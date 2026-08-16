@@ -12,6 +12,10 @@
 - [ADR-0002: application layer and humble view](architecture/decisions/0002-application-layer-and-humble-view.md) — Qt-free `app-core` crate; the Qt view displays and forwards intent only.
 - [ADR-0003: FFI seam conventions](architecture/decisions/0003-ffi-conventions.md) — typed error codes, stable `TabId(u64)`, Rust-owned dirty state across the cxx-qt seam.
 
+## Plans
+
+- [Settings, docking, theming, MCP foundation plan](architecture/settings-docking-theming-mcp-plan.md) — `app-core` refactor (Phase 0) then settings window, dockable panels (ADS), Darcula/Light themes, MCP server foundation, line numbers, tab reorder, tree-sitter syntax-highlighting foundation, quick wins.
+
 ## Product
 
 - [MVP proposal](product/mvp-proposal.md) — scope and user stories for the minimal text-editor shell.

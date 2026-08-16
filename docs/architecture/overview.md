@@ -37,7 +37,7 @@ graph TB
 |-------|-------|----------------|----|
 | `editor-core` | domain | Rope-backed `Document`, tab list, load/save/dirty state | No |
 | `project-model` | domain | `ProjectSession`, directory tree, `notify` watcher, last-project persistence | No |
-| `app-core` | application | `AppSession`: orchestration, command methods, typed `AppError` — being introduced by the current refactoring | No |
+| `app-core` | application | `AppSession`: orchestration, command methods, typed `AppError` | No |
 | `ui-shell` | adapter + view | `src/bridge.rs`: cxx-qt QObject translation; `cpp/`: Widgets, layout, menus, dialogs, `QApplication` | Yes |
 | `app` | main | Thin binary; hands off to `ui-shell` | Yes |
 

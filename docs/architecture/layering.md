@@ -61,11 +61,12 @@ cargo tree -p app-core -e normal | grep -i qt       # must be empty
 
 ## Known debt at time of writing
 
-`app-core` does not exist yet; the refactoring phase creates it.
-Until then, the following violations of this document are known debt being removed:
+None. The refactoring phase this document anticipated is complete:
+`app-core` exists (`AppSession`, `TabId`, `AppError`), `bridge.rs` is a
+thin adapter, and `main_window.cpp` is a humble view with no business
+rules. `cargo test --workspace` passes for the three Qt-free crates and
+`cargo tree` confirms no Qt leakage into any of them.
 
-- Business rules in the view: binary-open rule (`main_window.cpp:283-306`), rename path construction (`377-383`), delete orchestration (`399-404`).
-- QObjects owning domain state: `ProjectSession` in `bridge.rs:401`, `TabList` in `bridge.rs:667`.
-- `QString` sentinel errors, int-index tab identity, and dual dirty state across the FFI seam (see ADR-0003).
-
-Trigger to pay down: the refactoring phase of the current architecture plan; no new code may extend these patterns in the meantime.
+No new code may reintroduce `QString` sentinel errors, int-index tab
+identity, or business rules in `bridge.rs`/`cpp/` — see the FFI seam
+rules and "Where logic may live" above.

@@ -58,6 +58,55 @@ highlighting is built on tree-sitter.
   C++ (ADS) must build under both the Linux and Windows-cross toolchains
   or the Windows artifact silently regresses.
 
+## Phase 0 (prerequisite): `app-core` refactor
+
+While this plan was being written, [ADR-0002](decisions/0002-application-layer-and-humble-view.md),
+[ADR-0003](decisions/0003-ffi-conventions.md), and
+[`layering.md`](layering.md) were accepted as binding architecture: a
+Qt-free `app-core` crate must own all orchestration and business rules
+(`AppSession`, `TabId(u64)` identity, typed `AppError`), `bridge.rs`
+becomes a thin translation-only adapter, and `cpp/main_window.cpp` becomes
+a humble view with zero business rules.
+`layering.md`'s "known debt" section is explicit: **no new code may
+extend the old int-index/`QString`-sentinel/dual-dirty-state patterns**
+this plan's C/L/G/T/S/Y/D/M tasks would otherwise have built on.
+
+`app-core` does not exist yet — only the ADRs and CI layering gate do.
+This plan now runs the refactor as **Phase 0**, before any of the
+feature work below, so every later task is built on the target
+architecture instead of on code already marked for removal.
+
+| # | Task | Deliverable | Verification |
+|---|---|---|---|
+| R1 | Scaffold `app-core` | New Qt-free crate: `AppSession` (owns `ProjectSession` + an open-document table keyed by `TabId(u64)`, never reused within a session), `AppError` enum with stable `i32` codes, a `CommandResult{code, message}` struct | `cargo test -p app-core`; `cargo tree -p app-core -e normal \| grep -i qt` empty |
+| R2 | Move tree/document orchestration into `AppSession` | Command methods (`open_folder`, `create_file`, `create_folder`, `rename_entry`, `delete_entry`, `open_file`, `save_tab`, `close_tab`, `reopen_last_project`) implement the rules currently in C++: binary-open rule (`main_window.cpp:283-306`), rename path construction (`377-383`), delete → tab-invalidation as one call instead of `deletePath` + `notifyPathDeleted` | Unit tests per rule in `app-core` (binary-open rejection, rename path construction, delete invalidates the matching open tab in one call) |
+| R3 | `ProjectTreeModel`/`DocumentManager` become thin adapters | `bridge.rs` QObjects hold a shared `AppSession`, no longer own `ProjectSession`/`TabList` directly (`bridge.rs:401`, `bridge.rs:667` today); each invokable becomes slot → translate → `AppSession` call → emit signal/refresh model, no branching | Code review against `layering.md`'s adapter rule; `cargo test -p ui-shell` (existing bridge tests still pass against the new adapter shape) |
+| R4 | Typed errors across the FFI seam | Replace every `QString` sentinel return with `CommandResult{code, message}`; C++ branches on `code == 0`, displays `message` verbatim | Manual: every existing error path (bad rename, delete failure, unreadable folder) still shows the right dialog text |
+| R5 | `TabId(u64)` tab identity | `AppSession` issues `TabId` per open document; FFI calls/signals identify tabs by `TabId`; the `TabId → QTabWidget` index map lives in exactly one place at the adapter/view edge, replacing the `int`-index lockstep across `QTabWidget`/`titles_`/`TabList` | Manual: open/close/reorder tabs in varied order, confirm no index-drift bug class (the one `layering.md` calls out) |
+| R6 | Rust-owned dirty state | `QTextDocument::modificationChanged` forwards edits into `AppSession` (via the adapter); the view reads the dirty flag back from `AppSession` for title decoration, no local authoritative flag in C++ | Manual: edit/undo-to-clean/save across several tabs, dirty indicator always matches `AppSession`'s view, no divergence |
+| R7 | Docs sync | Update `docs/architecture/overview.md`'s container diagram/module list to show `app-core`; clear `layering.md`'s "known debt" section once R1–R6 land | `cargo tree -p editor-core/-p project-model/-p app-core -e normal \| grep -i qt` all empty (the CI layering gate this repo now runs) |
+
+All feature tasks below (C/L/G/T/S/Y/D/M) build on top of Phase 0, not on
+the old bridge.rs/int-index/QString architecture. In particular:
+
+- **G2 (tab reordering)** no longer needs its own `TabList::move_tab` +
+  `EditorTabs::titles_` reorder-in-lockstep fix — `TabId` identity (R5)
+  already makes reorder a non-event for tab identity; the only remaining
+  work is `setMovable(true)` + updating the adapter's `TabId → index` map
+  on `tabMoved`, which R5 already establishes as the one place that
+  mapping lives.
+- **L1/L2 (Exit, Save As)** and all quick wins route through `AppSession`
+  commands and typed `CommandResult`s from the start, not through new
+  `QString`-sentinel invokables.
+- **M3–M5 (MCP tool wiring)** dispatch into the same `AppSession` commands
+  the UI adapter calls — MCP tool handlers become another thin adapter
+  over `AppSession`, exactly mirroring `bridge.rs`'s role, still queued
+  onto the Qt thread via `CxxQtThread` for any command that must emit a
+  UI-visible signal.
+- **C1 (`app-config` crate)** is unaffected by Phase 0 — it's a sibling
+  Qt-free crate, not part of the tree/document orchestration Phase 0
+  moves into `app-core`.
+
 ## Architecture decisions
 
 | # | Decision | Why |
