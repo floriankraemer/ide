@@ -21,3 +21,7 @@ See `docs/architecture/` for layering rules and ADRs.
 cargo build --workspace
 cargo test --workspace
 ```
+
+## License
+
+GPLv3, see [LICENSE](LICENSE).
