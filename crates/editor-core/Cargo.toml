@@ -1,0 +1,10 @@
+[package]
+name = "editor-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ropey = "1"
+
+[dev-dependencies]
+tempfile = "3"
