@@ -27,7 +27,7 @@ per `CLAUDE.md`.
 | C2 | done | `ad49424` (`cargo test -p app-config`; Docker `linux-artifact` build verified; manual open-3-folders pass not run, no display here) |
 | L1 | done | `ad49424` (Docker `linux-artifact` build verified; manual close/relaunch-geometry pass not run, no display here) |
 | L2 | done | `ad49424` (`cargo test -p app-core`; Docker `linux-artifact` build verified; manual Save-As pass not run, no display here) |
-| L3 | done | `pending` (`cargo test -p syntax-core`; Docker `linux-artifact` build verified; manual .rs/.json label-switch pass not run, no display here) |
+| L3 | done | `751c35f` (`cargo test -p syntax-core`; Docker `linux-artifact` build verified; manual .rs/.json label-switch pass not run, no display here) |
 | G1 | done | `38e846b` (Docker `linux-artifact` build verified; no display here for gutter-rendering manual pass) |
 | G2 | done | `05df10e` (Docker `linux-artifact` build verified; manual drag-reorder pass not run, no display here) |
 | T1 | done | `843d464` (Docker `linux-artifact` build verified; dark-launch visual not manually smoke-tested, no display here) |
