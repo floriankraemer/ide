@@ -51,7 +51,11 @@ public:
     {
         tabWidget_->setTabsClosable(true);
         tabWidget_->setUsesScrollButtons(true);
-        tabWidget_->setMovable(false);
+        // G2: drag-reorder is safe with no adapter/app-core change because
+        // TabId is looked up by scanning each page's dynamic property, not
+        // by a maintained index map (see tabIdAt/indexOfTab below) — a
+        // reorder can't desynchronize anything.
+        tabWidget_->setMovable(true);
 
         connect(docManager_, &DocumentManager::tabOpened, this, &EditorTabs::onTabOpened);
         connect(docManager_, &DocumentManager::tabClosed, this, &EditorTabs::onTabClosed);
