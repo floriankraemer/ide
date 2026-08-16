@@ -385,6 +385,12 @@ mod ffi {
         #[cxx_name = "tabExtension"]
         fn tab_extension(self: &DocumentManager, tab_id: u64) -> QString;
 
+        /// Human-readable language name for the tab's extension (L3's
+        /// status bar), e.g. "Rust", "JSON", "Plain Text".
+        #[qinvokable]
+        #[cxx_name = "tabLanguageName"]
+        fn tab_language_name(self: &DocumentManager, tab_id: u64) -> QString;
+
         /// The tab's display title (file name, plus the "(deleted)" suffix
         /// once its backing file is gone). The tab strip renders this
         /// verbatim, adding only its own dirty marker.
@@ -1042,6 +1048,16 @@ impl ffi::DocumentManager {
             .tab_extension(TabId::from_raw(tab_id))
             .map(|ext| QString::from(ext.as_str()))
             .unwrap_or_default()
+    }
+
+    pub fn tab_language_name(&self, tab_id: u64) -> QString {
+        let extension = self
+            .session
+            .borrow()
+            .tab_extension(TabId::from_raw(tab_id))
+            .unwrap_or_default();
+        let language = syntax_core::language_for_extension(&extension);
+        QString::from(syntax_core::language_name(language))
     }
 
     pub fn tab_title(&self, tab_id: u64) -> QString {

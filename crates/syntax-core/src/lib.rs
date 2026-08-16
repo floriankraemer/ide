@@ -26,6 +26,15 @@ pub fn language_for_extension(extension: &str) -> Language {
     }
 }
 
+/// Human-readable name for `language` (status bar, L3).
+pub fn language_name(language: Language) -> &'static str {
+    match language {
+        Language::Rust => "Rust",
+        Language::Json => "JSON",
+        Language::PlainText => "Plain Text",
+    }
+}
+
 /// Coarse token categories, kept to what tree-sitter's stock Rust/JSON
 /// grammars naturally distinguish — not a general-purpose taxonomy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -140,6 +149,13 @@ mod tests {
         assert_eq!(language_for_extension("json"), Language::Json);
         assert_eq!(language_for_extension("txt"), Language::PlainText);
         assert_eq!(language_for_extension(""), Language::PlainText);
+    }
+
+    #[test]
+    fn language_name_covers_every_language() {
+        assert_eq!(language_name(Language::Rust), "Rust");
+        assert_eq!(language_name(Language::Json), "JSON");
+        assert_eq!(language_name(Language::PlainText), "Plain Text");
     }
 
     #[test]

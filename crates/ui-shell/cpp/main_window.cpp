@@ -18,8 +18,11 @@
 #include <QFormLayout>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QStatusBar>
+#include <QTextCursor>
 #include <memory>
 #include <QMainWindow>
 #include <QMenu>
@@ -83,6 +86,7 @@ public:
             if (index >= 0) {
                 docManager_->setActiveTab(tabIdAt(index));
             }
+            updateStatusBar();
         });
     }
 
@@ -136,6 +140,15 @@ public:
         }
         editor->document()->setModified(false);
         renderTabText(index, docManager_->tabTitle(tabId), false);
+    }
+
+    // L3: registers the status bar's line:col and language labels, and
+    // fills them in immediately for whatever tab is already current.
+    void attachStatusBar(QLabel *positionLabel, QLabel *languageLabel)
+    {
+        positionLabel_ = positionLabel;
+        languageLabel_ = languageLabel;
+        updateStatusBar();
     }
 
     // Exit / window-close (L1): runs the same unsaved-changes prompt as
@@ -309,6 +322,28 @@ private:
         docManager_->closeTab(tabIdAt(index));
     }
 
+    // L3: line:col + language for whatever tab is current, or blank when
+    // no tab is open. The "UTF-8" label is static (set once in
+    // buildMainWindow) since only UTF-8 is supported today — nothing here
+    // needs to touch it.
+    void updateStatusBar()
+    {
+        if (!positionLabel_ || !languageLabel_) {
+            return;
+        }
+        auto *editor = currentEditor();
+        if (!editor) {
+            positionLabel_->clear();
+            languageLabel_->clear();
+            return;
+        }
+        const QTextCursor cursor = editor->textCursor();
+        positionLabel_->setText(QObject::tr("Ln %1, Col %2")
+                                   .arg(cursor.blockNumber() + 1)
+                                   .arg(cursor.columnNumber() + 1));
+        languageLabel_->setText(docManager_->tabLanguageName(tabIdAt(tabWidget_->currentIndex())));
+    }
+
     // Shared with setEditorColors, and with onTabOpened's initial apply.
     void applyEditorPalette(QPlainTextEdit *editor)
     {
@@ -334,6 +369,15 @@ private:
         // management needed. PlainText (unrecognized/no extension) yields
         // no spans from highlight_line, so this is a harmless no-op then.
         new SyntaxHighlighter(editor->document(), docManager_->tabExtension(tabId));
+
+        // L3: only the visible tab's cursor should move the status bar —
+        // guards against a background tab's programmatic cursor change
+        // (e.g. a reload) touching labels that describe a different tab.
+        connect(editor, &QPlainTextEdit::cursorPositionChanged, this, [this, editor]() {
+            if (tabWidget_->currentWidget() == editor) {
+                updateStatusBar();
+            }
+        });
 
         // Forward QPlainTextEdit's own modified state into the session's
         // authoritative dirty flag (ADR-0003) rather than marshalling
@@ -373,6 +417,8 @@ private:
     QFont editorFont_;
     QString editorBackground_;
     QString editorForeground_;
+    QLabel *positionLabel_ = nullptr;
+    QLabel *languageLabel_ = nullptr;
 };
 
 // Subclassed so closeEvent() can run the same unsaved-changes prompt as
@@ -769,6 +815,18 @@ QMainWindow *buildMainWindow()
     editorTabs->setEditorFont(QFont(savedFont.family, static_cast<int>(savedFont.size)));
     const FfiEditorColors savedColors = appSettings->editorColors();
     editorTabs->setEditorColors(savedColors.background, savedColors.foreground);
+
+    // L3: line:col + language update per current tab / cursor move; "UTF-8"
+    // is static since only UTF-8 is supported today (US-2b's binary-file
+    // rejection already rules out anything else reaching an open tab).
+    auto *statusBar = window->statusBar();
+    auto *languageLabel = new QLabel(statusBar);
+    auto *positionLabel = new QLabel(statusBar);
+    auto *encodingLabel = new QLabel(QStringLiteral("UTF-8"), statusBar);
+    statusBar->addPermanentWidget(languageLabel);
+    statusBar->addPermanentWidget(positionLabel);
+    statusBar->addPermanentWidget(encodingLabel);
+    editorTabs->attachStatusBar(positionLabel, languageLabel);
 
     QMenu *fileMenu = window->menuBar()->addMenu(QObject::tr("&File"));
     QAction *openFolderAction = fileMenu->addAction(QObject::tr("Open Folder..."));
