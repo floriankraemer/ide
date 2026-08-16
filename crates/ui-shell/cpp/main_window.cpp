@@ -6,24 +6,38 @@
 
 #include <QApplication>
 #include <QCloseEvent>
+#include <QColor>
+#include <QColorDialog>
+#include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFont>
+#include <QFormLayout>
+#include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLineEdit>
+#include <QListWidget>
+#include <memory>
 #include <QMainWindow>
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPalette>
 #include <QPlainTextEdit>
 #include <QPoint>
 #include <QPushButton>
 #include <QRect>
+#include <QSpinBox>
 #include <QSplitter>
+#include <QStackedWidget>
 #include <QStringList>
 #include <QTabWidget>
 #include <QtGui/QTextDocument>
 #include <QTreeView>
 #include <QVariant>
+#include <QVBoxLayout>
 #include <QWidget>
 
 namespace ui_shell {
@@ -134,6 +148,36 @@ public:
             }
         }
         return true;
+    }
+
+    // S2 live-apply: updates every open tab immediately and remembers the
+    // choice so tabs opened afterward pick it up too. No persistence here —
+    // the settings dialog decides via AppSettings whether to keep (OK) or
+    // revert (Cancel) this.
+    void setEditorFont(const QFont &font)
+    {
+        editorFont_ = font;
+        for (int i = 0; i < tabWidget_->count(); ++i) {
+            if (auto *editor = qobject_cast<QPlainTextEdit *>(tabWidget_->widget(i))) {
+                editor->setFont(font);
+            }
+        }
+    }
+
+    // `backgroundHex`/`foregroundHex` empty means "use the theme's default
+    // palette role" (A3): starting from qApp's own palette and overriding
+    // only the roles with a value keeps that default live even after a
+    // theme switch, rather than freezing whatever color was current when
+    // the override was set.
+    void setEditorColors(const QString &backgroundHex, const QString &foregroundHex)
+    {
+        editorBackground_ = backgroundHex;
+        editorForeground_ = foregroundHex;
+        for (int i = 0; i < tabWidget_->count(); ++i) {
+            if (auto *editor = qobject_cast<QPlainTextEdit *>(tabWidget_->widget(i))) {
+                applyEditorPalette(editor);
+            }
+        }
     }
 
     // Rename/delete via the tree changed a tab's title (US-2b) — re-render
@@ -264,12 +308,27 @@ private:
         docManager_->closeTab(tabIdAt(index));
     }
 
+    // Shared with setEditorColors, and with onTabOpened's initial apply.
+    void applyEditorPalette(QPlainTextEdit *editor)
+    {
+        QPalette pal = qApp->palette();
+        if (!editorBackground_.isEmpty()) {
+            pal.setColor(QPalette::Base, QColor(editorBackground_));
+        }
+        if (!editorForeground_.isEmpty()) {
+            pal.setColor(QPalette::Text, QColor(editorForeground_));
+        }
+        editor->setPalette(pal);
+    }
+
     void onTabOpened(quint64 tabId, const QString &title)
     {
         auto *editor = new CodeEditor(tabWidget_);
         editor->setProperty("tabId", QVariant::fromValue(tabId));
         editor->setPlainText(docManager_->tabContent(tabId));
         editor->document()->setModified(false);
+        editor->setFont(editorFont_);
+        applyEditorPalette(editor);
 
         // Forward QPlainTextEdit's own modified state into the session's
         // authoritative dirty flag (ADR-0003) rather than marshalling
@@ -306,6 +365,9 @@ private:
     DocumentManager *docManager_;
     QTabWidget *tabWidget_;
     QWidget *window_;
+    QFont editorFont_;
+    QString editorBackground_;
+    QString editorForeground_;
 };
 
 // Subclassed so closeEvent() can run the same unsaved-changes prompt as
@@ -377,6 +439,126 @@ void populateRecentProjectsMenu(QMenu *menu, AppSettings *appSettings, ProjectTr
                               openProjectAndRefreshRecents(treeModel, window, menu, appSettings,
                                                             path);
                           });
+    }
+}
+
+// Settings dialog (S1: category list + stacked detail pane; S2: font +
+// editor colors on the Editor page). Every control applies live as it's
+// changed (theme via qApp->setStyleSheet(), font/colors via `editorTabs`) so
+// the effect is visible immediately; OK persists that already-applied state
+// through `appSettings`, Cancel restores exactly what was active when the
+// dialog opened. Modal and blocking, so every lambda below capturing
+// `&dialog` only ever runs while `dialog` is still alive on this stack frame.
+void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *editorTabs)
+{
+    const QString originalTheme = appSettings->themeName();
+    const FfiEditorFont originalFont = appSettings->editorFont();
+    const FfiEditorColors originalColors = appSettings->editorColors();
+
+    QDialog dialog(parent);
+    dialog.setWindowTitle(QObject::tr("Settings"));
+
+    auto *categoryList = new QListWidget(&dialog);
+    categoryList->addItem(QObject::tr("Appearance"));
+    categoryList->addItem(QObject::tr("Editor"));
+    categoryList->setMaximumWidth(150);
+
+    auto *pages = new QStackedWidget(&dialog);
+
+    auto *appearancePage = new QWidget(&dialog);
+    auto *appearanceForm = new QFormLayout(appearancePage);
+    auto *themeCombo = new QComboBox(appearancePage);
+    themeCombo->addItem(QObject::tr("Dark"), QStringLiteral("dark"));
+    themeCombo->addItem(QObject::tr("Light"), QStringLiteral("light"));
+    themeCombo->setCurrentIndex(originalTheme == QStringLiteral("light") ? 1 : 0);
+    appearanceForm->addRow(QObject::tr("Theme:"), themeCombo);
+    pages->addWidget(appearancePage);
+
+    QObject::connect(themeCombo, &QComboBox::currentIndexChanged, &dialog, [themeCombo]() {
+        qApp->setStyleSheet(styleSheetForTheme(themeCombo->currentData().toString()));
+    });
+
+    auto *editorPage = new QWidget(&dialog);
+    auto *editorForm = new QFormLayout(editorPage);
+    auto *fontFamilyEdit = new QLineEdit(originalFont.family, editorPage);
+    auto *fontSizeSpin = new QSpinBox(editorPage);
+    fontSizeSpin->setRange(6, 72);
+    fontSizeSpin->setValue(static_cast<int>(originalFont.size));
+    editorForm->addRow(QObject::tr("Font family:"), fontFamilyEdit);
+    editorForm->addRow(QObject::tr("Font size:"), fontSizeSpin);
+
+    auto applyFontLive = [editorTabs, fontFamilyEdit, fontSizeSpin]() {
+        editorTabs->setEditorFont(QFont(fontFamilyEdit->text(), fontSizeSpin->value()));
+    };
+    QObject::connect(fontFamilyEdit, &QLineEdit::textChanged, &dialog, applyFontLive);
+    QObject::connect(fontSizeSpin, &QSpinBox::valueChanged, &dialog, applyFontLive);
+
+    // Boxed so the color-picker lambdas (which need to both read and update
+    // the chosen value across separate clicks) share one instance rather
+    // than each capturing a stale copy.
+    auto backgroundColor = std::make_shared<QString>(originalColors.background);
+    auto foregroundColor = std::make_shared<QString>(originalColors.foreground);
+    auto applyColorsLive = [editorTabs, backgroundColor, foregroundColor]() {
+        editorTabs->setEditorColors(*backgroundColor, *foregroundColor);
+    };
+
+    auto *backgroundButton = new QPushButton(QObject::tr("Background Color..."), editorPage);
+    QObject::connect(backgroundButton, &QPushButton::clicked, &dialog,
+                      [&dialog, backgroundColor, applyColorsLive]() {
+                          const QColor initial = backgroundColor->isEmpty()
+                            ? QColor(Qt::white)
+                            : QColor(*backgroundColor);
+                          const QColor chosen = QColorDialog::getColor(
+                            initial, &dialog, QObject::tr("Background Color"));
+                          if (chosen.isValid()) {
+                              *backgroundColor = chosen.name();
+                              applyColorsLive();
+                          }
+                      });
+    editorForm->addRow(backgroundButton);
+
+    auto *foregroundButton = new QPushButton(QObject::tr("Text Color..."), editorPage);
+    QObject::connect(foregroundButton, &QPushButton::clicked, &dialog,
+                      [&dialog, foregroundColor, applyColorsLive]() {
+                          const QColor initial = foregroundColor->isEmpty()
+                            ? QColor(Qt::black)
+                            : QColor(*foregroundColor);
+                          const QColor chosen = QColorDialog::getColor(
+                            initial, &dialog, QObject::tr("Text Color"));
+                          if (chosen.isValid()) {
+                              *foregroundColor = chosen.name();
+                              applyColorsLive();
+                          }
+                      });
+    editorForm->addRow(foregroundButton);
+
+    pages->addWidget(editorPage);
+
+    QObject::connect(categoryList, &QListWidget::currentRowChanged, pages,
+                      &QStackedWidget::setCurrentIndex);
+    categoryList->setCurrentRow(0);
+
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+
+    auto *bodyLayout = new QHBoxLayout();
+    bodyLayout->addWidget(categoryList);
+    bodyLayout->addWidget(pages, 1);
+
+    auto *mainLayout = new QVBoxLayout(&dialog);
+    mainLayout->addLayout(bodyLayout);
+    mainLayout->addWidget(buttons);
+
+    if (dialog.exec() == QDialog::Accepted) {
+        appSettings->saveTheme(themeCombo->currentData().toString());
+        appSettings->saveEditorFont(fontFamilyEdit->text(),
+                                     static_cast<quint32>(fontSizeSpin->value()));
+        appSettings->saveEditorColors(*backgroundColor, *foregroundColor);
+    } else {
+        qApp->setStyleSheet(styleSheetForTheme(originalTheme));
+        editorTabs->setEditorFont(QFont(originalFont.family, static_cast<int>(originalFont.size)));
+        editorTabs->setEditorColors(originalColors.background, originalColors.foreground);
     }
 }
 
@@ -575,6 +757,14 @@ QMainWindow *buildMainWindow()
     window->setEditorTabs(editorTabs);
     window->setAppSettings(appSettings);
 
+    // S2: applied before reopenLastProject() (below) opens any tabs, so
+    // every tab — including ones opened at startup — starts with the
+    // persisted font/colors rather than the QPlainTextEdit default.
+    const FfiEditorFont savedFont = appSettings->editorFont();
+    editorTabs->setEditorFont(QFont(savedFont.family, static_cast<int>(savedFont.size)));
+    const FfiEditorColors savedColors = appSettings->editorColors();
+    editorTabs->setEditorColors(savedColors.background, savedColors.foreground);
+
     QMenu *fileMenu = window->menuBar()->addMenu(QObject::tr("&File"));
     QAction *openFolderAction = fileMenu->addAction(QObject::tr("Open Folder..."));
     QMenu *recentProjectsMenu = fileMenu->addMenu(QObject::tr("Recent Projects"));
@@ -583,6 +773,8 @@ QMainWindow *buildMainWindow()
     QAction *saveAction = fileMenu->addAction(QObject::tr("Save"));
     saveAction->setShortcut(QKeySequence::Save);
     QAction *saveAsAction = fileMenu->addAction(QObject::tr("Save As..."));
+    fileMenu->addSeparator();
+    QAction *preferencesAction = fileMenu->addAction(QObject::tr("Preferences..."));
     fileMenu->addSeparator();
     QAction *exitAction = fileMenu->addAction(QObject::tr("Exit"));
 
@@ -607,6 +799,11 @@ QMainWindow *buildMainWindow()
     QObject::connect(saveAsAction, &QAction::triggered, window, [editorTabs]() {
         editorTabs->saveCurrentTabAs();
     });
+
+    QObject::connect(preferencesAction, &QAction::triggered, window,
+                      [window, appSettings, editorTabs]() {
+                          showSettingsDialog(window, appSettings, editorTabs);
+                      });
 
     QMenu *editMenu = window->menuBar()->addMenu(QObject::tr("&Edit"));
     QAction *undoAction = editMenu->addAction(QObject::tr("Undo"));

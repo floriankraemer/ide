@@ -41,6 +41,24 @@ mod ffi {
         height: u32,
     }
 
+    /// Editor font (S2), 1:1 with `Settings::editor_font_family`/`_size`.
+    /// Always resolved (`editor_font_family_or_default`/`_size_or_default`)
+    /// — never empty/zero — so the view never has to fall back itself.
+    #[derive(Default)]
+    struct FfiEditorFont {
+        family: QString,
+        size: u32,
+    }
+
+    /// Editor text colors (S2), hex strings ("#rrggbb") or empty for "use
+    /// the theme's default palette role" — the view (not this struct)
+    /// decides what empty means.
+    #[derive(Default)]
+    struct FfiEditorColors {
+        background: QString,
+        foreground: QString,
+    }
+
     unsafe extern "C++Qt" {
         include!(<QtCore/QAbstractItemModel>);
         /// Base Qt class `ProjectTreeModel` inherits from.
@@ -392,6 +410,31 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "themeName"]
         fn theme_name(self: &AppSettings) -> QString;
+
+        /// Persist the chosen theme name (S1's Appearance page, on OK).
+        #[qinvokable]
+        #[cxx_name = "saveTheme"]
+        fn save_theme(self: &AppSettings, theme: &QString);
+
+        /// Editor font, always resolved to a usable value (S2).
+        #[qinvokable]
+        #[cxx_name = "editorFont"]
+        fn editor_font(self: &AppSettings) -> FfiEditorFont;
+
+        /// Persist the editor font (S2's Editor page, on OK).
+        #[qinvokable]
+        #[cxx_name = "saveEditorFont"]
+        fn save_editor_font(self: &AppSettings, family: &QString, size: u32);
+
+        /// Editor text colors, empty when unset (S2).
+        #[qinvokable]
+        #[cxx_name = "editorColors"]
+        fn editor_colors(self: &AppSettings) -> FfiEditorColors;
+
+        /// Persist the editor colors (S2's Editor page, on OK).
+        #[qinvokable]
+        #[cxx_name = "saveEditorColors"]
+        fn save_editor_colors(self: &AppSettings, background: &QString, foreground: &QString);
     }
 
     unsafe extern "C++" {
@@ -413,7 +456,7 @@ use cxx_qt::Threading;
 use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QVariant,
 };
-use ffi::{FfiOpenResult, FfiResult, FfiWindowGeometry, Roles};
+use ffi::{FfiEditorColors, FfiEditorFont, FfiOpenResult, FfiResult, FfiWindowGeometry, Roles};
 
 thread_local! {
     /// The single `AppSession` both QObject adapters share. cxx-qt
@@ -498,6 +541,65 @@ impl ffi::AppSettings {
     pub fn theme_name(&self) -> QString {
         let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
         QString::from(settings.theme_name())
+    }
+
+    pub fn save_theme(&self, theme: &QString) {
+        let config_dir = app_core::resolve_config_dir();
+        let Ok(mut settings) = app_config::load(&config_dir) else {
+            return;
+        };
+        settings.theme = theme.to_string();
+        let _ = app_config::save(&config_dir, &settings);
+    }
+
+    pub fn editor_font(&self) -> FfiEditorFont {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        FfiEditorFont {
+            family: QString::from(settings.editor_font_family_or_default()),
+            size: settings.editor_font_size_or_default(),
+        }
+    }
+
+    pub fn save_editor_font(&self, family: &QString, size: u32) {
+        let config_dir = app_core::resolve_config_dir();
+        let Ok(mut settings) = app_config::load(&config_dir) else {
+            return;
+        };
+        settings.editor_font_family = family.to_string();
+        settings.editor_font_size = size;
+        let _ = app_config::save(&config_dir, &settings);
+    }
+
+    pub fn editor_colors(&self) -> FfiEditorColors {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        FfiEditorColors {
+            background: QString::from(
+                settings.editor_colors.get("background").map(String::as_str).unwrap_or(""),
+            ),
+            foreground: QString::from(
+                settings.editor_colors.get("foreground").map(String::as_str).unwrap_or(""),
+            ),
+        }
+    }
+
+    pub fn save_editor_colors(&self, background: &QString, foreground: &QString) {
+        let config_dir = app_core::resolve_config_dir();
+        let Ok(mut settings) = app_config::load(&config_dir) else {
+            return;
+        };
+        let background = background.to_string();
+        let foreground = foreground.to_string();
+        if background.is_empty() {
+            settings.editor_colors.remove("background");
+        } else {
+            settings.editor_colors.insert("background".to_string(), background);
+        }
+        if foreground.is_empty() {
+            settings.editor_colors.remove("foreground");
+        } else {
+            settings.editor_colors.insert("foreground".to_string(), foreground);
+        }
+        let _ = app_config::save(&config_dir, &settings);
     }
 }
 

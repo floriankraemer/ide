@@ -78,6 +78,11 @@ const MAX_RECENT_PROJECTS: usize = 10;
 /// Theme name used when `Settings::theme` hasn't been set yet (T2).
 const DEFAULT_THEME: &str = "dark";
 
+/// Editor font used when `Settings::editor_font_family`/`_size` haven't
+/// been set yet (S2).
+const DEFAULT_EDITOR_FONT_FAMILY: &str = "Monospace";
+const DEFAULT_EDITOR_FONT_SIZE: u32 = 11;
+
 impl Settings {
     /// The active theme name, defaulting to [`DEFAULT_THEME`] when unset —
     /// so the view never has to special-case an empty string itself.
@@ -86,6 +91,26 @@ impl Settings {
             DEFAULT_THEME
         } else {
             &self.theme
+        }
+    }
+
+    /// The editor font family, defaulting to [`DEFAULT_EDITOR_FONT_FAMILY`]
+    /// when unset.
+    pub fn editor_font_family_or_default(&self) -> &str {
+        if self.editor_font_family.is_empty() {
+            DEFAULT_EDITOR_FONT_FAMILY
+        } else {
+            &self.editor_font_family
+        }
+    }
+
+    /// The editor font size, defaulting to [`DEFAULT_EDITOR_FONT_SIZE`]
+    /// when unset (0).
+    pub fn editor_font_size_or_default(&self) -> u32 {
+        if self.editor_font_size == 0 {
+            DEFAULT_EDITOR_FONT_SIZE
+        } else {
+            self.editor_font_size
         }
     }
 
@@ -225,6 +250,24 @@ mod tests {
             ..Settings::default()
         };
         assert_eq!(settings.theme_name(), "light");
+    }
+
+    #[test]
+    fn editor_font_defaults_when_unset() {
+        let settings = Settings::default();
+        assert_eq!(settings.editor_font_family_or_default(), "Monospace");
+        assert_eq!(settings.editor_font_size_or_default(), 11);
+    }
+
+    #[test]
+    fn editor_font_returns_the_set_values() {
+        let settings = Settings {
+            editor_font_family: "Fira Code".to_string(),
+            editor_font_size: 14,
+            ..Settings::default()
+        };
+        assert_eq!(settings.editor_font_family_or_default(), "Fira Code");
+        assert_eq!(settings.editor_font_size_or_default(), 14);
     }
 
     #[test]
