@@ -2,6 +2,11 @@ fn main() {
     cxx_qt_build::CxxQtBuilder::new()
         .file("src/bridge.rs")
         .cpp_file("cpp/main_window.cpp")
+        // First hand-written (non-generated) QObject in this crate: header
+        // passed to cpp_file() auto-enables moc (CppFile::from, cxx-qt-build
+        // 0.9), so this is also the first place build.rs runs moc directly.
+        .cpp_file("cpp/code_editor.h")
+        .cpp_file("cpp/code_editor.cpp")
         .include_dir("cpp")
         .qt_module("Widgets")
         // Widgets code uses QTextDocument (QtGui) directly. On Linux this

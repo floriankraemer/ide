@@ -1,5 +1,6 @@
 #include "main_window.h"
 
+#include "code_editor.h"
 #include "ui-shell/src/bridge.cxxqt.h"
 
 #include <QApplication>
@@ -217,7 +218,7 @@ private:
 
     void onTabOpened(quint64 tabId, const QString &title)
     {
-        auto *editor = new QPlainTextEdit(tabWidget_);
+        auto *editor = new CodeEditor(tabWidget_);
         editor->setProperty("tabId", QVariant::fromValue(tabId));
         editor->setPlainText(docManager_->tabContent(tabId));
         editor->document()->setModified(false);
