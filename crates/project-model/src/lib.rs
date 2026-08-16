@@ -227,8 +227,8 @@ pub fn open_folder(path: impl AsRef<Path>) -> Result<Project, OpenFolderError> {
     }
     fs::read_dir(path).map_err(|e| OpenFolderError::NotReadable(path.to_path_buf(), e))?;
 
-    let tree =
-        DirectoryTree::build(path).map_err(|e| OpenFolderError::NotReadable(path.to_path_buf(), e))?;
+    let tree = DirectoryTree::build(path)
+        .map_err(|e| OpenFolderError::NotReadable(path.to_path_buf(), e))?;
 
     Ok(Project {
         root: ProjectRoot {
@@ -242,7 +242,10 @@ pub fn open_folder(path: impl AsRef<Path>) -> Result<Project, OpenFolderError> {
 /// in `config_dir` (per plan §3 — deliberately not serde/toml/json).
 pub fn persist_last_project(config_dir: &Path, project_path: &Path) -> io::Result<()> {
     fs::create_dir_all(config_dir)?;
-    fs::write(config_dir.join(LAST_PROJECT_FILE), project_path.to_string_lossy().as_bytes())
+    fs::write(
+        config_dir.join(LAST_PROJECT_FILE),
+        project_path.to_string_lossy().as_bytes(),
+    )
 }
 
 /// Read the last-opened project path, if any was persisted.
@@ -295,7 +298,10 @@ impl ProjectSession {
     /// through (not collapsed to just a path) so the caller can tell a
     /// structural change (create/remove/rename) apart from a content-only
     /// write to a file that already exists in the tree.
-    pub fn start_watcher(&mut self, on_change: impl Fn(notify::EventKind, PathBuf) + Send + 'static) {
+    pub fn start_watcher(
+        &mut self,
+        on_change: impl Fn(notify::EventKind, PathBuf) + Send + 'static,
+    ) {
         self.watcher = None;
         if let Some(project) = &self.current {
             self.watcher = ProjectWatcher::start(project.root.path(), on_change).ok();
@@ -339,9 +345,8 @@ impl ProjectSession {
     /// Reopen the last-persisted project, if any. Returns `Ok(true)` if a
     /// project was found and opened, `Ok(false)` if nothing was persisted.
     pub fn reopen_last(&mut self, config_dir: &Path) -> Result<bool, OpenFolderError> {
-        let last = read_last_project(config_dir).map_err(|e| {
-            OpenFolderError::NotReadable(config_dir.to_path_buf(), e)
-        })?;
+        let last = read_last_project(config_dir)
+            .map_err(|e| OpenFolderError::NotReadable(config_dir.to_path_buf(), e))?;
         match last {
             Some(path) => {
                 self.open_folder(path, config_dir)?;
@@ -433,7 +438,9 @@ mod tests {
             .map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0")
             .unwrap_or(false);
         if is_root {
-            eprintln!("skipping opening_unreadable_path_errors_without_mutating_state: running as root");
+            eprintln!(
+                "skipping opening_unreadable_path_errors_without_mutating_state: running as root"
+            );
             return;
         }
 

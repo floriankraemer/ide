@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Lint, test, layering
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt6 and xvfb
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qt6-base-dev qmake6 xvfb
+
+      - name: Install Rust toolchain
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal --component rustfmt,clippy
+          rustup default 1.90.0
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Tests
+        run: xvfb-run -a cargo test --workspace
+
+      - name: Layering gate (Qt must not leak into core crates)
+        run: |
+          for crate in editor-core project-model app-core; do
+            if cargo tree -p "$crate" -e normal | grep -qi qt; then
+              echo "::error::$crate depends on Qt — layering violation (docs/architecture/layering.md)"
+              exit 1
+            fi
+          done

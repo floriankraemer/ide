@@ -121,7 +121,10 @@ mod tests {
                 }
             }
         }
-        assert!(saw_any, "expected at least one watcher event for the rewrite");
+        assert!(
+            saw_any,
+            "expected at least one watcher event for the rewrite"
+        );
         assert!(
             !saw_structural,
             "a content-only rewrite of an existing file must not be reported as structural"

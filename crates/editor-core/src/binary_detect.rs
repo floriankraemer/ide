@@ -101,7 +101,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("a.bin");
         let mut bytes = vec![0x00u8, 0x01, 0x02, 0xff, 0xfe];
-        bytes.extend(std::iter::repeat(0xAAu8).take(100));
+        bytes.extend(std::iter::repeat_n(0xAAu8, 100));
         fs::write(&path, &bytes).unwrap();
         assert!(looks_binary_file(&path).unwrap());
     }

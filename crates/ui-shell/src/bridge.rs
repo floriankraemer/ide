@@ -136,21 +136,33 @@ mod ffi {
         /// user-facing error message on failure (e.g. name already taken).
         #[qinvokable]
         #[cxx_name = "createFile"]
-        fn create_file(self: Pin<&mut ProjectTreeModel>, parent_dir: &QString, name: &QString) -> QString;
+        fn create_file(
+            self: Pin<&mut ProjectTreeModel>,
+            parent_dir: &QString,
+            name: &QString,
+        ) -> QString;
 
         /// Create an empty folder named `name` inside `parent_dir` and
         /// refresh the tree. Returns an empty string on success, or a
         /// user-facing error message on failure.
         #[qinvokable]
         #[cxx_name = "createFolder"]
-        fn create_folder(self: Pin<&mut ProjectTreeModel>, parent_dir: &QString, name: &QString) -> QString;
+        fn create_folder(
+            self: Pin<&mut ProjectTreeModel>,
+            parent_dir: &QString,
+            name: &QString,
+        ) -> QString;
 
         /// Rename `path` (file or folder) to `new_name` in place and
         /// refresh the tree. Returns an empty string on success, or a
         /// user-facing error message on failure.
         #[qinvokable]
         #[cxx_name = "renamePath"]
-        fn rename_path(self: Pin<&mut ProjectTreeModel>, path: &QString, new_name: &QString) -> QString;
+        fn rename_path(
+            self: Pin<&mut ProjectTreeModel>,
+            path: &QString,
+            new_name: &QString,
+        ) -> QString;
 
         /// Delete `path` (recursively if it's a folder) and refresh the
         /// tree. Returns an empty string on success, or a user-facing error
@@ -279,7 +291,11 @@ mod ffi {
         /// `old_path` isn't open.
         #[qinvokable]
         #[cxx_name = "notifyPathRenamed"]
-        fn notify_path_renamed(self: Pin<&mut DocumentManager>, old_path: &QString, new_path: &QString);
+        fn notify_path_renamed(
+            self: Pin<&mut DocumentManager>,
+            old_path: &QString,
+            new_path: &QString,
+        );
 
         /// If `path` has an open tab, mark it deleted (blocking further
         /// silent saves — see `editor_core::Document::mark_deleted`) and
@@ -381,9 +397,9 @@ mod is_structural_change_tests {
     fn a_plain_content_write_is_not_structural() {
         // What `fs::write` on an already-existing file (every save)
         // reports under Linux's inotify backend.
-        assert!(!is_structural_change(&EventKind::Modify(
-            ModifyKind::Data(notify::event::DataChange::Any)
-        )));
+        assert!(!is_structural_change(&EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any
+        ))));
     }
 
     #[test]
@@ -509,10 +525,14 @@ impl ffi::ProjectTreeModel {
 
     pub fn open_folder(mut self: Pin<&mut Self>, path: &QString) -> QString {
         let path = std::path::PathBuf::from(path.to_string());
-        let config_dir = project_model::default_config_dir()
-            .unwrap_or_else(|| std::env::temp_dir().join("ide"));
+        let config_dir =
+            project_model::default_config_dir().unwrap_or_else(|| std::env::temp_dir().join("ide"));
 
-        let result = self.as_mut().rust_mut().session.open_folder(&path, &config_dir);
+        let result = self
+            .as_mut()
+            .rust_mut()
+            .session
+            .open_folder(&path, &config_dir);
 
         match result {
             Ok(()) => {
@@ -528,8 +548,8 @@ impl ffi::ProjectTreeModel {
     }
 
     pub fn reopen_last_project(mut self: Pin<&mut Self>) -> bool {
-        let config_dir = project_model::default_config_dir()
-            .unwrap_or_else(|| std::env::temp_dir().join("ide"));
+        let config_dir =
+            project_model::default_config_dir().unwrap_or_else(|| std::env::temp_dir().join("ide"));
 
         let opened = self
             .as_mut()
@@ -578,12 +598,7 @@ impl ffi::ProjectTreeModel {
                 let structural = is_structural_change(&kind);
                 let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
                     if structural {
-                        let rebuilt = model
-                            .as_mut()
-                            .rust_mut()
-                            .session
-                            .rebuild_tree()
-                            .is_ok();
+                        let rebuilt = model.as_mut().rust_mut().session.rebuild_tree().is_ok();
                         if rebuilt {
                             unsafe {
                                 model.as_mut().begin_reset_model();
@@ -615,7 +630,11 @@ impl ffi::ProjectTreeModel {
         self.as_mut().finish_mutation(result.map(|_| ()))
     }
 
-    pub fn create_folder(mut self: Pin<&mut Self>, parent_dir: &QString, name: &QString) -> QString {
+    pub fn create_folder(
+        mut self: Pin<&mut Self>,
+        parent_dir: &QString,
+        name: &QString,
+    ) -> QString {
         let parent = std::path::PathBuf::from(parent_dir.to_string());
         let result = project_model::create_folder(&parent, &name.to_string());
         self.as_mut().finish_mutation(result.map(|_| ()))
@@ -689,7 +708,8 @@ impl ffi::DocumentManager {
                         .get(index)
                         .map(|doc| doc.title())
                         .unwrap_or_default();
-                    self.as_mut().tab_opened(index as i32, QString::from(title.as_str()));
+                    self.as_mut()
+                        .tab_opened(index as i32, QString::from(title.as_str()));
                 }
                 index as i32
             }
@@ -803,7 +823,8 @@ impl ffi::DocumentManager {
             rust.suppressed_changes.insert(new_path, Instant::now());
             title
         };
-        self.as_mut().tab_title_changed(index as i32, QString::from(title.as_str()));
+        self.as_mut()
+            .tab_title_changed(index as i32, QString::from(title.as_str()));
     }
 
     /// Handle a filesystem-watcher event for `path`, relayed from
@@ -869,7 +890,8 @@ impl ffi::DocumentManager {
             doc.mark_deleted();
             format!("{} (deleted)", doc.title())
         };
-        self.as_mut().tab_title_changed(index as i32, QString::from(title.as_str()));
+        self.as_mut()
+            .tab_title_changed(index as i32, QString::from(title.as_str()));
     }
 }
 

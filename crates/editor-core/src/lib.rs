@@ -142,10 +142,7 @@ impl Document {
         if self.deleted {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
-                format!(
-                    "\"{}\" was deleted; nothing to save to",
-                    self.title()
-                ),
+                format!("\"{}\" was deleted; nothing to save to", self.title()),
             ));
         }
         fs::write(&self.path, self.rope.to_string())?;
