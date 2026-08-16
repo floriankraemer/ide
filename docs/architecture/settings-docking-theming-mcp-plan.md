@@ -28,7 +28,7 @@ per `CLAUDE.md`.
 | L1 | todo | |
 | L2 | todo | |
 | L3 | todo | |
-| G1 | done | `pending` (Docker `linux-artifact` build verified; no display here for gutter-rendering manual pass) |
+| G1 | done | `38e846b` (Docker `linux-artifact` build verified; no display here for gutter-rendering manual pass) |
 | G2 | todo | |
 | T1 | todo | |
 | T2 | todo | |
