@@ -1,8 +1,12 @@
 # MVP implementation plan: Minimal Text Editor Shell
 
+> **Historical document.**
+> The MVP described here has been delivered.
+> The binding architecture is now [layering.md](layering.md) plus ADRs [0002](decisions/0002-application-layer-and-humble-view.md) and [0003](decisions/0003-ffi-conventions.md); where this plan disagrees with them, they win.
+
 ## Status
 
-Draft — implementation plan derived from the approved
+Superseded (delivered) — implementation plan derived from the approved
 [MVP proposal](../product/mvp-proposal.md), constrained by
 [ADR 0001: core tech stack](decisions/0001-core-tech-stack.md) and the
 [architecture overview](overview.md).
@@ -17,6 +21,7 @@ strategy (aqtinstall over MXE or from-source Qt).
 Recommend `tech-writer` split those into ADR-0002 and ADR-0003 after
 `senior-software-engineer` confirms feasibility in the scaffold task
 (Task 1) and the Docker Windows task (Task 8).
+*(Superseded: the ADR-0002/0003 slots were used for the application-layer and FFI-convention decisions instead, and the Windows strategy changed — see §4.)*
 
 ## 1. Cargo workspace layout
 
@@ -60,9 +65,11 @@ Crate responsibilities:
   `DocumentManager` QObject wrapping `editor-core`'s tab state, the main
   window/menu/tab-strip/tree-view widget wiring.
   This is the only crate that depends on `cxx-qt` and Qt6.
-- **`app`** — thin binary crate: constructs the `QApplication`, constructs
-  `project-model`/`editor-core` state, hands ownership to `ui-shell`, runs
-  the Qt event loop.
+- **`app`** — thin binary crate: hands off to `ui-shell`, whose C++ side
+  (`crates/ui-shell/cpp/main_window.cpp`) constructs the `QApplication`
+  and runs the Qt event loop.
+  *(Corrected: this plan originally placed `QApplication` in `app`; the
+  implementation constructs it in C++.)*
   Kept separate from `ui-shell` so `ui-shell`'s bridge types stay a library
   target `cxx-qt-build` can codegen against cleanly.
 
@@ -199,6 +206,14 @@ Three options were evaluated:
 
 **Decision: `aqtinstall` + official Qt6 `mingw_64` prebuilt binaries**, for
 the reasons in the table above.
+
+> **Superseded in implementation.**
+> The `aqtinstall` approach did not pan out and the build fell through to
+> what this section calls Fallback A: `docker/Dockerfile`'s
+> `windows-builder` stage uses an MXE-based mingw-w64 + Qt6 toolchain
+> (shared build) as the primary and only Windows cross-compile path.
+> The evaluation table above is kept as the historical record of why
+> `aqtinstall` was tried first.
 
 The single most likely failure mode: Qt's official `mingw_64` kit is built
 against a specific MinGW-w64 GCC version (e.g. Qt 6.7's `mingw_64` kit

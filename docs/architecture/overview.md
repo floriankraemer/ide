@@ -1,119 +1,73 @@
 # Architecture overview
 
-This describes the high-level module layout following
-[ADR 0001: core tech stack](decisions/0001-core-tech-stack.md).
-It is a sketch to orient contributors, not a full design spec — module-level
-design docs and further ADRs will follow as implementation starts.
+Arc42-lite overview of the current system.
+The binding rules live in [layering.md](layering.md) and the ADRs; this page orients a new contributor.
 
-## Container diagram
+## 1. Context
+
+The project is an MVP IDE: a cross-platform text editor shell with a PHPStorm-like layout.
+It is a Rust Cargo workspace with a Qt6 Widgets UI, bridged via `cxx-qt` per [ADR-0001](decisions/0001-core-tech-stack.md).
+The MVP scope is open a folder, browse it in a sidebar tree, and edit/save text in tabs — see the [MVP proposal](../product/mvp-proposal.md).
+
+## 2. Quality goals
+
+1. **Testability without a display.**
+   All business logic lives in Qt-free crates and runs under plain `cargo test`, with no Qt runtime or display server.
+2. **View swappability.**
+   The view is Qt Widgets today; QML is the planned future view.
+   Because the view holds zero rules ([ADR-0002](decisions/0002-application-layer-and-humble-view.md)), swapping it must not touch `app-core` or the domain crates.
+3. **Performance** (from ADR-0001): typing latency and large-file handling drive the Rust-core decision.
+
+## 3. Building-block view
+
+Four layers plus the binary crate, per [layering.md](layering.md):
 
 ```mermaid
 graph TB
-    subgraph UI["UI Shell (Qt6 / QML, C++/QML)"]
-        Shell[Window & panel layout<br/>project tree, editor tabs, run panel]
-        Theme[Settings & Theme engine<br/>QSS + user config]
+    app["app (main)"] --> view
+    subgraph uishell["ui-shell"]
+        view["view: cpp/main_window.cpp<br/>widgets, layout, wiring"] --> adapter["adapter: src/bridge.rs<br/>thin QObject translation"]
     end
-
-    subgraph Core["Editor Core (Rust)"]
-        Buffer[Text buffer / rope<br/>+ syntax highlighting + indexing]
-        LSP[LSP Client]
-        Debug[Debugger Adapter layer]
-        Project[Project / VCS model]
-    end
-
-    subgraph Plugins["Plugin Host (Rust)"]
-        Native[Native dylib loader<br/>stable C ABI]
-        Wasm[WASM runtime<br/>wasmtime, sandboxed]
-    end
-
-    Shell <-- "cxx-qt bridge<br/>signals/slots, QAbstractItemModel" --> Buffer
-    Shell <-- "cxx-qt bridge" --> Project
-    Theme --> Shell
-
-    Buffer --> LSP
-    Buffer --> Debug
-    Project --> LSP
-    Project --> Debug
-
-    Core --> Native
-    Core --> Wasm
-
-    Native -. "full-speed core integrations<br/>(LSP servers, debuggers, indexers)" .- Plugins
-    Wasm -. "sandboxed, crash-isolated<br/>3rd-party plugins" .- Plugins
+    adapter --> appcore["application: app-core<br/>AppSession, commands, AppError"]
+    appcore --> editorcore["domain: editor-core"]
+    appcore --> projectmodel["domain: project-model"]
 ```
 
-## Modules
+| Crate | Layer | Responsibility | Qt |
+|-------|-------|----------------|----|
+| `editor-core` | domain | Rope-backed `Document`, tab list, load/save/dirty state | No |
+| `project-model` | domain | `ProjectSession`, directory tree, `notify` watcher, last-project persistence | No |
+| `app-core` | application | `AppSession`: orchestration, command methods, typed `AppError` — being introduced by the current refactoring | No |
+| `ui-shell` | adapter + view | `src/bridge.rs`: cxx-qt QObject translation; `cpp/`: Widgets, layout, menus, dialogs, `QApplication` | Yes |
+| `app` | main | Thin binary; hands off to `ui-shell` | Yes |
 
-**UI Shell (Qt6/QML)**
-Window chrome, panel layout (project tree, editor tabs, search results, run
-console) — the PHPStorm-like layout the user asked for. Native widgets and
-dialogs for OS-consistent look and feel. Lives in Qt/C++/QML because that's
-where Qt's native rendering and theming live.
+The view never decides, it only displays and forwards intent.
+Rules crossing the FFI seam (typed errors, `TabId`, Rust-owned dirty state) are fixed by [ADR-0003](decisions/0003-ffi-conventions.md).
 
-**Settings & Theme engine**
-User configuration and QSS-based theming, feeding the UI Shell. Kept
-alongside the UI layer since it's primarily about presentation.
+## 4. Cross-boundary communication
 
-**Editor Core (Rust)**
-Text buffer/rope, syntax highlighting, and project indexing — the
-performance-critical path (typing latency, large-file handling, whole-project
-search). Written in Rust for speed and memory safety without GC pauses.
+- UI actions call invokable slots on the `cxx-qt` QObjects; the adapter translates and delegates to `AppSession`.
+- Rust-side changes (dirty flags, watcher events) surface as Qt signals; tree data is exposed via a `QAbstractItemModel` backed by Rust data.
+- Filesystem watcher events arrive on a background thread and are marshalled onto the Qt event loop via `CxxQtThread` queuing — no shared-mutex model.
 
-**LSP Client (Rust)**
-Talks to language servers over the Language Server Protocol for
-completions, diagnostics, go-to-definition, etc. Sits in the Rust core so it
-can feed the buffer/indexing layer directly without crossing the UI FFI
-boundary for every response.
+## 5. Build and deployment
 
-**Debugger Adapter layer (Rust)**
-Implements the Debug Adapter Protocol (DAP) to talk to language-specific
-debuggers. Same rationale as the LSP client: perf- and latency-sensitive,
-belongs in the Rust core.
+`docker/Dockerfile` is a single multi-stage file: a `linux-builder` stage (apt Qt6) and a `windows-builder` stage cross-compiling with MXE's mingw-w64 + Qt6 toolchain.
+Artifacts land in `dist/`.
 
-**Project / VCS model (Rust)**
-File-system project model and version control integration (diffing, status,
-blame). Feeds both the UI (project tree, VCS gutter) and the indexing/LSP
-layers.
+## 6. Future scope (not implemented)
 
-**Plugin Host (Rust)**
-Two loaders:
-- *Native dylib loader*: stable C ABI, used for core/perf-critical
-  integrations (bundled LSP/debugger adapters, custom indexers) that need
-  full-speed, zero-copy access to the editor core.
-- *WASM runtime (wasmtime)*: sandboxed, crash-isolated execution for
-  third-party plugins, open to any language that compiles to WASM. The host
-  API surface exposed to WASM plugins is intentionally smaller and
-  explicitly versioned, since it's a trust boundary.
+The following are documented direction per ADR-0001 but have no code and no crates today; add them when the work starts, not before:
 
-## Cross-boundary communication
+- **LSP client** — language-server integration in the Rust core.
+- **Debugger adapter (DAP)** — same placement rationale as LSP.
+- **Plugin host** — hybrid model: native dylib loader (stable C ABI) for trusted, perf-critical integrations; sandboxed WASM runtime (wasmtime) with a narrower, capability-based API for third-party plugins.
+- **QML view** — the planned replacement for the Widgets view; the humble-view split exists so this swap stays cheap.
 
-The Rust core and Qt UI communicate via `cxx-qt` bindings:
-- Rust-side state changes (buffer edits, indexing progress, VCS status)
-  emit Qt signals the UI connects to.
-- List/tree-shaped data (project tree, search results, run panel output)
-  is exposed to Qt via `QAbstractItemModel` implementations backed by Rust
-  data, avoiding a serialize/copy step for large result sets.
-- UI actions (open file, run action, apply quick-fix) call into Rust slots
-  through the same bridge.
+Each of these gets its own ADR under `decisions/` when it becomes real.
 
-## Plugin API surface
+## Related
 
-- **Native tier**: full access to editor core APIs (buffer mutation,
-  indexing hooks, LSP/DAP integration points). Reserved for
-  first-party/tightly-coupled integrations where trust is already implicit
-  (they ship as dynamic libraries loaded into the host process).
-- **WASM tier**: a deliberately narrower, capability-based API (read buffer
-  contents, register commands/menu entries, contribute UI panels via
-  declarative descriptions, make network requests only if granted). This is
-  the extension point for the open third-party plugin ecosystem, sandboxed
-  so a misbehaving or malicious plugin can't crash or compromise the host.
-
-## Open follow-ups (not yet decided)
-
-- Text buffer/rope data structure choice (e.g. `ropey` vs. custom).
-- LSP client library choice (e.g. `tower-lsp` vs. custom).
-- Build/packaging tooling: Cargo workspace layout + CMake integration for
-  the Qt side, per-OS packaging (MSI/dmg/AppImage or similar).
-- CI matrix covering Windows/macOS/Linux.
-
-Each should get its own ADR under `decisions/` once decided.
+- [Layering rules](layering.md) — binding dependency and logic-placement rules.
+- [ADR-0001](decisions/0001-core-tech-stack.md), [ADR-0002](decisions/0002-application-layer-and-humble-view.md), [ADR-0003](decisions/0003-ffi-conventions.md).
+- [MVP implementation plan](mvp-implementation-plan.md) — historical.
