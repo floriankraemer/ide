@@ -31,7 +31,7 @@ per `CLAUDE.md`.
 | G1 | done | `38e846b` (Docker `linux-artifact` build verified; no display here for gutter-rendering manual pass) |
 | G2 | done | `05df10e` (Docker `linux-artifact` build verified; manual drag-reorder pass not run, no display here) |
 | T1 | done | `843d464` (Docker `linux-artifact` build verified; dark-launch visual not manually smoke-tested, no display here) |
-| T2 | done | `pending` (`cargo test -p app-config`; Docker `linux-artifact` build verified; live-switch trigger arrives with S1, manual restyle pass not run, no display here) |
+| T2 | done | `aceb830` (`cargo test -p app-config`; Docker `linux-artifact` build verified; live-switch trigger arrives with S1, manual restyle pass not run, no display here) |
 | S1 | todo | |
 | S2 | todo | |
 | Y1 | done | `1475e3f` |
