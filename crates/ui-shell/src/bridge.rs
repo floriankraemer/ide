@@ -1,11 +1,35 @@
 // cxx-qt bridge boundary for ui-shell.
 //
-// Task 2 scope was just enough bridge to show the native Qt6 main window
-// with its menu bar. This adds `ProjectTreeModel`: a `QAbstractItemModel`
-// implementation wrapping `project-model`'s arena-based `DirectoryTree`
-// (Task 5, mvp-implementation-plan.md §2).
+// Adapter layer only (ADR-0002): the two QObjects here — `ProjectTreeModel`
+// (a `QAbstractItemModel` over the project tree) and `DocumentManager` (the
+// open-tab surface for the tab strip) — hold no domain state and decide
+// nothing. They share the single `app_core::AppSession` and translate:
+// slot → QString/QModelIndex → `AppSession` call → emit signal / refresh
+// model. Errors cross as a typed code + message struct and tabs are
+// identified by stable `TabId`s (ADR-0003).
 #[cxx_qt::bridge]
 mod ffi {
+    /// Typed command result crossing the FFI seam (ADR-0003): `code` is the
+    /// stable `app_core::AppError` code (0 = success), `message` the
+    /// user-facing text shown verbatim. The UI branches on `code`, never on
+    /// the message — the `QString`-sentinel convention ("" = success) is
+    /// banned.
+    #[derive(Default)]
+    struct FfiResult {
+        code: i32,
+        message: QString,
+    }
+
+    /// `FfiResult` plus the tab the command yielded — `openFile`'s return.
+    /// `tab_id` is 0 (the "no tab" sentinel; real ids start at 1) when
+    /// `code` is non-zero.
+    #[derive(Default)]
+    struct FfiOpenResult {
+        code: i32,
+        message: QString,
+        tab_id: u64,
+    }
+
     unsafe extern "C++Qt" {
         include!(<QtCore/QAbstractItemModel>);
         /// Base Qt class `ProjectTreeModel` inherits from.
@@ -40,10 +64,10 @@ mod ffi {
     }
 
     extern "RustQt" {
-        /// `QAbstractItemModel` wrapping `project-model`'s `DirectoryTree`
-        /// arena. The model's invisible root corresponds to the arena's
-        /// root node (the open project folder); top-level rows are that
-        /// folder's direct children.
+        /// `QAbstractItemModel` over the shared `AppSession`'s project tree
+        /// (`project-model`'s arena-based `DirectoryTree`). The model's
+        /// invisible root corresponds to the arena's root node (the open
+        /// project folder); top-level rows are that folder's direct children.
         #[qobject]
         #[base = QAbstractItemModel]
         type ProjectTreeModel = super::ProjectTreeModelRust;
@@ -65,8 +89,8 @@ mod ffi {
         /// # Safety
         ///
         /// Inherited `beginResetModel`/`endResetModel` from the base class —
-        /// bracket any full-tree replacement (Task 5 has no watcher yet, so
-        /// this is only used for the initial "Open Folder" population).
+        /// bracket any full-tree replacement (open, mutation refresh, or a
+        /// structural watcher event).
         #[inherit]
         #[cxx_name = "beginResetModel"]
         unsafe fn begin_reset_model(self: Pin<&mut ProjectTreeModel>);
@@ -108,20 +132,12 @@ mod ffi {
         #[cxx_name = "roleNames"]
         fn role_names(self: &ProjectTreeModel) -> QHash_i32_QByteArray;
 
-        /// Open `path` as the active project (via `project-model`'s
-        /// `ProjectSession`, which also persists it as last-opened) and
-        /// reset the model to reflect the new tree. Returns an empty
-        /// string on success, or a user-facing error message on failure —
-        /// the current tree (if any) is left unchanged on failure (US-1).
+        /// Open `path` as the active project (persisted as last-opened) and
+        /// reset the model to reflect the new tree. The current tree (if
+        /// any) is left unchanged on failure (US-1).
         #[qinvokable]
         #[cxx_name = "openFolder"]
-        fn open_folder(self: Pin<&mut ProjectTreeModel>, path: &QString) -> QString;
-
-        /// Binary-vs-text sniff (US-2b's last bullet) for a file path, used
-        /// by the tree-view click handler before attempting to open it.
-        #[qinvokable]
-        #[cxx_name = "isBinaryFile"]
-        fn is_binary_file(self: &ProjectTreeModel, path: &QString) -> bool;
+        fn open_folder(self: Pin<&mut ProjectTreeModel>, path: &QString) -> FfiResult;
 
         /// Absolute path of the open project's root folder, or an empty
         /// string if none is open. Used by the tree-view context menu to
@@ -132,44 +148,44 @@ mod ffi {
         fn root_path(self: &ProjectTreeModel) -> QString;
 
         /// Create an empty file named `name` inside `parent_dir` and
-        /// refresh the tree. Returns an empty string on success, or a
-        /// user-facing error message on failure (e.g. name already taken).
+        /// refresh the tree.
         #[qinvokable]
         #[cxx_name = "createFile"]
         fn create_file(
             self: Pin<&mut ProjectTreeModel>,
             parent_dir: &QString,
             name: &QString,
-        ) -> QString;
+        ) -> FfiResult;
 
         /// Create an empty folder named `name` inside `parent_dir` and
-        /// refresh the tree. Returns an empty string on success, or a
-        /// user-facing error message on failure.
+        /// refresh the tree.
         #[qinvokable]
         #[cxx_name = "createFolder"]
         fn create_folder(
             self: Pin<&mut ProjectTreeModel>,
             parent_dir: &QString,
             name: &QString,
-        ) -> QString;
+        ) -> FfiResult;
 
-        /// Rename `path` (file or folder) to `new_name` in place and
-        /// refresh the tree. Returns an empty string on success, or a
-        /// user-facing error message on failure.
+        /// Rename `path` (file or folder) to `new_name` in place and refresh
+        /// the tree. The session computes the new path itself and retargets
+        /// any open tab at it (US-2b) — `tabTitleChanged` is emitted for the
+        /// affected tab; the old two-step C++ protocol is gone.
         #[qinvokable]
         #[cxx_name = "renamePath"]
         fn rename_path(
             self: Pin<&mut ProjectTreeModel>,
             path: &QString,
             new_name: &QString,
-        ) -> QString;
+        ) -> FfiResult;
 
         /// Delete `path` (recursively if it's a folder) and refresh the
-        /// tree. Returns an empty string on success, or a user-facing error
-        /// message on failure.
+        /// tree. Any open tab on `path` is flagged deleted by the session
+        /// (blocking further silent saves) and `tabTitleChanged` is emitted
+        /// with its "(deleted)" title (US-2b).
         #[qinvokable]
         #[cxx_name = "deletePath"]
-        fn delete_path(self: Pin<&mut ProjectTreeModel>, path: &QString) -> QString;
+        fn delete_path(self: Pin<&mut ProjectTreeModel>, path: &QString) -> FfiResult;
 
         /// Reopen the last-persisted project (US-1's "relaunch reopens the
         /// last project" criterion) and start its filesystem watcher.
@@ -182,27 +198,37 @@ mod ffi {
         fn reopen_last_project(self: Pin<&mut ProjectTreeModel>) -> bool;
 
         /// Emitted on the Qt thread after a filesystem-watcher event has
-        /// already been folded into a tree rebuild + reset (Task 8, plan
-        /// §2). `main_window.cpp` connects this to
-        /// `DocumentManager::checkExternalChange` so an open tab whose
-        /// backing file changed on disk gets the reload/keep prompt (US-3).
+        /// already been folded into a tree rebuild + reset. `main_window.cpp`
+        /// connects this to `DocumentManager::checkExternalChange` so an
+        /// open tab whose backing file changed on disk gets the reload/keep
+        /// prompt (US-3).
         #[qsignal]
         #[cxx_name = "filesChangedExternally"]
         fn files_changed_externally(self: Pin<&mut ProjectTreeModel>, path: QString);
+
+        /// Emitted when a tree mutation (rename/delete) changed an open
+        /// tab's title as a side effect (US-2b) — the tab strip updates its
+        /// label in response, preserving the unsaved-changes indicator.
+        /// Lives on this QObject (not `DocumentManager`) because the tree
+        /// mutations are its slots; `main_window.cpp` wires it to the same
+        /// tab-strip handler.
+        #[qsignal]
+        #[cxx_name = "tabTitleChanged"]
+        fn tab_title_changed(self: Pin<&mut ProjectTreeModel>, tab_id: u64, title: QString);
     }
 
     // Enables `self.qt_thread()` on `ProjectTreeModel`, giving the
     // `notify` watcher thread (owned by `project-model`) a `CxxQtThread`
-    // handle it can queue tree-rebuild closures onto safely (plan §2) —
-    // the only cross-thread communication in the watcher design, no
-    // hand-rolled synchronization.
+    // handle it can queue tree-rebuild closures onto safely — the only
+    // cross-thread communication in the watcher design, no hand-rolled
+    // synchronization.
     impl cxx_qt::Threading for ProjectTreeModel {}
 
     extern "RustQt" {
-        /// `QObject` wrapping `editor-core`'s `TabList` (Task 6,
-        /// mvp-implementation-plan.md §2). Owns which files are open and
-        /// their dirty flags; the `QPlainTextEdit` widgets own live
-        /// keystroke editing (see module docs on the "Live editing" split).
+        /// `QObject` adapter for the shared `AppSession`'s open-document
+        /// table — the tab strip's FFI surface. Owns nothing; the
+        /// `QPlainTextEdit` widgets own live keystroke editing while Rust's
+        /// `Document` owns the authoritative dirty flag (ADR-0003).
         #[qobject]
         type DocumentManager = super::DocumentManagerRust;
 
@@ -211,126 +237,100 @@ mod ffi {
         /// page in response.
         #[qsignal]
         #[cxx_name = "tabOpened"]
-        fn tab_opened(self: Pin<&mut DocumentManager>, index: i32, title: QString);
+        fn tab_opened(self: Pin<&mut DocumentManager>, tab_id: u64, title: QString);
 
         /// Emitted after `closeTab` actually removes a tab — the tab strip
         /// removes the corresponding page in response.
         #[qsignal]
         #[cxx_name = "tabClosed"]
-        fn tab_closed(self: Pin<&mut DocumentManager>, index: i32);
+        fn tab_closed(self: Pin<&mut DocumentManager>, tab_id: u64);
 
         /// Emitted when a tab's dirty flag changes (via `setTabModified` or
         /// a successful `saveTab`) — the tab strip updates its
         /// unsaved-changes indicator in response.
         #[qsignal]
         #[cxx_name = "tabModifiedChanged"]
-        fn tab_modified_changed(self: Pin<&mut DocumentManager>, index: i32, modified: bool);
+        fn tab_modified_changed(self: Pin<&mut DocumentManager>, tab_id: u64, modified: bool);
 
-        /// Emitted when a tab's title needs to change without the tab
-        /// itself opening/closing — a rename via the tree
-        /// (`notifyPathRenamed`) or the "(deleted)" suffix from
-        /// `notifyPathDeleted` (US-2b). The tab strip updates its label in
-        /// response, preserving the unsaved-changes indicator.
-        #[qsignal]
-        #[cxx_name = "tabTitleChanged"]
-        fn tab_title_changed(self: Pin<&mut DocumentManager>, index: i32, title: QString);
-
-        /// Declared per mvp-implementation-plan.md §2 for the filesystem
-        /// watcher (Task 8); not wired up yet — out of scope for this task.
+        /// Emitted from `checkExternalChange` when the session's watcher
+        /// policy decided the change is genuinely external to an open,
+        /// still-existing tab — `main_window.cpp` shows the reload/keep
+        /// prompt in response (US-3).
         #[qsignal]
         #[cxx_name = "externalChangeDetected"]
-        fn external_change_detected(self: Pin<&mut DocumentManager>, path: QString);
+        fn external_change_detected(self: Pin<&mut DocumentManager>, tab_id: u64, path: QString);
 
         /// Open `path` as a new tab, or focus its existing tab if already
-        /// open (US-3: focus-not-duplicate). Returns the tab index, or -1
-        /// on failure (see `lastError`).
+        /// open (US-3: focus-not-duplicate). The session enforces the
+        /// binary-open rule (US-2b); the UI branches on the returned code
+        /// (`CODE_BINARY_FILE` gets an information dialog, other failures an
+        /// error dialog). For a new tab, `tabOpened` is emitted before this
+        /// returns.
         #[qinvokable]
         #[cxx_name = "openFile"]
-        fn open_file(self: Pin<&mut DocumentManager>, path: &QString) -> i32;
+        fn open_file(self: Pin<&mut DocumentManager>, path: &QString) -> FfiOpenResult;
 
-        /// Close the tab at `index`. The caller (UI) is responsible for any
+        /// Close the tab `tab_id`. The caller (UI) is responsible for any
         /// unsaved-changes prompt before calling this.
         #[qinvokable]
         #[cxx_name = "closeTab"]
-        fn close_tab(self: Pin<&mut DocumentManager>, index: i32);
+        fn close_tab(self: Pin<&mut DocumentManager>, tab_id: u64);
 
-        /// Replace the tab's content with `content` and write it to disk.
-        /// Returns an empty string on success, or a user-facing error
-        /// message on failure (US-4: no silent data loss — the dirty flag
-        /// is left set on failure).
+        /// Replace the tab's content with `content` and write it to disk
+        /// (US-4: no silent data loss — the dirty flag is left set on
+        /// failure).
         #[qinvokable]
         #[cxx_name = "saveTab"]
-        fn save_tab(self: Pin<&mut DocumentManager>, index: i32, content: &QString) -> QString;
+        fn save_tab(self: Pin<&mut DocumentManager>, tab_id: u64, content: &QString) -> FfiResult;
 
-        /// Update which tab `editor-core` considers active.
+        /// Update which tab the session considers active.
         #[qinvokable]
         #[cxx_name = "setActiveTab"]
-        fn set_active_tab(self: Pin<&mut DocumentManager>, index: i32);
+        fn set_active_tab(self: Pin<&mut DocumentManager>, tab_id: u64);
 
-        /// Mirror `QPlainTextEdit`'s own `QTextDocument::modificationChanged`
-        /// state into `editor-core`'s per-tab dirty flag (see module docs —
-        /// live keystrokes are not marshalled through the rope).
+        /// Forward `QPlainTextEdit`'s own `QTextDocument::modificationChanged`
+        /// notification into the authoritative Rust dirty flag (ADR-0003 —
+        /// live keystrokes are not marshalled through the rope; the widget
+        /// forwards its edit state and reads the flag back).
         #[qinvokable]
         #[cxx_name = "setTabModified"]
-        fn set_tab_modified(self: Pin<&mut DocumentManager>, index: i32, modified: bool);
+        fn set_tab_modified(self: Pin<&mut DocumentManager>, tab_id: u64, modified: bool);
 
         /// The tab's current buffer content, used to populate a newly
         /// created `QPlainTextEdit` page when a tab is opened.
         #[qinvokable]
         #[cxx_name = "tabContent"]
-        fn tab_content(self: &DocumentManager, index: i32) -> QString;
+        fn tab_content(self: &DocumentManager, tab_id: u64) -> QString;
 
-        /// User-facing reason the last `openFile` call failed, if any.
+        /// The tab's display title (file name, plus the "(deleted)" suffix
+        /// once its backing file is gone). The tab strip renders this
+        /// verbatim, adding only its own dirty marker.
         #[qinvokable]
-        #[cxx_name = "lastError"]
-        fn last_error(self: &DocumentManager) -> QString;
+        #[cxx_name = "tabTitle"]
+        fn tab_title(self: &DocumentManager, tab_id: u64) -> QString;
 
-        /// If `old_path` has an open tab, point it at `new_path` and emit
-        /// `tabTitleChanged` (US-2b: a rename via the tree must update the
-        /// tab, not silently keep pointing at the stale path). No-op if
-        /// `old_path` isn't open.
+        /// The authoritative dirty flag for `tab_id` (ADR-0003: the view
+        /// reads this rather than trusting its own copy).
         #[qinvokable]
-        #[cxx_name = "notifyPathRenamed"]
-        fn notify_path_renamed(
-            self: Pin<&mut DocumentManager>,
-            old_path: &QString,
-            new_path: &QString,
-        );
-
-        /// If `path` has an open tab, mark it deleted (blocking further
-        /// silent saves — see `editor_core::Document::mark_deleted`) and
-        /// emit `tabTitleChanged` with a "(deleted)" suffix (US-2b). No-op
-        /// if `path` isn't open.
-        #[qinvokable]
-        #[cxx_name = "notifyPathDeleted"]
-        fn notify_path_deleted(self: Pin<&mut DocumentManager>, path: &QString);
+        #[cxx_name = "tabIsModified"]
+        fn tab_is_modified(self: &DocumentManager, tab_id: u64) -> bool;
 
         /// Handle a filesystem-watcher event for `path` (relayed via
         /// `ProjectTreeModel::filesChangedExternally`, already running on
         /// the Qt thread by the time this is called — plain signal/slot,
-        /// no further cross-thread hop needed). Emits
-        /// `externalChangeDetected(path)` if `path` has an open tab, unless
-        /// the change is one this `DocumentManager` caused itself (a recent
-        /// `saveTab`/tree-driven rename onto that path) or the tab was
-        /// already flagged deleted by a tree-driven delete (Task 8).
+        /// no further cross-thread hop needed). The session's watcher
+        /// policy decides whether this is a genuine external change to an
+        /// open tab; if so `externalChangeDetected(tabId, path)` is emitted.
         #[qinvokable]
         #[cxx_name = "checkExternalChange"]
         fn check_external_change(self: Pin<&mut DocumentManager>, path: &QString);
 
-        /// Index of the open tab backed by `path`, or -1 if `path` isn't
-        /// open. Used by `main_window.cpp` to resolve
-        /// `externalChangeDetected(path)` to a tab before prompting.
-        #[qinvokable]
-        #[cxx_name = "tabIndexForPath"]
-        fn tab_index_for_path(self: &DocumentManager, path: &QString) -> i32;
-
         /// Re-read the tab's backing file from disk, discarding any
         /// in-editor edits (the "Reload" choice on the external-change
-        /// prompt, US-3). Returns an empty string on success, or a
-        /// user-facing error message on failure.
+        /// prompt, US-3).
         #[qinvokable]
         #[cxx_name = "reloadTabFromDisk"]
-        fn reload_tab_from_disk(self: Pin<&mut DocumentManager>, index: i32) -> QString;
+        fn reload_tab_from_disk(self: Pin<&mut DocumentManager>, tab_id: u64) -> FfiResult;
     }
 
     unsafe extern "C++" {
@@ -344,77 +344,53 @@ mod ffi {
 }
 
 use core::pin::Pin;
-use cxx_qt::{CxxQtType, Threading};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+use app_core::{AppError, AppSession, TabId};
+use cxx_qt::Threading;
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
-use ffi::Roles;
-use std::time::{Duration, Instant};
+use ffi::{FfiOpenResult, FfiResult, Roles};
 
-/// How long after this `DocumentManager` writes a path to disk itself
-/// (`saveTab`) or repoints a tab onto a new path (a tree-driven rename) a
-/// matching filesystem-watcher event for that path is treated as an echo
-/// of our own change rather than a genuine external edit — see
-/// `DocumentManagerRust::suppressed_changes`. Generous enough to absorb
-/// typical inotify/Qt-event-loop latency; not meant to be race-proof.
-const SELF_CHANGE_SUPPRESSION_WINDOW: Duration = Duration::from_millis(1500);
-
-/// Whether a filesystem-watcher event actually shifts the project tree's
-/// shape (a file/folder created, removed, or renamed) as opposed to a
-/// content-only change to a path that's already in the tree (a plain write,
-/// e.g. every `Ctrl+S` save — same rows, same structure, just different
-/// bytes on disk). Only the former needs the tree model rebuilt and reset;
-/// resetting for the latter is exactly what caused the sidebar to
-/// re-collapse on every save (`beginResetModel`/`endResetModel` discards
-/// Qt's per-item expand state for the whole tree).
-fn is_structural_change(kind: &notify::EventKind) -> bool {
-    matches!(
-        kind,
-        notify::EventKind::Create(_)
-            | notify::EventKind::Remove(_)
-            | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
-    )
+thread_local! {
+    /// The single `AppSession` both QObject adapters share. cxx-qt
+    /// constructs the Rust structs via `Default` when C++ does
+    /// `new ProjectTreeModel(window)` — there is no constructor-injection
+    /// path — so the shared instance lives in a thread-local both `Default`
+    /// impls clone. Sound because all QObjects (and every slot/signal here)
+    /// live on the single Qt UI thread; the watcher thread never touches the
+    /// session directly, it queues closures onto the Qt thread via
+    /// `CxxQtThread` first.
+    static APP_SESSION: Rc<RefCell<AppSession>> = Rc::new(RefCell::new(AppSession::new()));
 }
 
-#[cfg(test)]
-mod is_structural_change_tests {
-    use super::is_structural_change;
-    use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
-    use notify::EventKind;
+fn shared_session() -> Rc<RefCell<AppSession>> {
+    APP_SESSION.with(Rc::clone)
+}
 
-    #[test]
-    fn create_and_remove_are_structural() {
-        assert!(is_structural_change(&EventKind::Create(CreateKind::File)));
-        assert!(is_structural_change(&EventKind::Remove(RemoveKind::File)));
-    }
-
-    #[test]
-    fn a_rename_is_structural() {
-        assert!(is_structural_change(&EventKind::Modify(ModifyKind::Name(
-            RenameMode::Both
-        ))));
-    }
-
-    #[test]
-    fn a_plain_content_write_is_not_structural() {
-        // What `fs::write` on an already-existing file (every save)
-        // reports under Linux's inotify backend.
-        assert!(!is_structural_change(&EventKind::Modify(ModifyKind::Data(
-            notify::event::DataChange::Any
-        ))));
-    }
-
-    #[test]
-    fn metadata_only_changes_are_not_structural() {
-        assert!(!is_structural_change(&EventKind::Modify(
-            ModifyKind::Metadata(notify::event::MetadataKind::Any)
-        )));
+/// Translate a command result into the FFI struct (ADR-0003).
+fn to_ffi_result(result: Result<(), AppError>) -> FfiResult {
+    match result {
+        Ok(()) => FfiResult::default(),
+        Err(err) => FfiResult {
+            code: err.code(),
+            message: QString::from(err.to_string().as_str()),
+        },
     }
 }
 
-/// Rust-side state behind the `ProjectTreeModel` QObject: the currently
-/// open project (if any), owned via `project-model`'s `ProjectSession`.
-#[derive(Default)]
+/// Rust side of the `ProjectTreeModel` QObject: a handle to the shared
+/// session, nothing else — the tree data itself lives in `app-core`.
 pub struct ProjectTreeModelRust {
-    session: project_model::ProjectSession,
+    session: Rc<RefCell<AppSession>>,
+}
+
+impl Default for ProjectTreeModelRust {
+    fn default() -> Self {
+        Self {
+            session: shared_session(),
+        }
+    }
 }
 
 impl ffi::ProjectTreeModel {
@@ -423,7 +399,8 @@ impl ffi::ProjectTreeModel {
     /// naturally yields 0 without any separate "is leaf" tracking; Qt's
     /// tree view relies on that to skip drawing an expand affordance.
     pub fn row_count(&self, parent: &QModelIndex) -> i32 {
-        let Some(project) = self.session.current() else {
+        let session = self.session.borrow();
+        let Some(project) = session.project() else {
             return 0;
         };
         let tree = &project.tree;
@@ -445,7 +422,8 @@ impl ffi::ProjectTreeModel {
     /// can always re-derive a node's row by searching its own parent's
     /// children.
     pub fn index(&self, row: i32, column: i32, parent: &QModelIndex) -> QModelIndex {
-        let Some(project) = self.session.current() else {
+        let session = self.session.borrow();
+        let Some(project) = session.project() else {
             return QModelIndex::default();
         };
         let tree = &project.tree;
@@ -466,7 +444,8 @@ impl ffi::ProjectTreeModel {
     /// model's invisible root — so a child whose arena parent is the root
     /// correctly yields an invalid (root) `QModelIndex`.
     pub fn parent(&self, child: &QModelIndex) -> QModelIndex {
-        let Some(project) = self.session.current() else {
+        let session = self.session.borrow();
+        let Some(project) = session.project() else {
             return QModelIndex::default();
         };
         let tree = &project.tree;
@@ -492,7 +471,8 @@ impl ffi::ProjectTreeModel {
     }
 
     pub fn data(&self, index: &QModelIndex, role: i32) -> QVariant {
-        let Some(project) = self.session.current() else {
+        let session = self.session.borrow();
+        let Some(project) = session.project() else {
             return QVariant::default();
         };
         if !index.is_valid() {
@@ -523,41 +503,23 @@ impl ffi::ProjectTreeModel {
         roles
     }
 
-    pub fn open_folder(mut self: Pin<&mut Self>, path: &QString) -> QString {
+    pub fn open_folder(mut self: Pin<&mut Self>, path: &QString) -> FfiResult {
         let path = std::path::PathBuf::from(path.to_string());
-        let config_dir =
-            project_model::default_config_dir().unwrap_or_else(|| std::env::temp_dir().join("ide"));
-
-        let result = self
-            .as_mut()
-            .rust_mut()
-            .session
-            .open_folder(&path, &config_dir);
-
-        match result {
-            Ok(()) => {
-                unsafe {
-                    self.as_mut().begin_reset_model();
-                    self.as_mut().end_reset_model();
-                }
-                self.as_mut().start_watcher();
-                QString::default()
+        // Borrow scoped tightly: `endResetModel` synchronously re-enters
+        // `rowCount`/`data`, which take their own borrow of the session.
+        let result = self.session.borrow_mut().open_project(&path);
+        if result.is_ok() {
+            unsafe {
+                self.as_mut().begin_reset_model();
+                self.as_mut().end_reset_model();
             }
-            Err(err) => QString::from(err.to_string().as_str()),
+            self.as_mut().start_watcher();
         }
+        to_ffi_result(result)
     }
 
     pub fn reopen_last_project(mut self: Pin<&mut Self>) -> bool {
-        let config_dir =
-            project_model::default_config_dir().unwrap_or_else(|| std::env::temp_dir().join("ide"));
-
-        let opened = self
-            .as_mut()
-            .rust_mut()
-            .session
-            .reopen_last(&config_dir)
-            .unwrap_or(false);
-
+        let opened = self.session.borrow_mut().reopen_last_project();
         if opened {
             unsafe {
                 self.as_mut().begin_reset_model();
@@ -569,15 +531,15 @@ impl ffi::ProjectTreeModel {
     }
 
     /// (Re)start the filesystem watcher for whatever project is now
-    /// current, replacing any previous watcher (plan §2: single watcher).
-    /// Each fs event queues a closure onto this `ProjectTreeModel`'s own Qt
-    /// thread — the one cross-thread hop in the whole design — which, only
-    /// for a *structural* event (see `is_structural_change`), rebuilds the
-    /// tree and resets the model; every event (structural or not) still
-    /// emits `filesChangedExternally(path)` for `main_window.cpp` to relay
-    /// to `DocumentManager` via an ordinary (already-on-the-Qt-thread)
-    /// signal connection, so US-3's reload/keep prompt for an open tab's
-    /// content change keeps working. That relay is why `project-model`'s
+    /// current, replacing any previous watcher (single watcher). Each fs
+    /// event queues a closure onto this `ProjectTreeModel`'s own Qt thread —
+    /// the one cross-thread hop in the whole design — which, only for a
+    /// *structural* event (see `project_model::is_structural_change`),
+    /// rebuilds the tree and resets the model; every event (structural or
+    /// not) still emits `filesChangedExternally(path)` for `main_window.cpp`
+    /// to relay to `DocumentManager` via an ordinary (already-on-the-Qt-
+    /// thread) signal connection, so US-3's reload/keep prompt for an open
+    /// tab's content change keeps working. That relay is why `project-model`'s
     /// watcher only ever needs one `CxxQtThread` handle, not two.
     ///
     /// Root cause of the "saving a file collapses the sidebar" bug: this
@@ -586,19 +548,18 @@ impl ffi::ProjectTreeModel {
     /// the tree — a content-only change that doesn't move a single row.
     /// `beginResetModel`/`endResetModel` throws away Qt's per-item expand
     /// state for the whole tree, so every save re-collapsed it. Filtering
-    /// on `EventKind` here fixes both the app's own saves and genuinely
+    /// on the event kind here fixes both the app's own saves and genuinely
     /// external content-only edits (no reason to reset for either), while
     /// still fully rebuilding for real structural changes (US-2).
-    fn start_watcher(mut self: Pin<&mut Self>) {
+    fn start_watcher(self: Pin<&mut Self>) {
         let qt_thread = self.qt_thread();
-        self.as_mut()
-            .rust_mut()
-            .session
+        self.session
+            .borrow_mut()
             .start_watcher(move |kind, changed_path| {
-                let structural = is_structural_change(&kind);
+                let structural = project_model::is_structural_change(&kind);
                 let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
                     if structural {
-                        let rebuilt = model.as_mut().rust_mut().session.rebuild_tree().is_ok();
+                        let rebuilt = model.session.borrow_mut().rebuild_tree().is_ok();
                         if rebuilt {
                             unsafe {
                                 model.as_mut().begin_reset_model();
@@ -612,286 +573,199 @@ impl ffi::ProjectTreeModel {
             });
     }
 
-    pub fn is_binary_file(&self, path: &QString) -> bool {
-        let path = std::path::PathBuf::from(path.to_string());
-        editor_core::looks_binary_file(&path).unwrap_or(true)
-    }
-
     pub fn root_path(&self) -> QString {
-        match self.session.current() {
-            Some(project) => QString::from(project.root.path().to_string_lossy().as_ref()),
+        match self.session.borrow().root_path() {
+            Some(path) => QString::from(path.to_string_lossy().as_ref()),
             None => QString::default(),
         }
     }
 
-    pub fn create_file(mut self: Pin<&mut Self>, parent_dir: &QString, name: &QString) -> QString {
+    pub fn create_file(
+        mut self: Pin<&mut Self>,
+        parent_dir: &QString,
+        name: &QString,
+    ) -> FfiResult {
         let parent = std::path::PathBuf::from(parent_dir.to_string());
-        let result = project_model::create_file(&parent, &name.to_string());
-        self.as_mut().finish_mutation(result.map(|_| ()))
+        let result = self
+            .session
+            .borrow_mut()
+            .create_file(&parent, &name.to_string());
+        self.as_mut().finish_mutation(result.map(|()| None))
     }
 
     pub fn create_folder(
         mut self: Pin<&mut Self>,
         parent_dir: &QString,
         name: &QString,
-    ) -> QString {
+    ) -> FfiResult {
         let parent = std::path::PathBuf::from(parent_dir.to_string());
-        let result = project_model::create_folder(&parent, &name.to_string());
-        self.as_mut().finish_mutation(result.map(|_| ()))
+        let result = self
+            .session
+            .borrow_mut()
+            .create_folder(&parent, &name.to_string());
+        self.as_mut().finish_mutation(result.map(|()| None))
     }
 
-    pub fn rename_path(mut self: Pin<&mut Self>, path: &QString, new_name: &QString) -> QString {
+    pub fn rename_path(mut self: Pin<&mut Self>, path: &QString, new_name: &QString) -> FfiResult {
         let path = std::path::PathBuf::from(path.to_string());
-        let result = project_model::rename_path(&path, &new_name.to_string());
-        self.as_mut().finish_mutation(result.map(|_| ()))
-    }
-
-    pub fn delete_path(mut self: Pin<&mut Self>, path: &QString) -> QString {
-        let path = std::path::PathBuf::from(path.to_string());
-        let result = project_model::delete_path(&path);
+        let result = self
+            .session
+            .borrow_mut()
+            .rename_entry(&path, &new_name.to_string());
         self.as_mut().finish_mutation(result)
     }
 
-    /// Shared tail for the four mutation methods above: on success,
-    /// re-snapshot the tree from disk and reset the model (full reset, no
-    /// incremental diffing — consistent with Task 5's reset-based approach
-    /// at MVP scope); on failure, leave the tree untouched and surface the
-    /// error message.
+    pub fn delete_path(mut self: Pin<&mut Self>, path: &QString) -> FfiResult {
+        let path = std::path::PathBuf::from(path.to_string());
+        let result = self.session.borrow_mut().delete_entry(&path);
+        self.as_mut().finish_mutation(result)
+    }
+
+    /// Shared tail for the four tree-mutation slots above: reset the model
+    /// so the view re-reads the rebuilt tree, and relay any retitled tab to
+    /// the tab strip. The model is also reset when only the tree re-snapshot
+    /// failed (`TreeRebuild`) — the disk mutation itself succeeded, so the
+    /// stale rows must still be dropped (same behavior as before the
+    /// refactoring). Full reset, no incremental diffing — consistent with
+    /// the reset-based approach at MVP scope.
     fn finish_mutation(
         mut self: Pin<&mut Self>,
-        result: Result<(), project_model::FileOpError>,
-    ) -> QString {
-        match result {
-            Ok(()) => {
-                let rebuild = self.as_mut().rust_mut().session.rebuild_tree();
-                unsafe {
-                    self.as_mut().begin_reset_model();
-                    self.as_mut().end_reset_model();
-                }
-                match rebuild {
-                    Ok(()) => QString::default(),
-                    Err(e) => QString::from(e.to_string().as_str()),
-                }
+        result: Result<Option<app_core::RetitledTab>, AppError>,
+    ) -> FfiResult {
+        let mutated_disk = matches!(&result, Ok(_) | Err(AppError::TreeRebuild(_)));
+        if mutated_disk {
+            unsafe {
+                self.as_mut().begin_reset_model();
+                self.as_mut().end_reset_model();
             }
-            Err(err) => QString::from(err.to_string().as_str()),
+        }
+        match result {
+            Ok(retitled) => {
+                if let Some(tab) = retitled {
+                    self.as_mut()
+                        .tab_title_changed(tab.id.raw(), QString::from(tab.title.as_str()));
+                }
+                FfiResult::default()
+            }
+            Err(err) => FfiResult {
+                code: err.code(),
+                message: QString::from(err.to_string().as_str()),
+            },
         }
     }
 }
 
-/// Rust-side state behind the `DocumentManager` QObject: `editor-core`'s
-/// tab list, plus the last `openFile` error for `lastError()` (US-3/US-4,
-/// Task 6).
-#[derive(Default)]
+/// Rust side of the `DocumentManager` QObject: a handle to the shared
+/// session, nothing else — tabs, dirty flags, and the watcher-suppression
+/// policy all live in `app-core`.
 pub struct DocumentManagerRust {
-    tabs: editor_core::TabList,
-    last_error: String,
-    /// Paths this `DocumentManager` itself just changed on disk (a
-    /// `saveTab`) or repointed a tab onto (a tree-driven rename), each with
-    /// the `Instant` it happened — the own-save/own-rename feedback-loop
-    /// guard for `check_external_change` (Task 8: the filesystem watcher
-    /// would otherwise also see these as "external" changes).
-    suppressed_changes: std::collections::HashMap<std::path::PathBuf, Instant>,
+    session: Rc<RefCell<AppSession>>,
+}
+
+impl Default for DocumentManagerRust {
+    fn default() -> Self {
+        Self {
+            session: shared_session(),
+        }
+    }
 }
 
 impl ffi::DocumentManager {
-    pub fn open_file(mut self: Pin<&mut Self>, path: &QString) -> i32 {
+    pub fn open_file(mut self: Pin<&mut Self>, path: &QString) -> FfiOpenResult {
         let path = std::path::PathBuf::from(path.to_string());
-        let tabs_before = self.tabs.len();
-
-        let result = self.as_mut().rust_mut().tabs.open(&path);
+        let result = self.session.borrow_mut().open_file(&path);
         match result {
-            Ok(index) => {
-                let is_new = self.tabs.len() > tabs_before;
-                if is_new {
-                    let title = self
-                        .tabs
-                        .get(index)
-                        .map(|doc| doc.title())
-                        .unwrap_or_default();
+            Ok(opened) => {
+                if opened.newly_opened {
                     self.as_mut()
-                        .tab_opened(index as i32, QString::from(title.as_str()));
+                        .tab_opened(opened.id.raw(), QString::from(opened.title.as_str()));
                 }
-                index as i32
+                FfiOpenResult {
+                    code: AppError::CODE_OK,
+                    message: QString::default(),
+                    tab_id: opened.id.raw(),
+                }
             }
-            Err(err) => {
-                self.as_mut().rust_mut().last_error = err.to_string();
-                -1
-            }
+            Err(err) => FfiOpenResult {
+                code: err.code(),
+                message: QString::from(err.to_string().as_str()),
+                tab_id: 0,
+            },
         }
     }
 
-    pub fn close_tab(mut self: Pin<&mut Self>, index: i32) {
-        if index < 0 {
-            return;
-        }
-        let closed = self
-            .as_mut()
-            .rust_mut()
-            .tabs
-            .close(index as usize)
-            .is_some();
+    pub fn close_tab(mut self: Pin<&mut Self>, tab_id: u64) {
+        let closed = self.session.borrow_mut().close_tab(TabId::from_raw(tab_id));
         if closed {
-            self.as_mut().tab_closed(index);
+            self.as_mut().tab_closed(tab_id);
         }
     }
 
-    pub fn save_tab(mut self: Pin<&mut Self>, index: i32, content: &QString) -> QString {
-        if index < 0 {
-            return QString::from("no such tab");
+    pub fn save_tab(mut self: Pin<&mut Self>, tab_id: u64, content: &QString) -> FfiResult {
+        let result = self
+            .session
+            .borrow_mut()
+            .save_tab(TabId::from_raw(tab_id), &content.to_string());
+        if result.is_ok() {
+            self.as_mut().tab_modified_changed(tab_id, false);
         }
-        let content = content.to_string();
-        let save_result = {
-            let mut rust = self.as_mut().rust_mut();
-            match rust.tabs.get_mut(index as usize) {
-                Some(doc) => {
-                    doc.replace_content(&content);
-                    let path = doc.path().to_path_buf();
-                    let result = doc.save().map_err(|err| err.to_string());
-                    if result.is_ok() {
-                        rust.suppressed_changes.insert(path, Instant::now());
-                    }
-                    result
-                }
-                None => Err("no such tab".to_string()),
-            }
-        };
-
-        match save_result {
-            Ok(()) => {
-                self.as_mut().tab_modified_changed(index, false);
-                QString::default()
-            }
-            Err(err) => QString::from(err.as_str()),
-        }
+        to_ffi_result(result)
     }
 
-    pub fn set_active_tab(mut self: Pin<&mut Self>, index: i32) {
-        if index >= 0 {
-            self.as_mut().rust_mut().tabs.set_active(index as usize);
-        }
+    pub fn set_active_tab(self: Pin<&mut Self>, tab_id: u64) {
+        self.session
+            .borrow_mut()
+            .set_active_tab(TabId::from_raw(tab_id));
     }
 
-    pub fn set_tab_modified(mut self: Pin<&mut Self>, index: i32, modified: bool) {
-        if index < 0 {
-            return;
-        }
-        let changed = {
-            let mut rust = self.as_mut().rust_mut();
-            match rust.tabs.get_mut(index as usize) {
-                Some(doc) => {
-                    doc.set_dirty(modified);
-                    true
-                }
-                None => false,
-            }
-        };
+    pub fn set_tab_modified(mut self: Pin<&mut Self>, tab_id: u64, modified: bool) {
+        let changed = self
+            .session
+            .borrow_mut()
+            .set_tab_dirty(TabId::from_raw(tab_id), modified);
         if changed {
-            self.as_mut().tab_modified_changed(index, modified);
+            self.as_mut().tab_modified_changed(tab_id, modified);
         }
     }
 
-    pub fn tab_content(&self, index: i32) -> QString {
-        if index < 0 {
-            return QString::default();
-        }
-        self.tabs
-            .get(index as usize)
-            .map(|doc| QString::from(doc.content().as_str()))
+    pub fn tab_content(&self, tab_id: u64) -> QString {
+        self.session
+            .borrow()
+            .tab_content(TabId::from_raw(tab_id))
+            .map(|content| QString::from(content.as_str()))
             .unwrap_or_default()
     }
 
-    pub fn last_error(&self) -> QString {
-        QString::from(self.last_error.as_str())
+    pub fn tab_title(&self, tab_id: u64) -> QString {
+        self.session
+            .borrow()
+            .tab_title(TabId::from_raw(tab_id))
+            .map(|title| QString::from(title.as_str()))
+            .unwrap_or_default()
     }
 
-    pub fn notify_path_renamed(mut self: Pin<&mut Self>, old_path: &QString, new_path: &QString) {
-        let old_path = std::path::PathBuf::from(old_path.to_string());
-        let new_path = std::path::PathBuf::from(new_path.to_string());
-        let Some(index) = self.tabs.find_by_path(&old_path) else {
-            return;
-        };
-        let title = {
-            let mut rust = self.as_mut().rust_mut();
-            let doc = rust
-                .tabs
-                .get_mut(index)
-                .expect("index came from find_by_path on the same tab list");
-            doc.set_path(new_path.clone());
-            let title = doc.title();
-            // The watcher will also see this rename land on `new_path` —
-            // suppress the echo (same reasoning as `save_tab`).
-            rust.suppressed_changes.insert(new_path, Instant::now());
-            title
-        };
-        self.as_mut()
-            .tab_title_changed(index as i32, QString::from(title.as_str()));
+    pub fn tab_is_modified(&self, tab_id: u64) -> bool {
+        self.session
+            .borrow()
+            .tab_is_dirty(TabId::from_raw(tab_id))
+            .unwrap_or(false)
     }
 
-    /// Handle a filesystem-watcher event for `path`, relayed from
-    /// `ProjectTreeModel::filesChangedExternally` (Task 8). No-op unless
-    /// `path` has an open tab; further no-ops if that tab was already
-    /// flagged deleted by a tree-driven delete (nothing to reload/keep —
-    /// see `notify_path_deleted`), or if `path` was changed by this
-    /// `DocumentManager` itself within the suppression window (`save_tab`
-    /// or a tree-driven rename onto `path`) rather than externally.
     pub fn check_external_change(mut self: Pin<&mut Self>, path: &QString) {
-        let path = std::path::PathBuf::from(path.to_string());
-        let Some(index) = self.tabs.find_by_path(&path) else {
-            return;
-        };
-        if self.tabs.get(index).map(|d| d.is_deleted()).unwrap_or(true) {
-            return;
-        }
-        let is_own_change = self
-            .suppressed_changes
-            .get(&path)
-            .map(|at| at.elapsed() < SELF_CHANGE_SUPPRESSION_WINDOW)
-            .unwrap_or(false);
-        if is_own_change {
-            return;
-        }
-        self.as_mut()
-            .external_change_detected(QString::from(path.to_string_lossy().as_ref()));
-    }
-
-    pub fn tab_index_for_path(&self, path: &QString) -> i32 {
-        let path = std::path::PathBuf::from(path.to_string());
-        self.tabs
-            .find_by_path(&path)
-            .map(|i| i as i32)
-            .unwrap_or(-1)
-    }
-
-    pub fn reload_tab_from_disk(mut self: Pin<&mut Self>, index: i32) -> QString {
-        if index < 0 {
-            return QString::from("no such tab");
-        }
-        let mut rust = self.as_mut().rust_mut();
-        match rust.tabs.get_mut(index as usize) {
-            Some(doc) => match doc.reload() {
-                Ok(()) => QString::default(),
-                Err(err) => QString::from(err.to_string().as_str()),
-            },
-            None => QString::from("no such tab"),
+        let path_buf = std::path::PathBuf::from(path.to_string());
+        let hit = self.session.borrow_mut().check_external_change(&path_buf);
+        if let Some(id) = hit {
+            self.as_mut()
+                .external_change_detected(id.raw(), path.clone());
         }
     }
 
-    pub fn notify_path_deleted(mut self: Pin<&mut Self>, path: &QString) {
-        let path = std::path::PathBuf::from(path.to_string());
-        let Some(index) = self.tabs.find_by_path(&path) else {
-            return;
-        };
-        let title = {
-            let mut rust = self.as_mut().rust_mut();
-            let doc = rust
-                .tabs
-                .get_mut(index)
-                .expect("index came from find_by_path on the same tab list");
-            doc.mark_deleted();
-            format!("{} (deleted)", doc.title())
-        };
-        self.as_mut()
-            .tab_title_changed(index as i32, QString::from(title.as_str()));
+    pub fn reload_tab_from_disk(self: Pin<&mut Self>, tab_id: u64) -> FfiResult {
+        let result = self
+            .session
+            .borrow_mut()
+            .reload_tab(TabId::from_raw(tab_id));
+        to_ffi_result(result)
     }
 }
 

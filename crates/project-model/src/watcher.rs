@@ -7,7 +7,29 @@
 
 use std::path::{Path, PathBuf};
 
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher as _};
+
+// Re-exported so downstream crates (`app-core`, `ui-shell`) can name the
+// event kind in watcher callbacks without depending on `notify` themselves —
+// the watcher backend stays this crate's implementation detail.
+pub use notify::EventKind;
+
+/// Whether a filesystem-watcher event actually shifts the project tree's
+/// shape (a file/folder created, removed, or renamed) as opposed to a
+/// content-only change to a path that's already in the tree (a plain write,
+/// e.g. every `Ctrl+S` save — same rows, same structure, just different
+/// bytes on disk). Only the former needs the tree model rebuilt and reset;
+/// resetting for the latter is exactly what caused the sidebar to
+/// re-collapse on every save (`beginResetModel`/`endResetModel` discards
+/// Qt's per-item expand state for the whole tree).
+pub fn is_structural_change(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_)
+            | EventKind::Remove(_)
+            | EventKind::Modify(notify::event::ModifyKind::Name(_))
+    )
+}
 
 /// A running watcher for one project root. Kept alive for as long as the
 /// project is open; dropping it (e.g. when a different project is opened)
@@ -41,6 +63,42 @@ impl ProjectWatcher {
         })?;
         watcher.watch(root, RecursiveMode::Recursive)?;
         Ok(Self { _watcher: watcher })
+    }
+}
+
+#[cfg(test)]
+mod is_structural_change_tests {
+    use super::is_structural_change;
+    use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
+    use notify::EventKind;
+
+    #[test]
+    fn create_and_remove_are_structural() {
+        assert!(is_structural_change(&EventKind::Create(CreateKind::File)));
+        assert!(is_structural_change(&EventKind::Remove(RemoveKind::File)));
+    }
+
+    #[test]
+    fn a_rename_is_structural() {
+        assert!(is_structural_change(&EventKind::Modify(ModifyKind::Name(
+            RenameMode::Both
+        ))));
+    }
+
+    #[test]
+    fn a_plain_content_write_is_not_structural() {
+        // What `fs::write` on an already-existing file (every save)
+        // reports under Linux's inotify backend.
+        assert!(!is_structural_change(&EventKind::Modify(ModifyKind::Data(
+            notify::event::DataChange::Any
+        ))));
+    }
+
+    #[test]
+    fn metadata_only_changes_are_not_structural() {
+        assert!(!is_structural_change(&EventKind::Modify(
+            ModifyKind::Metadata(notify::event::MetadataKind::Any)
+        )));
     }
 }
 

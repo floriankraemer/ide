@@ -11,7 +11,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 mod watcher;
-pub use watcher::ProjectWatcher;
+pub use watcher::{is_structural_change, EventKind, ProjectWatcher};
 
 /// File name used to persist the last-opened project path, per the plan's
 /// "single plain-text line, no serde/toml/json" decision.

@@ -22,6 +22,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "app-core"
+version = "0.1.0"
+dependencies = [
+ "editor-core",
+ "project-model",
+ "tempfile",
+]
+
+[[package]]
 name = "bitflags"
 version = "1.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -795,12 +804,12 @@ dependencies = [
 name = "ui-shell"
 version = "0.1.0"
 dependencies = [
+ "app-core",
  "cxx",
  "cxx-qt",
  "cxx-qt-build",
  "cxx-qt-lib",
  "editor-core",
- "notify",
  "project-model",
 ]
 

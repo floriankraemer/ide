@@ -15,25 +15,27 @@
 #include <QPoint>
 #include <QPushButton>
 #include <QSplitter>
-#include <QStringList>
 #include <QTabWidget>
 #include <QtGui/QTextDocument>
 #include <QTreeView>
 #include <QVariant>
 #include <QWidget>
 
-#include <QDebug>
-
 namespace ui_shell {
 
 namespace {
 
-// Owns the tab strip <-> DocumentManager wiring (Task 6, US-3/US-4): keeps
-// each QTabWidget page's QPlainTextEdit and tab index in lockstep with
-// editor-core's TabList by only ever mutating both sides through the same
-// DocumentManager signals (tabOpened/tabClosed keep both lists reordered
-// identically, so a plain parallel QStringList of base titles is enough —
-// no separate index-mapping table needed).
+// app_core::AppError's stable code for the binary-open rejection (ADR-0003,
+// pinned by app-core's error_codes_are_stable test) — the one error kind the
+// view presents as information rather than as an error.
+constexpr int kErrBinaryFile = 3;
+
+// Humble view for the tab strip (ADR-0002): owns the QTabWidget <->
+// DocumentManager wiring, decides nothing. Tabs are identified by the
+// session's stable TabId (ADR-0003); the TabId <-> page-index mapping lives
+// here and only here, as a dynamic property on each page widget — an id
+// never shifts when other tabs close, so there is no index lockstep to
+// maintain and no parallel title list to keep in sync.
 class EditorTabs : public QObject
 {
 public:
@@ -52,28 +54,29 @@ public:
                 &DocumentManager::tabModifiedChanged,
                 this,
                 &EditorTabs::onTabModifiedChanged);
-        connect(docManager_,
-                &DocumentManager::tabTitleChanged,
-                this,
-                &EditorTabs::onTabTitleChanged);
         connect(tabWidget_, &QTabWidget::tabCloseRequested, this, &EditorTabs::requestCloseTab);
         connect(tabWidget_, &QTabWidget::currentChanged, docManager_, [this](int index) {
             if (index >= 0) {
-                docManager_->setActiveTab(index);
+                docManager_->setActiveTab(tabIdAt(index));
             }
         });
     }
 
-    // Opens `path`, or focuses its tab if already open (US-3). Shows an
-    // error dialog on failure (e.g. unreadable/non-UTF8 file).
+    // Opens `path`, or focuses its tab if already open (US-3). The session
+    // decides whether the file may open (binary rejection, readability);
+    // this only picks the dialog flavor by error code and shows the result.
     void openFile(const QString &path)
     {
-        const int index = docManager_->openFile(path);
-        if (index < 0) {
-            QMessageBox::critical(window_, tr("Cannot open file"), docManager_->lastError());
+        const auto result = docManager_->openFile(path);
+        if (result.code == kErrBinaryFile) {
+            QMessageBox::information(window_, tr("Cannot open file"), result.message);
             return;
         }
-        tabWidget_->setCurrentIndex(index);
+        if (result.code != 0) {
+            QMessageBox::critical(window_, tr("Cannot open file"), result.message);
+            return;
+        }
+        tabWidget_->setCurrentIndex(indexOfTab(result.tab_id));
     }
 
     QPlainTextEdit *currentEditor() const
@@ -84,14 +87,26 @@ public:
     // Ctrl+S / File > Save.
     void saveCurrentTab() { saveTab(tabWidget_->currentIndex()); }
 
-    // US-3's external-change prompt: the tab at `index` (backed by `path`)
-    // was modified outside the editor (filesystem watcher, Task 8).
-    // "Reload" re-reads the file from disk, discarding in-editor edits;
-    // "Keep" leaves the editor content untouched but marks the tab dirty,
-    // since it's now known to differ from what's on disk.
-    void handleExternalChange(int index, const QString &path)
+    // Rename/delete via the tree changed a tab's title (US-2b) — re-render
+    // the label, preserving the unsaved-changes indicator.
+    void onTabTitleChanged(quint64 tabId, const QString &title)
     {
-        if (index < 0 || index >= tabWidget_->count()) {
+        const int index = indexOfTab(tabId);
+        if (index < 0) {
+            return;
+        }
+        renderTabText(index, title, docManager_->tabIsModified(tabId));
+    }
+
+    // US-3's external-change prompt: the tab `tabId` (backed by `path`) was
+    // modified outside the editor (filesystem watcher). "Reload" re-reads
+    // the file from disk, discarding in-editor edits; "Keep" leaves the
+    // editor content untouched but marks the tab dirty, since it's now
+    // known to differ from what's on disk.
+    void handleExternalChange(quint64 tabId, const QString &path)
+    {
+        const int index = indexOfTab(tabId);
+        if (index < 0) {
             return;
         }
         auto *editor = qobject_cast<QPlainTextEdit *>(tabWidget_->widget(index));
@@ -111,12 +126,12 @@ public:
         box.exec();
 
         if (box.clickedButton() == reloadButton) {
-            const QString error = docManager_->reloadTabFromDisk(index);
-            if (!error.isEmpty()) {
-                QMessageBox::critical(window_, tr("Cannot reload file"), error);
+            const auto result = docManager_->reloadTabFromDisk(tabId);
+            if (result.code != 0) {
+                QMessageBox::critical(window_, tr("Cannot reload file"), result.message);
                 return;
             }
-            editor->setPlainText(docManager_->tabContent(index));
+            editor->setPlainText(docManager_->tabContent(tabId));
             editor->document()->setModified(false);
         } else {
             editor->document()->setModified(true);
@@ -124,6 +139,31 @@ public:
     }
 
 private:
+    // The one TabId <-> index mapping (ADR-0003): the id rides on the page
+    // widget itself, so closes and reorders can never desynchronize it.
+    quint64 tabIdAt(int index) const
+    {
+        QWidget *widget = tabWidget_->widget(index);
+        return widget ? widget->property("tabId").toULongLong() : 0;
+    }
+
+    int indexOfTab(quint64 tabId) const
+    {
+        for (int i = 0; i < tabWidget_->count(); ++i) {
+            if (tabIdAt(i) == tabId) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // Label rendering: the session's display title verbatim, plus the
+    // view's own unsaved-changes dot.
+    void renderTabText(int index, const QString &title, bool modified)
+    {
+        tabWidget_->setTabText(index, modified ? title + QStringLiteral(" •") : title);
+    }
+
     // Writes the tab's content to disk. Shows an error dialog and leaves the
     // dirty state set on failure (US-4: no silent data loss). Returns
     // whether the save succeeded.
@@ -133,9 +173,9 @@ private:
         if (!editor) {
             return false;
         }
-        const QString error = docManager_->saveTab(index, editor->toPlainText());
-        if (!error.isEmpty()) {
-            QMessageBox::critical(window_, tr("Cannot save file"), error);
+        const auto result = docManager_->saveTab(tabIdAt(index), editor->toPlainText());
+        if (result.code != 0) {
+            QMessageBox::critical(window_, tr("Cannot save file"), result.message);
             return false;
         }
         editor->document()->setModified(false);
@@ -143,11 +183,11 @@ private:
     }
 
     // Save/Discard/Cancel prompt for a tab with unsaved changes (US-3/US-4).
-    // Returns true if the tab is now safe to close.
+    // Returns true if the tab is now safe to close. Dirtiness is read from
+    // the session — Rust owns that flag (ADR-0003).
     bool confirmCloseTab(int index)
     {
-        auto *editor = qobject_cast<QPlainTextEdit *>(tabWidget_->widget(index));
-        if (!editor || !editor->document()->isModified()) {
+        if (!docManager_->tabIsModified(tabIdAt(index))) {
             return true;
         }
 
@@ -172,76 +212,56 @@ private:
         if (!confirmCloseTab(index)) {
             return;
         }
-        docManager_->closeTab(index);
+        docManager_->closeTab(tabIdAt(index));
     }
 
-    void onTabOpened(int index, const QString &title)
+    void onTabOpened(quint64 tabId, const QString &title)
     {
         auto *editor = new QPlainTextEdit(tabWidget_);
-        editor->setPlainText(docManager_->tabContent(index));
+        editor->setProperty("tabId", QVariant::fromValue(tabId));
+        editor->setPlainText(docManager_->tabContent(tabId));
         editor->document()->setModified(false);
 
-        // Mirror QPlainTextEdit's own dirty state into editor-core rather
-        // than marshalling keystrokes (mvp-implementation-plan.md §2).
-        // `editor->indexOf` is looked up by widget, not captured by value,
-        // because tab indices shift when other tabs close.
+        // Forward QPlainTextEdit's own modified state into the session's
+        // authoritative dirty flag (ADR-0003) rather than marshalling
+        // keystrokes. The stable id is captured by value — unlike a tab
+        // index, it never shifts when other tabs close.
         connect(editor->document(),
                 &QTextDocument::modificationChanged,
                 docManager_,
-                [this, editor](bool modified) {
-                    const int idx = tabWidget_->indexOf(editor);
-                    if (idx >= 0) {
-                        docManager_->setTabModified(idx, modified);
-                    }
-                });
+                [this, tabId](bool modified) { docManager_->setTabModified(tabId, modified); });
 
-        titles_.insert(index, title);
-        tabWidget_->insertTab(index, editor, title);
+        tabWidget_->addTab(editor, title);
     }
 
-    void onTabClosed(int index)
+    void onTabClosed(quint64 tabId)
     {
-        if (index < 0 || index >= tabWidget_->count()) {
+        const int index = indexOfTab(tabId);
+        if (index < 0) {
             return;
         }
         QWidget *widget = tabWidget_->widget(index);
         tabWidget_->removeTab(index);
         delete widget;
-        titles_.removeAt(index);
     }
 
-    void onTabModifiedChanged(int index, bool modified)
+    void onTabModifiedChanged(quint64 tabId, bool modified)
     {
-        if (index < 0 || index >= titles_.size()) {
+        const int index = indexOfTab(tabId);
+        if (index < 0) {
             return;
         }
-        const QString base = titles_.at(index);
-        tabWidget_->setTabText(index, modified ? base + QStringLiteral(" •") : base);
-    }
-
-    // A tree-driven rename or delete (US-2b) changed the tab's title
-    // without opening/closing it — update the base title used by
-    // onTabModifiedChanged so the unsaved-changes dot keeps working.
-    void onTabTitleChanged(int index, const QString &title)
-    {
-        if (index < 0 || index >= titles_.size()) {
-            return;
-        }
-        titles_[index] = title;
-        auto *editor = qobject_cast<QPlainTextEdit *>(tabWidget_->widget(index));
-        const bool modified = editor && editor->document()->isModified();
-        tabWidget_->setTabText(index, modified ? title + QStringLiteral(" •") : title);
+        renderTabText(index, docManager_->tabTitle(tabId), modified);
     }
 
     DocumentManager *docManager_;
     QTabWidget *tabWidget_;
     QWidget *window_;
-    QStringList titles_; // Base titles (no dirty indicator), parallel to tabWidget_'s pages.
 };
 
 // Sidebar tree + tabbed editor area, PHPStorm-style (US-5): a resizable
 // splitter with the project tree on the left and the tab strip on the
-// right (Task 6).
+// right.
 EditorTabs *buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
                                 DocumentManager *docManager)
 {
@@ -262,11 +282,11 @@ EditorTabs *buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
 
     auto *editorTabs = new EditorTabs(docManager, tabWidget, window);
 
-    // Filesystem-watcher plumbing (Task 8, mvp-implementation-plan.md §2):
-    // ProjectTreeModel's watcher-driven signal already carries the changed
-    // path and already runs on the Qt thread (queued there via
-    // CxxQtThread), so relaying it to DocumentManager is a plain
-    // same-thread signal/slot connection — no further cross-thread hop.
+    // Filesystem-watcher plumbing: ProjectTreeModel's watcher-driven signal
+    // already carries the changed path and already runs on the Qt thread
+    // (queued there via CxxQtThread), so relaying it to DocumentManager is a
+    // plain same-thread signal/slot connection — no further cross-thread
+    // hop. The session decides whether the change warrants a prompt.
     QObject::connect(treeModel,
                       &ProjectTreeModel::filesChangedExternally,
                       docManager,
@@ -274,17 +294,24 @@ EditorTabs *buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
 
     QObject::connect(docManager,
                       &DocumentManager::externalChangeDetected,
-                      docManager,
-                      [docManager, editorTabs](const QString &path) {
-                          const int index = docManager->tabIndexForPath(path);
-                          editorTabs->handleExternalChange(index, path);
+                      editorTabs,
+                      [editorTabs](quint64 tabId, const QString &path) {
+                          editorTabs->handleExternalChange(tabId, path);
+                      });
+
+    // A tree-driven rename/delete retitled an open tab (US-2b).
+    QObject::connect(treeModel,
+                      &ProjectTreeModel::tabTitleChanged,
+                      editorTabs,
+                      [editorTabs](quint64 tabId, const QString &title) {
+                          editorTabs->onTabTitleChanged(tabId, title);
                       });
 
     QObject::connect(
       treeView,
       &QTreeView::clicked,
       treeModel,
-      [treeModel, editorTabs, window](const QModelIndex &index) {
+      [treeModel, editorTabs](const QModelIndex &index) {
           const bool isDir =
             treeModel->data(index, static_cast<int>(ProjectTreeModel::Roles::IsDir)).toBool();
           if (isDir) {
@@ -293,25 +320,18 @@ EditorTabs *buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
 
           const QString path =
             treeModel->data(index, static_cast<int>(ProjectTreeModel::Roles::Path)).toString();
-
-          if (treeModel->isBinaryFile(path)) {
-              QMessageBox::information(
-                window,
-                QObject::tr("Cannot open file"),
-                QObject::tr("\"%1\" is a binary file and cannot be opened as text.").arg(path));
-              return;
-          }
-
           editorTabs->openFile(path);
       });
 
     // Right-click context menu: create/rename/delete from the tree (US-2b).
+    // Pure intent-forwarding: dialogs gather names/confirmation, the session
+    // performs the operation (including retargeting any open tab).
     treeView->setContextMenuPolicy(Qt::CustomContextMenu);
     QObject::connect(
       treeView,
       &QTreeView::customContextMenuRequested,
       treeView,
-      [treeView, treeModel, docManager, window](const QPoint &pos) {
+      [treeView, treeModel, window](const QPoint &pos) {
           const QString rootPath = treeModel->rootPath();
           if (rootPath.isEmpty()) {
               return; // No project open.
@@ -352,9 +372,9 @@ EditorTabs *buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
               if (name.isEmpty()) {
                   return;
               }
-              const QString error = treeModel->createFile(targetDir, name);
-              if (!error.isEmpty()) {
-                  QMessageBox::critical(window, QObject::tr("Cannot create file"), error);
+              const auto result = treeModel->createFile(targetDir, name);
+              if (result.code != 0) {
+                  QMessageBox::critical(window, QObject::tr("Cannot create file"), result.message);
               }
           } else if (chosen == newFolderAction) {
               const QString name = QInputDialog::getText(window, QObject::tr("New Folder"),
@@ -362,9 +382,10 @@ EditorTabs *buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
               if (name.isEmpty()) {
                   return;
               }
-              const QString error = treeModel->createFolder(targetDir, name);
-              if (!error.isEmpty()) {
-                  QMessageBox::critical(window, QObject::tr("Cannot create folder"), error);
+              const auto result = treeModel->createFolder(targetDir, name);
+              if (result.code != 0) {
+                  QMessageBox::critical(window, QObject::tr("Cannot create folder"),
+                                         result.message);
               }
           } else if (chosen == renameAction) {
               const QString currentName = QFileInfo(itemPath).fileName();
@@ -374,13 +395,10 @@ EditorTabs *buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
               if (newName.isEmpty() || newName == currentName) {
                   return;
               }
-              const QString newPath = QFileInfo(itemPath).absolutePath() + QLatin1Char('/') + newName;
-              const QString error = treeModel->renamePath(itemPath, newName);
-              if (!error.isEmpty()) {
-                  QMessageBox::critical(window, QObject::tr("Cannot rename"), error);
-                  return;
+              const auto result = treeModel->renamePath(itemPath, newName);
+              if (result.code != 0) {
+                  QMessageBox::critical(window, QObject::tr("Cannot rename"), result.message);
               }
-              docManager->notifyPathRenamed(itemPath, newPath);
           } else if (chosen == deleteAction) {
               const QString itemName = QFileInfo(itemPath).fileName();
               const QString warning = itemIsDir
@@ -396,12 +414,10 @@ EditorTabs *buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
               if (choice != QMessageBox::Yes) {
                   return;
               }
-              const QString error = treeModel->deletePath(itemPath);
-              if (!error.isEmpty()) {
-                  QMessageBox::critical(window, QObject::tr("Cannot delete"), error);
-                  return;
+              const auto result = treeModel->deletePath(itemPath);
+              if (result.code != 0) {
+                  QMessageBox::critical(window, QObject::tr("Cannot delete"), result.message);
               }
-              docManager->notifyPathDeleted(itemPath);
           }
       });
 
@@ -409,8 +425,8 @@ EditorTabs *buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
-// Edit/Save actions are wired to the tabbed editor area (Task 6); the rest
-// remain non-functional stubs for later tasks.
+// Edit/Save actions are wired to the tabbed editor area; the rest remain
+// non-functional stubs for later tasks.
 QMainWindow *buildMainWindow()
 {
     auto *window = new QMainWindow();
@@ -436,9 +452,9 @@ QMainWindow *buildMainWindow()
             return;
         }
 
-        const QString error = treeModel->openFolder(dir);
-        if (!error.isEmpty()) {
-            QMessageBox::critical(window, QObject::tr("Cannot open folder"), error);
+        const auto result = treeModel->openFolder(dir);
+        if (result.code != 0) {
+            QMessageBox::critical(window, QObject::tr("Cannot open folder"), result.message);
         }
     });
 
@@ -486,8 +502,8 @@ QMainWindow *buildMainWindow()
     });
 
     // US-1: relaunching the app reopens the last project automatically.
-    // Reuses the same watcher-start path as "Open Folder..." (Task 8), so
-    // the tree is live-refreshing from the moment it's populated.
+    // Reuses the same watcher-start path as "Open Folder...", so the tree
+    // is live-refreshing from the moment it's populated.
     treeModel->reopenLastProject();
 
     return window;

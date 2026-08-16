@@ -1,0 +1,792 @@
+//! Application layer (ADR-0002): `AppSession` owns the one open project and
+//! the open-document table, and exposes the command methods the UI adapter
+//! calls. Every rule that used to live in `main_window.cpp` or the QObject
+//! bodies — binary-open rejection, rename path construction, delete → tab
+//! invalidation, watcher-event → tab policy, config-dir fallback — lives
+//! here, Qt-free and unit-tested.
+//!
+//! No Qt dependency — `ui-shell`'s `bridge.rs` wraps this in thin QObject
+//! adapters (slot → session call → signal); see docs/architecture/layering.md.
+
+use std::collections::HashMap;
+use std::fmt;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
+
+use editor_core::Document;
+use project_model::{FileOpError, OpenFolderError, Project, ProjectSession};
+
+/// Stable per-session tab identity (ADR-0003): issued monotonically from 1,
+/// never reused, so an id can never silently start meaning a different tab
+/// the way a `QTabWidget` index does after a close. `0` is reserved as the
+/// "no tab" sentinel at the FFI edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TabId(u64);
+
+impl TabId {
+    /// The raw `u64` crossing the FFI seam.
+    pub fn raw(self) -> u64 {
+        self.0
+    }
+
+    /// Reconstruct an id received back from the FFI seam.
+    pub fn from_raw(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
+/// How long after this session writes a path to disk itself (`save_tab`) or
+/// repoints a tab onto a new path (a tree-driven rename) a matching
+/// filesystem-watcher event for that path is treated as an echo of our own
+/// change rather than a genuine external edit — see
+/// [`AppSession::check_external_change`]. Generous enough to absorb typical
+/// inotify/Qt-event-loop latency; not meant to be race-proof.
+const SELF_CHANGE_SUPPRESSION_WINDOW: Duration = Duration::from_millis(1500);
+
+/// Why an [`AppSession`] command failed. Each variant carries a stable
+/// numeric code (ADR-0003) so the UI can branch on error kind — e.g. show
+/// the binary-file rejection as information rather than an error — while the
+/// `Display` message is shown to the user verbatim.
+#[derive(Debug)]
+pub enum AppError {
+    /// The `TabId` doesn't name an open tab (closed, or never issued).
+    NoSuchTab,
+    /// "Open Folder" failed; the current project is left unchanged (US-1).
+    OpenFolder(OpenFolderError),
+    /// The binary-open rule (US-2b): the file's content looks binary — or
+    /// couldn't be sniffed at all, which is treated the same way.
+    BinaryFile(PathBuf),
+    /// Reading the file into a document failed (e.g. not valid UTF-8).
+    OpenFile(io::Error),
+    /// Writing the tab's content to disk failed; the dirty flag stays set
+    /// (US-4: no silent data loss).
+    Save(io::Error),
+    /// A create/rename/delete filesystem mutation failed (US-2b).
+    FileOp(FileOpError),
+    /// Re-reading the tab's backing file from disk failed (US-3's "Reload").
+    Reload(io::Error),
+    /// The mutation itself succeeded but re-snapshotting the tree from disk
+    /// failed afterwards (e.g. the root vanished mid-operation).
+    TreeRebuild(io::Error),
+}
+
+impl AppError {
+    /// Success code at the FFI seam; never produced by an `AppError`.
+    pub const CODE_OK: i32 = 0;
+    pub const CODE_NO_SUCH_TAB: i32 = 1;
+    pub const CODE_OPEN_FOLDER: i32 = 2;
+    pub const CODE_BINARY_FILE: i32 = 3;
+    pub const CODE_OPEN_FILE: i32 = 4;
+    pub const CODE_SAVE: i32 = 5;
+    pub const CODE_FILE_OP: i32 = 6;
+    pub const CODE_RELOAD: i32 = 7;
+    pub const CODE_TREE_REBUILD: i32 = 8;
+
+    /// The variant's stable numeric code (ADR-0003). These are part of the
+    /// FFI contract — `main_window.cpp` branches on them — so existing
+    /// numbers must never be renumbered, only appended to.
+    pub fn code(&self) -> i32 {
+        match self {
+            AppError::NoSuchTab => Self::CODE_NO_SUCH_TAB,
+            AppError::OpenFolder(_) => Self::CODE_OPEN_FOLDER,
+            AppError::BinaryFile(_) => Self::CODE_BINARY_FILE,
+            AppError::OpenFile(_) => Self::CODE_OPEN_FILE,
+            AppError::Save(_) => Self::CODE_SAVE,
+            AppError::FileOp(_) => Self::CODE_FILE_OP,
+            AppError::Reload(_) => Self::CODE_RELOAD,
+            AppError::TreeRebuild(_) => Self::CODE_TREE_REBUILD,
+        }
+    }
+}
+
+impl fmt::Display for AppError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AppError::NoSuchTab => write!(f, "no such tab"),
+            AppError::OpenFolder(e) => write!(f, "{e}"),
+            AppError::BinaryFile(p) => write!(
+                f,
+                "\"{}\" is a binary file and cannot be opened as text.",
+                p.display()
+            ),
+            AppError::OpenFile(e) => write!(f, "{e}"),
+            AppError::Save(e) => write!(f, "{e}"),
+            AppError::FileOp(e) => write!(f, "{e}"),
+            AppError::Reload(e) => write!(f, "{e}"),
+            AppError::TreeRebuild(e) => write!(f, "{e}"),
+        }
+    }
+}
+
+impl std::error::Error for AppError {}
+
+/// What [`AppSession::open_file`] yielded: the tab (new or existing) now
+/// holding `path`, and whether it was newly opened — the adapter only emits
+/// a tab-opened signal for genuinely new tabs (US-3: focus, don't duplicate).
+#[derive(Debug)]
+pub struct OpenedTab {
+    pub id: TabId,
+    pub title: String,
+    pub newly_opened: bool,
+}
+
+/// An open tab whose title changed as a side effect of a tree mutation — a
+/// rename retargeting it, or a delete flagging it "(deleted)" (US-2b). The
+/// adapter relays this as a tab-title-changed signal.
+#[derive(Debug)]
+pub struct RetitledTab {
+    pub id: TabId,
+    pub title: String,
+}
+
+struct TabEntry {
+    id: TabId,
+    doc: Document,
+}
+
+/// The config dir the session persists "last opened project" into:
+/// the platform config dir, or a temp-dir fallback when the platform
+/// doesn't report one (e.g. a stripped-down container environment) —
+/// degrading "reopen last project" beats refusing to start.
+pub fn resolve_config_dir() -> PathBuf {
+    project_model::default_config_dir().unwrap_or_else(|| std::env::temp_dir().join("ide"))
+}
+
+/// The application session (ADR-0002): the one open project plus the
+/// open-document table, with `Result`-returning command methods as the
+/// command layer. The UI adapter holds exactly one of these and translates
+/// slots into calls on it.
+pub struct AppSession {
+    project: ProjectSession,
+    /// Open documents in opening order. A `Vec` scan instead of a map:
+    /// lookups are by id or path over a handful of open tabs.
+    docs: Vec<TabEntry>,
+    /// Next id to issue; starts at 1 so 0 stays the FFI "no tab" sentinel.
+    next_tab_id: u64,
+    active: Option<TabId>,
+    /// Paths this session itself just changed on disk (a `save_tab`) or
+    /// repointed a tab onto (a tree-driven rename), each with the `Instant`
+    /// it happened — the own-save/own-rename feedback-loop guard for
+    /// `check_external_change` (the filesystem watcher would otherwise also
+    /// see these as "external" changes).
+    suppressed_changes: HashMap<PathBuf, Instant>,
+    config_dir: PathBuf,
+}
+
+impl Default for AppSession {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AppSession {
+    pub fn new() -> Self {
+        Self::with_config_dir(resolve_config_dir())
+    }
+
+    /// Like [`AppSession::new`] but persisting into `config_dir` — tests use
+    /// a temp dir so they never touch the developer's real `~/.config`.
+    pub fn with_config_dir(config_dir: PathBuf) -> Self {
+        Self {
+            project: ProjectSession::new(),
+            docs: Vec::new(),
+            next_tab_id: 1,
+            active: None,
+            suppressed_changes: HashMap::new(),
+            config_dir,
+        }
+    }
+
+    // --- project commands -------------------------------------------------
+
+    /// The current project, if one is open — read-only tree access for the
+    /// `QAbstractItemModel` adapter.
+    pub fn project(&self) -> Option<&Project> {
+        self.project.current()
+    }
+
+    /// Absolute path of the open project's root folder, if any.
+    pub fn root_path(&self) -> Option<&Path> {
+        self.project.current().map(|p| p.root.path())
+    }
+
+    /// Open `path` as the active project and persist it as "last opened".
+    /// On failure the current project (if any) is left unchanged (US-1).
+    pub fn open_project(&mut self, path: &Path) -> Result<(), AppError> {
+        self.project
+            .open_folder(path, &self.config_dir)
+            .map_err(AppError::OpenFolder)
+    }
+
+    /// Reopen the last-persisted project (US-1). Returns whether a project
+    /// was found and opened; startup is silent about a missing or unreadable
+    /// last project rather than popping an error dialog before the window is
+    /// even shown, hence `bool` and not `Result`.
+    pub fn reopen_last_project(&mut self) -> bool {
+        self.project.reopen_last(&self.config_dir).unwrap_or(false)
+    }
+
+    /// (Re)start the filesystem watcher for the current project root; see
+    /// `ProjectSession::start_watcher` for the threading contract.
+    pub fn start_watcher(
+        &mut self,
+        on_change: impl Fn(project_model::EventKind, PathBuf) + Send + 'static,
+    ) {
+        self.project.start_watcher(on_change);
+    }
+
+    /// Re-snapshot the current project's tree from disk (after a watcher
+    /// event reported a structural change).
+    pub fn rebuild_tree(&mut self) -> Result<(), AppError> {
+        self.project.rebuild_tree().map_err(AppError::TreeRebuild)
+    }
+
+    // --- tab commands -----------------------------------------------------
+
+    /// Open `path` as a new tab, or focus the existing tab if the file is
+    /// already open (US-3: focus, don't duplicate). Enforces the binary-open
+    /// rule (US-2b): a file whose content looks binary — or that can't be
+    /// sniffed at all, which is treated the same — is rejected with
+    /// [`AppError::BinaryFile`] before any tab is created.
+    pub fn open_file(&mut self, path: &Path) -> Result<OpenedTab, AppError> {
+        if editor_core::looks_binary_file(path).unwrap_or(true) {
+            return Err(AppError::BinaryFile(path.to_path_buf()));
+        }
+        if let Some(id) = self.find_tab_by_path(path) {
+            self.active = Some(id);
+            let title = self.tab_title(id).expect("tab found by path exists");
+            return Ok(OpenedTab {
+                id,
+                title,
+                newly_opened: false,
+            });
+        }
+        let doc = Document::open(path).map_err(AppError::OpenFile)?;
+        let id = TabId(self.next_tab_id);
+        self.next_tab_id += 1;
+        let title = doc.title();
+        self.docs.push(TabEntry { id, doc });
+        self.active = Some(id);
+        Ok(OpenedTab {
+            id,
+            title,
+            newly_opened: true,
+        })
+    }
+
+    /// Close the tab `id`. Returns whether a tab was actually closed. The
+    /// caller (UI) is responsible for any unsaved-changes prompt first.
+    pub fn close_tab(&mut self, id: TabId) -> bool {
+        let Some(pos) = self.docs.iter().position(|e| e.id == id) else {
+            return false;
+        };
+        self.docs.remove(pos);
+        if self.active == Some(id) {
+            // The tab strip picks the neighbouring page itself and reports
+            // it back via `set_active_tab` right after.
+            self.active = None;
+        }
+        true
+    }
+
+    /// Replace the tab's content with `content` and write it to disk. The
+    /// dirty flag is cleared on success and left set on failure (US-4: no
+    /// silent data loss). The written path is recorded so the watcher's echo
+    /// of our own write isn't reported as an external change.
+    pub fn save_tab(&mut self, id: TabId, content: &str) -> Result<(), AppError> {
+        let Some(pos) = self.docs.iter().position(|e| e.id == id) else {
+            return Err(AppError::NoSuchTab);
+        };
+        let doc = &mut self.docs[pos].doc;
+        doc.replace_content(content);
+        let path = doc.path().to_path_buf();
+        doc.save().map_err(AppError::Save)?;
+        self.suppressed_changes.insert(path, Instant::now());
+        Ok(())
+    }
+
+    /// Update which tab is considered active. Ignores unknown ids (the tab
+    /// strip can report a page that was closed in the same event burst).
+    pub fn set_active_tab(&mut self, id: TabId) {
+        if self.doc(id).is_some() {
+            self.active = Some(id);
+        }
+    }
+
+    pub fn active_tab(&self) -> Option<TabId> {
+        self.active
+    }
+
+    /// Mirror the view's edit notifications into the authoritative dirty
+    /// flag (ADR-0003: Rust owns dirty state; the view forwards edits).
+    /// Returns whether the tab exists.
+    pub fn set_tab_dirty(&mut self, id: TabId, dirty: bool) -> bool {
+        match self.doc_mut(id) {
+            Some(doc) => {
+                doc.set_dirty(dirty);
+                true
+            }
+            None => false,
+        }
+    }
+
+    pub fn tab_is_dirty(&self, id: TabId) -> Option<bool> {
+        self.doc(id).map(|d| d.is_dirty())
+    }
+
+    /// The tab's current buffer content, used to populate a newly created
+    /// editor page.
+    pub fn tab_content(&self, id: TabId) -> Option<String> {
+        self.doc(id).map(|d| d.content())
+    }
+
+    /// The tab's display title: the file name, plus a "(deleted)" suffix
+    /// once the tree deleted its backing file (US-2b). The view renders this
+    /// verbatim (its own dirty marker aside).
+    pub fn tab_title(&self, id: TabId) -> Option<String> {
+        self.doc(id).map(|d| {
+            if d.is_deleted() {
+                format!("{} (deleted)", d.title())
+            } else {
+                d.title()
+            }
+        })
+    }
+
+    /// Re-read the tab's backing file from disk, discarding any in-editor
+    /// edits (the "Reload" choice on the external-change prompt, US-3).
+    pub fn reload_tab(&mut self, id: TabId) -> Result<(), AppError> {
+        let doc = self.doc_mut(id).ok_or(AppError::NoSuchTab)?;
+        doc.reload().map_err(AppError::Reload)
+    }
+
+    // --- tree mutations ---------------------------------------------------
+
+    /// Create an empty file named `name` inside `parent_dir` and re-snapshot
+    /// the tree (US-2b).
+    pub fn create_file(&mut self, parent_dir: &Path, name: &str) -> Result<(), AppError> {
+        project_model::create_file(parent_dir, name).map_err(AppError::FileOp)?;
+        self.rebuild_tree()
+    }
+
+    /// Create an empty folder named `name` inside `parent_dir` and
+    /// re-snapshot the tree (US-2b).
+    pub fn create_folder(&mut self, parent_dir: &Path, name: &str) -> Result<(), AppError> {
+        project_model::create_folder(parent_dir, name).map_err(AppError::FileOp)?;
+        self.rebuild_tree()
+    }
+
+    /// Rename `path` (file or folder) to `new_name` in place, re-snapshot
+    /// the tree, and — if `path` has an open tab — retarget that tab at the
+    /// new path so future saves land there (US-2b). The new path is computed
+    /// here, in one place, from the rename result; the view never
+    /// reconstructs it. The retargeted path is recorded so the watcher's
+    /// echo of the rename isn't reported as an external change.
+    pub fn rename_entry(
+        &mut self,
+        path: &Path,
+        new_name: &str,
+    ) -> Result<Option<RetitledTab>, AppError> {
+        let new_path = project_model::rename_path(path, new_name).map_err(AppError::FileOp)?;
+        self.rebuild_tree()?;
+        let Some(id) = self.find_tab_by_path(path) else {
+            return Ok(None);
+        };
+        self.doc_mut(id)
+            .expect("tab found by path exists")
+            .set_path(new_path.clone());
+        self.suppressed_changes.insert(new_path, Instant::now());
+        let title = self.tab_title(id).expect("tab found by path exists");
+        Ok(Some(RetitledTab { id, title }))
+    }
+
+    /// Delete `path` (recursively if it's a folder), re-snapshot the tree,
+    /// and — if `path` has an open tab — flag that tab deleted, which blocks
+    /// further silent saves and adds the "(deleted)" title suffix (US-2b).
+    /// The old two-step C++ protocol (delete, then remember to notify the
+    /// tab) is collapsed into this one command.
+    pub fn delete_entry(&mut self, path: &Path) -> Result<Option<RetitledTab>, AppError> {
+        project_model::delete_path(path).map_err(AppError::FileOp)?;
+        self.rebuild_tree()?;
+        let Some(id) = self.find_tab_by_path(path) else {
+            return Ok(None);
+        };
+        self.doc_mut(id)
+            .expect("tab found by path exists")
+            .mark_deleted();
+        let title = self.tab_title(id).expect("tab found by path exists");
+        Ok(Some(RetitledTab { id, title }))
+    }
+
+    // --- watcher policy ---------------------------------------------------
+
+    /// Decide whether a filesystem-watcher event for `path` is a genuine
+    /// external change the user must be prompted about (US-3), returning the
+    /// affected tab if so. `None` when `path` has no open tab, when the tab
+    /// was already flagged deleted by a tree-driven delete (nothing to
+    /// reload/keep), or when `path` was changed by this session itself
+    /// within the suppression window (`save_tab` or a tree-driven rename
+    /// onto `path`) rather than externally.
+    pub fn check_external_change(&mut self, path: &Path) -> Option<TabId> {
+        let id = self.find_tab_by_path(path)?;
+        if self.doc(id).map(|d| d.is_deleted()).unwrap_or(true) {
+            return None;
+        }
+        let is_own_change = self
+            .suppressed_changes
+            .get(path)
+            .map(|at| at.elapsed() < SELF_CHANGE_SUPPRESSION_WINDOW)
+            .unwrap_or(false);
+        if is_own_change {
+            return None;
+        }
+        Some(id)
+    }
+
+    // --- internals --------------------------------------------------------
+
+    fn find_tab_by_path(&self, path: &Path) -> Option<TabId> {
+        self.docs
+            .iter()
+            .find(|e| e.doc.path() == path)
+            .map(|e| e.id)
+    }
+
+    fn doc(&self, id: TabId) -> Option<&Document> {
+        self.docs.iter().find(|e| e.id == id).map(|e| &e.doc)
+    }
+
+    fn doc_mut(&mut self, id: TabId) -> Option<&mut Document> {
+        self.docs
+            .iter_mut()
+            .find(|e| e.id == id)
+            .map(|e| &mut e.doc)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn session_with_project() -> (tempfile::TempDir, tempfile::TempDir, AppSession) {
+        let project_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+        fs::write(project_dir.path().join("a.txt"), "alpha").unwrap();
+        fs::write(project_dir.path().join("b.txt"), "beta").unwrap();
+        let mut session = AppSession::with_config_dir(config_dir.path().to_path_buf());
+        session.open_project(project_dir.path()).unwrap();
+        (project_dir, config_dir, session)
+    }
+
+    /// Force a suppression entry to look older than the window without
+    /// actually sleeping through it.
+    fn expire_suppression(session: &mut AppSession, path: &Path) {
+        let expired = Instant::now()
+            .checked_sub(SELF_CHANGE_SUPPRESSION_WINDOW + Duration::from_secs(1))
+            .expect("process uptime exceeds the suppression window in tests");
+        session
+            .suppressed_changes
+            .insert(path.to_path_buf(), expired);
+    }
+
+    #[test]
+    fn error_codes_are_stable() {
+        // These numbers are the FFI contract main_window.cpp branches on
+        // (ADR-0003) — renumbering any of them is a breaking change.
+        assert_eq!(AppError::CODE_OK, 0);
+        assert_eq!(AppError::NoSuchTab.code(), 1);
+        assert_eq!(
+            AppError::OpenFolder(OpenFolderError::NotFound(PathBuf::new())).code(),
+            2
+        );
+        assert_eq!(AppError::BinaryFile(PathBuf::new()).code(), 3);
+        assert_eq!(AppError::OpenFile(io::Error::other("x")).code(), 4);
+        assert_eq!(AppError::Save(io::Error::other("x")).code(), 5);
+        assert_eq!(
+            AppError::FileOp(FileOpError::NotFound(PathBuf::new())).code(),
+            6
+        );
+        assert_eq!(AppError::Reload(io::Error::other("x")).code(), 7);
+        assert_eq!(AppError::TreeRebuild(io::Error::other("x")).code(), 8);
+    }
+
+    #[test]
+    fn resolve_config_dir_always_yields_an_ide_dir() {
+        // Whether the platform config dir or the temp-dir fallback wins,
+        // the app's config always lives in a directory named "ide".
+        let dir = resolve_config_dir();
+        assert_eq!(dir.file_name().unwrap(), "ide");
+    }
+
+    #[test]
+    fn open_project_failure_leaves_current_project_unchanged() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let missing = project_dir.path().join("does-not-exist");
+
+        let err = session.open_project(&missing).unwrap_err();
+        assert_eq!(err.code(), AppError::CODE_OPEN_FOLDER);
+        assert_eq!(session.root_path().unwrap(), project_dir.path());
+    }
+
+    #[test]
+    fn open_file_rejects_binary_content() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let binary = project_dir.path().join("blob.bin");
+        fs::write(&binary, [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
+
+        let err = session.open_file(&binary).unwrap_err();
+        assert_eq!(err.code(), AppError::CODE_BINARY_FILE);
+        assert!(err.to_string().contains("binary"));
+        assert!(
+            session.docs.is_empty(),
+            "no tab may be created on rejection"
+        );
+    }
+
+    #[test]
+    fn open_file_treats_unsniffable_files_as_binary() {
+        // Matches the pre-refactor UI behavior: if the sniff itself fails
+        // (unreadable/missing file), the user gets the binary-file message.
+        let (project_dir, _config, mut session) = session_with_project();
+        let missing = project_dir.path().join("ghost.txt");
+
+        let err = session.open_file(&missing).unwrap_err();
+        assert_eq!(err.code(), AppError::CODE_BINARY_FILE);
+    }
+
+    #[test]
+    fn open_file_focuses_existing_tab_instead_of_duplicating() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let path = project_dir.path().join("a.txt");
+
+        let first = session.open_file(&path).unwrap();
+        assert!(first.newly_opened);
+        assert_eq!(first.title, "a.txt");
+
+        // Switch away, then re-open the same path.
+        let other = session
+            .open_file(&project_dir.path().join("b.txt"))
+            .unwrap();
+        assert_eq!(session.active_tab(), Some(other.id));
+
+        let second = session.open_file(&path).unwrap();
+        assert!(!second.newly_opened);
+        assert_eq!(second.id, first.id);
+        assert_eq!(session.active_tab(), Some(first.id));
+        assert_eq!(session.docs.len(), 2);
+    }
+
+    #[test]
+    fn tab_ids_are_monotonic_and_never_reused() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let a = session
+            .open_file(&project_dir.path().join("a.txt"))
+            .unwrap();
+        let b = session
+            .open_file(&project_dir.path().join("b.txt"))
+            .unwrap();
+        assert!(b.id.raw() > a.id.raw());
+
+        assert!(session.close_tab(a.id));
+        fs::write(project_dir.path().join("c.txt"), "gamma").unwrap();
+        let c = session
+            .open_file(&project_dir.path().join("c.txt"))
+            .unwrap();
+        assert_ne!(c.id, a.id, "a closed tab's id must never be reissued");
+        assert!(c.id.raw() > b.id.raw());
+    }
+
+    #[test]
+    fn close_tab_clears_active_and_reports_unknown_ids() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let a = session
+            .open_file(&project_dir.path().join("a.txt"))
+            .unwrap();
+        assert_eq!(session.active_tab(), Some(a.id));
+
+        assert!(session.close_tab(a.id));
+        assert_eq!(session.active_tab(), None);
+        assert!(!session.close_tab(a.id), "double close must be a no-op");
+    }
+
+    #[test]
+    fn save_tab_writes_content_clears_dirty_and_suppresses_the_echo() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let path = project_dir.path().join("a.txt");
+        let tab = session.open_file(&path).unwrap();
+        session.set_tab_dirty(tab.id, true);
+
+        session.save_tab(tab.id, "edited content").unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "edited content");
+        assert_eq!(session.tab_is_dirty(tab.id), Some(false));
+        // The watcher's echo of our own write must not be an external change.
+        assert_eq!(session.check_external_change(&path), None);
+    }
+
+    #[test]
+    fn save_tab_with_unknown_id_is_no_such_tab() {
+        let (_project_dir, _config, mut session) = session_with_project();
+        let err = session.save_tab(TabId::from_raw(999), "x").unwrap_err();
+        assert_eq!(err.code(), AppError::CODE_NO_SUCH_TAB);
+        assert_eq!(err.to_string(), "no such tab");
+    }
+
+    #[test]
+    fn rename_entry_computes_the_new_path_and_retargets_the_open_tab() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let old_path = project_dir.path().join("a.txt");
+        let new_path = project_dir.path().join("renamed.txt");
+        let tab = session.open_file(&old_path).unwrap();
+
+        let retitled = session.rename_entry(&old_path, "renamed.txt").unwrap();
+
+        let retitled = retitled.expect("the open tab must be retargeted");
+        assert_eq!(retitled.id, tab.id);
+        assert_eq!(retitled.title, "renamed.txt");
+        assert!(!old_path.exists());
+        assert!(new_path.is_file());
+        // Future saves land on the new path…
+        session.save_tab(tab.id, "after rename").unwrap();
+        assert_eq!(fs::read_to_string(&new_path).unwrap(), "after rename");
+        // …and the watcher's echo of the rename is suppressed.
+        assert_eq!(session.check_external_change(&new_path), None);
+    }
+
+    #[test]
+    fn rename_entry_without_an_open_tab_retitles_nothing() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let path = project_dir.path().join("a.txt");
+        let retitled = session.rename_entry(&path, "renamed.txt").unwrap();
+        assert!(retitled.is_none());
+    }
+
+    #[test]
+    fn rename_entry_failure_surfaces_the_file_op_code() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let path = project_dir.path().join("a.txt");
+        // b.txt already exists, so the rename must fail.
+        let err = session.rename_entry(&path, "b.txt").unwrap_err();
+        assert_eq!(err.code(), AppError::CODE_FILE_OP);
+        assert!(path.exists(), "original must be untouched on error");
+    }
+
+    #[test]
+    fn delete_entry_invalidates_the_open_tab_and_blocks_saves() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let path = project_dir.path().join("a.txt");
+        let tab = session.open_file(&path).unwrap();
+
+        let retitled = session.delete_entry(&path).unwrap();
+
+        let retitled = retitled.expect("the open tab must be flagged");
+        assert_eq!(retitled.id, tab.id);
+        assert_eq!(retitled.title, "a.txt (deleted)");
+        assert!(!path.exists());
+        // A deleted tab must not silently write to nowhere (US-4)…
+        let err = session.save_tab(tab.id, "x").unwrap_err();
+        assert_eq!(err.code(), AppError::CODE_SAVE);
+        // …and watcher events for it need no further prompt.
+        assert_eq!(session.check_external_change(&path), None);
+    }
+
+    #[test]
+    fn delete_entry_without_an_open_tab_retitles_nothing() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let retitled = session
+            .delete_entry(&project_dir.path().join("a.txt"))
+            .unwrap();
+        assert!(retitled.is_none());
+    }
+
+    #[test]
+    fn external_change_is_reported_only_for_open_undeleted_unsuppressed_tabs() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let open_path = project_dir.path().join("a.txt");
+        let closed_path = project_dir.path().join("b.txt");
+        let tab = session.open_file(&open_path).unwrap();
+
+        // A path with no open tab: nothing to prompt about.
+        assert_eq!(session.check_external_change(&closed_path), None);
+        // A genuinely external change to an open tab: prompt.
+        assert_eq!(session.check_external_change(&open_path), Some(tab.id));
+    }
+
+    #[test]
+    fn suppression_expires_after_the_window() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let path = project_dir.path().join("a.txt");
+        let tab = session.open_file(&path).unwrap();
+        session.save_tab(tab.id, "our own write").unwrap();
+        assert_eq!(session.check_external_change(&path), None);
+
+        expire_suppression(&mut session, &path);
+        assert_eq!(
+            session.check_external_change(&path),
+            Some(tab.id),
+            "an old suppression entry must not mask a real external change"
+        );
+    }
+
+    #[test]
+    fn create_file_and_folder_rebuild_the_tree() {
+        let (project_dir, _config, mut session) = session_with_project();
+        session.create_file(project_dir.path(), "new.txt").unwrap();
+        session.create_folder(project_dir.path(), "newdir").unwrap();
+
+        let tree = &session.project().unwrap().tree;
+        let names: Vec<&str> = tree
+            .children(tree.root_id())
+            .iter()
+            .map(|&id| tree.node(id).name.as_str())
+            .collect();
+        assert!(names.contains(&"new.txt"));
+        assert!(names.contains(&"newdir"));
+    }
+
+    #[test]
+    fn create_file_errors_when_name_taken() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let err = session
+            .create_file(project_dir.path(), "a.txt")
+            .unwrap_err();
+        assert_eq!(err.code(), AppError::CODE_FILE_OP);
+    }
+
+    #[test]
+    fn reload_tab_discards_in_editor_edits() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let path = project_dir.path().join("a.txt");
+        let tab = session.open_file(&path).unwrap();
+        session.set_tab_dirty(tab.id, true);
+
+        fs::write(&path, "changed externally").unwrap();
+        session.reload_tab(tab.id).unwrap();
+
+        assert_eq!(session.tab_content(tab.id).unwrap(), "changed externally");
+        assert_eq!(session.tab_is_dirty(tab.id), Some(false));
+    }
+
+    #[test]
+    fn reopen_last_project_round_trips_through_the_config_dir() {
+        let project_dir = tempfile::tempdir().unwrap();
+        fs::write(project_dir.path().join("x.txt"), "x").unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+
+        let mut first = AppSession::with_config_dir(config_dir.path().to_path_buf());
+        first.open_project(project_dir.path()).unwrap();
+
+        // Simulate a fresh launch: new session, same config dir.
+        let mut second = AppSession::with_config_dir(config_dir.path().to_path_buf());
+        assert!(second.reopen_last_project());
+        assert_eq!(second.root_path().unwrap(), project_dir.path());
+
+        // And with nothing persisted: silent no-op, no project.
+        let empty_config = tempfile::tempdir().unwrap();
+        let mut third = AppSession::with_config_dir(empty_config.path().to_path_buf());
+        assert!(!third.reopen_last_project());
+        assert!(third.project().is_none());
+    }
+}

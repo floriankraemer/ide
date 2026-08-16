@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/editor-core",
     "crates/project-model",
+    "crates/app-core",
     "crates/ui-shell",
     "crates/app",
 ]
