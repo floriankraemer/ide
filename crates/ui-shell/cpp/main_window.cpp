@@ -1,6 +1,7 @@
 #include "main_window.h"
 
 #include "code_editor.h"
+#include "theme.h"
 #include "ui-shell/src/bridge.cxxqt.h"
 
 #include <QApplication>
@@ -516,6 +517,7 @@ int run_app()
 {
     int argc = 0;
     QApplication app(argc, nullptr);
+    app.setStyleSheet(darculaStyleSheet());
 
     QMainWindow *window = buildMainWindow();
     window->show();
