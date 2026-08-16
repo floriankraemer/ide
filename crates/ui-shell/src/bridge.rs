@@ -385,6 +385,13 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "saveWindowGeometry"]
         fn save_window_geometry(self: &AppSettings, x: i32, y: i32, width: u32, height: u32);
+
+        /// Active theme name (T2), e.g. "dark" or "light" — defaults to
+        /// "dark" when unset (`Settings::theme_name`). The view maps this to
+        /// a stylesheet via `styleSheetForTheme`.
+        #[qinvokable]
+        #[cxx_name = "themeName"]
+        fn theme_name(self: &AppSettings) -> QString;
     }
 
     unsafe extern "C++" {
@@ -486,6 +493,11 @@ impl ffi::AppSettings {
             height,
         };
         let _ = app_config::save(&config_dir, &settings);
+    }
+
+    pub fn theme_name(&self) -> QString {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        QString::from(settings.theme_name())
     }
 }
 

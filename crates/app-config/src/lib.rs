@@ -75,7 +75,20 @@ pub struct Settings {
 /// growing unbounded.
 const MAX_RECENT_PROJECTS: usize = 10;
 
+/// Theme name used when `Settings::theme` hasn't been set yet (T2).
+const DEFAULT_THEME: &str = "dark";
+
 impl Settings {
+    /// The active theme name, defaulting to [`DEFAULT_THEME`] when unset —
+    /// so the view never has to special-case an empty string itself.
+    pub fn theme_name(&self) -> &str {
+        if self.theme.is_empty() {
+            DEFAULT_THEME
+        } else {
+            &self.theme
+        }
+    }
+
     /// Push `path` to the front of `recent_projects`, deduping any existing
     /// entry for it and capping the list at [`MAX_RECENT_PROJECTS`].
     pub fn push_recent_project(&mut self, path: PathBuf) {
@@ -197,6 +210,21 @@ mod tests {
             settings.recent_projects[0],
             PathBuf::from(format!("/project-{}", MAX_RECENT_PROJECTS + 4))
         );
+    }
+
+    #[test]
+    fn theme_name_defaults_when_unset() {
+        let settings = Settings::default();
+        assert_eq!(settings.theme_name(), "dark");
+    }
+
+    #[test]
+    fn theme_name_returns_the_set_theme() {
+        let settings = Settings {
+            theme: "light".to_string(),
+            ..Settings::default()
+        };
+        assert_eq!(settings.theme_name(), "light");
     }
 
     #[test]

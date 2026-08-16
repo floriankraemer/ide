@@ -554,6 +554,12 @@ QMainWindow *buildMainWindow()
     window->setWindowTitle(QStringLiteral("IDE"));
 
     auto *appSettings = new AppSettings(window);
+    // Live-switch mechanism (T2): re-applying setStyleSheet() at runtime is
+    // exactly how a future theme-picker (S1) switches without a restart —
+    // this call is that same path, just fired once at startup with the
+    // persisted theme instead of a freshly-picked one.
+    qApp->setStyleSheet(styleSheetForTheme(appSettings->themeName()));
+
     const FfiWindowGeometry savedGeometry = appSettings->windowGeometry();
     if (savedGeometry.width > 0 && savedGeometry.height > 0) {
         window->setGeometry(savedGeometry.x, savedGeometry.y,
@@ -655,8 +661,10 @@ int run_app()
 {
     int argc = 0;
     QApplication app(argc, nullptr);
-    app.setStyleSheet(darculaStyleSheet());
 
+    // buildMainWindow() applies the persisted theme (T2) once AppSettings
+    // exists; nothing is shown yet at this point, so there's no unstyled
+    // frame to flash.
     QMainWindow *window = buildMainWindow();
     window->show();
 

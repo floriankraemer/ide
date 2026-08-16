@@ -99,4 +99,103 @@ QLineEdit, QPlainTextEdit {
 )");
 }
 
+QString lightStyleSheet()
+{
+    return QStringLiteral(R"(
+QWidget {
+    background-color: #fafafa;
+    color: #1a1a1a;
+    selection-background-color: #90caf9;
+    selection-color: #000000;
+}
+
+QMainWindow, QDialog {
+    background-color: #f2f2f2;
+}
+
+QMenuBar {
+    background-color: #f2f2f2;
+    color: #1a1a1a;
+}
+
+QMenuBar::item:selected {
+    background-color: #90caf9;
+}
+
+QMenu {
+    background-color: #ffffff;
+    border: 1px solid #d0d0d0;
+}
+
+QMenu::item:selected {
+    background-color: #90caf9;
+}
+
+QTreeView, QAbstractItemView {
+    background-color: #ffffff;
+    alternate-background-color: #f5f5f5;
+    border: none;
+}
+
+QTreeView::item:selected, QAbstractItemView::item:selected {
+    background-color: #90caf9;
+}
+
+QTabWidget::pane {
+    border: 1px solid #d0d0d0;
+    background-color: #ffffff;
+}
+
+QTabBar::tab {
+    background-color: #eeeeee;
+    color: #1a1a1a;
+    padding: 6px 12px;
+    border: 1px solid #d0d0d0;
+    border-bottom: none;
+}
+
+QTabBar::tab:selected {
+    background-color: #ffffff;
+    color: #000000;
+}
+
+QSplitter::handle {
+    background-color: #eeeeee;
+}
+
+QStatusBar {
+    background-color: #f2f2f2;
+    color: #1a1a1a;
+}
+
+QScrollBar:vertical, QScrollBar:horizontal {
+    background: #f2f2f2;
+    border: none;
+}
+
+QScrollBar::handle {
+    background: #c0c0c0;
+    border-radius: 3px;
+}
+
+QScrollBar::handle:hover {
+    background: #a8a8a8;
+}
+
+QLineEdit, QPlainTextEdit {
+    background-color: #ffffff;
+    color: #1a1a1a;
+    border: 1px solid #d0d0d0;
+}
+)");
+}
+
+QString styleSheetForTheme(const QString &themeName)
+{
+    if (themeName == QStringLiteral("light")) {
+        return lightStyleSheet();
+    }
+    return darculaStyleSheet();
+}
+
 } // namespace ui_shell
