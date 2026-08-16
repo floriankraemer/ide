@@ -1,6 +1,7 @@
 #include "main_window.h"
 
 #include "code_editor.h"
+#include "syntax_highlighter.h"
 #include "theme.h"
 #include "ui-shell/src/bridge.cxxqt.h"
 
@@ -329,6 +330,10 @@ private:
         editor->document()->setModified(false);
         editor->setFont(editorFont_);
         applyEditorPalette(editor);
+        // Y2: self-parents to editor->document(), no manual lifetime
+        // management needed. PlainText (unrecognized/no extension) yields
+        // no spans from highlight_line, so this is a harmless no-op then.
+        new SyntaxHighlighter(editor->document(), docManager_->tabExtension(tabId));
 
         // Forward QPlainTextEdit's own modified state into the session's
         // authoritative dirty flag (ADR-0003) rather than marshalling

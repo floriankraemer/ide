@@ -59,6 +59,35 @@ mod ffi {
         foreground: QString,
     }
 
+    /// Token category (Y2), 1:1 with `syntax_core::TokenKind`.
+    enum FfiTokenKind {
+        Keyword,
+        String,
+        Comment,
+        Number,
+        Function,
+        Type,
+        Other,
+    }
+
+    /// A classified span within the text passed to `highlight_line`, in
+    /// UTF-8 byte offsets (matching `syntax_core::HighlightSpan`) — not
+    /// `ui-shell`'s usual QString/UTF-16 offsets, since classification
+    /// happens on the UTF-8 buffer the Rust side receives. The view maps
+    /// these back to UTF-16 offsets itself.
+    struct FfiHighlightSpan {
+        start: usize,
+        end: usize,
+        kind: FfiTokenKind,
+    }
+
+    extern "Rust" {
+        /// Highlight `text` (UTF-8) for the language implied by
+        /// `extension` (Y2) — a pure per-call function, no QObject state,
+        /// wrapping `syntax_core::highlight`.
+        fn highlight_line(extension: &str, text: &str) -> Vec<FfiHighlightSpan>;
+    }
+
     unsafe extern "C++Qt" {
         include!(<QtCore/QAbstractItemModel>);
         /// Base Qt class `ProjectTreeModel` inherits from.
@@ -349,6 +378,13 @@ mod ffi {
         #[cxx_name = "tabContent"]
         fn tab_content(self: &DocumentManager, tab_id: u64) -> QString;
 
+        /// The tab's backing file extension (no leading dot, lowercased),
+        /// empty when there is none — used to pick a highlighting language
+        /// (Y2).
+        #[qinvokable]
+        #[cxx_name = "tabExtension"]
+        fn tab_extension(self: &DocumentManager, tab_id: u64) -> QString;
+
         /// The tab's display title (file name, plus the "(deleted)" suffix
         /// once its backing file is gone). The tab strip renders this
         /// verbatim, adding only its own dirty marker.
@@ -482,6 +518,32 @@ fn to_ffi_result(result: Result<(), AppError>) -> FfiResult {
             code: err.code(),
             message: QString::from(err.to_string().as_str()),
         },
+    }
+}
+
+/// `syntax_core::highlight` wrapped for the FFI seam (Y2). Pure per-call
+/// function, no QObject/session state involved.
+fn highlight_line(extension: &str, text: &str) -> Vec<ffi::FfiHighlightSpan> {
+    let language = syntax_core::language_for_extension(extension);
+    syntax_core::highlight(language, text)
+        .into_iter()
+        .map(|span| ffi::FfiHighlightSpan {
+            start: span.start,
+            end: span.end,
+            kind: to_ffi_token_kind(span.kind),
+        })
+        .collect()
+}
+
+fn to_ffi_token_kind(kind: syntax_core::TokenKind) -> ffi::FfiTokenKind {
+    match kind {
+        syntax_core::TokenKind::Keyword => ffi::FfiTokenKind::Keyword,
+        syntax_core::TokenKind::String => ffi::FfiTokenKind::String,
+        syntax_core::TokenKind::Comment => ffi::FfiTokenKind::Comment,
+        syntax_core::TokenKind::Number => ffi::FfiTokenKind::Number,
+        syntax_core::TokenKind::Function => ffi::FfiTokenKind::Function,
+        syntax_core::TokenKind::Type => ffi::FfiTokenKind::Type,
+        syntax_core::TokenKind::Other => ffi::FfiTokenKind::Other,
     }
 }
 
@@ -971,6 +1033,14 @@ impl ffi::DocumentManager {
             .borrow()
             .tab_content(TabId::from_raw(tab_id))
             .map(|content| QString::from(content.as_str()))
+            .unwrap_or_default()
+    }
+
+    pub fn tab_extension(&self, tab_id: u64) -> QString {
+        self.session
+            .borrow()
+            .tab_extension(TabId::from_raw(tab_id))
+            .map(|ext| QString::from(ext.as_str()))
             .unwrap_or_default()
     }
 

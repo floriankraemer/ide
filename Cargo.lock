@@ -1920,6 +1920,7 @@ dependencies = [
  "cxx-qt-lib",
  "editor-core",
  "project-model",
+ "syntax-core",
 ]
 
 [[package]]

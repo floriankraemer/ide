@@ -8,6 +8,7 @@ fn main() {
         .cpp_file("cpp/code_editor.h")
         .cpp_file("cpp/code_editor.cpp")
         .cpp_file("cpp/theme.cpp")
+        .cpp_file("cpp/syntax_highlighter.cpp")
         .include_dir("cpp")
         .qt_module("Widgets")
         // Widgets code uses QTextDocument (QtGui) directly. On Linux this

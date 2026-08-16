@@ -35,7 +35,7 @@ per `CLAUDE.md`.
 | S1 | done | `2e0e0c2` (Docker `linux-artifact` build verified; manual change-theme/OK/relaunch and Cancel-discards passes not run, no display here) |
 | S2 | done | `2e0e0c2` (`cargo test -p app-config`; Docker `linux-artifact` build verified; manual live-update/persist passes not run, no display here) |
 | Y1 | done | `1475e3f` |
-| Y2 | todo | |
+| Y2 | done | `pending` (`cargo test -p app-core -p syntax-core`; Docker `linux-artifact` build verified; manual .rs/.json/.txt visual pass not run, no display here) |
 | D1 | todo | |
 | D2 | todo | |
 | D3 | todo | |

@@ -358,6 +358,16 @@ impl AppSession {
         self.doc(id).map(|d| d.content())
     }
 
+    /// The tab's backing file extension (no leading dot, lowercased), used
+    /// to pick a highlighting language (Y2). `None` for an extensionless
+    /// file — the view treats that the same as an unrecognized extension.
+    pub fn tab_extension(&self, id: TabId) -> Option<String> {
+        self.doc(id)?
+            .path()
+            .extension()
+            .map(|ext| ext.to_string_lossy().to_lowercase())
+    }
+
     /// The tab's display title: the file name, plus a "(deleted)" suffix
     /// once the tree deleted its backing file (US-2b). The view renders this
     /// verbatim (its own dirty marker aside).
@@ -677,6 +687,23 @@ mod tests {
             .save_tab_as(TabId::from_raw(999), project_dir.path().join("x.txt"), "x")
             .unwrap_err();
         assert_eq!(err.code(), AppError::CODE_NO_SUCH_TAB);
+    }
+
+    #[test]
+    fn tab_extension_is_lowercased_and_none_when_absent() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let rust_tab = session
+            .open_file(&project_dir.path().join("a.txt"))
+            .unwrap();
+        assert_eq!(session.tab_extension(rust_tab.id).as_deref(), Some("txt"));
+
+        fs::write(project_dir.path().join("no_ext"), "x").unwrap();
+        let no_ext_tab = session
+            .open_file(&project_dir.path().join("no_ext"))
+            .unwrap();
+        assert_eq!(session.tab_extension(no_ext_tab.id), None);
+
+        assert_eq!(session.tab_extension(TabId::from_raw(999)), None);
     }
 
     #[test]

@@ -8,6 +8,7 @@ app-core = { path = "../app-core" }
 app-config = { path = "../app-config" }
 editor-core = { path = "../editor-core" }
 project-model = { path = "../project-model" }
+syntax-core = { path = "../syntax-core" }
 cxx = "1"
 cxx-qt = "0.9"
 cxx-qt-lib = "0.9"
