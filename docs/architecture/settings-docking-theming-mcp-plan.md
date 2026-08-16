@@ -7,6 +7,45 @@ Draft — approved, implementation starting. Builds on the shipped MVP
 [ADR 0001](decisions/0001-core-tech-stack.md) (Rust core + Qt6 UI via
 `cxx-qt`, hybrid plugin system). Does not reopen ADR 0001.
 
+## Progress
+
+Living status table — update the relevant row(s) **in the same commit**
+that finishes a task, so status and code never drift apart. A fresh
+session should read this table (and `git log`) before picking up work,
+per `CLAUDE.md`.
+
+| Task | Status | Commit |
+|---|---|---|
+| R1 | done | `1099c15` |
+| R2 | done | `1099c15` |
+| R3 | done | `1099c15` |
+| R4 | done | `1099c15` |
+| R5 | done | `1099c15` |
+| R6 | done | `1099c15` |
+| R7 | done | `05fe5ce` (docs sync swept in earlier; plan doc itself fixed here) |
+| C1 | todo | |
+| C2 | todo | |
+| L1 | todo | |
+| L2 | todo | |
+| L3 | todo | |
+| G1 | todo | |
+| G2 | todo | |
+| T1 | todo | |
+| T2 | todo | |
+| S1 | todo | |
+| S2 | todo | |
+| Y1 | todo | |
+| Y2 | todo | |
+| D1 | todo | |
+| D2 | todo | |
+| D3 | todo | |
+| D4 | todo | |
+| M1 | todo | |
+| M2 | todo | |
+| M3 | todo | |
+| M4 | todo | |
+| M5 | todo | |
+
 ## Context
 
 The IDE has a working MVP: open-folder, sidebar file tree, tabbed

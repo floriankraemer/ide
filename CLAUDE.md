@@ -3,6 +3,12 @@
 Cross-platform IDE: Rust core + Qt6 Widgets via cxx-qt (QML planned later).
 Architecture authority: `docs/architecture/layering.md` and the ADRs in `docs/architecture/decisions/`. Read them before structural work.
 
+## Starting a session
+
+Before starting work, read `docs/architecture/settings-docking-theming-mcp-plan.md`'s Progress table and `git log` to find the next open task. Update the task's row (status + commit hash) in the same commit that finishes it — status and code must never drift apart.
+
+Check `git status`/`git log` before starting; if another session's work is uncommitted or mid-flight, don't overwrite it — coordinate or work on a different task instead.
+
 ## Project map
 
 - `crates/editor-core` — domain: rope `Document`, `TabList`, binary detection. Qt-free.
