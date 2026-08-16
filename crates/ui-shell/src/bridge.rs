@@ -30,6 +30,17 @@ mod ffi {
         tab_id: u64,
     }
 
+    /// Persisted window geometry (L1), 1:1 with `app_config::WindowGeometry`.
+    /// A freshly-defaulted value (all zero) means "nothing saved yet" — the
+    /// view falls back to its own default size in that case.
+    #[derive(Default)]
+    struct FfiWindowGeometry {
+        x: i32,
+        y: i32,
+        width: u32,
+        height: u32,
+    }
+
     unsafe extern "C++Qt" {
         include!(<QtCore/QAbstractItemModel>);
         /// Base Qt class `ProjectTreeModel` inherits from.
@@ -46,6 +57,8 @@ mod ffi {
         type QString = cxx_qt_lib::QString;
         include!("cxx-qt-lib/qhash.h");
         type QHash_i32_QByteArray = cxx_qt_lib::QHash<cxx_qt_lib::QHashPair_i32_QByteArray>;
+        include!("cxx-qt-lib/qstringlist.h");
+        type QStringList = cxx_qt_lib::QStringList;
     }
 
     /// Extra data roles `data()` answers, alongside `Qt::DisplayRole` (0 —
@@ -283,6 +296,22 @@ mod ffi {
         #[cxx_name = "saveTab"]
         fn save_tab(self: Pin<&mut DocumentManager>, tab_id: u64, content: &QString) -> FfiResult;
 
+        /// Save As (L2): write `content` to `path`, repointing the tab at
+        /// it (same reason `saveTab` takes `content` rather than reading
+        /// the session's own copy — live keystrokes aren't marshalled
+        /// through the rope, ADR-0003). On success the caller re-renders
+        /// the tab's title (`tabTitle` now reflects the new path) — reuses
+        /// the existing `tabModifiedChanged` signal rather than adding a
+        /// new one.
+        #[qinvokable]
+        #[cxx_name = "saveTabAs"]
+        fn save_tab_as(
+            self: Pin<&mut DocumentManager>,
+            tab_id: u64,
+            path: &QString,
+            content: &QString,
+        ) -> FfiResult;
+
         /// Update which tab the session considers active.
         #[qinvokable]
         #[cxx_name = "setActiveTab"]
@@ -333,6 +362,31 @@ mod ffi {
         fn reload_tab_from_disk(self: Pin<&mut DocumentManager>, tab_id: u64) -> FfiResult;
     }
 
+    extern "RustQt" {
+        /// Settings-I/O adapter (L1 window geometry/state, C2 recent
+        /// projects) — wraps `app_config::{load,save}` the same way
+        /// `DocumentManager` wraps `AppSession`. Owns no settings state
+        /// itself; every call re-reads or re-writes `settings.toml`.
+        #[qobject]
+        type AppSettings = super::AppSettingsRust;
+
+        /// Most-recently-opened projects, newest first (C2).
+        #[qinvokable]
+        #[cxx_name = "recentProjects"]
+        fn recent_projects(self: &AppSettings) -> QStringList;
+
+        /// Last-persisted main window geometry, or all-zero if none was
+        /// ever saved (L1).
+        #[qinvokable]
+        #[cxx_name = "windowGeometry"]
+        fn window_geometry(self: &AppSettings) -> FfiWindowGeometry;
+
+        /// Persist the main window's geometry (L1's `closeEvent`).
+        #[qinvokable]
+        #[cxx_name = "saveWindowGeometry"]
+        fn save_window_geometry(self: &AppSettings, x: i32, y: i32, width: u32, height: u32);
+    }
+
     unsafe extern "C++" {
         include!("main_window.h");
 
@@ -349,8 +403,10 @@ use std::rc::Rc;
 
 use app_core::{AppError, AppSession, TabId};
 use cxx_qt::Threading;
-use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant};
-use ffi::{FfiOpenResult, FfiResult, Roles};
+use cxx_qt_lib::{
+    QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QVariant,
+};
+use ffi::{FfiOpenResult, FfiResult, FfiWindowGeometry, Roles};
 
 thread_local! {
     /// The single `AppSession` both QObject adapters share. cxx-qt
@@ -376,6 +432,60 @@ fn to_ffi_result(result: Result<(), AppError>) -> FfiResult {
             code: err.code(),
             message: QString::from(err.to_string().as_str()),
         },
+    }
+}
+
+/// Push `path` onto the persisted recent-projects list (C2). Best-effort:
+/// a settings load/save failure here must not block the folder from
+/// opening, so errors are silently dropped — same tolerance `AppSession`
+/// already applies to the last-opened-project fallback.
+fn push_recent_project(path: std::path::PathBuf) {
+    let config_dir = app_core::resolve_config_dir();
+    let Ok(mut settings) = app_config::load(&config_dir) else {
+        return;
+    };
+    settings.push_recent_project(path);
+    let _ = app_config::save(&config_dir, &settings);
+}
+
+/// Rust side of the `AppSettings` QObject: stateless, every call re-reads
+/// or re-writes `settings.toml` directly (mirrors `push_recent_project`).
+#[derive(Default)]
+pub struct AppSettingsRust;
+
+impl ffi::AppSettings {
+    pub fn recent_projects(&self) -> QStringList {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        settings
+            .recent_projects
+            .iter()
+            .map(|p| QString::from(p.to_string_lossy().as_ref()))
+            .collect()
+    }
+
+    pub fn window_geometry(&self) -> FfiWindowGeometry {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        let g = settings.window_geometry;
+        FfiWindowGeometry {
+            x: g.x,
+            y: g.y,
+            width: g.width,
+            height: g.height,
+        }
+    }
+
+    pub fn save_window_geometry(&self, x: i32, y: i32, width: u32, height: u32) {
+        let config_dir = app_core::resolve_config_dir();
+        let Ok(mut settings) = app_config::load(&config_dir) else {
+            return;
+        };
+        settings.window_geometry = app_config::WindowGeometry {
+            x,
+            y,
+            width,
+            height,
+        };
+        let _ = app_config::save(&config_dir, &settings);
     }
 }
 
@@ -514,6 +624,7 @@ impl ffi::ProjectTreeModel {
                 self.as_mut().end_reset_model();
             }
             self.as_mut().start_watcher();
+            push_recent_project(path);
         }
         to_ffi_result(result)
     }
@@ -706,6 +817,19 @@ impl ffi::DocumentManager {
             .session
             .borrow_mut()
             .save_tab(TabId::from_raw(tab_id), &content.to_string());
+        if result.is_ok() {
+            self.as_mut().tab_modified_changed(tab_id, false);
+        }
+        to_ffi_result(result)
+    }
+
+    pub fn save_tab_as(mut self: Pin<&mut Self>, tab_id: u64, path: &QString, content: &QString) -> FfiResult {
+        let path = std::path::PathBuf::from(path.to_string());
+        let result = self.session.borrow_mut().save_tab_as(
+            TabId::from_raw(tab_id),
+            path,
+            &content.to_string(),
+        );
         if result.is_ok() {
             self.as_mut().tab_modified_changed(tab_id, false);
         }

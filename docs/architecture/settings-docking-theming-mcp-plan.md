@@ -24,9 +24,9 @@ per `CLAUDE.md`.
 | R6 | done | `1099c15` |
 | R7 | done | `05fe5ce` (docs sync swept in earlier; plan doc itself fixed here) |
 | C1 | done | `ec078c1` |
-| C2 | todo | |
-| L1 | todo | |
-| L2 | todo | |
+| C2 | done | `pending` (`cargo test -p app-config`; Docker `linux-artifact` build verified; manual open-3-folders pass not run, no display here) |
+| L1 | done | `pending` (Docker `linux-artifact` build verified; manual close/relaunch-geometry pass not run, no display here) |
+| L2 | done | `pending` (`cargo test -p app-core`; Docker `linux-artifact` build verified; manual Save-As pass not run, no display here) |
 | L3 | todo | |
 | G1 | done | `38e846b` (Docker `linux-artifact` build verified; no display here for gutter-rendering manual pass) |
 | G2 | todo | |

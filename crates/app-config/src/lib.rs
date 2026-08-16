@@ -71,6 +71,20 @@ pub struct Settings {
     pub window_state: String,
 }
 
+/// Cap on remembered recent projects — enough for a useful menu without
+/// growing unbounded.
+const MAX_RECENT_PROJECTS: usize = 10;
+
+impl Settings {
+    /// Push `path` to the front of `recent_projects`, deduping any existing
+    /// entry for it and capping the list at [`MAX_RECENT_PROJECTS`].
+    pub fn push_recent_project(&mut self, path: PathBuf) {
+        self.recent_projects.retain(|p| p != &path);
+        self.recent_projects.insert(0, path);
+        self.recent_projects.truncate(MAX_RECENT_PROJECTS);
+    }
+}
+
 /// Why loading or saving settings failed.
 #[derive(Debug)]
 pub enum ConfigError {
@@ -155,6 +169,34 @@ mod tests {
         let loaded = load(dir.path()).unwrap();
 
         assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn push_recent_project_dedupes_and_moves_to_front() {
+        let mut settings = Settings::default();
+        settings.push_recent_project(PathBuf::from("/a"));
+        settings.push_recent_project(PathBuf::from("/b"));
+        settings.push_recent_project(PathBuf::from("/a"));
+
+        assert_eq!(
+            settings.recent_projects,
+            vec![PathBuf::from("/a"), PathBuf::from("/b")]
+        );
+    }
+
+    #[test]
+    fn push_recent_project_caps_at_max() {
+        let mut settings = Settings::default();
+        for i in 0..(MAX_RECENT_PROJECTS + 5) {
+            settings.push_recent_project(PathBuf::from(format!("/project-{i}")));
+        }
+
+        assert_eq!(settings.recent_projects.len(), MAX_RECENT_PROJECTS);
+        // Most recent push is first.
+        assert_eq!(
+            settings.recent_projects[0],
+            PathBuf::from(format!("/project-{}", MAX_RECENT_PROJECTS + 4))
+        );
     }
 
     #[test]

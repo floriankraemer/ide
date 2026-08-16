@@ -23,8 +23,10 @@ graph TB
 | `editor-core` | (std only) | **No** |
 | `project-model` | (std, notify) | **No** |
 | `syntax-core` | (std, tree-sitter, tree-sitter-rust, tree-sitter-json) | **No** |
+| `app-config` | (std, dirs, serde, toml) | **No** |
+| `mcp-server` | (std, dirs, serde, serde_json, tokio, axum) | **No** |
 | `app-core` | `editor-core`, `project-model` | **No** |
-| `ui-shell` | `app-core`, `editor-core`, `project-model` | Yes (adapter + view live here) |
+| `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `syntax-core`, `mcp-server` | Yes (adapter + view live here) |
 | `app` | `ui-shell` | Yes |
 
 `editor-core`, `project-model`, and `app-core` MUST NOT depend on cxx-qt or Qt in any form — no direct dependency, no transitive dependency, no feature-gated dependency.

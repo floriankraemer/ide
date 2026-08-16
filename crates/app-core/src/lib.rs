@@ -306,6 +306,23 @@ impl AppSession {
         Ok(())
     }
 
+    /// Save As: replace the tab's content, repoint it at `path`, and write
+    /// it there. Unlike `save_tab` this changes the tab's identity on disk —
+    /// the caller (adapter) is responsible for telling the view to
+    /// re-render the tab's title afterward. Dirty flag left set on failure
+    /// (US-4: no silent data loss), same as `save_tab`.
+    pub fn save_tab_as(&mut self, id: TabId, path: PathBuf, content: &str) -> Result<(), AppError> {
+        let Some(pos) = self.docs.iter().position(|e| e.id == id) else {
+            return Err(AppError::NoSuchTab);
+        };
+        let doc = &mut self.docs[pos].doc;
+        doc.replace_content(content);
+        doc.set_path(path.clone());
+        doc.save().map_err(AppError::Save)?;
+        self.suppressed_changes.insert(path, Instant::now());
+        Ok(())
+    }
+
     /// Update which tab is considered active. Ignores unknown ids (the tab
     /// strip can report a page that was closed in the same event burst).
     pub fn set_active_tab(&mut self, id: TabId) {
@@ -632,6 +649,34 @@ mod tests {
         let err = session.save_tab(TabId::from_raw(999), "x").unwrap_err();
         assert_eq!(err.code(), AppError::CODE_NO_SUCH_TAB);
         assert_eq!(err.to_string(), "no such tab");
+    }
+
+    #[test]
+    fn save_tab_as_writes_to_the_new_path_and_retitles_the_tab() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let old_path = project_dir.path().join("a.txt");
+        let new_path = project_dir.path().join("a-copy.txt");
+        let tab = session.open_file(&old_path).unwrap();
+
+        session
+            .save_tab_as(tab.id, new_path.clone(), "copied content")
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(&new_path).unwrap(), "copied content");
+        assert_eq!(session.tab_title(tab.id).unwrap(), "a-copy.txt");
+        assert_eq!(session.tab_is_dirty(tab.id), Some(false));
+        // The watcher's echo of our own write to the new path must not be an
+        // external change.
+        assert_eq!(session.check_external_change(&new_path), None);
+    }
+
+    #[test]
+    fn save_tab_as_with_unknown_id_is_no_such_tab() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let err = session
+            .save_tab_as(TabId::from_raw(999), project_dir.path().join("x.txt"), "x")
+            .unwrap_err();
+        assert_eq!(err.code(), AppError::CODE_NO_SUCH_TAB);
     }
 
     #[test]

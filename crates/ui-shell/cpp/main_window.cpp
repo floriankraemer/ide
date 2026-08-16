@@ -5,6 +5,7 @@
 #include "ui-shell/src/bridge.cxxqt.h"
 
 #include <QApplication>
+#include <QCloseEvent>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QInputDialog>
@@ -16,7 +17,9 @@
 #include <QPlainTextEdit>
 #include <QPoint>
 #include <QPushButton>
+#include <QRect>
 #include <QSplitter>
+#include <QStringList>
 #include <QTabWidget>
 #include <QtGui/QTextDocument>
 #include <QTreeView>
@@ -88,6 +91,46 @@ public:
 
     // Ctrl+S / File > Save.
     void saveCurrentTab() { saveTab(tabWidget_->currentIndex()); }
+
+    // File > Save As... (L2): the session repoints the tab at the chosen
+    // path and writes there; the tree's own watcher picks up the new file
+    // for free (no explicit tree-refresh call needed here).
+    void saveCurrentTabAs()
+    {
+        const int index = tabWidget_->currentIndex();
+        if (index < 0) {
+            return;
+        }
+        auto *editor = qobject_cast<QPlainTextEdit *>(tabWidget_->widget(index));
+        if (!editor) {
+            return;
+        }
+        const QString path = QFileDialog::getSaveFileName(window_, tr("Save As"));
+        if (path.isEmpty()) {
+            return;
+        }
+        const quint64 tabId = tabIdAt(index);
+        const auto result = docManager_->saveTabAs(tabId, path, editor->toPlainText());
+        if (result.code != 0) {
+            QMessageBox::critical(window_, tr("Cannot save file"), result.message);
+            return;
+        }
+        editor->document()->setModified(false);
+        renderTabText(index, docManager_->tabTitle(tabId), false);
+    }
+
+    // Exit / window-close (L1): runs the same unsaved-changes prompt as
+    // closing tabs one at a time, stopping at the first Cancel so the
+    // caller can abort the close.
+    bool confirmCloseAllTabs()
+    {
+        for (int i = 0; i < tabWidget_->count(); ++i) {
+            if (!confirmCloseTab(i)) {
+                return false;
+            }
+        }
+        return true;
+    }
 
     // Rename/delete via the tree changed a tab's title (US-2b) — re-render
     // the label, preserving the unsaved-changes indicator.
@@ -261,6 +304,78 @@ private:
     QWidget *window_;
 };
 
+// Subclassed so closeEvent() can run the same unsaved-changes prompt as
+// closing a tab, and persist geometry on close (L1). No Q_OBJECT: overriding
+// a virtual function needs no signals/slots/qobject_cast, so this adds no
+// second moc target.
+class IdeMainWindow : public QMainWindow
+{
+public:
+    void setEditorTabs(EditorTabs *editorTabs) { editorTabs_ = editorTabs; }
+    void setAppSettings(AppSettings *appSettings) { appSettings_ = appSettings; }
+
+protected:
+    void closeEvent(QCloseEvent *event) override
+    {
+        if (editorTabs_ && !editorTabs_->confirmCloseAllTabs()) {
+            event->ignore();
+            return;
+        }
+        if (appSettings_) {
+            const QRect g = geometry();
+            appSettings_->saveWindowGeometry(g.x(), g.y(), static_cast<quint32>(g.width()),
+                                              static_cast<quint32>(g.height()));
+        }
+        QMainWindow::closeEvent(event);
+    }
+
+private:
+    EditorTabs *editorTabs_ = nullptr;
+    AppSettings *appSettings_ = nullptr;
+};
+
+// File > Recent Projects (C2): rebuilds `menu` from `appSettings`'s
+// persisted list. Forward-declared so it and openProjectAndRefreshRecents
+// (below) can call each other without any lambda self-capture.
+void populateRecentProjectsMenu(QMenu *menu, AppSettings *appSettings, ProjectTreeModel *treeModel,
+                                 QMainWindow *window);
+
+// Shared tail for "Open Folder..." and clicking a Recent Projects entry:
+// open, report failure, and on success refresh the menu so the
+// just-opened path moves to the front (C2).
+void openProjectAndRefreshRecents(ProjectTreeModel *treeModel, QMainWindow *window,
+                                   QMenu *recentProjectsMenu, AppSettings *appSettings,
+                                   const QString &path)
+{
+    const auto result = treeModel->openFolder(path);
+    if (result.code != 0) {
+        QMessageBox::critical(window, QObject::tr("Cannot open folder"), result.message);
+        return;
+    }
+    populateRecentProjectsMenu(recentProjectsMenu, appSettings, treeModel, window);
+}
+
+void populateRecentProjectsMenu(QMenu *menu, AppSettings *appSettings, ProjectTreeModel *treeModel,
+                                 QMainWindow *window)
+{
+    menu->clear();
+    const QStringList projects = appSettings->recentProjects();
+    if (projects.isEmpty()) {
+        QAction *empty = menu->addAction(QObject::tr("(No Recent Projects)"));
+        empty->setEnabled(false);
+        return;
+    }
+    for (qsizetype i = 0; i < projects.size(); ++i) {
+        const QString path = projects.at(i);
+        QAction *action = menu->addAction(path);
+        QObject::connect(action, &QAction::triggered, treeModel,
+                          [treeModel, window, menu, appSettings, path]() {
+                              openProjectAndRefreshRecents(treeModel, window, menu, appSettings,
+                                                            path);
+                          });
+    }
+}
+
 // Sidebar tree + tabbed editor area, PHPStorm-style (US-5): a resizable
 // splitter with the project tree on the left and the tab strip on the
 // right.
@@ -431,37 +546,56 @@ EditorTabs *buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
 // non-functional stubs for later tasks.
 QMainWindow *buildMainWindow()
 {
-    auto *window = new QMainWindow();
+    auto *window = new IdeMainWindow();
     window->setWindowTitle(QStringLiteral("IDE"));
-    window->resize(1024, 768);
+
+    auto *appSettings = new AppSettings(window);
+    const FfiWindowGeometry savedGeometry = appSettings->windowGeometry();
+    if (savedGeometry.width > 0 && savedGeometry.height > 0) {
+        window->setGeometry(savedGeometry.x, savedGeometry.y,
+                             static_cast<int>(savedGeometry.width),
+                             static_cast<int>(savedGeometry.height));
+    } else {
+        window->resize(1024, 768);
+    }
 
     auto *treeModel = new ProjectTreeModel(window);
     auto *docManager = new DocumentManager(window);
     EditorTabs *editorTabs = buildCentralWidget(window, treeModel, docManager);
+    window->setEditorTabs(editorTabs);
+    window->setAppSettings(appSettings);
 
     QMenu *fileMenu = window->menuBar()->addMenu(QObject::tr("&File"));
     QAction *openFolderAction = fileMenu->addAction(QObject::tr("Open Folder..."));
+    QMenu *recentProjectsMenu = fileMenu->addMenu(QObject::tr("Recent Projects"));
+    populateRecentProjectsMenu(recentProjectsMenu, appSettings, treeModel, window);
+    fileMenu->addSeparator();
     QAction *saveAction = fileMenu->addAction(QObject::tr("Save"));
     saveAction->setShortcut(QKeySequence::Save);
-    fileMenu->addAction(QObject::tr("Save As..."));
+    QAction *saveAsAction = fileMenu->addAction(QObject::tr("Save As..."));
     fileMenu->addSeparator();
-    fileMenu->addAction(QObject::tr("Exit"));
+    QAction *exitAction = fileMenu->addAction(QObject::tr("Exit"));
 
-    QObject::connect(openFolderAction, &QAction::triggered, window, [treeModel, window]() {
-        const QString dir = QFileDialog::getExistingDirectory(
-          window, QObject::tr("Open Folder"), QString(), QFileDialog::ShowDirsOnly);
-        if (dir.isEmpty()) {
-            return;
-        }
+    QObject::connect(openFolderAction, &QAction::triggered, window,
+                      [treeModel, window, recentProjectsMenu, appSettings]() {
+                          const QString dir = QFileDialog::getExistingDirectory(
+                            window, QObject::tr("Open Folder"), QString(),
+                            QFileDialog::ShowDirsOnly);
+                          if (dir.isEmpty()) {
+                              return;
+                          }
+                          openProjectAndRefreshRecents(treeModel, window, recentProjectsMenu,
+                                                        appSettings, dir);
+                      });
 
-        const auto result = treeModel->openFolder(dir);
-        if (result.code != 0) {
-            QMessageBox::critical(window, QObject::tr("Cannot open folder"), result.message);
-        }
-    });
+    QObject::connect(exitAction, &QAction::triggered, window, [window]() { window->close(); });
 
     QObject::connect(saveAction, &QAction::triggered, window, [editorTabs]() {
         editorTabs->saveCurrentTab();
+    });
+
+    QObject::connect(saveAsAction, &QAction::triggered, window, [editorTabs]() {
+        editorTabs->saveCurrentTabAs();
     });
 
     QMenu *editMenu = window->menuBar()->addMenu(QObject::tr("&Edit"));

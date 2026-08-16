@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 app-core = { path = "../app-core" }
+app-config = { path = "../app-config" }
 editor-core = { path = "../editor-core" }
 project-model = { path = "../project-model" }
 cxx = "1"
