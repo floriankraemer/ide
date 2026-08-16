@@ -22,6 +22,7 @@ graph TB
 |-------|---------------|-------------------|
 | `editor-core` | (std only) | **No** |
 | `project-model` | (std, notify) | **No** |
+| `syntax-core` | (std, tree-sitter, tree-sitter-rust, tree-sitter-json) | **No** |
 | `app-core` | `editor-core`, `project-model` | **No** |
 | `ui-shell` | `app-core`, `editor-core`, `project-model` | Yes (adapter + view live here) |
 | `app` | `ui-shell` | Yes |

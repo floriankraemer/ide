@@ -3,6 +3,8 @@ resolver = "2"
 members = [
     "crates/editor-core",
     "crates/project-model",
+    "crates/syntax-core",
+    "crates/app-config",
     "crates/app-core",
     "crates/ui-shell",
     "crates/app",
