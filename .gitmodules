@@ -1,0 +1,3 @@
+[submodule "third_party/qt-advanced-docking-system"]
+	path = third_party/qt-advanced-docking-system
+	url = https://github.com/githubuser0xFFFF/Qt-Advanced-Docking-System.git
