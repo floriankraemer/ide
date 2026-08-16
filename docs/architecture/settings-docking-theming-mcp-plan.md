@@ -41,7 +41,7 @@ per `CLAUDE.md`.
 | D3 | todo | |
 | D4 | todo | |
 | M1 | done | `74c0bef` |
-| M2 | done | `pending` (docs only — ADR-0004) |
+| M2 | done | `16302d2` (docs only — ADR-0004) |
 | M3 | todo | |
 | M4 | todo | |
 | M5 | todo | |
