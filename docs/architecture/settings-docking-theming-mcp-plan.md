@@ -27,13 +27,37 @@ editor control (not read-only); docking uses the Qt Advanced Docking
 System (ADS) library rather than a hand-rolled docking engine; syntax
 highlighting is built on tree-sitter.
 
-## Current-state facts (verified against source)
+## Current-state facts (verified against source, post-Phase-0)
 
-- All UI is hand-written C++ in `crates/ui-shell/cpp/main_window.cpp` — no
-  QML. `QMainWindow` (plain, not subclassed) → `QSplitter(Qt::Horizontal)`
-  → `QTreeView` (project tree) + `QTabWidget` (tab strip, `setMovable(false)`
-  at line 47 — tab reorder explicitly disabled). One `QPlainTextEdit` per
-  open tab, created in `EditorTabs::onTabOpened`.
+- Five crates: `editor-core`, `project-model`, **`app-core`** (all
+  Qt-free, unit-tested without a Qt runtime), `ui-shell` (only crate
+  touching `cxx-qt`/Qt), `app` (thin binary).
+- `app-core::AppSession` owns the one open `ProjectSession` plus an
+  open-document table keyed by `TabId(u64)` (issued monotonically from 1,
+  never reused), and exposes `Result<T, AppError>` command methods
+  (`open_project`, `open_file`, `save_tab`, `rename_entry`,
+  `delete_entry`, `close_tab`, `reload_tab`, `check_external_change`, …).
+  All business rules live here: the binary-open rule, rename path
+  construction, delete → tab-invalidation as one call, watcher-echo
+  suppression. 21 unit tests.
+- `crates/ui-shell/src/bridge.rs` is a thin adapter: `ProjectTreeModel`
+  and `DocumentManager` QObjects hold a shared `Rc<RefCell<AppSession>>`
+  (`shared_session()`), own no domain state, and each invokable is
+  slot → translate → `AppSession` call → emit signal/refresh model.
+  Errors cross as typed `FfiResult`/`FfiOpenResult` structs (`code` +
+  `message`), never a `QString` sentinel.
+- `crates/ui-shell/cpp/main_window.cpp`'s `EditorTabs` is a humble view:
+  no business rules, branches only on `FfiResult::code`. Tab identity is
+  the session's `TabId`, stored as a Qt dynamic property (`"tabId"`) on
+  each page widget and looked up by scanning `tabWidget_` — **there is no
+  separate index-bookkeeping list to keep in sync** (the old parallel
+  `titles_ QStringList` is gone entirely). This means enabling tab drag
+  reorder needs no companion identity fix — the `tabId` property travels
+  with the widget regardless of its visual position.
+- `QMainWindow` (plain, not subclassed) → `QSplitter(Qt::Horizontal)` →
+  `QTreeView` (project tree) + `QTabWidget` (tab strip,
+  `setMovable(false)` still set — tab reorder still explicitly disabled,
+  this plan's G2 task). One `QPlainTextEdit` per open tab.
 - **No class in the codebase uses `Q_OBJECT`/moc today.** `EditorTabs :
   public QObject` only uses lambda-based `connect()`. `build.rs` never
   invokes `moc`. Line numbers, syntax highlighting, and ADS are all
@@ -41,71 +65,59 @@ highlighting is built on tree-sitter.
   code.
 - `crates/ui-shell/build.rs`: `cxx_qt_build::CxxQtBuilder` with
   `.qt_module("Widgets")`/`.qt_module("Gui")` only, no `Quick`/`Qml`.
-- `editor-core::Document` — `ropey`-backed, dirty flag externally mirrored
-  from `QTextDocument::modificationChanged`, no internal insert/delete-driven
-  tracking. `TabList` — `Vec<Document>` + active index; **no reorder
-  method**; every index-based `DocumentManager` invokable
-  (`tabIndexForPath` etc.) assumes tab index == vec index.
-- `project-model` persists exactly one thing: last-opened project path, as
-  one plain-text line (`persist_last_project`/`read_last_project`,
-  explicitly not serde/toml/json). `default_config_dir()` =
-  `dirs::config_dir().join("ide")`.
-- 4 crates today: `editor-core`, `project-model` (both Qt-free,
-  unit-tested without a Qt runtime — a boundary this plan preserves),
-  `ui-shell` (only crate touching `cxx-qt`/Qt), `app` (thin binary).
+- `editor_core::Document`'s dirty flag is the single source of truth
+  (ADR-0003): `QTextDocument::modificationChanged` forwards into
+  `AppSession::set_tab_dirty`; the view reads it back, never keeps its
+  own authoritative copy.
+- `project-model::watcher` now exposes `is_structural_change` (moved out
+  of `bridge.rs` — domain logic, not adapter translation) and re-exports
+  `notify::EventKind`, so `ui-shell` no longer depends on `notify`
+  directly.
+- `project-model` persists exactly one thing outside `AppSession`'s
+  in-memory state: last-opened project path, as one plain-text line
+  (`persist_last_project`/`read_last_project`, explicitly not
+  serde/toml/json). `default_config_dir()` = `dirs::config_dir().join("ide")`.
   No `serde`, `toml`, `tree-sitter`, MCP/JSON-RPC, or `tokio` anywhere yet.
 - Docker cross-builds Windows via MXE + pinned mingw-w64. Any new vendored
   C++ (ADS) must build under both the Linux and Windows-cross toolchains
   or the Windows artifact silently regresses.
 
-## Phase 0 (prerequisite): `app-core` refactor
+## Phase 0 (prerequisite): `app-core` refactor — complete
 
-While this plan was being written, [ADR-0002](decisions/0002-application-layer-and-humble-view.md),
+[ADR-0002](decisions/0002-application-layer-and-humble-view.md),
 [ADR-0003](decisions/0003-ffi-conventions.md), and
-[`layering.md`](layering.md) were accepted as binding architecture: a
-Qt-free `app-core` crate must own all orchestration and business rules
-(`AppSession`, `TabId(u64)` identity, typed `AppError`), `bridge.rs`
-becomes a thin translation-only adapter, and `cpp/main_window.cpp` becomes
-a humble view with zero business rules.
-`layering.md`'s "known debt" section is explicit: **no new code may
-extend the old int-index/`QString`-sentinel/dual-dirty-state patterns**
-this plan's C/L/G/T/S/Y/D/M tasks would otherwise have built on.
+[`layering.md`](layering.md) were accepted as binding architecture while
+this plan was being written, and the refactor they describe — Qt-free
+`app-core` (`AppSession`, `TabId(u64)`, typed `AppError`), a thin
+`bridge.rs` adapter, and a humble `main_window.cpp` view — has since
+landed and been committed. `layering.md`'s "known debt" section is
+cleared. `cargo test --workspace` passes for the three Qt-free crates
+(62 tests) and `cargo tree` confirms no Qt leakage into
+`editor-core`/`project-model`/`app-core`. See "Current-state facts"
+above for the resulting shape.
 
-`app-core` does not exist yet — only the ADRs and CI layering gate do.
-This plan now runs the refactor as **Phase 0**, before any of the
-feature work below, so every later task is built on the target
-architecture instead of on code already marked for removal.
+One thing landed better than originally scoped: `TabId` identity lives
+as a widget property looked up dynamically, not a maintained
+`TabId → index` map — so tab reordering (G2 below) needs no identity
+bookkeeping at all, just enabling the widget's built-in drag support.
 
-| # | Task | Deliverable | Verification |
-|---|---|---|---|
-| R1 | Scaffold `app-core` | New Qt-free crate: `AppSession` (owns `ProjectSession` + an open-document table keyed by `TabId(u64)`, never reused within a session), `AppError` enum with stable `i32` codes, a `CommandResult{code, message}` struct | `cargo test -p app-core`; `cargo tree -p app-core -e normal \| grep -i qt` empty |
-| R2 | Move tree/document orchestration into `AppSession` | Command methods (`open_folder`, `create_file`, `create_folder`, `rename_entry`, `delete_entry`, `open_file`, `save_tab`, `close_tab`, `reopen_last_project`) implement the rules currently in C++: binary-open rule (`main_window.cpp:283-306`), rename path construction (`377-383`), delete → tab-invalidation as one call instead of `deletePath` + `notifyPathDeleted` | Unit tests per rule in `app-core` (binary-open rejection, rename path construction, delete invalidates the matching open tab in one call) |
-| R3 | `ProjectTreeModel`/`DocumentManager` become thin adapters | `bridge.rs` QObjects hold a shared `AppSession`, no longer own `ProjectSession`/`TabList` directly (`bridge.rs:401`, `bridge.rs:667` today); each invokable becomes slot → translate → `AppSession` call → emit signal/refresh model, no branching | Code review against `layering.md`'s adapter rule; `cargo test -p ui-shell` (existing bridge tests still pass against the new adapter shape) |
-| R4 | Typed errors across the FFI seam | Replace every `QString` sentinel return with `CommandResult{code, message}`; C++ branches on `code == 0`, displays `message` verbatim | Manual: every existing error path (bad rename, delete failure, unreadable folder) still shows the right dialog text |
-| R5 | `TabId(u64)` tab identity | `AppSession` issues `TabId` per open document; FFI calls/signals identify tabs by `TabId`; the `TabId → QTabWidget` index map lives in exactly one place at the adapter/view edge, replacing the `int`-index lockstep across `QTabWidget`/`titles_`/`TabList` | Manual: open/close/reorder tabs in varied order, confirm no index-drift bug class (the one `layering.md` calls out) |
-| R6 | Rust-owned dirty state | `QTextDocument::modificationChanged` forwards edits into `AppSession` (via the adapter); the view reads the dirty flag back from `AppSession` for title decoration, no local authoritative flag in C++ | Manual: edit/undo-to-clean/save across several tabs, dirty indicator always matches `AppSession`'s view, no divergence |
-| R7 | Docs sync | Update `docs/architecture/overview.md`'s container diagram/module list to show `app-core`; clear `layering.md`'s "known debt" section once R1–R6 land | `cargo tree -p editor-core/-p project-model/-p app-core -e normal \| grep -i qt` all empty (the CI layering gate this repo now runs) |
+All feature tasks below (C/L/G/T/S/Y/D/M) build on this architecture, not
+on the old bridge.rs/int-index/`QString` one. In particular:
 
-All feature tasks below (C/L/G/T/S/Y/D/M) build on top of Phase 0, not on
-the old bridge.rs/int-index/QString architecture. In particular:
-
-- **G2 (tab reordering)** no longer needs its own `TabList::move_tab` +
-  `EditorTabs::titles_` reorder-in-lockstep fix — `TabId` identity (R5)
-  already makes reorder a non-event for tab identity; the only remaining
-  work is `setMovable(true)` + updating the adapter's `TabId → index` map
-  on `tabMoved`, which R5 already establishes as the one place that
-  mapping lives.
+- **G2 (tab reordering)** is now just `setMovable(true)` — no
+  `TabList::move_tab` or index-resync fix needed, per the note above.
 - **L1/L2 (Exit, Save As)** and all quick wins route through `AppSession`
-  commands and typed `CommandResult`s from the start, not through new
-  `QString`-sentinel invokables.
-- **M3–M5 (MCP tool wiring)** dispatch into the same `AppSession` commands
-  the UI adapter calls — MCP tool handlers become another thin adapter
-  over `AppSession`, exactly mirroring `bridge.rs`'s role, still queued
-  onto the Qt thread via `CxxQtThread` for any command that must emit a
-  UI-visible signal.
+  commands and typed `FfiResult`/`FfiOpenResult`s, identifying tabs by
+  `TabId` rather than index, from the start.
+- **M3–M5 (MCP tool wiring)** dispatch into the same `AppSession`
+  commands the UI adapter calls — MCP tool handlers become another thin
+  adapter over `AppSession`, exactly mirroring `bridge.rs`'s role, still
+  queued onto the Qt thread via `CxxQtThread` for any command that must
+  emit a UI-visible signal. Tools identify tabs/buffers by `TabId` or
+  path, never by tab-strip index.
 - **C1 (`app-config` crate)** is unaffected by Phase 0 — it's a sibling
-  Qt-free crate, not part of the tree/document orchestration Phase 0
-  moves into `app-core`.
+  Qt-free crate, not part of the tree/document orchestration `app-core`
+  owns.
 
 ## Architecture decisions
 
@@ -198,14 +210,11 @@ since existing `qobject_cast<QPlainTextEdit*>` call sites keep working.
 **Sequenced before ADS** — smallest possible surface to first prove `moc`
 integration in `build.rs` works at all.
 
-**Tab reordering**: `setMovable(true)`; connect `tabBar()->tabMoved(from,
-to)` (new) to a new `DocumentManager::moveTab` invokable. Add
-`TabList::move_tab(&mut self, from, to)` to `editor-core` (re-homes
-`active` if it pointed at a moved index) with unit tests mirroring the
-existing `tablist_close_reindexes_active_tab` style. `EditorTabs::titles_`
-(the parallel `QStringList`) must also reorder in the `tabMoved` handler
-or the dirty-indicator title lookup silently desyncs — same discipline
-the code already applies to the closed-tab case.
+**Tab reordering**: `setMovable(true)` on `main_window.cpp`'s
+`QTabWidget`. No adapter or `app-core` change needed — per "Phase 0"
+above, `TabId` already rides as a dynamic property on each page widget
+and is looked up by scanning, not by a maintained index map, so a
+drag-reorder can't desynchronize anything. This is now a one-line task.
 
 **Syntax highlighting foundation**: `syntax-core` — `Language` enum
 (Rust, Json, PlainText) + extension map (shared later with the status
@@ -236,16 +245,20 @@ becomes a closure queued via the existing `CxxQtThread` pattern; a
 First-slice tools (read + write): `list_project_tree`,
 `list_open_buffers`, `read_buffer(path)`, `open_file(path)`,
 `edit_buffer(path, content)` (full-content replace for v1, mirroring
-`DocumentManager::saveTab`'s existing contract — no new range-based edit
+`AppSession::save_tab`'s existing contract — no new range-based edit
 protocol yet), `save_buffer(path)`, `get_cursor_position(path)` (needs a
-small new `DocumentManager::cursorPosition(index)` invokable, since
-cursor state currently lives only in the widget). Every write path routes
-through the same `DocumentManager` invokables the UI itself uses — no
-parallel MCP-only mutation path.
+small new `AppSession::cursor_position(TabId)` command + adapter
+invokable, since cursor state currently lives only in the widget; MCP
+resolves `path` to `TabId` the same way `AppSession::find_tab_by_path`
+already does internally). Every write path routes through the same
+`AppSession` commands the UI adapter calls — no parallel MCP-only
+mutation path.
 
 **Quick wins**:
-- *Save As* — `DocumentManager::saveTabAs` (reuses `Document::set_path` +
-  existing `save()`); watcher already picks up the new file for free.
+- *Save As* — new `AppSession::save_tab_as(TabId, PathBuf)` command
+  (reuses `Document::set_path` + existing `save()`), exposed as a
+  `DocumentManager::saveTabAs(tabId, path)` invokable; watcher already
+  picks up the new file for free.
 - *Exit + window geometry* — new `IdeMainWindow : public QMainWindow`
   subclass with `closeEvent()` reusing `EditorTabs::confirmCloseTab` per
   tab; `Exit` menu calls `window->close()` so both paths share one prompt
@@ -279,10 +292,10 @@ run in parallel except where noted.
 | C1 | Scaffold `app-config` crate | `Settings` struct (serde+toml), load/save, default-on-missing-file | `cargo test -p app-config`: round-trip, missing file → defaults, old/partial field doesn't panic |
 | C2 | Recent projects | push/dedupe/cap logic in `app-config`; `open_folder` success pushes to it; `File > Recent Projects` submenu | `cargo test -p app-config`; manual: open 3 folders, submenu correct order, click reopens |
 | L1 | `IdeMainWindow` + Exit + geometry persistence | subclass with `closeEvent()` reusing `confirmCloseTab`; Exit calls `window->close()`; geometry/state persisted | Manual: dirty tab + Exit prompts correctly; resize/move, relaunch, geometry restored |
-| L2 | Save As | `DocumentManager::saveTabAs` invokable; menu wired | Manual: Save As inside project — appears in tree via watcher, tab retitles, subsequent Ctrl+S targets new path |
+| L2 | Save As | `AppSession::save_tab_as` command + `DocumentManager::saveTabAs(tabId, path)` invokable; menu wired | Manual: Save As inside project — appears in tree via watcher, tab retitles, subsequent Ctrl+S targets new path |
 | L3 | Status bar | `QStatusBar`: line:col, UTF-8, language (needs Y1) | Manual: switch between `.rs`/`.json` tabs, labels correct |
 | G1 | `CodeEditor` gutter + first moc integration | `build.rs` invokes `moc` over `code_editor.h`; `CodeEditor`+`LineNumberArea`; `onTabOpened` uses `CodeEditor` | `cargo build` produces moc'd code; manual: gutter shows correct numbers, updates on scroll/edit; existing `qobject_cast` sites still work |
-| G2 | Tab reordering | `setMovable(true)`; `TabList::move_tab` + tests; `DocumentManager::moveTab` wired to `tabMoved`; `titles_` reordered | `cargo test -p editor-core`; manual: drag-reorder, dirty indicators and external-change prompts still target correct tab |
+| G2 | Tab reordering | `setMovable(true)` in `main_window.cpp` — no `app-core`/adapter change needed (see "Phase 0" above) | Manual: drag-reorder tabs; dirty indicators, close, and external-change prompts still target the correct (moved) tab |
 | T1 | QSS engine + Darcula | `.qss` loading mechanism; darcula default | Manual: app launches dark-themed, chrome restyled |
 | T2 | Light theme + live switch | `light.qss`; `setStyleSheet()` live switch | Manual: switch theme, restyles without restart |
 | S1 | Settings dialog shell | category list + stacked detail pane; Appearance page wired to T2 + persisted | Manual: change theme, OK, relaunch persists; Cancel discards |
@@ -296,8 +309,8 @@ run in parallel except where noted.
 | M1 | MCP transport spike | `rmcp` vs hand-rolled evaluated; one lands with a no-op tool | A minimal MCP/curl client calls the no-op tool and gets a response |
 | M2 | MCP ADR | write up M1's decision | Reviewed |
 | M3 | `EditorCommands` channel + thread wiring | `mcp-server` channel/trait; listener thread spawned in `run_app()`; wired via `CxxQtThread::queue()` | MCP `list_open_buffers` reflects UI-opened tabs in the same process |
-| M4 | First-slice read tools | `list_project_tree`, `list_open_buffers`, `read_buffer`, `get_cursor_position` (+ `DocumentManager::cursorPosition`) | MCP client reads match visible UI state |
-| M5 | First-slice write tools | `open_file`, `edit_buffer`, `save_buffer` via existing `DocumentManager` invokables | MCP client writes visibly affect UI; round-trips to disk match manual Ctrl+S |
+| M4 | First-slice read tools | `list_project_tree`, `list_open_buffers`, `read_buffer`, `get_cursor_position` (+ new `AppSession::cursor_position(TabId)` command) | MCP client reads match visible UI state |
+| M5 | First-slice write tools | `open_file`, `edit_buffer`, `save_buffer` via existing `AppSession` commands (same ones the UI adapter calls) | MCP client writes visibly affect UI; round-trips to disk match manual Ctrl+S |
 
 ## Verification approach
 
