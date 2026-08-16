@@ -40,7 +40,7 @@ per `CLAUDE.md`.
 | D2 | todo | |
 | D3 | todo | |
 | D4 | todo | |
-| M1 | todo | |
+| M1 | done | `74c0bef` |
 | M2 | todo | |
 | M3 | todo | |
 | M4 | todo | |
