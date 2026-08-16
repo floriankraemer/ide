@@ -23,7 +23,7 @@ per `CLAUDE.md`.
 | R5 | done | `1099c15` |
 | R6 | done | `1099c15` |
 | R7 | done | `05fe5ce` (docs sync swept in earlier; plan doc itself fixed here) |
-| C1 | todo | |
+| C1 | done | `ec078c1` |
 | C2 | todo | |
 | L1 | todo | |
 | L2 | todo | |
@@ -34,7 +34,7 @@ per `CLAUDE.md`.
 | T2 | todo | |
 | S1 | todo | |
 | S2 | todo | |
-| Y1 | todo | |
+| Y1 | done | `1475e3f` |
 | Y2 | todo | |
 | D1 | todo | |
 | D2 | todo | |
