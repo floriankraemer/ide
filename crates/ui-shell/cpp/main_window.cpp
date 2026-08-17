@@ -842,6 +842,10 @@ QMainWindow *buildMainWindow()
 
     auto *treeModel = new ProjectTreeModel(window);
     auto *docManager = new DocumentManager(window);
+    // M3: one MCP server per process, started once right after the shared
+    // DocumentManager exists — the listener thread it spawns dispatches
+    // every EditorCommand back onto this same QObject's Qt thread.
+    docManager->startMcpServer();
     const CentralWidgets central = buildCentralWidget(window, treeModel, docManager, appSettings);
     EditorTabs *editorTabs = central.editorTabs;
     window->setEditorTabs(editorTabs);

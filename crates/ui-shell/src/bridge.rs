@@ -420,7 +420,23 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "reloadTabFromDisk"]
         fn reload_tab_from_disk(self: Pin<&mut DocumentManager>, tab_id: u64) -> FfiResult;
+
+        /// Starts the MCP transport on a dedicated background thread (its
+        /// own Tokio runtime, since `run_app()`'s Qt event loop isn't async)
+        /// and the `EditorCommand` listener loop that marshals each command
+        /// onto this QObject's own `CxxQtThread` (M3). Call exactly once,
+        /// right after constructing the `DocumentManager` — there is only
+        /// ever one MCP server per process, mirroring the one shared
+        /// `AppSession`.
+        #[qinvokable]
+        #[cxx_name = "startMcpServer"]
+        fn start_mcp_server(self: Pin<&mut DocumentManager>);
     }
+
+    // Enables `self.qt_thread()` on `DocumentManager` — the MCP listener
+    // thread's one cross-thread hop (M3), same `CxxQtThread::queue()`
+    // pattern `ProjectTreeModel`'s watcher relay above already established.
+    impl cxx_qt::Threading for DocumentManager {}
 
     extern "RustQt" {
         /// Settings-I/O adapter (L1 window geometry/state, C2 recent
@@ -1118,6 +1134,48 @@ impl ffi::DocumentManager {
             .borrow_mut()
             .reload_tab(TabId::from_raw(tab_id));
         to_ffi_result(result)
+    }
+
+    pub fn start_mcp_server(self: Pin<&mut Self>) {
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let Ok(runtime) = tokio::runtime::Runtime::new() else {
+                return;
+            };
+            runtime.block_on(async move {
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                let config_dir = app_core::resolve_config_dir();
+                // Held for the thread's lifetime — dropping it would shut
+                // the server down. No explicit shutdown wired up yet; the
+                // process exiting takes it down along with everything else.
+                let Ok(_server_handle) = mcp_server::start(&config_dir, tx).await else {
+                    return;
+                };
+                while let Some(cmd) = rx.recv().await {
+                    let _ = qt_thread.queue(move |doc_manager: Pin<&mut Self>| {
+                        dispatch_editor_command(doc_manager, cmd);
+                    });
+                }
+            });
+        });
+    }
+}
+
+/// Runs on the Qt thread (queued there by `start_mcp_server`'s listener):
+/// does the actual `AppSession`-mediated work for one `EditorCommand` and
+/// answers it through the command's own `oneshot::Sender`.
+fn dispatch_editor_command(doc_manager: Pin<&mut ffi::DocumentManager>, cmd: mcp_server::EditorCommand) {
+    match cmd {
+        mcp_server::EditorCommand::ListOpenBuffers(respond) => {
+            let buffers = doc_manager
+                .session
+                .borrow()
+                .open_tabs()
+                .into_iter()
+                .map(|(id, title)| mcp_server::BufferInfo { tab_id: id.raw(), title })
+                .collect();
+            let _ = respond.send(buffers);
+        }
     }
 }
 

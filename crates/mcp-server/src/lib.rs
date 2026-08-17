@@ -17,8 +17,35 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
+
+/// One open editor tab, as the MCP `list_open_buffers` tool reports it
+/// (M3/M4). Deliberately generic (no `app_core::TabId`) — this crate stays
+/// independent of `app-core`, per the plan's crate boundaries.
+#[derive(Debug, Clone, Serialize)]
+pub struct BufferInfo {
+    pub tab_id: u64,
+    pub title: String,
+}
+
+/// Commands the MCP transport sends to the running editor. `mcp-server`
+/// never touches editor state itself — it only defines the message shape;
+/// `ui-shell` is the (only) consumer, dispatching each command onto the
+/// relevant QObject's `CxxQtThread` (M3), reusing the exact cross-thread
+/// pattern `bridge.rs`'s filesystem-watcher relay already established. Each
+/// variant carries its own `oneshot::Sender` so the HTTP handler that sent
+/// it can `.await` the one reply it's waiting for, no correlation ids
+/// needed.
+pub enum EditorCommand {
+    ListOpenBuffers(oneshot::Sender<Vec<BufferInfo>>),
+}
+
+/// The channel half `mcp-server` holds and sends on; the caller (`ui-shell`)
+/// creates the `(sender, receiver)` pair, passes the sender to [`start`],
+/// and keeps the `mpsc::UnboundedReceiver<EditorCommand>` for itself to
+/// consume on its own listener thread.
+pub type EditorCommandSender = mpsc::UnboundedSender<EditorCommand>;
 
 /// `{port, token}` written to disk so an MCP client can discover a running
 /// instance without a fixed port. Lives at `<config_dir>/mcp-discovery.json`.
@@ -71,6 +98,24 @@ struct RpcError {
 #[derive(Clone)]
 struct AppState {
     token: String,
+    commands: EditorCommandSender,
+}
+
+/// The UI-thread listener isn't running yet, or has already shut down —
+/// either way the command couldn't reach (or come back from) the editor.
+/// Not a JSON-RPC framing problem, so this is a server-defined error code
+/// in the reserved application range, not one of the JSON-RPC spec's own
+/// codes (which top out at -32000).
+fn editor_unavailable_response(id: serde_json::Value) -> RpcResponse {
+    RpcResponse {
+        jsonrpc: "2.0",
+        id,
+        result: None,
+        error: Some(RpcError {
+            code: -32000,
+            message: "editor is not available".into(),
+        }),
+    }
 }
 
 async fn rpc_handler(
@@ -106,6 +151,23 @@ async fn rpc_handler(
             result: Some(serde_json::Value::String("pong".into())),
             error: None,
         },
+        "list_open_buffers" => {
+            let (respond, receive) = oneshot::channel();
+            match state.commands.send(EditorCommand::ListOpenBuffers(respond)) {
+                Err(_) => editor_unavailable_response(req.id),
+                Ok(()) => match receive.await {
+                    Ok(buffers) => RpcResponse {
+                        jsonrpc: "2.0",
+                        id: req.id,
+                        result: Some(
+                            serde_json::to_value(buffers).expect("Vec<BufferInfo> serializes"),
+                        ),
+                        error: None,
+                    },
+                    Err(_) => editor_unavailable_response(req.id),
+                },
+            }
+        }
         other => RpcResponse {
             jsonrpc: "2.0",
             id: req.id,
@@ -137,9 +199,12 @@ impl ServerHandle {
     }
 }
 
-/// Start the spike MCP server on an OS-assigned 127.0.0.1 port, write the
-/// discovery file into `config_dir`, and return a handle to it.
-pub async fn start(config_dir: &Path) -> io::Result<ServerHandle> {
+/// Start the MCP server on an OS-assigned 127.0.0.1 port, write the
+/// discovery file into `config_dir`, and return a handle to it. `commands`
+/// is where editor-touching tool calls (`list_open_buffers`, …) send their
+/// `EditorCommand`s — the caller owns the matching receiver and is
+/// responsible for actually running the editor side of each command (M3).
+pub async fn start(config_dir: &Path, commands: EditorCommandSender) -> io::Result<ServerHandle> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let port = listener.local_addr()?.port();
     let token = generate_token();
@@ -151,7 +216,7 @@ pub async fn start(config_dir: &Path) -> io::Result<ServerHandle> {
         serde_json::to_string_pretty(&discovery).expect("Discovery serializes"),
     )?;
 
-    let state = AppState { token };
+    let state = AppState { token, commands };
     let app = Router::new().route("/rpc", post(rpc_handler)).with_state(state.clone());
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
@@ -179,7 +244,8 @@ mod tests {
     #[tokio::test]
     async fn ping_round_trips_over_http_with_valid_token() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = start(dir.path()).await.unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let handle = start(dir.path(), tx).await.unwrap();
 
         let client = reqwest::Client::new();
         let resp = client
@@ -200,7 +266,8 @@ mod tests {
     #[tokio::test]
     async fn wrong_token_is_rejected() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = start(dir.path()).await.unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let handle = start(dir.path(), tx).await.unwrap();
 
         let client = reqwest::Client::new();
         let resp = client
@@ -216,9 +283,67 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_open_buffers_round_trips_through_the_command_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = start(dir.path(), tx).await.unwrap();
+
+        // Stands in for ui-shell's real listener thread (M3): answers the
+        // one command this test sends with a canned buffer list.
+        tokio::spawn(async move {
+            if let Some(EditorCommand::ListOpenBuffers(respond)) = rx.recv().await {
+                let _ = respond.send(vec![BufferInfo {
+                    tab_id: 1,
+                    title: "a.rs".to_string(),
+                }]);
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/rpc", handle.port))
+            .bearer_auth(&handle.token)
+            .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "list_open_buffers"}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["result"][0]["tab_id"], 1);
+        assert_eq!(body["result"][0]["title"], "a.rs");
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn list_open_buffers_with_no_listener_returns_editor_unavailable_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        drop(rx); // No listener thread running — send() will fail.
+        let handle = start(dir.path(), tx).await.unwrap();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/rpc", handle.port))
+            .bearer_auth(&handle.token)
+            .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "list_open_buffers"}))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), 200);
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"]["code"], -32000);
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn unknown_method_returns_rpc_error_not_http_error() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = start(dir.path()).await.unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let handle = start(dir.path(), tx).await.unwrap();
 
         let client = reqwest::Client::new();
         let resp = client
@@ -239,7 +364,8 @@ mod tests {
     #[tokio::test]
     async fn discovery_file_is_written_with_matching_port_and_token() {
         let dir = tempfile::tempdir().unwrap();
-        let handle = start(dir.path()).await.unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let handle = start(dir.path(), tx).await.unwrap();
 
         let contents = std::fs::read_to_string(discovery_file_path(dir.path())).unwrap();
         let discovery: Discovery = serde_json::from_str(&contents).unwrap();

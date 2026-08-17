@@ -1919,8 +1919,10 @@ dependencies = [
  "cxx-qt-build",
  "cxx-qt-lib",
  "editor-core",
+ "mcp-server",
  "project-model",
  "syntax-core",
+ "tokio",
 ]
 
 [[package]]

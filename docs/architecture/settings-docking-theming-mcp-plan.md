@@ -42,7 +42,7 @@ per `CLAUDE.md`.
 | D4 | done | `9420ed8` (Docker `linux-artifact` **and** `windows-artifact` both build/link clean; manual float-sidebar/relaunch-restored pass not run, no display here) |
 | M1 | done | `74c0bef` |
 | M2 | done | `16302d2` (docs only — ADR-0004) |
-| M3 | todo | |
+| M3 | done | `pending` (`cargo test -p mcp-server -p app-core`; Qt-leakage gate clean on `mcp-server`; Docker `linux-artifact` build verified; MCP-client-against-running-UI round trip not run, no display here) |
 | M4 | todo | |
 | M5 | todo | |
 

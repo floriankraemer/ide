@@ -358,6 +358,15 @@ impl AppSession {
         self.doc(id).map(|d| d.content())
     }
 
+    /// Snapshot of every open tab's id and display title, in opening order
+    /// (MCP's `list_open_buffers` tool, M3/M4).
+    pub fn open_tabs(&self) -> Vec<(TabId, String)> {
+        self.docs
+            .iter()
+            .map(|e| (e.id, self.tab_title(e.id).unwrap_or_default()))
+            .collect()
+    }
+
     /// The tab's backing file extension (no leading dot, lowercased), used
     /// to pick a highlighting language (Y2). `None` for an extensionless
     /// file — the view treats that the same as an unrecognized extension.
@@ -687,6 +696,23 @@ mod tests {
             .save_tab_as(TabId::from_raw(999), project_dir.path().join("x.txt"), "x")
             .unwrap_err();
         assert_eq!(err.code(), AppError::CODE_NO_SUCH_TAB);
+    }
+
+    #[test]
+    fn open_tabs_reflects_opening_order_and_titles() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let a = session
+            .open_file(&project_dir.path().join("a.txt"))
+            .unwrap();
+        fs::write(project_dir.path().join("b.txt"), "beta").unwrap();
+        let b = session
+            .open_file(&project_dir.path().join("b.txt"))
+            .unwrap();
+
+        assert_eq!(
+            session.open_tabs(),
+            vec![(a.id, "a.txt".to_string()), (b.id, "b.txt".to_string())]
+        );
     }
 
     #[test]

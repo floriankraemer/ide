@@ -9,6 +9,8 @@ app-config = { path = "../app-config" }
 editor-core = { path = "../editor-core" }
 project-model = { path = "../project-model" }
 syntax-core = { path = "../syntax-core" }
+mcp-server = { path = "../mcp-server" }
+tokio = { version = "1", features = ["rt-multi-thread"] }
 cxx = "1"
 cxx-qt = "0.9"
 cxx-qt-lib = "0.9"
