@@ -4,7 +4,10 @@
 //! wraps [`highlight`] behind a `QSyntaxHighlighter` adapter later. This
 //! crate only classifies bytes of already-loaded text into spans.
 
-use tree_sitter::{Node, Parser};
+use std::sync::LazyLock;
+
+use streaming_iterator::StreamingIterator;
+use tree_sitter::{Parser, Query, QueryCursor};
 
 /// Languages this crate can highlight. Two starter grammars per the
 /// syntax-highlighting-foundation plan (Rust, JSON) plus a no-op fallback.
@@ -56,83 +59,107 @@ pub struct HighlightSpan {
     pub kind: TokenKind,
 }
 
+/// A `highlights.scm` query, compiled once per language and reused across
+/// calls. Grammar + query text are bundled into the binary via
+/// `include_str!`/`LANGUAGE` constants so highlighting works identically
+/// under `cargo test` and in the packaged app — no runtime file loading.
+struct QueryLanguage {
+    grammar: tree_sitter::Language,
+    query: Query,
+}
+
+fn rust_query_language() -> &'static QueryLanguage {
+    static RUST: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        let query = Query::new(
+            &grammar,
+            include_str!("../queries/rust/highlights.scm"),
+        )
+        .expect("rust highlights.scm must compile against tree-sitter-rust's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &RUST
+}
+
+fn json_query_language() -> &'static QueryLanguage {
+    static JSON: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
+        let query = Query::new(
+            &grammar,
+            include_str!("../queries/json/highlights.scm"),
+        )
+        .expect("json highlights.scm must compile against tree-sitter-json's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &JSON
+}
+
+fn query_language_for(language: Language) -> Option<&'static QueryLanguage> {
+    match language {
+        Language::Rust => Some(rust_query_language()),
+        Language::Json => Some(json_query_language()),
+        Language::PlainText => None,
+    }
+}
+
+/// Map a query capture name (`@keyword`, `@string`, ...) onto the existing
+/// `TokenKind` taxonomy. Captures with no mapping (there are none today,
+/// since every capture in our `.scm` files is one of these six) are
+/// dropped, mirroring the old hand-matcher's `_ => None` arm.
+fn token_kind_for_capture(capture_name: &str) -> Option<TokenKind> {
+    match capture_name {
+        "keyword" => Some(TokenKind::Keyword),
+        "string" => Some(TokenKind::String),
+        "comment" => Some(TokenKind::Comment),
+        "number" => Some(TokenKind::Number),
+        "function" => Some(TokenKind::Function),
+        "type" => Some(TokenKind::Type),
+        _ => None,
+    }
+}
+
 /// Highlight `text` as `language`, returning spans in document order.
 ///
-/// v1 ceiling: whole-buffer parse on every call, no incremental
-/// `InputEdit` reparse — see decision A6 for the upgrade path.
+/// Stateless one-shot convenience wrapper: parses fresh and discards the
+/// tree. For repeated highlighting of an evolving document, prefer
+/// [`Highlighter`], which keeps a persistent tree and reparses
+/// incrementally.
 pub fn highlight(language: Language, text: &str) -> Vec<HighlightSpan> {
-    let grammar = match language {
-        Language::Rust => tree_sitter_rust::LANGUAGE.into(),
-        Language::Json => tree_sitter_json::LANGUAGE.into(),
-        Language::PlainText => return Vec::new(),
+    let Some(ql) = query_language_for(language) else {
+        return Vec::new();
     };
-
     let mut parser = Parser::new();
-    if parser.set_language(&grammar).is_err() {
+    if parser.set_language(&ql.grammar).is_err() {
         return Vec::new();
     }
     let Some(tree) = parser.parse(text, None) else {
         return Vec::new();
     };
+    spans_from_tree(ql, &tree, text)
+}
 
+fn spans_from_tree(
+    ql: &QueryLanguage,
+    tree: &tree_sitter::Tree,
+    text: &str,
+) -> Vec<HighlightSpan> {
     let mut spans = Vec::new();
-    collect_spans(language, tree.root_node(), &mut spans);
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&ql.query, tree.root_node(), text.as_bytes());
+    while let Some(m) = matches.next() {
+        for capture in m.captures {
+            let capture_name = ql.query.capture_names()[capture.index as usize];
+            if let Some(kind) = token_kind_for_capture(capture_name) {
+                spans.push(HighlightSpan {
+                    start: capture.node.start_byte(),
+                    end: capture.node.end_byte(),
+                    kind,
+                });
+            }
+        }
+    }
+    spans.sort_by_key(|span| (span.start, span.end));
     spans
-}
-
-fn collect_spans(language: Language, node: Node, spans: &mut Vec<HighlightSpan>) {
-    if let Some(kind) = classify(language, node) {
-        spans.push(HighlightSpan {
-            start: node.start_byte(),
-            end: node.end_byte(),
-            kind,
-        });
-    }
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_spans(language, child, spans);
-    }
-}
-
-fn classify(language: Language, node: Node) -> Option<TokenKind> {
-    match language {
-        Language::Rust => classify_rust(node),
-        Language::Json => classify_json(node),
-        Language::PlainText => None,
-    }
-}
-
-/// Node-kind classification for the `tree-sitter-rust` grammar. Driven by
-/// inspecting the grammar's own node kinds rather than a bundled
-/// `highlights.scm` query, since this is a foundation-level v1 (see A6).
-fn classify_rust(node: Node) -> Option<TokenKind> {
-    match node.kind() {
-        "line_comment" | "block_comment" => Some(TokenKind::Comment),
-        "string_literal" | "raw_string_literal" | "char_literal" => Some(TokenKind::String),
-        "integer_literal" | "float_literal" => Some(TokenKind::Number),
-        "type_identifier" | "primitive_type" => Some(TokenKind::Type),
-        "identifier" => match node.parent()?.kind() {
-            "function_item" | "call_expression" => Some(TokenKind::Function),
-            _ => None,
-        },
-        "fn" | "let" | "mut" | "pub" | "struct" | "enum" | "impl" | "trait" | "use" | "mod"
-        | "return" | "if" | "else" | "match" | "for" | "while" | "loop" | "break"
-        | "continue" | "const" | "static" | "async" | "await" | "move" | "ref" | "as"
-        | "where" | "unsafe" | "dyn" | "extern" | "in" | "self" | "super" | "crate" | "true"
-        | "false" => Some(TokenKind::Keyword),
-        _ => None,
-    }
-}
-
-/// Node-kind classification for the `tree-sitter-json` grammar. Standard
-/// JSON has no comments, so `TokenKind::Comment` is never produced here.
-fn classify_json(node: Node) -> Option<TokenKind> {
-    match node.kind() {
-        "string" => Some(TokenKind::String),
-        "number" => Some(TokenKind::Number),
-        "true" | "false" | "null" => Some(TokenKind::Keyword),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

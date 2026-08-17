@@ -1618,6 +1618,7 @@ dependencies = [
 name = "syntax-core"
 version = "0.1.0"
 dependencies = [
+ "streaming-iterator",
  "tree-sitter",
  "tree-sitter-json",
  "tree-sitter-rust",
