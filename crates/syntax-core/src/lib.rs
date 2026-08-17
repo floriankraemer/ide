@@ -1391,6 +1391,19 @@ mod tests {
     }
 
     #[test]
+    fn csharp_outline_captures_auto_properties_as_fields() {
+        const SNIPPET: &str = "class Person {\n    public string Name { get; set; }\n}\n";
+        let roots = outline(Language::CSharp, SNIPPET);
+        let person = roots
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "Person")
+            .expect("expected a Person class root");
+        assert_eq!(person.children.len(), 1);
+        assert_eq!(person.children[0].kind, SymbolKind::Field);
+        assert_eq!(person.children[0].name, "Name");
+    }
+
+    #[test]
     fn java_outline_nests_methods_under_class() {
         let roots = outline(Language::Java, JAVA_SNIPPET);
         let greeter = roots

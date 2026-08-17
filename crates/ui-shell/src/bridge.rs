@@ -707,6 +707,43 @@ mod ffi {
         #[cxx_name = "searchFailed"]
         fn search_failed(self: Pin<&mut SearchModel>, message: QString);
 
+        /// Quick Open's full-text half (user-requested "Search Everywhere"
+        /// merge of Find in Files results into Go to Symbol): a literal
+        /// substring search over the same index, kept as its own
+        /// invokable/signal trio — same reasoning as `symbolSearch` below
+        /// keeping its own signal rather than reusing `projectSymbolFound`
+        /// — so `QuickOpenDialog` and `FindInFilesPanel` don't leak results
+        /// into each other despite sharing one `SearchModel`.
+        #[qinvokable]
+        #[cxx_name = "quickOpenTextSearch"]
+        fn quick_open_text_search(self: Pin<&mut SearchModel>, query: &QString);
+
+        /// One Quick Open text match: same payload shape as
+        /// `searchMatchFound`.
+        #[qsignal]
+        #[cxx_name = "quickOpenTextMatchFound"]
+        fn quick_open_text_match_found(
+            self: Pin<&mut SearchModel>,
+            path: QString,
+            line: u32,
+            start: u32,
+            end: u32,
+            snippet: QString,
+        );
+
+        /// Emitted once after the last `quickOpenTextMatchFound` of a
+        /// `quickOpenTextSearch` call (including when there were zero
+        /// matches).
+        #[qsignal]
+        #[cxx_name = "quickOpenTextSearchFinished"]
+        fn quick_open_text_search_finished(self: Pin<&mut SearchModel>);
+
+        /// Emitted instead of `quickOpenTextSearchFinished` when
+        /// `quickOpenTextSearch` couldn't run at all (no index built yet).
+        #[qsignal]
+        #[cxx_name = "quickOpenTextSearchFailed"]
+        fn quick_open_text_search_failed(self: Pin<&mut SearchModel>, message: QString);
+
         /// Class View's project-wide tier (Task I): list every indexed
         /// symbol *definition* across the whole project — same
         /// `index_core::TextIndex` this QObject already owns for Find in
@@ -1826,6 +1863,62 @@ impl ffi::SearchModel {
                     let message = err.to_string();
                     let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
                         model.as_mut().search_failed(QString::from(message.as_str()));
+                    });
+                }
+            }
+        });
+    }
+
+    /// Quick Open's full-text half — same shape as `search` above (literal
+    /// substring, background thread, per-match signal), just emitting the
+    /// dedicated `quick_open_text_*` signals instead of `search`'s so
+    /// `FindInFilesPanel` (which listens to `search_match_found`) never
+    /// sees these results.
+    pub fn quick_open_text_search(self: Pin<&mut Self>, query: &QString) {
+        let pattern = query.to_string();
+        let qt_thread = self.qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            let guard = slot.lock().unwrap();
+            let Some(index) = guard.as_ref() else {
+                drop(guard);
+                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                    model
+                        .as_mut()
+                        .quick_open_text_search_failed(QString::from("No project is open yet."));
+                });
+                return;
+            };
+            let result = index.search(&pattern, false);
+            drop(guard);
+            match result {
+                Ok(matches) => {
+                    for m in matches {
+                        let snippet = line_snippet(&m.path, m.line);
+                        let path = QString::from(m.path.to_string_lossy().as_ref());
+                        let line = m.line as u32;
+                        let start = m.start as u32;
+                        let end = m.end as u32;
+                        let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                            model.as_mut().quick_open_text_match_found(
+                                path,
+                                line,
+                                start,
+                                end,
+                                QString::from(snippet.as_str()),
+                            );
+                        });
+                    }
+                    let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                        model.as_mut().quick_open_text_search_finished();
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model
+                            .as_mut()
+                            .quick_open_text_search_failed(QString::from(message.as_str()));
                     });
                 }
             }

@@ -13,3 +13,4 @@
 (field_declaration
   (variable_declaration
     (variable_declarator name: (identifier) @name))) @definition.field
+(property_declaration name: (identifier) @name) @definition.field

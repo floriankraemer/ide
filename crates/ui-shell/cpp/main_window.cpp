@@ -31,6 +31,7 @@
 #include <QListWidget>
 #include <QStatusBar>
 #include <QTextCursor>
+#include <QToolButton>
 #include <memory>
 #include <QMainWindow>
 #include <QMenu>
@@ -684,11 +685,29 @@ public:
         modeCombo_->addItem(tr("Current File"));
         modeCombo_->addItem(tr("Project"));
 
+        // PhpStorm-style toggle: off (default) shows definition order,
+        // on sorts each tree level alphabetically by its item text — the
+        // symbol name is the leading token so text sort already reads as
+        // name sort, no per-item comparator needed.
+        sortButton_ = new QToolButton(this);
+        sortButton_->setText(tr("A→Z"));
+        sortButton_->setToolTip(tr("Sort Alphabetically"));
+        sortButton_->setCheckable(true);
+        connect(sortButton_, &QToolButton::toggled, this, [this](bool on) {
+            tree_->setSortingEnabled(on);
+            if (on) {
+                tree_->sortByColumn(0, Qt::AscendingOrder);
+            }
+        });
+
         tree_ = new QTreeWidget(this);
         tree_->setHeaderHidden(true);
         tree_->setContextMenuPolicy(Qt::CustomContextMenu);
+        auto *topLayout = new QHBoxLayout();
+        topLayout->addWidget(modeCombo_, 1);
+        topLayout->addWidget(sortButton_);
         auto *layout = new QVBoxLayout(this);
-        layout->addWidget(modeCombo_);
+        layout->addLayout(topLayout);
         layout->addWidget(tree_);
 
         connect(tree_, &QTreeWidget::itemDoubleClicked, this, &ClassViewPanel::onItemDoubleClicked);
@@ -842,6 +861,7 @@ private:
     std::function<void(const QString &)> onFindUsagesRequested_;
     QTreeWidget *tree_ = nullptr;
     QComboBox *modeCombo_ = nullptr;
+    QToolButton *sortButton_ = nullptr;
     bool projectMode_ = false;
     QHash<QString, QTreeWidgetItem *> fileItems_;
     QHash<QString, QTreeWidgetItem *> containerItems_;
@@ -964,6 +984,15 @@ public:
                     resultsList_->clear();
                     new QListWidgetItem(tr("Search failed: %1").arg(message), resultsList_);
                 });
+
+        // User-requested "Search Everywhere" merge: fold Find in Files'
+        // full-text results into this same dialog, in a second labeled
+        // section below the symbol results. Kept on a dedicated signal
+        // (`quickOpenTextMatchFound`, not `searchMatchFound`) so this
+        // dialog's queries never leak into `FindInFilesPanel`'s list —
+        // both listen off the one shared `SearchModel` instance.
+        connect(searchModel_, &SearchModel::quickOpenTextMatchFound, this,
+                &QuickOpenDialog::addTextResult);
     }
 
     // Wired to the "Go to Symbol..." menu action/shortcut: reset to a blank
@@ -982,6 +1011,8 @@ private:
     void runQuery(const QString &text)
     {
         resultsList_->clear();
+        textSeparator_ = nullptr;
+        textResultCount_ = 0;
         if (text.isEmpty()) {
             return;
         }
@@ -992,6 +1023,7 @@ private:
         // that's ever visible in practice at the query volumes this
         // dialog sees.
         searchModel_->symbolSearch(text);
+        searchModel_->quickOpenTextSearch(text);
     }
 
     void addResult(const QString &path, quint32 line, FfiSymbolKind kind, const QString &name,
@@ -1012,6 +1044,36 @@ private:
         }
     }
 
+    // Task J's full-text half: one Find-in-Files-style match, appended
+    // under a "Text matches" separator that's inserted lazily on the first
+    // hit (so an empty section never appears). Capped — this dialog is a
+    // narrow quick-open list, not an exhaustive results view; Find in
+    // Files stays the place for that.
+    // ponytail: cap is a fixed constant, not user-configurable; raise it
+    // if 30 ever feels too tight in practice.
+    void addTextResult(const QString &path, quint32 line, quint32 start, quint32 end,
+                        const QString &snippet)
+    {
+        Q_UNUSED(start);
+        Q_UNUSED(end);
+        static constexpr int kMaxTextResults = 30;
+        if (textResultCount_ >= kMaxTextResults) {
+            return;
+        }
+        if (!textSeparator_) {
+            textSeparator_ = new QListWidgetItem(tr("Text matches"), resultsList_);
+            textSeparator_->setFlags(Qt::NoItemFlags);
+            QFont font = textSeparator_->font();
+            font.setBold(true);
+            textSeparator_->setFont(font);
+        }
+        auto *item = new QListWidgetItem(
+          tr("%1 — %2:%3").arg(snippet, QFileInfo(path).fileName()).arg(line), resultsList_);
+        item->setData(Qt::UserRole, path);
+        item->setData(Qt::UserRole + 1, line);
+        ++textResultCount_;
+    }
+
     void openCurrent() { openItem(resultsList_->currentItem()); }
 
     void openItem(QListWidgetItem *item)
@@ -1019,8 +1081,12 @@ private:
         if (!item) {
             return;
         }
-        editorTabs_->openFileAtLine(item->data(Qt::UserRole).toString(),
-                                     item->data(Qt::UserRole + 1).toInt(), 0);
+        const QVariant pathData = item->data(Qt::UserRole);
+        if (!pathData.isValid()) {
+            // The "Text matches" separator carries no data.
+            return;
+        }
+        editorTabs_->openFileAtLine(pathData.toString(), item->data(Qt::UserRole + 1).toInt(), 0);
         accept();
     }
 
@@ -1028,6 +1094,8 @@ private:
     EditorTabs *editorTabs_;
     QLineEdit *queryEdit_ = nullptr;
     QListWidget *resultsList_ = nullptr;
+    QListWidgetItem *textSeparator_ = nullptr;
+    int textResultCount_ = 0;
 };
 
 // Subclassed so closeEvent() can run the same unsaved-changes prompt as
