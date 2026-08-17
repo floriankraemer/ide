@@ -17,7 +17,7 @@ per `CLAUDE.md`.
 | D | open | |
 | E1 | open | |
 | F1 | done | 178ac09 |
-| F2 | done | pending |
+| F2 | done | bf0b6a7 |
 | F3 | open | |
 | G1 | done | 49f0320 |
 | H | open | |
