@@ -328,6 +328,33 @@ impl AppSession {
         Ok(())
     }
 
+    /// Replace the tab's in-memory content and mark it dirty, without
+    /// writing to disk (MCP's `edit_buffer` tool, M5 — an MCP client edits
+    /// live, same as a human typing, then decides separately whether/when
+    /// to save). The caller (adapter) is responsible for telling the view
+    /// to reflect the new content in its widget, mirroring how `save_tab`'s
+    /// caller already owns telling the view the dirty flag changed.
+    pub fn edit_tab(&mut self, id: TabId, content: &str) -> Result<(), AppError> {
+        let doc = self.doc_mut(id).ok_or(AppError::NoSuchTab)?;
+        doc.replace_content(content);
+        doc.set_dirty(true);
+        Ok(())
+    }
+
+    /// Write the tab's *current* in-memory content to disk (MCP's
+    /// `save_buffer` tool, M5) — unlike `save_tab`, takes no `content`
+    /// parameter, since the caller here is the tab's own content (set by
+    /// `edit_tab` or the original file load), not a live widget whose
+    /// keystrokes were never synced into the rope (ADR-0003 — that
+    /// asymmetry is why `save_tab` needs `content` and this doesn't).
+    pub fn save_buffer(&mut self, id: TabId) -> Result<(), AppError> {
+        let doc = self.doc_mut(id).ok_or(AppError::NoSuchTab)?;
+        let path = doc.path().to_path_buf();
+        doc.save().map_err(AppError::Save)?;
+        self.suppressed_changes.insert(path, Instant::now());
+        Ok(())
+    }
+
     /// Update which tab is considered active. Ignores unknown ids (the tab
     /// strip can report a page that was closed in the same event burst).
     pub fn set_active_tab(&mut self, id: TabId) {
@@ -804,6 +831,48 @@ mod tests {
         assert_eq!(session.tab_extension(no_ext_tab.id), None);
 
         assert_eq!(session.tab_extension(TabId::from_raw(999)), None);
+    }
+
+    #[test]
+    fn edit_tab_updates_content_and_dirty_flag_without_writing_to_disk() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let path = project_dir.path().join("a.txt");
+        let tab = session.open_file(&path).unwrap();
+
+        session.edit_tab(tab.id, "edited in memory").unwrap();
+
+        assert_eq!(session.tab_content(tab.id).unwrap(), "edited in memory");
+        assert_eq!(session.tab_is_dirty(tab.id), Some(true));
+        assert_eq!(fs::read_to_string(&path).unwrap(), "alpha");
+    }
+
+    #[test]
+    fn edit_tab_with_unknown_id_is_no_such_tab() {
+        let (_project_dir, _config, mut session) = session_with_project();
+        let err = session.edit_tab(TabId::from_raw(999), "x").unwrap_err();
+        assert_eq!(err.code(), AppError::CODE_NO_SUCH_TAB);
+    }
+
+    #[test]
+    fn save_buffer_writes_the_tabs_current_content_and_clears_dirty() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let path = project_dir.path().join("a.txt");
+        let tab = session.open_file(&path).unwrap();
+        session.edit_tab(tab.id, "saved via mcp").unwrap();
+
+        session.save_buffer(tab.id).unwrap();
+
+        assert_eq!(fs::read_to_string(&path).unwrap(), "saved via mcp");
+        assert_eq!(session.tab_is_dirty(tab.id), Some(false));
+        // The watcher's echo of our own write must not be an external change.
+        assert_eq!(session.check_external_change(&path), None);
+    }
+
+    #[test]
+    fn save_buffer_with_unknown_id_is_no_such_tab() {
+        let (_project_dir, _config, mut session) = session_with_project();
+        let err = session.save_buffer(TabId::from_raw(999)).unwrap_err();
+        assert_eq!(err.code(), AppError::CODE_NO_SUCH_TAB);
     }
 
     #[test]

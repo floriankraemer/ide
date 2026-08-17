@@ -208,6 +208,26 @@ public:
         renderTabText(index, title, docManager_->tabIsModified(tabId));
     }
 
+    // M5: an MCP client's edit_buffer call changed the tab's content —
+    // reflect it in the widget immediately, no prompt (unlike a disk
+    // change, this came through the same session the widget already
+    // trusts). editor->document()->setModified(true) mirrors what
+    // onTabOpened's own modificationChanged forwarding would have done had
+    // a human typed the same edit.
+    void onBufferEditedExternally(quint64 tabId, const QString &content)
+    {
+        const int index = indexOfTab(tabId);
+        if (index < 0) {
+            return;
+        }
+        auto *editor = qobject_cast<QPlainTextEdit *>(tabWidget_->widget(index));
+        if (!editor) {
+            return;
+        }
+        editor->setPlainText(content);
+        editor->document()->setModified(true);
+    }
+
     // US-3's external-change prompt: the tab `tabId` (backed by `path`) was
     // modified outside the editor (filesystem watcher). "Reload" re-reads
     // the file from disk, discarding in-editor edits; "Keep" leaves the
@@ -695,6 +715,16 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                       editorTabs,
                       [editorTabs](quint64 tabId, const QString &path) {
                           editorTabs->handleExternalChange(tabId, path);
+                      });
+
+    // MCP's edit_buffer tool (M5) changed a tab's content (M3's listener
+    // thread relayed it here via CxxQtThread::queue already) — reflect it
+    // in the widget.
+    QObject::connect(docManager,
+                      &DocumentManager::bufferEditedExternally,
+                      editorTabs,
+                      [editorTabs](quint64 tabId, const QString &content) {
+                          editorTabs->onBufferEditedExternally(tabId, content);
                       });
 
     // A tree-driven rename/delete retitled an open tab (US-2b).

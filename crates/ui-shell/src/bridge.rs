@@ -320,6 +320,14 @@ mod ffi {
         #[cxx_name = "externalChangeDetected"]
         fn external_change_detected(self: Pin<&mut DocumentManager>, tab_id: u64, path: QString);
 
+        /// Emitted after MCP's `edit_buffer` tool (M5) changes a tab's
+        /// content — the tab strip replaces the widget's text so the edit
+        /// is visible, the same "session decides, view displays" split
+        /// every other cross-thread/external mutation in this file uses.
+        #[qsignal]
+        #[cxx_name = "bufferEditedExternally"]
+        fn buffer_edited_externally(self: Pin<&mut DocumentManager>, tab_id: u64, content: QString);
+
         /// Open `path` as a new tab, or focus its existing tab if already
         /// open (US-3: focus-not-duplicate). The session enforces the
         /// binary-open rule (US-2b); the UI branches on the returned code
@@ -1177,7 +1185,7 @@ impl ffi::DocumentManager {
 /// Runs on the Qt thread (queued there by `start_mcp_server`'s listener):
 /// does the actual `AppSession`-mediated work for one `EditorCommand` and
 /// answers it through the command's own `oneshot::Sender`.
-fn dispatch_editor_command(doc_manager: Pin<&mut ffi::DocumentManager>, cmd: mcp_server::EditorCommand) {
+fn dispatch_editor_command(mut doc_manager: Pin<&mut ffi::DocumentManager>, cmd: mcp_server::EditorCommand) {
     match cmd {
         mcp_server::EditorCommand::ListOpenBuffers(respond) => {
             let buffers = doc_manager
@@ -1213,6 +1221,44 @@ fn dispatch_editor_command(doc_manager: Pin<&mut ffi::DocumentManager>, cmd: mcp
                 .cursor_position(TabId::from_raw(tab_id))
                 .map(|(line, column)| mcp_server::CursorPosition { line, column });
             let _ = respond.send(position);
+        }
+        mcp_server::EditorCommand::OpenFile { path, respond } => {
+            // Reuses the openFile invokable's own body verbatim (path
+            // translation, session call, tabOpened emission on a new tab)
+            // rather than duplicating it — MCP and the UI's "Open File"
+            // dialog end up on the exact same path.
+            let result = doc_manager.as_mut().open_file(&QString::from(path.as_str()));
+            let mapped = if result.code == 0 {
+                Ok(result.tab_id)
+            } else {
+                Err(result.message.to_string())
+            };
+            let _ = respond.send(mapped);
+        }
+        mcp_server::EditorCommand::EditBuffer { tab_id, content, respond } => {
+            let result = doc_manager
+                .session
+                .borrow_mut()
+                .edit_tab(TabId::from_raw(tab_id), &content);
+            let mapped = result.map_err(|err| err.to_string());
+            if mapped.is_ok() {
+                // Not tab_modified_changed too: the widget's own
+                // modificationChanged forwarding (installed in onTabOpened)
+                // already emits it once onBufferEditedExternally calls
+                // setModified(true) on the widget — one path, not two.
+                doc_manager
+                    .as_mut()
+                    .buffer_edited_externally(tab_id, QString::from(content.as_str()));
+            }
+            let _ = respond.send(mapped);
+        }
+        mcp_server::EditorCommand::SaveBuffer { tab_id, respond } => {
+            let result = doc_manager.session.borrow_mut().save_buffer(TabId::from_raw(tab_id));
+            let mapped = result.map_err(|err| err.to_string());
+            if mapped.is_ok() {
+                doc_manager.as_mut().tab_modified_changed(tab_id, false);
+            }
+            let _ = respond.send(mapped);
         }
     }
 }

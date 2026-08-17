@@ -64,6 +64,26 @@ pub enum EditorCommand {
         tab_id: u64,
         respond: oneshot::Sender<Option<CursorPosition>>,
     },
+    /// Open `path` as a new tab, or focus its existing tab if already open
+    /// — same semantics as the UI's own "Open File" (M5). `Ok` carries the
+    /// tab id; `Err` the same user-facing message an `AppError` would
+    /// display.
+    OpenFile {
+        path: String,
+        respond: oneshot::Sender<Result<u64, String>>,
+    },
+    /// Replace the tab's in-memory content, same as a human typing — does
+    /// not write to disk (M5; see `save_buffer` for that).
+    EditBuffer {
+        tab_id: u64,
+        content: String,
+        respond: oneshot::Sender<Result<(), String>>,
+    },
+    /// Write the tab's current in-memory content to disk (M5).
+    SaveBuffer {
+        tab_id: u64,
+        respond: oneshot::Sender<Result<(), String>>,
+    },
 }
 
 /// The channel half `mcp-server` holds and sends on; the caller (`ui-shell`)
@@ -121,6 +141,49 @@ fn required_tab_id(req: &RpcRequest) -> Result<u64, RpcResponse> {
                 message: "params.tab_id must be a non-negative integer".into(),
             }),
         })
+}
+
+/// Pull `params.<key>` out as a `String`, or a JSON-RPC "invalid params"
+/// error (`-32602`) response if it's missing or not a string.
+fn required_string(req: &RpcRequest, key: &str) -> Result<String, RpcResponse> {
+    req.params
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| RpcResponse {
+            jsonrpc: "2.0",
+            id: req.id.clone(),
+            result: None,
+            error: Some(RpcError {
+                code: -32602,
+                message: format!("params.{key} must be a string"),
+            }),
+        })
+}
+
+/// Translate a command's `Result<T, String>` reply into an `RpcResponse`,
+/// shared by the three write tools (M5) — success maps to `success()
+/// -> serde_json::Value`. and failure to a server-defined error code, not
+/// one of the JSON-RPC spec's own reserved ones.
+fn command_result_response<T>(
+    id: serde_json::Value,
+    result: Result<T, String>,
+    success: impl FnOnce(T) -> serde_json::Value,
+) -> RpcResponse {
+    match result {
+        Ok(value) => RpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: Some(success(value)),
+            error: None,
+        },
+        Err(message) => RpcResponse {
+            jsonrpc: "2.0",
+            id,
+            result: None,
+            error: Some(RpcError { code: -32001, message }),
+        },
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -264,6 +327,53 @@ async fn rpc_handler(
                             ),
                             error: None,
                         },
+                        Err(_) => editor_unavailable_response(req.id),
+                    },
+                }
+            }
+        },
+        "open_file" => match required_string(&req, "path") {
+            Err(response) => response,
+            Ok(path) => {
+                let (respond, receive) = oneshot::channel();
+                match state.commands.send(EditorCommand::OpenFile { path, respond }) {
+                    Err(_) => editor_unavailable_response(req.id),
+                    Ok(()) => match receive.await {
+                        Ok(result) => command_result_response(req.id, result, |tab_id| {
+                            serde_json::json!({ "tab_id": tab_id })
+                        }),
+                        Err(_) => editor_unavailable_response(req.id),
+                    },
+                }
+            }
+        },
+        "edit_buffer" => match required_tab_id(&req).and_then(|tab_id| {
+            required_string(&req, "content").map(|content| (tab_id, content))
+        }) {
+            Err(response) => response,
+            Ok((tab_id, content)) => {
+                let (respond, receive) = oneshot::channel();
+                match state.commands.send(EditorCommand::EditBuffer { tab_id, content, respond }) {
+                    Err(_) => editor_unavailable_response(req.id),
+                    Ok(()) => match receive.await {
+                        Ok(result) => {
+                            command_result_response(req.id, result, |()| serde_json::Value::Null)
+                        }
+                        Err(_) => editor_unavailable_response(req.id),
+                    },
+                }
+            }
+        },
+        "save_buffer" => match required_tab_id(&req) {
+            Err(response) => response,
+            Ok(tab_id) => {
+                let (respond, receive) = oneshot::channel();
+                match state.commands.send(EditorCommand::SaveBuffer { tab_id, respond }) {
+                    Err(_) => editor_unavailable_response(req.id),
+                    Ok(()) => match receive.await {
+                        Ok(result) => {
+                            command_result_response(req.id, result, |()| serde_json::Value::Null)
+                        }
                         Err(_) => editor_unavailable_response(req.id),
                     },
                 }
@@ -549,6 +659,128 @@ mod tests {
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["result"]["line"], 2);
         assert_eq!(body["result"]["column"], 5);
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn open_file_round_trips_through_the_command_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = start(dir.path(), tx).await.unwrap();
+
+        tokio::spawn(async move {
+            if let Some(EditorCommand::OpenFile { path, respond }) = rx.recv().await {
+                assert_eq!(path, "/proj/a.txt");
+                let _ = respond.send(Ok(42));
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/rpc", handle.port))
+            .bearer_auth(&handle.token)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "open_file", "params": {"path": "/proj/a.txt"}
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["result"]["tab_id"], 42);
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn open_file_failure_surfaces_the_editor_error_message() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = start(dir.path(), tx).await.unwrap();
+
+        tokio::spawn(async move {
+            if let Some(EditorCommand::OpenFile { respond, .. }) = rx.recv().await {
+                let _ = respond.send(Err("file looks binary".to_string()));
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/rpc", handle.port))
+            .bearer_auth(&handle.token)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "open_file", "params": {"path": "/proj/bin"}
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"]["code"], -32001);
+        assert_eq!(body["error"]["message"], "file looks binary");
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn edit_buffer_round_trips_through_the_command_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = start(dir.path(), tx).await.unwrap();
+
+        tokio::spawn(async move {
+            if let Some(EditorCommand::EditBuffer { tab_id, content, respond }) = rx.recv().await {
+                assert_eq!(tab_id, 5);
+                assert_eq!(content, "new content");
+                let _ = respond.send(Ok(()));
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/rpc", handle.port))
+            .bearer_auth(&handle.token)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "edit_buffer",
+                "params": {"tab_id": 5, "content": "new content"}
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["error"].is_null());
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn save_buffer_round_trips_through_the_command_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = start(dir.path(), tx).await.unwrap();
+
+        tokio::spawn(async move {
+            if let Some(EditorCommand::SaveBuffer { tab_id, respond }) = rx.recv().await {
+                assert_eq!(tab_id, 9);
+                let _ = respond.send(Ok(()));
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/rpc", handle.port))
+            .bearer_auth(&handle.token)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "save_buffer", "params": {"tab_id": 9}
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert!(body["error"].is_null());
 
         handle.shutdown().await;
     }
