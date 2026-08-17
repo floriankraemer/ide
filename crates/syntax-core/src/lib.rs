@@ -82,6 +82,18 @@ pub struct Occurrence {
     pub is_definition: bool,
 }
 
+/// A foldable region (Task C): byte range `start..end` of a block/body-like
+/// node (function/method body, class/struct/enum body, object/array, ...)
+/// from the language's `folds.scm` `@fold` capture. Emitted in document
+/// order by [`Highlighter::fold_ranges`], which reads off the same
+/// incrementally-maintained tree `set_text`/`edit` already keep current —
+/// no second full-buffer parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldRange {
+    pub start: usize,
+    pub end: usize,
+}
+
 /// A `highlights.scm` query, compiled once per language and reused across
 /// calls. Grammar + query text are bundled into the binary via
 /// `include_str!`/`LANGUAGE` constants so highlighting works identically
@@ -230,6 +242,67 @@ fn locals_query_language_for(language: Language) -> Option<&'static QueryLanguag
         Language::CSharp => Some(csharp_locals_query_language()),
         Language::Java => Some(java_locals_query_language()),
         Language::Php => Some(php_locals_query_language()),
+        Language::PlainText => None,
+    }
+}
+
+fn rust_folds_query_language() -> &'static QueryLanguage {
+    static RUST_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        let query = Query::new(&grammar, include_str!("../queries/rust/folds.scm"))
+            .expect("rust folds.scm must compile against tree-sitter-rust's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &RUST_FOLDS
+}
+
+fn json_folds_query_language() -> &'static QueryLanguage {
+    static JSON_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
+        let query = Query::new(&grammar, include_str!("../queries/json/folds.scm"))
+            .expect("json folds.scm must compile against tree-sitter-json's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &JSON_FOLDS
+}
+
+fn csharp_folds_query_language() -> &'static QueryLanguage {
+    static CSHARP_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
+        let query = Query::new(&grammar, include_str!("../queries/csharp/folds.scm"))
+            .expect("csharp folds.scm must compile against tree-sitter-c-sharp's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &CSHARP_FOLDS
+}
+
+fn java_folds_query_language() -> &'static QueryLanguage {
+    static JAVA_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+        let query = Query::new(&grammar, include_str!("../queries/java/folds.scm"))
+            .expect("java folds.scm must compile against tree-sitter-java's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &JAVA_FOLDS
+}
+
+fn php_folds_query_language() -> &'static QueryLanguage {
+    static PHP_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
+        let query = Query::new(&grammar, include_str!("../queries/php/folds.scm"))
+            .expect("php folds.scm must compile against tree-sitter-php's php_only grammar");
+        QueryLanguage { grammar, query }
+    });
+    &PHP_FOLDS
+}
+
+fn folds_query_language_for(language: Language) -> Option<&'static QueryLanguage> {
+    match language {
+        Language::Rust => Some(rust_folds_query_language()),
+        Language::Json => Some(json_folds_query_language()),
+        Language::CSharp => Some(csharp_folds_query_language()),
+        Language::Java => Some(java_folds_query_language()),
+        Language::Php => Some(php_folds_query_language()),
         Language::PlainText => None,
     }
 }
@@ -451,6 +524,35 @@ impl Highlighter {
         let spans = spans_from_tree(ql, &new_tree, &self.text);
         self.tree = Some(new_tree);
         spans
+    }
+
+    /// Foldable regions (Task C) in document order, from the current
+    /// incremental tree — i.e. whatever `set_text`/`edit` last left behind.
+    /// Does not reparse: call after `set_text`/`edit`, not instead of it.
+    /// Empty for [`Language::PlainText`], a language with no `folds.scm`,
+    /// or before the first `set_text`/`edit` call.
+    pub fn fold_ranges(&self) -> Vec<FoldRange> {
+        let (Some(ql), Some(tree)) = (folds_query_language_for(self.language), self.tree.as_ref())
+        else {
+            return Vec::new();
+        };
+        let mut ranges = Vec::new();
+        let mut cursor = QueryCursor::new();
+        let mut matches = cursor.matches(&ql.query, tree.root_node(), self.text.as_bytes());
+        while let Some(m) = matches.next() {
+            for capture in m.captures {
+                let capture_name = ql.query.capture_names()[capture.index as usize];
+                if capture_name == "fold" {
+                    ranges.push(FoldRange {
+                        start: capture.node.start_byte(),
+                        end: capture.node.end_byte(),
+                    });
+                }
+            }
+        }
+        ranges.sort_by_key(|r| (r.start, r.end));
+        ranges.dedup();
+        ranges
     }
 }
 
@@ -840,6 +942,157 @@ mod tests {
         assert_eq!(names.len(), 3, "1 definition + 2 references: {names:?}");
         assert_eq!(names.iter().filter(|o| o.is_definition).count(), 1);
         assert_eq!(names.iter().filter(|o| !o.is_definition).count(), 2);
+    }
+
+    // --- fold_ranges (Task C) ---
+
+    #[test]
+    fn plain_text_has_no_fold_ranges() {
+        let mut highlighter = Highlighter::new(Language::PlainText);
+        highlighter.set_text("hello");
+        assert!(highlighter.fold_ranges().is_empty());
+    }
+
+    #[test]
+    fn fold_ranges_are_empty_before_any_parse() {
+        assert!(Highlighter::new(Language::Rust).fold_ranges().is_empty());
+    }
+
+    #[test]
+    fn rust_function_body_is_foldable() {
+        let text = "fn add(x: i32, y: i32) -> i32 {\n    x + y\n}";
+        let mut highlighter = Highlighter::new(Language::Rust);
+        highlighter.set_text(text);
+        let ranges = highlighter.fold_ranges();
+        let body = ranges
+            .iter()
+            .find(|r| &text[r.start..r.end] == "{\n    x + y\n}")
+            .expect("expected the function body to be foldable");
+        assert_eq!(&text[body.start..body.end], "{\n    x + y\n}");
+    }
+
+    #[test]
+    fn rust_struct_body_is_foldable() {
+        let text = "struct Point {\n    x: i32,\n    y: i32,\n}";
+        let mut highlighter = Highlighter::new(Language::Rust);
+        highlighter.set_text(text);
+        let ranges = highlighter.fold_ranges();
+        assert!(
+            ranges
+                .iter()
+                .any(|r| &text[r.start..r.end] == "{\n    x: i32,\n    y: i32,\n}"),
+            "expected the struct body to be foldable: {ranges:?}"
+        );
+    }
+
+    #[test]
+    fn json_object_is_foldable() {
+        let text = "{\"a\": 1, \"b\": [1, 2, 3]}";
+        let mut highlighter = Highlighter::new(Language::Json);
+        highlighter.set_text(text);
+        let ranges = highlighter.fold_ranges();
+        assert!(
+            ranges.iter().any(|r| &text[r.start..r.end] == text),
+            "expected the whole object to be foldable: {ranges:?}"
+        );
+        assert!(
+            ranges.iter().any(|r| &text[r.start..r.end] == "[1, 2, 3]"),
+            "expected the nested array to be foldable: {ranges:?}"
+        );
+    }
+
+    #[test]
+    fn csharp_method_body_is_foldable() {
+        let mut highlighter = Highlighter::new(Language::CSharp);
+        highlighter.set_text(CSHARP_SNIPPET);
+        let ranges = highlighter.fold_ranges();
+        assert!(
+            ranges
+                .iter()
+                .any(|r| CSHARP_SNIPPET[r.start..r.end].starts_with("{\n        // say hi")),
+            "expected the Greet() body to be foldable: {ranges:?}"
+        );
+    }
+
+    #[test]
+    fn csharp_class_body_is_foldable() {
+        let mut highlighter = Highlighter::new(Language::CSharp);
+        highlighter.set_text(CSHARP_SNIPPET);
+        let ranges = highlighter.fold_ranges();
+        assert!(
+            ranges.iter().any(|r| r.start == CSHARP_SNIPPET.find('{').unwrap()
+                && r.end == CSHARP_SNIPPET.rfind('}').unwrap() + 1),
+            "expected the class body to be foldable: {ranges:?}"
+        );
+    }
+
+    #[test]
+    fn java_method_body_is_foldable() {
+        let mut highlighter = Highlighter::new(Language::Java);
+        highlighter.set_text(JAVA_SNIPPET);
+        let ranges = highlighter.fold_ranges();
+        assert!(
+            ranges
+                .iter()
+                .any(|r| JAVA_SNIPPET[r.start..r.end].starts_with("{\n        // say hi")),
+            "expected the greet() body to be foldable: {ranges:?}"
+        );
+    }
+
+    #[test]
+    fn java_class_body_is_foldable() {
+        let mut highlighter = Highlighter::new(Language::Java);
+        highlighter.set_text(JAVA_SNIPPET);
+        let ranges = highlighter.fold_ranges();
+        assert!(
+            ranges.iter().any(|r| r.start == JAVA_SNIPPET.find('{').unwrap()
+                && r.end == JAVA_SNIPPET.rfind('}').unwrap() + 1),
+            "expected the class body to be foldable: {ranges:?}"
+        );
+    }
+
+    #[test]
+    fn php_method_body_is_foldable() {
+        let mut highlighter = Highlighter::new(Language::Php);
+        highlighter.set_text(PHP_SNIPPET);
+        let ranges = highlighter.fold_ranges();
+        assert!(
+            ranges
+                .iter()
+                .any(|r| PHP_SNIPPET[r.start..r.end].starts_with("{\n        // say hi")),
+            "expected the greet() body to be foldable: {ranges:?}"
+        );
+    }
+
+    #[test]
+    fn php_class_body_is_foldable() {
+        let mut highlighter = Highlighter::new(Language::Php);
+        highlighter.set_text(PHP_SNIPPET);
+        let ranges = highlighter.fold_ranges();
+        assert!(
+            ranges.iter().any(|r| r.start == PHP_SNIPPET.find('{').unwrap()
+                && r.end == PHP_SNIPPET.rfind('}').unwrap() + 1),
+            "expected the class body to be foldable: {ranges:?}"
+        );
+    }
+
+    #[test]
+    fn fold_ranges_reflect_incremental_edits() {
+        let old_text = "fn foo() {\n    1\n}";
+        let new_text = "fn foo() {\n    1 + 2\n}";
+
+        let mut highlighter = Highlighter::new(Language::Rust);
+        highlighter.set_text(old_text);
+        // Insert " + 2" right after "1" (byte offset 15..15 -> 15..19).
+        highlighter.edit(new_text, 15, 15, 19);
+
+        let ranges = highlighter.fold_ranges();
+        assert!(
+            ranges
+                .iter()
+                .any(|r| &new_text[r.start..r.end] == "{\n    1 + 2\n}"),
+            "expected the fold range to track the edit: {ranges:?}"
+        );
     }
 
     #[test]

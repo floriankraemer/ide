@@ -1,5 +1,6 @@
 #include "syntax_highlighter.h"
 
+#include "code_editor.h"
 #include "ui-shell/src/bridge.cxxqt.h"
 
 #include <algorithm>
@@ -142,10 +143,12 @@ rust::Box<SyntaxHighlighterHandle> makeHighlighter(const QString &extension)
 
 } // namespace
 
-SyntaxHighlighter::SyntaxHighlighter(QTextDocument *document, QString fileExtension)
+SyntaxHighlighter::SyntaxHighlighter(QTextDocument *document, QString fileExtension,
+                                      CodeEditor *editor)
   : QSyntaxHighlighter(document)
   , fileExtension_(std::move(fileExtension))
   , highlighter_(makeHighlighter(fileExtension_))
+  , editor_(editor)
 {
 }
 
@@ -188,6 +191,28 @@ void SyntaxHighlighter::highlightBlock(const QString &text)
         cachedByteOffsets_ = byteOffsetsByUtf16Index(wholeDocument);
         cachedTextBytes_ = textBytes;
         cachedRevision_ = document()->revision();
+
+        // Task C: fold ranges off the tree `set_text`/`apply_edit` just
+        // left current above — no second parse. Byte offsets -> UTF-16
+        // char offsets (reusing the table just built) -> block numbers,
+        // the coordinate CodeEditor's gutter/fold logic works in.
+        if (editor_) {
+            const rust::Vec<FfiFoldRange> foldRanges = highlighter_->fold_ranges();
+            QVector<FoldRange> ranges;
+            ranges.reserve(static_cast<int>(foldRanges.size()));
+            for (const auto &range : foldRanges) {
+                const int startChar = utf16IndexForByteOffset(cachedByteOffsets_, range.start);
+                const int endChar = utf16IndexForByteOffset(cachedByteOffsets_, range.end);
+                const int startBlock = document()->findBlock(startChar).blockNumber();
+                // `endChar` sits on the closing brace/bracket; back off by
+                // one so a fold ending exactly at a block boundary doesn't
+                // spuriously include the following block.
+                const int endBlock =
+                  document()->findBlock(std::max(startChar, endChar - 1)).blockNumber();
+                ranges.append(FoldRange{ startBlock, endBlock });
+            }
+            editor_->setFoldRanges(ranges);
+        }
     }
 
     if (cachedSpans_.isEmpty()) {

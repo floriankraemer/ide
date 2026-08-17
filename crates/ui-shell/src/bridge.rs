@@ -81,6 +81,46 @@ mod ffi {
         kind: FfiTokenKind,
     }
 
+    /// Structural symbol kind (Task D), 1:1 with `syntax_core::SymbolKind`.
+    enum FfiSymbolKind {
+        Class,
+        Struct,
+        Enum,
+        Interface,
+        Method,
+        Function,
+        Field,
+    }
+
+    /// One entry of `DocumentManager::tabOutline`'s flattened tree (Task
+    /// D), matching `syntax_core::SymbolNode` minus its `children: Vec`
+    /// (a directly self-recursive struct isn't needed here): `depth` is
+    /// how many ancestors this symbol has (0 = a root), so the view
+    /// reconstructs the tree by depth alone from this pre-order-flattened
+    /// list — walk it in order, popping back to `depth` parents deep and
+    /// pushing under whatever is left on top. `start`/`end` are the whole
+    /// definition's UTF-8 byte range (used to jump/select it);
+    /// `name_start`/`name_end` are just the identifier's (used to place
+    /// the cursor exactly on the name) — both in the tab's UTF-8 buffer,
+    /// same convention as `FfiHighlightSpan`.
+    struct FfiSymbolNode {
+        name: QString,
+        kind: FfiSymbolKind,
+        start: usize,
+        end: usize,
+        name_start: usize,
+        name_end: usize,
+        depth: u32,
+    }
+
+    /// A foldable region (Task C), UTF-8 byte offsets — same convention as
+    /// `FfiHighlightSpan`, 1:1 with `syntax_core::FoldRange`. The view maps
+    /// these back to UTF-16/block offsets itself.
+    struct FfiFoldRange {
+        start: usize,
+        end: usize,
+    }
+
     extern "Rust" {
         /// Opaque per-editor incremental highlighter handle (Y2/A1):
         /// wraps a `syntax_core::Highlighter`, which keeps a persistent
@@ -113,6 +153,12 @@ mod ffi {
             old_end_byte: usize,
             new_end_byte: usize,
         ) -> Vec<FfiHighlightSpan>;
+
+        /// Foldable regions (Task C) off the same incremental tree
+        /// `set_text`/`apply_edit` just left current — no second parse.
+        /// Call after either, on the same revision-change hook that
+        /// already drives highlighting.
+        fn fold_ranges(self: &SyntaxHighlighterHandle) -> Vec<FfiFoldRange>;
     }
 
     unsafe extern "C++Qt" {
@@ -435,6 +481,18 @@ mod ffi {
         #[cxx_name = "tabLanguageName"]
         fn tab_language_name(self: &DocumentManager, tab_id: u64) -> QString;
 
+        /// Class View's per-file tier (Task D): the tab's symbol outline
+        /// (`syntax_core::outline()` on its current content, language-
+        /// picked the same way `tabLanguageName` picks a display name),
+        /// pre-order-flattened per `FfiSymbolNode`'s doc comment. Pull-
+        /// based like `tabContent`/`tabExtension` rather than a push
+        /// signal — the view calls this once on tab open and again after
+        /// each successful save (not per keystroke; see the plan doc's
+        /// Task D — a project-wide-scope panel doesn't need live updates).
+        #[qinvokable]
+        #[cxx_name = "tabOutline"]
+        fn tab_outline(self: &DocumentManager, tab_id: u64) -> Vec<FfiSymbolNode>;
+
         /// The tab's display title (file name, plus the "(deleted)" suffix
         /// once its backing file is gone). The tab strip renders this
         /// verbatim, adding only its own dirty marker.
@@ -709,6 +767,17 @@ impl SyntaxHighlighterHandle {
     ) -> Vec<ffi::FfiHighlightSpan> {
         to_ffi_spans(self.0.edit(new_text, start_byte, old_end_byte, new_end_byte))
     }
+
+    fn fold_ranges(&self) -> Vec<ffi::FfiFoldRange> {
+        self.0
+            .fold_ranges()
+            .into_iter()
+            .map(|range| ffi::FfiFoldRange {
+                start: range.start,
+                end: range.end,
+            })
+            .collect()
+    }
 }
 
 fn to_ffi_spans(spans: Vec<syntax_core::HighlightSpan>) -> Vec<ffi::FfiHighlightSpan> {
@@ -731,6 +800,37 @@ fn to_ffi_token_kind(kind: syntax_core::TokenKind) -> ffi::FfiTokenKind {
         syntax_core::TokenKind::Function => ffi::FfiTokenKind::Function,
         syntax_core::TokenKind::Type => ffi::FfiTokenKind::Type,
         syntax_core::TokenKind::Other => ffi::FfiTokenKind::Other,
+    }
+}
+
+/// Pre-order flatten `nodes` (Task D) into `out`, recording each node's
+/// `depth` (root = 0) so `FfiSymbolNode`'s doc comment's reconstruction
+/// works: siblings/children stay in the tree's own document order since
+/// `syntax_core::outline()` already returns them that way.
+fn flatten_symbol_tree(nodes: &[syntax_core::SymbolNode], depth: u32, out: &mut Vec<ffi::FfiSymbolNode>) {
+    for node in nodes {
+        out.push(ffi::FfiSymbolNode {
+            name: QString::from(node.name.as_str()),
+            kind: to_ffi_symbol_kind(node.kind),
+            start: node.start,
+            end: node.end,
+            name_start: node.name_start,
+            name_end: node.name_end,
+            depth,
+        });
+        flatten_symbol_tree(&node.children, depth + 1, out);
+    }
+}
+
+fn to_ffi_symbol_kind(kind: syntax_core::SymbolKind) -> ffi::FfiSymbolKind {
+    match kind {
+        syntax_core::SymbolKind::Class => ffi::FfiSymbolKind::Class,
+        syntax_core::SymbolKind::Struct => ffi::FfiSymbolKind::Struct,
+        syntax_core::SymbolKind::Enum => ffi::FfiSymbolKind::Enum,
+        syntax_core::SymbolKind::Interface => ffi::FfiSymbolKind::Interface,
+        syntax_core::SymbolKind::Method => ffi::FfiSymbolKind::Method,
+        syntax_core::SymbolKind::Function => ffi::FfiSymbolKind::Function,
+        syntax_core::SymbolKind::Field => ffi::FfiSymbolKind::Field,
     }
 }
 
@@ -1275,6 +1375,19 @@ impl ffi::DocumentManager {
             .unwrap_or_default();
         let language = syntax_core::language_for_extension(&extension);
         QString::from(syntax_core::language_name(language))
+    }
+
+    pub fn tab_outline(&self, tab_id: u64) -> Vec<ffi::FfiSymbolNode> {
+        let session = self.session.borrow();
+        let tab_id = TabId::from_raw(tab_id);
+        let extension = session.tab_extension(tab_id).unwrap_or_default();
+        let language = syntax_core::language_for_extension(&extension);
+        let Some(content) = session.tab_content(tab_id) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        flatten_symbol_tree(&syntax_core::outline(language, &content), 0, &mut out);
+        out
     }
 
     pub fn tab_title(&self, tab_id: u64) -> QString {

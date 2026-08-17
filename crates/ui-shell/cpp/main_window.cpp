@@ -44,6 +44,8 @@
 #include <QTabWidget>
 #include <QtGui/QTextDocument>
 #include <QTreeView>
+#include <QTreeWidget>
+#include <QTreeWidgetItem>
 #include <QVariant>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -135,6 +137,46 @@ public:
     QPlainTextEdit *currentEditor() const
     {
         return qobject_cast<QPlainTextEdit *>(tabWidget_->currentWidget());
+    }
+
+    // Task D: the TabId of whichever tab is current, or 0 (the "no tab"
+    // sentinel, matching FfiOpenResult's convention) when none is open.
+    // Public wrapper over the private tabIdAt/tabWidget_ pair below, for
+    // ClassViewPanel to know which tab its outline belongs to.
+    quint64 currentTabId() const { return tabIdAt(tabWidget_->currentIndex()); }
+
+    // Task D: move the caret to a byte offset within the *current* tab's
+    // text and focus it — used by ClassViewPanel's jump-to-symbol, which
+    // (unlike Find in Files' openFileAtLine) never needs to open a
+    // different file, since Class View always describes the active tab.
+    // `byteOffset` is a UTF-8 byte offset into the tab's content (matching
+    // `syntax_core::SymbolNode`); converted to a line + in-line byte
+    // column here, then treated as a character offset within that line —
+    // the same documented ASCII-exact/UTF-8-approximate convention
+    // openFileAtLine uses for Find in Files' match column.
+    void jumpToByteOffset(quint64 byteOffset)
+    {
+        auto *editor = currentEditor();
+        if (!editor) {
+            return;
+        }
+        const QByteArray utf8 = docManager_->tabContent(tabIdAt(tabWidget_->currentIndex())).toUtf8();
+        const qsizetype clamped = qMin<qsizetype>(static_cast<qsizetype>(byteOffset), utf8.size());
+        int line = 0;
+        qsizetype lineStart = 0;
+        for (qsizetype i = 0; i < clamped; ++i) {
+            if (utf8.at(i) == '\n') {
+                ++line;
+                lineStart = i + 1;
+            }
+        }
+        QTextCursor cursor(editor->document()->findBlockByNumber(line));
+        cursor.movePosition(QTextCursor::StartOfBlock);
+        cursor.movePosition(QTextCursor::Right, QTextCursor::MoveAnchor,
+                             qMax<qsizetype>(0, clamped - lineStart));
+        editor->setTextCursor(cursor);
+        editor->centerCursor();
+        editor->setFocus();
     }
 
     // Ctrl+S / File > Save.
@@ -413,8 +455,10 @@ private:
         // Y2: self-parents to editor->document(), no manual lifetime
         // management needed. PlainText (unrecognized/no extension) yields
         // no spans from the incremental highlighter, so this is a
-        // harmless no-op then.
-        new SyntaxHighlighter(editor->document(), docManager_->tabExtension(tabId));
+        // harmless no-op then. `editor` (Task C) lets it push fold ranges
+        // to the gutter on the same revision-change hook that already
+        // drives highlighting.
+        new SyntaxHighlighter(editor->document(), docManager_->tabExtension(tabId), editor);
 
         // L3: only the visible tab's cursor should move the status bar —
         // guards against a background tab's programmatic cursor change
@@ -572,6 +616,95 @@ private:
     QCheckBox *regexCheck_ = nullptr;
     QListWidget *resultsList_ = nullptr;
     QLabel *statusLabel_ = nullptr;
+};
+
+// Class View dock panel (Task D), per-file tier: a QTreeWidget populated
+// from `DocumentManager::tabOutline()` for whichever tab is current.
+// Humble view per CLAUDE.md's hard rule — outline extraction is entirely
+// `syntax_core::outline()`'s job; this only builds tree items from the
+// flattened `FfiSymbolNode` list (reconstructing nesting from each item's
+// `depth`, per that struct's own doc comment) and forwards a double-click
+// to a caret jump via `EditorTabs::jumpToByteOffset`. Same dock-panel shape
+// FindInFilesPanel (Task H) established above.
+class ClassViewPanel : public QWidget
+{
+public:
+    ClassViewPanel(DocumentManager *docManager, EditorTabs *editorTabs, QWidget *parent)
+      : QWidget(parent)
+      , docManager_(docManager)
+      , editorTabs_(editorTabs)
+    {
+        tree_ = new QTreeWidget(this);
+        tree_->setHeaderHidden(true);
+        auto *layout = new QVBoxLayout(this);
+        layout->addWidget(tree_);
+
+        connect(tree_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *item) {
+            if (item) {
+                editorTabs_->jumpToByteOffset(item->data(0, Qt::UserRole).toULongLong());
+            }
+        });
+    }
+
+    // Repopulate the tree from `tabId`'s current outline — called on tab
+    // open, on tab switch, and whenever a tab becomes clean (a proxy for
+    // "just saved"; see buildCentralWidget's wiring comment for why).
+    // `tabId == 0` (no tab open) just clears the tree.
+    void refresh(quint64 tabId)
+    {
+        tree_->clear();
+        if (tabId == 0) {
+            return;
+        }
+        const rust::Vec<FfiSymbolNode> symbols = docManager_->tabOutline(tabId);
+
+        // `depth` reconstructs the tree from this pre-order-flattened list
+        // (see FfiSymbolNode's doc comment): `parents[d]` is the open
+        // QTreeWidgetItem at depth d-1 that the next depth-d item attaches
+        // under, or nullptr for a root (attaches to the QTreeWidget itself).
+        QVector<QTreeWidgetItem *> parents;
+        for (const auto &symbol : symbols) {
+            const int depth = static_cast<int>(symbol.depth);
+            parents.resize(depth + 1);
+            auto *item = new QTreeWidgetItem();
+            item->setText(0, symbol.name + QStringLiteral(" (") + symbolKindLabel(symbol.kind)
+                                + QStringLiteral(")"));
+            item->setData(0, Qt::UserRole, static_cast<quint64>(symbol.name_start));
+            if (depth == 0) {
+                tree_->addTopLevelItem(item);
+            } else {
+                parents[depth - 1]->addChild(item);
+            }
+            parents[depth] = item;
+        }
+        tree_->expandAll();
+    }
+
+private:
+    static QString symbolKindLabel(FfiSymbolKind kind)
+    {
+        switch (kind) {
+        case FfiSymbolKind::Class:
+            return QStringLiteral("class");
+        case FfiSymbolKind::Struct:
+            return QStringLiteral("struct");
+        case FfiSymbolKind::Enum:
+            return QStringLiteral("enum");
+        case FfiSymbolKind::Interface:
+            return QStringLiteral("interface");
+        case FfiSymbolKind::Method:
+            return QStringLiteral("method");
+        case FfiSymbolKind::Function:
+            return QStringLiteral("function");
+        case FfiSymbolKind::Field:
+        default:
+            return QStringLiteral("field");
+        }
+    }
+
+    DocumentManager *docManager_;
+    EditorTabs *editorTabs_;
+    QTreeWidget *tree_ = nullptr;
 };
 
 // Subclassed so closeEvent() can run the same unsaved-changes prompt as
