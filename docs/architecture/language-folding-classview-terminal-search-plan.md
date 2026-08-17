@@ -22,7 +22,7 @@ per `CLAUDE.md`.
 | G1 | done | 49f0320 |
 | H | done | 00842ba |
 | I | done | fdb444e |
-| J | done | PENDING_COMMIT |
+| J | done | d30429e |
 
 ## Context
 
