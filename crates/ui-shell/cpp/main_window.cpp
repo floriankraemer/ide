@@ -9,6 +9,7 @@
 #include "DockWidget.h"
 
 #include <QApplication>
+#include <QByteArray>
 #include <QCloseEvent>
 #include <QColor>
 #include <QColorDialog>
@@ -424,14 +425,15 @@ private:
 };
 
 // Subclassed so closeEvent() can run the same unsaved-changes prompt as
-// closing a tab, and persist geometry on close (L1). No Q_OBJECT: overriding
-// a virtual function needs no signals/slots/qobject_cast, so this adds no
-// second moc target.
+// closing a tab, and persist geometry + dock layout on close (L1, D4). No
+// Q_OBJECT: overriding a virtual function needs no signals/slots/
+// qobject_cast, so this adds no second moc target.
 class IdeMainWindow : public QMainWindow
 {
 public:
     void setEditorTabs(EditorTabs *editorTabs) { editorTabs_ = editorTabs; }
     void setAppSettings(AppSettings *appSettings) { appSettings_ = appSettings; }
+    void setDockManager(ads::CDockManager *dockManager) { dockManager_ = dockManager; }
 
 protected:
     void closeEvent(QCloseEvent *event) override
@@ -444,6 +446,14 @@ protected:
             const QRect g = geometry();
             appSettings_->saveWindowGeometry(g.x(), g.y(), static_cast<quint32>(g.width()),
                                               static_cast<quint32>(g.height()));
+            if (dockManager_) {
+                // D4: window_state is a plain Rust String (must be valid
+                // UTF-8); ADS's saveState() returns raw QByteArray, so
+                // base64 round-trips it through that constraint.
+                const QString state =
+                  QString::fromLatin1(dockManager_->saveState().toBase64());
+                appSettings_->saveWindowState(state);
+            }
         }
         QMainWindow::closeEvent(event);
     }
@@ -451,6 +461,7 @@ protected:
 private:
     EditorTabs *editorTabs_ = nullptr;
     AppSettings *appSettings_ = nullptr;
+    ads::CDockManager *dockManager_ = nullptr;
 };
 
 // File > Recent Projects (C2): rebuilds `menu` from `appSettings`'s
@@ -622,8 +633,18 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
 // inside its dock widget (not one dock widget per open file, per the plan's
 // migration scope) — G2's drag-reorder is unaffected either way, since it's
 // internal to that QTabWidget.
-EditorTabs *buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
-                                DocumentManager *docManager)
+// Return value of buildCentralWidget(): the tab-strip adapter (needed by
+// menu wiring) plus the dock manager (needed by IdeMainWindow for D4's
+// close-time saveState()) — one caller, so a tiny struct beats an
+// out-param.
+struct CentralWidgets
+{
+    EditorTabs *editorTabs;
+    ads::CDockManager *dockManager;
+};
+
+CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
+                                   DocumentManager *docManager, AppSettings *appSettings)
 {
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
@@ -641,6 +662,15 @@ EditorTabs *buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
     auto *treeDock = new ads::CDockWidget(dockManager, QObject::tr("Project"));
     treeDock->setWidget(treeView);
     dockManager->addDockWidget(ads::LeftDockWidgetArea, treeDock, editorArea);
+
+    // D4: restored after both dock widgets exist for this layout to apply
+    // to (ADS matches saved widgets by their title/object name). Empty
+    // means nothing was ever saved — first launch, or window_state predates
+    // D4 — so the layout built above (tree left of editor) stands as-is.
+    const QString savedState = appSettings->windowState();
+    if (!savedState.isEmpty()) {
+        dockManager->restoreState(QByteArray::fromBase64(savedState.toLatin1()));
+    }
 
     auto *editorTabs = new EditorTabs(docManager, tabWidget, window);
 
@@ -783,7 +813,7 @@ EditorTabs *buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
           }
       });
 
-    return editorTabs;
+    return CentralWidgets{editorTabs, dockManager};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -812,9 +842,11 @@ QMainWindow *buildMainWindow()
 
     auto *treeModel = new ProjectTreeModel(window);
     auto *docManager = new DocumentManager(window);
-    EditorTabs *editorTabs = buildCentralWidget(window, treeModel, docManager);
+    const CentralWidgets central = buildCentralWidget(window, treeModel, docManager, appSettings);
+    EditorTabs *editorTabs = central.editorTabs;
     window->setEditorTabs(editorTabs);
     window->setAppSettings(appSettings);
+    window->setDockManager(central.dockManager);
 
     // S2: applied before reopenLastProject() (below) opens any tabs, so
     // every tab — including ones opened at startup — starts with the

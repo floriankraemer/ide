@@ -39,7 +39,7 @@ per `CLAUDE.md`.
 | D1 | done | `c7c3a41` (go: Docker `linux-artifact` **and** `windows-artifact` both build/link clean; two vendor-side gaps found and worked around, see commit; runtime dock rendering not manually verified, no display here) |
 | D2 | done | `0b1ebcb` (docs only — ADR-0005) |
 | D3 | done | `3984752` (Docker `linux-artifact` **and** `windows-artifact` both build/link clean; manual float/redock and G2 tab-behavior passes not run, no display here) |
-| D4 | todo | |
+| D4 | done | `pending` (Docker `linux-artifact` **and** `windows-artifact` both build/link clean; manual float-sidebar/relaunch-restored pass not run, no display here) |
 | M1 | done | `74c0bef` |
 | M2 | done | `16302d2` (docs only — ADR-0004) |
 | M3 | todo | |

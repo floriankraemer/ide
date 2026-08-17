@@ -446,6 +446,20 @@ mod ffi {
         #[cxx_name = "saveWindowGeometry"]
         fn save_window_geometry(self: &AppSettings, x: i32, y: i32, width: u32, height: u32);
 
+        /// Opaque persisted dock layout blob (D4), base64-encoded by the
+        /// view — `ads::CDockManager::saveState()`/`restoreState()` deal in
+        /// `QByteArray`, not text, and `Settings::window_state` is a plain
+        /// Rust `String` (must be valid UTF-8). Empty when nothing was ever
+        /// saved.
+        #[qinvokable]
+        #[cxx_name = "windowState"]
+        fn window_state(self: &AppSettings) -> QString;
+
+        /// Persist the dock layout blob (D4's `closeEvent`).
+        #[qinvokable]
+        #[cxx_name = "saveWindowState"]
+        fn save_window_state(self: &AppSettings, state: &QString);
+
         /// Active theme name (T2), e.g. "dark" or "light" — defaults to
         /// "dark" when unset (`Settings::theme_name`). The view maps this to
         /// a stylesheet via `styleSheetForTheme`.
@@ -603,6 +617,20 @@ impl ffi::AppSettings {
             width,
             height,
         };
+        let _ = app_config::save(&config_dir, &settings);
+    }
+
+    pub fn window_state(&self) -> QString {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        QString::from(settings.window_state.as_str())
+    }
+
+    pub fn save_window_state(&self, state: &QString) {
+        let config_dir = app_core::resolve_config_dir();
+        let Ok(mut settings) = app_config::load(&config_dir) else {
+            return;
+        };
+        settings.window_state = state.to_string();
         let _ = app_config::save(&config_dir, &settings);
     }
 
