@@ -2950,7 +2950,9 @@ dependencies = [
  "index-core",
  "mcp-server",
  "project-model",
+ "pty-core",
  "syntax-core",
+ "terminal-core",
  "tokio",
 ]
 

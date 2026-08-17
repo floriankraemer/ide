@@ -129,7 +129,7 @@ impl ShellSpec {
 pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     child: Box<dyn Child + Send + Sync>,
-    reader: Box<dyn Read + Send>,
+    reader: Option<Box<dyn Read + Send>>,
     writer: Box<dyn Write + Send>,
 }
 
@@ -167,15 +167,35 @@ impl PtySession {
         Ok(Self {
             master: pair.master,
             child,
-            reader,
+            reader: Some(reader),
             writer,
         })
     }
 
     /// Blocking read of whatever output bytes are currently available.
-    /// Returns `Ok(0)` on EOF (child exited and closed the PTY).
+    /// Returns `Ok(0)` on EOF (child exited and closed the PTY). Errors with
+    /// `PtyError::Io` if [`take_reader`](Self::take_reader) already moved
+    /// the read half out.
     pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, PtyError> {
-        self.reader.read(buf).map_err(|e| PtyError::Io(e.to_string()))
+        match self.reader.as_mut() {
+            Some(reader) => reader.read(buf).map_err(|e| PtyError::Io(e.to_string())),
+            None => Err(PtyError::Io("read half already taken".to_string())),
+        }
+    }
+
+    /// Move the read half out for a dedicated background thread to own.
+    /// Needed because `read`/`write` both require exclusive (`&mut self`)
+    /// access: a caller that put the whole `PtySession` behind one lock so a
+    /// background thread could do blocking reads would find that lock held
+    /// for the whole blocking `read` call, stalling any `write` from another
+    /// thread until the next output byte arrives — for an interactive shell
+    /// that's a deadlock (the shell can't echo a keystroke that `write` can
+    /// never deliver). Splitting the read half out lets the reader thread
+    /// own it exclusively while `write`/`resize`/`kill` stay on the
+    /// `PtySession` for the caller's own thread to use, lock-free. Returns
+    /// `None` if already taken.
+    pub fn take_reader(&mut self) -> Option<Box<dyn Read + Send>> {
+        self.reader.take()
     }
 
     /// Write input bytes (e.g. keystrokes) to the shell.
@@ -270,6 +290,46 @@ mod tests {
         session.wait().expect("wait after kill");
 
         assert!(session.try_wait().expect("try_wait after kill").is_some());
+    }
+
+    #[test]
+    fn take_reader_moves_reading_out_and_still_works() {
+        let shell = ShellSpec::new("/bin/sh", vec!["-c".into(), "echo hi".into()]);
+        let mut session = PtySession::spawn(&shell, PtySize::new(24, 80)).expect("spawn");
+
+        let mut reader = session.take_reader().expect("reader available once");
+        assert!(session.take_reader().is_none(), "second take must yield None");
+
+        let mut output = Vec::new();
+        let mut buf = [0u8; 256];
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    output.extend_from_slice(&buf[..n]);
+                    if String::from_utf8_lossy(&output).contains("hi") {
+                        break;
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+        assert!(String::from_utf8_lossy(&output).contains("hi"));
+
+        session.wait().expect("wait");
+    }
+
+    #[test]
+    fn read_after_take_reader_errors() {
+        let shell = ShellSpec::new("/bin/sh", vec!["-c".into(), "sleep 1".into()]);
+        let mut session = PtySession::spawn(&shell, PtySize::new(24, 80)).expect("spawn");
+
+        session.take_reader();
+        let mut buf = [0u8; 16];
+        assert!(session.read(&mut buf).is_err());
+
+        session.kill().expect("kill");
+        session.wait().expect("wait");
     }
 
     #[test]

@@ -2,6 +2,7 @@
 
 #include "code_editor.h"
 #include "syntax_highlighter.h"
+#include "terminal_widget.h"
 #include "theme.h"
 #include "ui-shell/src/bridge.cxxqt.h"
 
@@ -928,11 +929,12 @@ struct CentralWidgets
     ads::CDockWidget *findInFilesDock;
     ClassViewPanel *classViewPanel;
     ads::CDockWidget *classViewDock;
+    ads::CDockWidget *terminalDock;
 };
 
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
                                    DocumentManager *docManager, AppSettings *appSettings,
-                                   SearchModel *searchModel)
+                                   SearchModel *searchModel, TerminalSession *terminalSession)
 {
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
@@ -969,6 +971,15 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     auto *classViewDock = new ads::CDockWidget(dockManager, QObject::tr("Class View"));
     classViewDock->setWidget(classViewPanel);
     dockManager->addDockWidget(ads::RightDockWidgetArea, classViewDock, editorArea);
+
+    // Task F3: bottom dock panel, tabbed alongside Find in Files — the
+    // conventional spot for an embedded shell in JetBrains/VS-style IDEs.
+    // The widget itself only starts the PTY once it's actually shown/sized
+    // (TerminalWidget::showEvent/resizeEvent), not eagerly here.
+    auto *terminalWidget = new TerminalWidget(terminalSession, dockManager);
+    auto *terminalDock = new ads::CDockWidget(dockManager, QObject::tr("Terminal"));
+    terminalDock->setWidget(terminalWidget);
+    dockManager->addDockWidget(ads::BottomDockWidgetArea, terminalDock, editorArea);
 
     // Class View tracks whatever tab is current: refresh on open, on
     // switch, and whenever a tab becomes clean. `tabModifiedChanged`
@@ -1158,8 +1169,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
           }
       });
 
-    return CentralWidgets{editorTabs,      dockManager,   findInFilesPanel,
-                           findInFilesDock, classViewPanel, classViewDock};
+    return CentralWidgets{editorTabs,      dockManager,     findInFilesPanel, findInFilesDock,
+                           classViewPanel,  classViewDock,   terminalDock};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -1189,12 +1200,17 @@ QMainWindow *buildMainWindow()
     auto *treeModel = new ProjectTreeModel(window);
     auto *docManager = new DocumentManager(window);
     auto *searchModel = new SearchModel(window);
+    // Task F3: one terminal session for the one "Terminal" dock widget —
+    // same one-QObject-per-dock-widget shape SearchModel/DocumentManager
+    // establish above. The shell isn't spawned yet (TerminalSession::start
+    // hasn't been called) until TerminalWidget knows its own pixel size.
+    auto *terminalSession = new TerminalSession(window);
     // M3: one MCP server per process, started once right after the shared
     // DocumentManager exists — the listener thread it spawns dispatches
     // every EditorCommand back onto this same QObject's Qt thread.
     docManager->startMcpServer();
     const CentralWidgets central =
-      buildCentralWidget(window, treeModel, docManager, appSettings, searchModel);
+      buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession);
     EditorTabs *editorTabs = central.editorTabs;
     window->setEditorTabs(editorTabs);
     window->setAppSettings(appSettings);
@@ -1282,6 +1298,15 @@ QMainWindow *buildMainWindow()
     QObject::connect(classViewAction, &QAction::triggered, window, [central]() {
         central.classViewDock->toggleView(true);
         central.classViewDock->raise();
+    });
+    QAction *terminalAction = viewMenu->addAction(QObject::tr("Terminal"));
+    terminalAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+`")));
+    QObject::connect(terminalAction, &QAction::triggered, window, [central]() {
+        central.terminalDock->toggleView(true);
+        central.terminalDock->raise();
+        if (QWidget *w = central.terminalDock->widget()) {
+            w->setFocus();
+        }
     });
 
     QObject::connect(undoAction, &QAction::triggered, window, [editorTabs]() {

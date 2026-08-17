@@ -10,6 +10,8 @@ editor-core = { path = "../editor-core" }
 project-model = { path = "../project-model" }
 syntax-core = { path = "../syntax-core" }
 index-core = { path = "../index-core" }
+pty-core = { path = "../pty-core" }
+terminal-core = { path = "../terminal-core" }
 mcp-server = { path = "../mcp-server" }
 tokio = { version = "1", features = ["rt-multi-thread"] }
 cxx = "1"
