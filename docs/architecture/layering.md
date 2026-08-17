@@ -25,6 +25,7 @@ graph TB
 | `syntax-core` | (std, tree-sitter, tree-sitter-rust, tree-sitter-json) | **No** |
 | `app-config` | (std, dirs, serde, toml) | **No** |
 | `mcp-server` | (std, dirs, serde, serde_json, tokio, axum) | **No** |
+| `pty-core` | (std, portable-pty) | **No** |
 | `app-core` | `editor-core`, `project-model` | **No** |
 | `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `syntax-core`, `mcp-server` | Yes (adapter + view live here) |
 | `app` | `ui-shell` | Yes |
@@ -60,6 +61,8 @@ cargo test --workspace
 cargo tree -p editor-core -e normal | grep -i qt    # must be empty
 cargo tree -p project-model -e normal | grep -i qt  # must be empty
 cargo tree -p app-core -e normal | grep -i qt       # must be empty
+cargo tree -p pty-core -e normal | grep -i qt       # must be empty
+cargo tree -p pty-core -e normal | grep -i tokio    # must be empty
 ```
 
 ## Known debt at time of writing

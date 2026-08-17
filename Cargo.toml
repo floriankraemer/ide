@@ -6,6 +6,7 @@ members = [
     "crates/syntax-core",
     "crates/app-config",
     "crates/mcp-server",
+    "crates/pty-core",
     "crates/app-core",
     "crates/ui-shell",
     "crates/app",
