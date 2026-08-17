@@ -36,7 +36,7 @@ per `CLAUDE.md`.
 | S2 | done | `2e0e0c2` (`cargo test -p app-config`; Docker `linux-artifact` build verified; manual live-update/persist passes not run, no display here) |
 | Y1 | done | `1475e3f` |
 | Y2 | done | `93dcc3d` (`cargo test -p app-core -p syntax-core`; Docker `linux-artifact` build verified; manual .rs/.json/.txt visual pass not run, no display here) |
-| D1 | done | `pending` (go: Docker `linux-artifact` **and** `windows-artifact` both build/link clean; two vendor-side gaps found and worked around, see commit; runtime dock rendering not manually verified, no display here) |
+| D1 | done | `c7c3a41` (go: Docker `linux-artifact` **and** `windows-artifact` both build/link clean; two vendor-side gaps found and worked around, see commit; runtime dock rendering not manually verified, no display here) |
 | D2 | todo | |
 | D3 | todo | |
 | D4 | todo | |
