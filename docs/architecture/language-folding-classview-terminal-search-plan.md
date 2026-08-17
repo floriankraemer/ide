@@ -16,7 +16,7 @@ per `CLAUDE.md`.
 | C | open | |
 | D | open | |
 | E1 | open | |
-| F1 | done | PENDING_COMMIT |
+| F1 | done | 178ac09 |
 | F2 | open | |
 | F3 | open | |
 | G1 | open | |
