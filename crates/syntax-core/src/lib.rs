@@ -59,6 +59,19 @@ pub struct HighlightSpan {
     pub kind: TokenKind,
 }
 
+/// One occurrence of an identifier-like node (byte range `start..end` into
+/// the source text `name` was read from), from `locals.scm`'s
+/// `@definition`/`@reference` captures (A2). `is_definition` is true when
+/// this occurrence is also a declaration site (function/struct/parameter/
+/// `let`-binding name, ...) per the language's `locals.scm`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Occurrence {
+    pub name: String,
+    pub start: usize,
+    pub end: usize,
+    pub is_definition: bool,
+}
+
 /// A `highlights.scm` query, compiled once per language and reused across
 /// calls. Grammar + query text are bundled into the binary via
 /// `include_str!`/`LANGUAGE` constants so highlighting works identically
@@ -102,6 +115,34 @@ fn query_language_for(language: Language) -> Option<&'static QueryLanguage> {
     }
 }
 
+fn rust_locals_query_language() -> &'static QueryLanguage {
+    static RUST_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        let query = Query::new(&grammar, include_str!("../queries/rust/locals.scm"))
+            .expect("rust locals.scm must compile against tree-sitter-rust's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &RUST_LOCALS
+}
+
+fn json_locals_query_language() -> &'static QueryLanguage {
+    static JSON_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
+        let query = Query::new(&grammar, include_str!("../queries/json/locals.scm"))
+            .expect("json locals.scm must compile against tree-sitter-json's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &JSON_LOCALS
+}
+
+fn locals_query_language_for(language: Language) -> Option<&'static QueryLanguage> {
+    match language {
+        Language::Rust => Some(rust_locals_query_language()),
+        Language::Json => Some(json_locals_query_language()),
+        Language::PlainText => None,
+    }
+}
+
 /// Map a query capture name (`@keyword`, `@string`, ...) onto the existing
 /// `TokenKind` taxonomy. Captures with no mapping (there are none today,
 /// since every capture in our `.scm` files is one of these six) are
@@ -128,6 +169,62 @@ fn token_kind_for_capture(capture_name: &str) -> Option<TokenKind> {
 /// incrementally rather than re-parsing the whole buffer every time.
 pub fn highlight(language: Language, text: &str) -> Vec<HighlightSpan> {
     Highlighter::new(language).set_text(text)
+}
+
+/// Every identifier-like node in `text`, parsed as `language`, in document
+/// order — not just declaration sites (A2). Stateless one-shot, matching
+/// [`highlight`]'s convention: does its own parse rather than reusing a
+/// [`Highlighter`]'s persistent tree, since nothing needs this
+/// incrementally yet.
+///
+/// Backed by a `locals.scm` per language (see `crates/syntax-core/queries/
+/// */locals.scm`) with `@definition`/`@reference` captures. A node can
+/// legitimately match both (e.g. a function name is a definition site and
+/// also matches the catch-all reference pattern — see the comment atop
+/// `rust/locals.scm`), so captures are folded by node byte-range with OR:
+/// each identifier node appears exactly once in the result, with
+/// `is_definition` true if any capture on it was `@definition`.
+/// [`Language::PlainText`] (or a language with no `locals.scm`) yields an
+/// empty vec.
+pub fn identifier_occurrences(language: Language, text: &str) -> Vec<Occurrence> {
+    let Some(ql) = locals_query_language_for(language) else {
+        return Vec::new();
+    };
+    let mut parser = Parser::new();
+    if parser.set_language(&ql.grammar).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(text, None) else {
+        return Vec::new();
+    };
+
+    let mut by_range: std::collections::BTreeMap<(usize, usize), bool> =
+        std::collections::BTreeMap::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&ql.query, tree.root_node(), text.as_bytes());
+    while let Some(m) = matches.next() {
+        for capture in m.captures {
+            let capture_name = ql.query.capture_names()[capture.index as usize];
+            let is_definition = match capture_name {
+                "definition" => true,
+                "reference" => false,
+                _ => continue,
+            };
+            let range = (capture.node.start_byte(), capture.node.end_byte());
+            let entry = by_range.entry(range).or_insert(false);
+            *entry |= is_definition;
+        }
+    }
+
+    by_range
+        .into_iter()
+        .map(|((start, end), is_definition)| Occurrence {
+            name: text[start..end].to_string(),
+            start,
+            end,
+            is_definition,
+        })
+        .collect()
 }
 
 fn spans_from_tree(
@@ -430,5 +527,72 @@ mod tests {
         let mut highlighter = Highlighter::new(Language::PlainText);
         assert!(highlighter.set_text("hello").is_empty());
         assert!(highlighter.edit("hello world", 5, 5, 11).is_empty());
+    }
+
+    #[test]
+    fn plain_text_has_no_identifier_occurrences() {
+        assert!(identifier_occurrences(Language::PlainText, "fn foo() {}").is_empty());
+    }
+
+    #[test]
+    fn rust_function_and_parameter_are_definitions_used_twice_in_body() {
+        let text = "fn add(x: i32) -> i32 { x + x }";
+        let occurrences = identifier_occurrences(Language::Rust, text);
+
+        let by_name = |name: &str| -> Vec<&Occurrence> {
+            occurrences.iter().filter(|o| o.name == name).collect()
+        };
+
+        let foo = by_name("add");
+        assert_eq!(foo.len(), 1, "function name should occur once: {foo:?}");
+        assert!(foo[0].is_definition);
+        assert_eq!(&text[foo[0].start..foo[0].end], "add");
+
+        let xs = by_name("x");
+        assert_eq!(xs.len(), 3, "1 definition + 2 references: {xs:?}");
+        let definitions: Vec<_> = xs.iter().filter(|o| o.is_definition).collect();
+        let references: Vec<_> = xs.iter().filter(|o| !o.is_definition).collect();
+        assert_eq!(definitions.len(), 1, "exactly one `x` is the parameter");
+        assert_eq!(references.len(), 2, "both body uses of `x` are references");
+
+        // Occurrences are in document order and byte ranges point at the
+        // right substrings.
+        for occurrence in &occurrences {
+            assert_eq!(
+                &text[occurrence.start..occurrence.end],
+                occurrence.name,
+                "byte range must point at the occurrence's own text"
+            );
+        }
+        let mut starts: Vec<usize> = occurrences.iter().map(|o| o.start).collect();
+        let mut sorted_starts = starts.clone();
+        sorted_starts.sort_unstable();
+        assert_eq!(starts, sorted_starts, "occurrences must be in document order");
+        starts.dedup();
+    }
+
+    #[test]
+    fn rust_struct_name_is_a_definition() {
+        let text = "struct Point { x: i32 }";
+        let occurrences = identifier_occurrences(Language::Rust, text);
+        let point = occurrences
+            .iter()
+            .find(|o| o.name == "Point")
+            .expect("expected an occurrence for the struct name");
+        assert!(point.is_definition);
+        assert_eq!(&text[point.start..point.end], "Point");
+    }
+
+    #[test]
+    fn json_object_keys_are_references_not_definitions() {
+        let text = "{\"key\": \"value\", \"other\": 1}";
+        let occurrences = identifier_occurrences(Language::Json, text);
+
+        assert!(
+            occurrences.iter().all(|o| !o.is_definition),
+            "JSON has no definition sites: {occurrences:?}"
+        );
+        let names: Vec<&str> = occurrences.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, vec!["\"key\"", "\"other\""]);
     }
 }
