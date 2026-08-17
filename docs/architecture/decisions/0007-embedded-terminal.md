@@ -2,11 +2,16 @@
 
 ## Status
 
-Proposed.
-Pending a `devops-expert` verification pass of `portable-pty` (Windows ConPTY path) and
-`alacritty_terminal` building clean under the existing MXE cross-build stage, per the plan
-doc's "Gate before starting Tracks 2 and 3's native-dependency work".
-Do not mark this Accepted until that check comes back clean.
+Accepted.
+The `windows-artifact` Docker target (MXE cross-build to `x86_64-pc-windows-gnu`) built
+`app.exe` clean with `pty-core`/`terminal-core` in the dependency tree. Verified by
+inspecting the resulting binary's PE import table (`objdump -p`): `portable-pty` and
+`alacritty_terminal` are fully statically linked into `app.exe` — neither adds any new
+runtime DLL dependency beyond the Qt6/mingw runtime set the bundle already ships (only
+`KERNEL32`/`advapi32`/`ws2_32`/`userenv`/`combase`/`bcryptprimitives`/standard
+`api-ms-win-core-*` system DLLs appear alongside `Qt6Core/Gui/Widgets`,
+`libstdc++-6`, `libwinpthread-1` — no ConPTY-related DLL surprises). The gate this ADR
+was pending on is closed.
 
 ## Context
 

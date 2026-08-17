@@ -2,13 +2,13 @@
 
 ## Status
 
-Proposed.
-Pending a `devops-expert` verification pass of tantivy's `zstd-sys` C dependency building clean
-under the existing MXE Windows cross-build stage, per the plan doc's "Gate before starting
-F1/G1 implementation".
-Do not mark this Accepted until that check comes back clean.
-The Linux `linux-builder` build is verified clean as of this task (G1) — `zstd-sys` compiled
-without needing any Dockerfile change beyond what was already present in the image.
+Accepted.
+The `windows-artifact` Docker target (MXE cross-build to `x86_64-pc-windows-gnu`) built
+`app.exe` clean with `index-core` (tantivy + `zstd-sys` + ripgrep crates + `ignore`) in the
+dependency tree, no Dockerfile changes needed. Verified via the resulting binary's PE import
+table (`objdump -p`): no new runtime DLL dependency from this crate — `zstd-sys` and the
+ripgrep crates are fully statically linked. The Linux `linux-builder` build was already
+verified clean as of task G1. The gate this ADR was pending on is closed.
 
 ## Context
 
