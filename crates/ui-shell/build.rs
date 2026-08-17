@@ -232,7 +232,6 @@ fn main() {
         .cpp_file("cpp/code_editor.cpp")
         .cpp_file("cpp/theme.cpp")
         .cpp_file("cpp/syntax_highlighter.cpp")
-        .cpp_file("cpp/ads_smoke_test.cpp")
         .include_dir("cpp")
         .include_dir(ads_dir)
         .cpp_file(compile_ads_qrc(ads_dir, &tool_dirs))

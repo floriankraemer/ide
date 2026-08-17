@@ -1,10 +1,12 @@
 #include "main_window.h"
 
-#include "ads_smoke_test.h"
 #include "code_editor.h"
 #include "syntax_highlighter.h"
 #include "theme.h"
 #include "ui-shell/src/bridge.cxxqt.h"
+
+#include "DockManager.h"
+#include "DockWidget.h"
 
 #include <QApplication>
 #include <QCloseEvent>
@@ -35,7 +37,6 @@
 #include <QPushButton>
 #include <QRect>
 #include <QSpinBox>
-#include <QSplitter>
 #include <QStackedWidget>
 #include <QStringList>
 #include <QTabWidget>
@@ -614,26 +615,32 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     }
 }
 
-// Sidebar tree + tabbed editor area, PHPStorm-style (US-5): a resizable
-// splitter with the project tree on the left and the tab strip on the
-// right.
+// Sidebar tree + tabbed editor area, PHPStorm-style (US-5): each panel is
+// its own ADS CDockWidget (D3) — float/redock each independently, room left
+// for future dock widgets (search, run console, MCP activity log) without
+// restructuring this function again. The tab strip stays one QTabWidget
+// inside its dock widget (not one dock widget per open file, per the plan's
+// migration scope) — G2's drag-reorder is unaffected either way, since it's
+// internal to that QTabWidget.
 EditorTabs *buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
                                 DocumentManager *docManager)
 {
-    auto *splitter = new QSplitter(Qt::Horizontal, window);
+    // Constructing with `window` (a QMainWindow) as parent makes the dock
+    // manager install itself as the central widget automatically (ADS's own
+    // CDockManager::CDockManager) — no explicit setCentralWidget() call.
+    auto *dockManager = new ads::CDockManager(window);
 
-    auto *treeView = new QTreeView(splitter);
+    auto *tabWidget = new QTabWidget();
+    auto *editorDock = new ads::CDockWidget(dockManager, QObject::tr("Editor"));
+    editorDock->setWidget(tabWidget);
+    auto *editorArea = dockManager->addDockWidget(ads::CenterDockWidgetArea, editorDock);
+
+    auto *treeView = new QTreeView();
     treeView->setModel(treeModel);
     treeView->setHeaderHidden(true);
-    splitter->addWidget(treeView);
-
-    auto *tabWidget = new QTabWidget(splitter);
-    splitter->addWidget(tabWidget);
-
-    splitter->setStretchFactor(0, 0);
-    splitter->setStretchFactor(1, 1);
-
-    window->setCentralWidget(splitter);
+    auto *treeDock = new ads::CDockWidget(dockManager, QObject::tr("Project"));
+    treeDock->setWidget(treeView);
+    dockManager->addDockWidget(ads::LeftDockWidgetArea, treeDock, editorArea);
 
     auto *editorTabs = new EditorTabs(docManager, tabWidget, window);
 
@@ -922,11 +929,6 @@ int run_app()
 {
     int argc = 0;
     QApplication app(argc, nullptr);
-
-    // D1 spike: proves ADS actually links and constructs, not just
-    // compiles. Never shown (constructed and torn down immediately), so it
-    // has no visible effect — D3 wires ADS into the real layout.
-    adsSmokeTest();
 
     // buildMainWindow() applies the persisted theme (T2) once AppSettings
     // exists; nothing is shown yet at this point, so there's no unstyled

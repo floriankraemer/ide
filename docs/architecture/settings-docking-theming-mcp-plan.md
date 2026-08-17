@@ -38,7 +38,7 @@ per `CLAUDE.md`.
 | Y2 | done | `93dcc3d` (`cargo test -p app-core -p syntax-core`; Docker `linux-artifact` build verified; manual .rs/.json/.txt visual pass not run, no display here) |
 | D1 | done | `c7c3a41` (go: Docker `linux-artifact` **and** `windows-artifact` both build/link clean; two vendor-side gaps found and worked around, see commit; runtime dock rendering not manually verified, no display here) |
 | D2 | done | `0b1ebcb` (docs only — ADR-0005) |
-| D3 | todo | |
+| D3 | done | `pending` (Docker `linux-artifact` **and** `windows-artifact` both build/link clean; manual float/redock and G2 tab-behavior passes not run, no display here) |
 | D4 | todo | |
 | M1 | done | `74c0bef` |
 | M2 | done | `16302d2` (docs only — ADR-0004) |
