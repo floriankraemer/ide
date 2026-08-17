@@ -12,7 +12,7 @@ per `CLAUDE.md`.
 | A | done | 176116e |
 | A1 | done | ea45195 |
 | A2 | done | 073bbf4 |
-| B | open | |
+| B | done | pending |
 | C | open | |
 | D | open | |
 | E1 | open | |

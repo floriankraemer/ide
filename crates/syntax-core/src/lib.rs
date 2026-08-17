@@ -9,12 +9,16 @@ use std::sync::LazyLock;
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 
-/// Languages this crate can highlight. Two starter grammars per the
-/// syntax-highlighting-foundation plan (Rust, JSON) plus a no-op fallback.
+/// Languages this crate can highlight. Rust/JSON from the original
+/// syntax-highlighting-foundation plan, plus C#/Java/PHP (Task B), plus a
+/// no-op fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Language {
     Rust,
     Json,
+    CSharp,
+    Java,
+    Php,
     PlainText,
 }
 
@@ -25,6 +29,9 @@ pub fn language_for_extension(extension: &str) -> Language {
     match extension {
         "rs" => Language::Rust,
         "json" => Language::Json,
+        "cs" => Language::CSharp,
+        "java" => Language::Java,
+        "php" => Language::Php,
         _ => Language::PlainText,
     }
 }
@@ -34,6 +41,9 @@ pub fn language_name(language: Language) -> &'static str {
     match language {
         Language::Rust => "Rust",
         Language::Json => "JSON",
+        Language::CSharp => "C#",
+        Language::Java => "Java",
+        Language::Php => "PHP",
         Language::PlainText => "Plain Text",
     }
 }
@@ -107,10 +117,58 @@ fn json_query_language() -> &'static QueryLanguage {
     &JSON
 }
 
+fn csharp_query_language() -> &'static QueryLanguage {
+    static CSHARP: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        // Pinned to 0.21.3, not `LANGUAGE`/`.into()` like the other
+        // grammars: see the version-pin comment on the `tree-sitter-c-sharp`
+        // dependency in Cargo.toml. This older release's binding exposes a
+        // `language()` fn returning `tree_sitter::Language` directly.
+        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
+        let query = Query::new(
+            &grammar,
+            include_str!("../queries/csharp/highlights.scm"),
+        )
+        .expect("csharp highlights.scm must compile against tree-sitter-c-sharp's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &CSHARP
+}
+
+fn java_query_language() -> &'static QueryLanguage {
+    static JAVA: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+        let query = Query::new(
+            &grammar,
+            include_str!("../queries/java/highlights.scm"),
+        )
+        .expect("java highlights.scm must compile against tree-sitter-java's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &JAVA
+}
+
+fn php_query_language() -> &'static QueryLanguage {
+    static PHP: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        // `php_only` (body-only grammar), not `LANGUAGE_PHP` (embedded
+        // HTML) — v1 design decision, see the plan doc.
+        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
+        let query = Query::new(
+            &grammar,
+            include_str!("../queries/php/highlights.scm"),
+        )
+        .expect("php highlights.scm must compile against tree-sitter-php's php_only grammar");
+        QueryLanguage { grammar, query }
+    });
+    &PHP
+}
+
 fn query_language_for(language: Language) -> Option<&'static QueryLanguage> {
     match language {
         Language::Rust => Some(rust_query_language()),
         Language::Json => Some(json_query_language()),
+        Language::CSharp => Some(csharp_query_language()),
+        Language::Java => Some(java_query_language()),
+        Language::Php => Some(php_query_language()),
         Language::PlainText => None,
     }
 }
@@ -135,10 +193,43 @@ fn json_locals_query_language() -> &'static QueryLanguage {
     &JSON_LOCALS
 }
 
+fn csharp_locals_query_language() -> &'static QueryLanguage {
+    static CSHARP_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
+        let query = Query::new(&grammar, include_str!("../queries/csharp/locals.scm"))
+            .expect("csharp locals.scm must compile against tree-sitter-c-sharp's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &CSHARP_LOCALS
+}
+
+fn java_locals_query_language() -> &'static QueryLanguage {
+    static JAVA_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+        let query = Query::new(&grammar, include_str!("../queries/java/locals.scm"))
+            .expect("java locals.scm must compile against tree-sitter-java's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &JAVA_LOCALS
+}
+
+fn php_locals_query_language() -> &'static QueryLanguage {
+    static PHP_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
+        let query = Query::new(&grammar, include_str!("../queries/php/locals.scm"))
+            .expect("php locals.scm must compile against tree-sitter-php's php_only grammar");
+        QueryLanguage { grammar, query }
+    });
+    &PHP_LOCALS
+}
+
 fn locals_query_language_for(language: Language) -> Option<&'static QueryLanguage> {
     match language {
         Language::Rust => Some(rust_locals_query_language()),
         Language::Json => Some(json_locals_query_language()),
+        Language::CSharp => Some(csharp_locals_query_language()),
+        Language::Java => Some(java_locals_query_language()),
+        Language::Php => Some(php_locals_query_language()),
         Language::PlainText => None,
     }
 }
@@ -375,6 +466,9 @@ mod tests {
     fn extension_maps_to_language() {
         assert_eq!(language_for_extension("rs"), Language::Rust);
         assert_eq!(language_for_extension("json"), Language::Json);
+        assert_eq!(language_for_extension("cs"), Language::CSharp);
+        assert_eq!(language_for_extension("java"), Language::Java);
+        assert_eq!(language_for_extension("php"), Language::Php);
         assert_eq!(language_for_extension("txt"), Language::PlainText);
         assert_eq!(language_for_extension(""), Language::PlainText);
     }
@@ -383,6 +477,9 @@ mod tests {
     fn language_name_covers_every_language() {
         assert_eq!(language_name(Language::Rust), "Rust");
         assert_eq!(language_name(Language::Json), "JSON");
+        assert_eq!(language_name(Language::CSharp), "C#");
+        assert_eq!(language_name(Language::Java), "Java");
+        assert_eq!(language_name(Language::Php), "PHP");
         assert_eq!(language_name(Language::PlainText), "Plain Text");
     }
 
@@ -581,6 +678,168 @@ mod tests {
             .expect("expected an occurrence for the struct name");
         assert!(point.is_definition);
         assert_eq!(&text[point.start..point.end], "Point");
+    }
+
+    // --- C# (Task B) ---
+
+    const CSHARP_SNIPPET: &str = "class Greeter {\n    public string Name;\n\n    public Greeter(string name) {\n        Name = name;\n    }\n\n    public string Greet() {\n        // say hi\n        return \"Hello, \" + Name;\n    }\n}\n";
+
+    #[test]
+    fn csharp_class_keyword_is_highlighted() {
+        let spans = highlight(Language::CSharp, CSHARP_SNIPPET);
+        let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        assert_eq!(&CSHARP_SNIPPET[span.start..span.end], "class");
+    }
+
+    #[test]
+    fn csharp_string_literal_is_highlighted() {
+        let spans = highlight(Language::CSharp, CSHARP_SNIPPET);
+        let span = find(&spans, TokenKind::String).expect("expected a String span");
+        assert_eq!(&CSHARP_SNIPPET[span.start..span.end], "\"Hello, \"");
+    }
+
+    #[test]
+    fn csharp_comment_is_highlighted() {
+        let spans = highlight(Language::CSharp, CSHARP_SNIPPET);
+        let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
+        assert!(&CSHARP_SNIPPET[span.start..span.end].starts_with("// say hi"));
+    }
+
+    #[test]
+    fn csharp_class_name_is_highlighted_as_type() {
+        let spans = highlight(Language::CSharp, CSHARP_SNIPPET);
+        let type_span = spans
+            .iter()
+            .find(|s| s.kind == TokenKind::Type && &CSHARP_SNIPPET[s.start..s.end] == "Greeter");
+        assert!(type_span.is_some(), "expected `Greeter` highlighted as a Type");
+    }
+
+    #[test]
+    fn csharp_method_definition_is_recognized() {
+        let occurrences = identifier_occurrences(Language::CSharp, CSHARP_SNIPPET);
+        let greet = occurrences
+            .iter()
+            .find(|o| o.name == "Greet")
+            .expect("expected an occurrence for the method name");
+        assert!(greet.is_definition);
+    }
+
+    #[test]
+    fn csharp_parameter_used_twice_is_one_definition_and_one_reference() {
+        let text = "class C { void M(string name) { name = name; } }";
+        let occurrences = identifier_occurrences(Language::CSharp, text);
+        let names: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "name").collect();
+        assert_eq!(names.len(), 3, "1 definition + 2 references: {names:?}");
+        assert_eq!(names.iter().filter(|o| o.is_definition).count(), 1);
+        assert_eq!(names.iter().filter(|o| !o.is_definition).count(), 2);
+    }
+
+    // --- Java (Task B) ---
+
+    const JAVA_SNIPPET: &str = "public class Greeter {\n    private String name;\n\n    public Greeter(String name) {\n        this.name = name;\n    }\n\n    public String greet() {\n        // say hi\n        return \"Hello, \" + name;\n    }\n}\n";
+
+    #[test]
+    fn java_class_keyword_is_highlighted() {
+        let spans = highlight(Language::Java, JAVA_SNIPPET);
+        let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        assert_eq!(&JAVA_SNIPPET[span.start..span.end], "public");
+    }
+
+    #[test]
+    fn java_string_literal_is_highlighted() {
+        let spans = highlight(Language::Java, JAVA_SNIPPET);
+        let span = find(&spans, TokenKind::String).expect("expected a String span");
+        assert_eq!(&JAVA_SNIPPET[span.start..span.end], "\"Hello, \"");
+    }
+
+    #[test]
+    fn java_comment_is_highlighted() {
+        let spans = highlight(Language::Java, JAVA_SNIPPET);
+        let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
+        assert!(&JAVA_SNIPPET[span.start..span.end].starts_with("// say hi"));
+    }
+
+    #[test]
+    fn java_class_name_is_highlighted_as_type() {
+        let spans = highlight(Language::Java, JAVA_SNIPPET);
+        let type_span = spans
+            .iter()
+            .find(|s| s.kind == TokenKind::Type && &JAVA_SNIPPET[s.start..s.end] == "Greeter");
+        assert!(type_span.is_some(), "expected `Greeter` highlighted as a Type");
+    }
+
+    #[test]
+    fn java_method_definition_is_recognized() {
+        let occurrences = identifier_occurrences(Language::Java, JAVA_SNIPPET);
+        let greet = occurrences
+            .iter()
+            .find(|o| o.name == "greet")
+            .expect("expected an occurrence for the method name");
+        assert!(greet.is_definition);
+    }
+
+    #[test]
+    fn java_parameter_used_twice_is_one_definition_and_one_reference() {
+        let text = "class C { void m(String name) { name = name; } }";
+        let occurrences = identifier_occurrences(Language::Java, text);
+        let names: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "name").collect();
+        assert_eq!(names.len(), 3, "1 definition + 2 references: {names:?}");
+        assert_eq!(names.iter().filter(|o| o.is_definition).count(), 1);
+        assert_eq!(names.iter().filter(|o| !o.is_definition).count(), 2);
+    }
+
+    // --- PHP (Task B) ---
+
+    const PHP_SNIPPET: &str = "class Greeter {\n    public string $name;\n\n    public function __construct(string $name) {\n        $this->name = $name;\n    }\n\n    public function greet(): string {\n        // say hi\n        return \"Hello, \" . $this->name;\n    }\n}\n";
+
+    #[test]
+    fn php_class_keyword_is_highlighted() {
+        let spans = highlight(Language::Php, PHP_SNIPPET);
+        let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        assert_eq!(&PHP_SNIPPET[span.start..span.end], "class");
+    }
+
+    #[test]
+    fn php_string_literal_is_highlighted() {
+        let spans = highlight(Language::Php, PHP_SNIPPET);
+        let span = find(&spans, TokenKind::String).expect("expected a String span");
+        assert_eq!(&PHP_SNIPPET[span.start..span.end], "\"Hello, \"");
+    }
+
+    #[test]
+    fn php_comment_is_highlighted() {
+        let spans = highlight(Language::Php, PHP_SNIPPET);
+        let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
+        assert!(&PHP_SNIPPET[span.start..span.end].starts_with("// say hi"));
+    }
+
+    #[test]
+    fn php_class_name_is_highlighted_as_type() {
+        let spans = highlight(Language::Php, PHP_SNIPPET);
+        let type_span = spans
+            .iter()
+            .find(|s| s.kind == TokenKind::Type && &PHP_SNIPPET[s.start..s.end] == "Greeter");
+        assert!(type_span.is_some(), "expected `Greeter` highlighted as a Type");
+    }
+
+    #[test]
+    fn php_method_definition_is_recognized() {
+        let occurrences = identifier_occurrences(Language::Php, PHP_SNIPPET);
+        let greet = occurrences
+            .iter()
+            .find(|o| o.name == "greet")
+            .expect("expected an occurrence for the method name");
+        assert!(greet.is_definition);
+    }
+
+    #[test]
+    fn php_parameter_used_twice_is_one_definition_and_one_reference() {
+        let text = "function add($x) { return $x + $x; }";
+        let occurrences = identifier_occurrences(Language::Php, text);
+        let names: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "$x").collect();
+        assert_eq!(names.len(), 3, "1 definition + 2 references: {names:?}");
+        assert_eq!(names.iter().filter(|o| o.is_definition).count(), 1);
+        assert_eq!(names.iter().filter(|o| !o.is_definition).count(), 2);
     }
 
     #[test]
