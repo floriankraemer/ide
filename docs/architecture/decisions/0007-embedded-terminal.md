@@ -62,6 +62,15 @@ No `tokio` or other async runtime in `pty-core` or `terminal-core`; `tokio` stay
   `pty-core`'s Linux build and unit tests (spawn/read, resize, kill/wait) are verified clean
   under the Docker `linux-builder` stage as of this task; the MXE cross-build path is not yet
   checked.
+- `terminal-core` (task F2) landed on `alacritty_terminal` 0.26.0, not 0.24: 0.24.2's `tty`
+  module failed to build on this toolchain (a `rustix`/`rustix-openpty` version-unification
+  conflict — two incompatible major versions of `rustix` in the dependency graph produced a
+  trait-not-implemented error unrelated to any code in this repo). 0.26.0 resolves clean.
+  `terminal-core` doesn't use `alacritty_terminal`'s `tty` module at all (it consumes bytes
+  from `pty-core` instead), so this was purely a "does the crate compile" gate, not a feature
+  gap. Its Linux build and unit tests (known VT100/SGR/CUP escape-sequence fixtures) are
+  verified clean under `linux-builder`; the MXE cross-build path is still unchecked, so this
+  ADR stays Proposed.
 - The `WindowsShellKind` enum only names the shell; nothing in `pty-core` verifies the named
   executable actually exists on the target machine before spawning, that's a caller-side
   concern for whichever task builds the terminal dock widget's shell-picker (F3 or later).
