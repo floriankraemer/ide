@@ -926,6 +926,8 @@ struct CentralWidgets
     ads::CDockManager *dockManager;
     FindInFilesPanel *findInFilesPanel;
     ads::CDockWidget *findInFilesDock;
+    ClassViewPanel *classViewPanel;
+    ads::CDockWidget *classViewDock;
 };
 
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
@@ -959,6 +961,37 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     auto *findInFilesDock = new ads::CDockWidget(dockManager, QObject::tr("Find in Files"));
     findInFilesDock->setWidget(findInFilesPanel);
     dockManager->addDockWidget(ads::BottomDockWidgetArea, findInFilesDock, editorArea);
+
+    // Task D: right-side dock panel, matching where JetBrains-style IDEs
+    // dock their Class/Structure View. Reuses the one EditorTabs instance
+    // above (its jumpToByteOffset) rather than a second navigation path.
+    auto *classViewPanel = new ClassViewPanel(docManager, editorTabs, dockManager);
+    auto *classViewDock = new ads::CDockWidget(dockManager, QObject::tr("Class View"));
+    classViewDock->setWidget(classViewPanel);
+    dockManager->addDockWidget(ads::RightDockWidgetArea, classViewDock, editorArea);
+
+    // Class View tracks whatever tab is current: refresh on open, on
+    // switch, and whenever a tab becomes clean. `tabModifiedChanged`
+    // firing with `modified == false` doubles as "just saved" — there is
+    // no separate "save completed" signal, and this one already fires
+    // exactly when EditorTabs::saveTab succeeds (it forwards
+    // QTextDocument::modificationChanged, which setModified(false) there
+    // triggers). It also fires on initial load and on undo-to-clean, both
+    // harmless extra refreshes of the same content.
+    QObject::connect(docManager, &DocumentManager::tabOpened, classViewPanel,
+                      [classViewPanel, editorTabs](quint64, const QString &) {
+                          classViewPanel->refresh(editorTabs->currentTabId());
+                      });
+    QObject::connect(tabWidget, &QTabWidget::currentChanged, classViewPanel,
+                      [classViewPanel, editorTabs](int) {
+                          classViewPanel->refresh(editorTabs->currentTabId());
+                      });
+    QObject::connect(docManager, &DocumentManager::tabModifiedChanged, classViewPanel,
+                      [classViewPanel, editorTabs](quint64 tabId, bool modified) {
+                          if (!modified && tabId == editorTabs->currentTabId()) {
+                              classViewPanel->refresh(tabId);
+                          }
+                      });
 
     // Rebuild the project's text index off the same project-open lifecycle
     // event the tree/watcher already use (no second, parallel hook).
@@ -1125,7 +1158,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
           }
       });
 
-    return CentralWidgets{editorTabs, dockManager, findInFilesPanel, findInFilesDock};
+    return CentralWidgets{editorTabs,      dockManager,   findInFilesPanel,
+                           findInFilesDock, classViewPanel, classViewDock};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -1241,6 +1275,14 @@ QMainWindow *buildMainWindow()
     editMenu->addSeparator();
     QAction *findInFilesAction = editMenu->addAction(QObject::tr("Find in Files..."));
     findInFilesAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+F")));
+
+    QMenu *viewMenu = window->menuBar()->addMenu(QObject::tr("&View"));
+    QAction *classViewAction = viewMenu->addAction(QObject::tr("Class View"));
+    classViewAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+C")));
+    QObject::connect(classViewAction, &QAction::triggered, window, [central]() {
+        central.classViewDock->toggleView(true);
+        central.classViewDock->raise();
+    });
 
     QObject::connect(undoAction, &QAction::triggered, window, [editorTabs]() {
         if (auto *editor = editorTabs->currentEditor()) {

@@ -94,6 +94,42 @@ pub struct FoldRange {
     pub end: usize,
 }
 
+/// Structural kind of a symbol extracted by [`outline()`] (Task D). Not
+/// every language uses every variant — e.g. Rust has no `Interface` in the
+/// literal sense (its `trait`s map onto it), PHP's `trait`s also map onto
+/// it (see `php/tags.scm`), and JSON uses none of them. Kept to what's
+/// actually meaningful across Rust/C#/Java/PHP rather than a maximal
+/// per-language taxonomy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SymbolKind {
+    Class,
+    Struct,
+    Enum,
+    Interface,
+    Method,
+    Function,
+    Field,
+}
+
+/// One definition site extracted by [`outline()`] (Task D): a name plus
+/// its structural kind, the byte range of the whole definition (`start`/
+/// `end` — used to jump-select or fold the definition) and of just its
+/// name token (`name_start`/`name_end` — used to place the cursor exactly
+/// on the identifier). `children` holds definitions nested inside this
+/// one by AST byte-range containment (e.g. a class's methods/fields, an
+/// `impl` block's methods) — see [`outline()`]'s doc comment for why
+/// containment, not an explicit parent capture, decides nesting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymbolNode {
+    pub name: String,
+    pub kind: SymbolKind,
+    pub start: usize,
+    pub end: usize,
+    pub name_start: usize,
+    pub name_end: usize,
+    pub children: Vec<SymbolNode>,
+}
+
 /// A `highlights.scm` query, compiled once per language and reused across
 /// calls. Grammar + query text are bundled into the binary via
 /// `include_str!`/`LANGUAGE` constants so highlighting works identically
@@ -307,6 +343,82 @@ fn folds_query_language_for(language: Language) -> Option<&'static QueryLanguage
     }
 }
 
+fn rust_tags_query_language() -> &'static QueryLanguage {
+    static RUST_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        let query = Query::new(&grammar, include_str!("../queries/rust/tags.scm"))
+            .expect("rust tags.scm must compile against tree-sitter-rust's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &RUST_TAGS
+}
+
+fn json_tags_query_language() -> &'static QueryLanguage {
+    static JSON_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
+        let query = Query::new(&grammar, include_str!("../queries/json/tags.scm"))
+            .expect("json tags.scm must compile against tree-sitter-json's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &JSON_TAGS
+}
+
+fn csharp_tags_query_language() -> &'static QueryLanguage {
+    static CSHARP_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
+        let query = Query::new(&grammar, include_str!("../queries/csharp/tags.scm"))
+            .expect("csharp tags.scm must compile against tree-sitter-c-sharp's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &CSHARP_TAGS
+}
+
+fn java_tags_query_language() -> &'static QueryLanguage {
+    static JAVA_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+        let query = Query::new(&grammar, include_str!("../queries/java/tags.scm"))
+            .expect("java tags.scm must compile against tree-sitter-java's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &JAVA_TAGS
+}
+
+fn php_tags_query_language() -> &'static QueryLanguage {
+    static PHP_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
+        let query = Query::new(&grammar, include_str!("../queries/php/tags.scm"))
+            .expect("php tags.scm must compile against tree-sitter-php's php_only grammar");
+        QueryLanguage { grammar, query }
+    });
+    &PHP_TAGS
+}
+
+fn tags_query_language_for(language: Language) -> Option<&'static QueryLanguage> {
+    match language {
+        Language::Rust => Some(rust_tags_query_language()),
+        Language::Json => Some(json_tags_query_language()),
+        Language::CSharp => Some(csharp_tags_query_language()),
+        Language::Java => Some(java_tags_query_language()),
+        Language::Php => Some(php_tags_query_language()),
+        Language::PlainText => None,
+    }
+}
+
+/// Map a `tags.scm` `@definition.<kind>` capture name onto [`SymbolKind`]
+/// — the part after the dot is the kind name verbatim (lowercased).
+fn symbol_kind_for_capture(capture_name: &str) -> Option<SymbolKind> {
+    match capture_name.strip_prefix("definition.")? {
+        "class" => Some(SymbolKind::Class),
+        "struct" => Some(SymbolKind::Struct),
+        "enum" => Some(SymbolKind::Enum),
+        "interface" => Some(SymbolKind::Interface),
+        "method" => Some(SymbolKind::Method),
+        "function" => Some(SymbolKind::Function),
+        "field" => Some(SymbolKind::Field),
+        _ => None,
+    }
+}
+
 /// Map a query capture name (`@keyword`, `@string`, ...) onto the existing
 /// `TokenKind` taxonomy. Captures with no mapping (there are none today,
 /// since every capture in our `.scm` files is one of these six) are
@@ -389,6 +501,123 @@ pub fn identifier_occurrences(language: Language, text: &str) -> Vec<Occurrence>
             is_definition,
         })
         .collect()
+}
+
+/// One raw `tags.scm` match before nesting: a definition's kind and byte
+/// range plus its name token's byte range, not yet organized into a tree.
+struct RawSymbol {
+    kind: SymbolKind,
+    start: usize,
+    end: usize,
+    name_start: usize,
+    name_end: usize,
+}
+
+/// Per-file symbol outline of `text`, parsed as `language` (Task D) — the
+/// data source for Class View's per-file tier. Stateless one-shot, matching
+/// [`highlight`]/[`identifier_occurrences`]'s convention: does its own
+/// parse rather than reusing a [`Highlighter`]'s persistent tree. `outline`
+/// is refreshed on save (a project-wide-scope panel doesn't need live
+/// per-keystroke updates), so there's no incremental-tree benefit to chase
+/// here the way there is for on-every-keystroke highlighting.
+///
+/// Backed by a `tags.scm` per language (see `crates/syntax-core/queries/
+/// */tags.scm`), following the community `tree-sitter-tags` convention:
+/// each pattern captures the whole definition node as `@definition.<kind>`
+/// and its identifier as `@name`. Nesting (methods/fields under their
+/// class, methods under an `impl` block, ...) is derived here from AST
+/// byte-range containment rather than from an explicit parent capture —
+/// simpler to get right than threading parent pointers through every
+/// query, and correct by construction since a tree-sitter node's range
+/// always fully contains its descendants' ranges. [`Language::PlainText`]
+/// (or a language with an empty `tags.scm`, i.e. JSON) yields an empty vec.
+pub fn outline(language: Language, text: &str) -> Vec<SymbolNode> {
+    let Some(ql) = tags_query_language_for(language) else {
+        return Vec::new();
+    };
+    let mut parser = Parser::new();
+    if parser.set_language(&ql.grammar).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(text, None) else {
+        return Vec::new();
+    };
+
+    let mut raw: Vec<RawSymbol> = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&ql.query, tree.root_node(), text.as_bytes());
+    while let Some(m) = matches.next() {
+        let mut definition: Option<(SymbolKind, usize, usize)> = None;
+        let mut name: Option<(usize, usize)> = None;
+        for capture in m.captures {
+            let capture_name = ql.query.capture_names()[capture.index as usize];
+            if capture_name == "name" {
+                name = Some((capture.node.start_byte(), capture.node.end_byte()));
+            } else if let Some(kind) = symbol_kind_for_capture(capture_name) {
+                definition = Some((kind, capture.node.start_byte(), capture.node.end_byte()));
+            }
+        }
+        if let (Some((kind, start, end)), Some((name_start, name_end))) = (definition, name) {
+            raw.push(RawSymbol {
+                kind,
+                start,
+                end,
+                name_start,
+                name_end,
+            });
+        }
+    }
+
+    build_symbol_tree(raw, text)
+}
+
+/// Nests `raw` definitions by AST byte-range containment: a classic
+/// "build a tree from ranges" stack scan. `raw` is sorted by start byte
+/// (ties broken by longest-range-first, so an outer definition is always
+/// pushed before an inner one that starts at the same byte — e.g. a
+/// struct with no leading trivia and its first field). While the next
+/// definition still starts before the stack top's end, it nests inside;
+/// once a definition starts at or past the top's end, the top is closed
+/// out (attached to its own parent, or promoted to a root) and popped.
+/// This is correct by construction — not a heuristic — because tree-sitter
+/// node ranges never partially overlap, only nest or sit disjoint.
+fn build_symbol_tree(mut raw: Vec<RawSymbol>, text: &str) -> Vec<SymbolNode> {
+    raw.sort_by_key(|r| (r.start, std::cmp::Reverse(r.end)));
+
+    let mut roots: Vec<SymbolNode> = Vec::new();
+    let mut open: Vec<SymbolNode> = Vec::new();
+
+    fn attach(open: &mut Vec<SymbolNode>, roots: &mut Vec<SymbolNode>, node: SymbolNode) {
+        match open.last_mut() {
+            Some(parent) => parent.children.push(node),
+            None => roots.push(node),
+        }
+    }
+
+    for r in raw {
+        while let Some(top) = open.last() {
+            if top.end <= r.start {
+                let done = open.pop().expect("just peeked Some");
+                attach(&mut open, &mut roots, done);
+            } else {
+                break;
+            }
+        }
+        open.push(SymbolNode {
+            name: text[r.name_start..r.name_end].to_string(),
+            kind: r.kind,
+            start: r.start,
+            end: r.end,
+            name_start: r.name_start,
+            name_end: r.name_end,
+            children: Vec::new(),
+        });
+    }
+    while let Some(done) = open.pop() {
+        attach(&mut open, &mut roots, done);
+    }
+
+    roots
 }
 
 fn spans_from_tree(
@@ -1106,5 +1335,86 @@ mod tests {
         );
         let names: Vec<&str> = occurrences.iter().map(|o| o.name.as_str()).collect();
         assert_eq!(names, vec!["\"key\"", "\"other\""]);
+    }
+
+    // --- outline() (Task D) ---
+
+    #[test]
+    fn plain_text_has_no_outline() {
+        assert!(outline(Language::PlainText, "anything").is_empty());
+    }
+
+    #[test]
+    fn json_has_no_outline() {
+        let text = "{\"key\": \"value\", \"nested\": {\"a\": 1}}";
+        assert!(outline(Language::Json, text).is_empty());
+    }
+
+    #[test]
+    fn rust_outline_nests_fields_under_struct_and_methods_under_impl() {
+        let text = "struct Point {\n    x: i32,\n    y: i32,\n}\n\nimpl Point {\n    fn new() -> Point { Point { x: 0, y: 0 } }\n    fn dist(&self) -> f64 { 0.0 }\n}\n";
+        let roots = outline(Language::Rust, text);
+
+        let point_struct = roots
+            .iter()
+            .find(|s| s.kind == SymbolKind::Struct && s.name == "Point")
+            .expect("expected a Point struct root");
+        let field_names: Vec<&str> = point_struct.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(field_names, vec!["x", "y"]);
+        assert!(point_struct.children.iter().all(|c| c.kind == SymbolKind::Field));
+
+        let point_impl = roots
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "Point")
+            .expect("expected a Point impl root");
+        let method_names: Vec<&str> = point_impl.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(method_names, vec!["new", "dist"]);
+        assert!(point_impl.children.iter().all(|c| c.kind == SymbolKind::Function));
+
+        // Name byte ranges point at just the identifier, not the whole
+        // definition.
+        assert_eq!(&text[point_struct.name_start..point_struct.name_end], "Point");
+    }
+
+    #[test]
+    fn csharp_outline_nests_methods_under_class() {
+        let occurrences = outline(Language::CSharp, CSHARP_SNIPPET);
+        let greeter = occurrences
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "Greeter")
+            .expect("expected a Greeter class root");
+        let names: Vec<&str> = greeter.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Name", "Greeter", "Greet"]);
+        assert_eq!(greeter.children[0].kind, SymbolKind::Field);
+        assert_eq!(greeter.children[1].kind, SymbolKind::Method); // constructor
+        assert_eq!(greeter.children[2].kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn java_outline_nests_methods_under_class() {
+        let roots = outline(Language::Java, JAVA_SNIPPET);
+        let greeter = roots
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "Greeter")
+            .expect("expected a Greeter class root");
+        let names: Vec<&str> = greeter.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["name", "Greeter", "greet"]);
+        assert_eq!(greeter.children[0].kind, SymbolKind::Field);
+        assert_eq!(greeter.children[1].kind, SymbolKind::Method); // constructor
+        assert_eq!(greeter.children[2].kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn php_outline_nests_methods_under_class() {
+        let roots = outline(Language::Php, PHP_SNIPPET);
+        let greeter = roots
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "Greeter")
+            .expect("expected a Greeter class root");
+        let names: Vec<&str> = greeter.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["$name", "__construct", "greet"]);
+        assert_eq!(greeter.children[0].kind, SymbolKind::Field);
+        assert_eq!(greeter.children[1].kind, SymbolKind::Method);
+        assert_eq!(greeter.children[2].kind, SymbolKind::Method);
     }
 }
