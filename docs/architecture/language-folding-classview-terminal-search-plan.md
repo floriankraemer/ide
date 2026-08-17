@@ -9,7 +9,7 @@ per `CLAUDE.md`.
 
 | Task | Status | Commit |
 |---|---|---|
-| A | done | |
+| A | done | 176116e |
 | A1 | open | |
 | A2 | open | |
 | B | open | |
