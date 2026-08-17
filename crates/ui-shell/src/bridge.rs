@@ -743,6 +743,79 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "projectSymbolsFailed"]
         fn project_symbols_failed(self: Pin<&mut SearchModel>, message: QString);
+
+        /// Task J — go-to-symbol: definition sites whose name contains
+        /// `query` (non-empty; an empty query is `projectSymbols`'s job
+        /// above, same underlying `find_definitions` call, just always
+        /// narrowed here). Runs on a background thread and streams results
+        /// like `projectSymbols`, for the same reason (shared `Mutex` with
+        /// a concurrent `buildIndex`/`search` call).
+        #[qinvokable]
+        #[cxx_name = "symbolSearch"]
+        fn symbol_search(self: Pin<&mut SearchModel>, query: &QString);
+
+        /// One go-to-symbol result: same shape as `projectSymbolFound`,
+        /// kept as a separate signal (rather than reusing that one) so the
+        /// quick-open dialog and the Class View project tier can listen
+        /// independently without filtering each other's emissions.
+        #[qsignal]
+        #[cxx_name = "symbolSearchResultFound"]
+        fn symbol_search_result_found(
+            self: Pin<&mut SearchModel>,
+            path: QString,
+            line: u32,
+            kind: FfiSymbolKind,
+            name: QString,
+            container: QString,
+        );
+
+        /// Emitted once after the last `symbolSearchResultFound` of a
+        /// `symbolSearch` call (including when there were zero results).
+        #[qsignal]
+        #[cxx_name = "symbolSearchFinished"]
+        fn symbol_search_finished(self: Pin<&mut SearchModel>);
+
+        /// Emitted instead of `symbolSearchFinished` when `symbolSearch`
+        /// couldn't run at all (no index built yet).
+        #[qsignal]
+        #[cxx_name = "symbolSearchFailed"]
+        fn symbol_search_failed(self: Pin<&mut SearchModel>, message: QString);
+
+        /// Task J — find-usages: every occurrence (definitions and
+        /// references alike) of the exact name `name`, across the whole
+        /// project. `index_core::TextIndex::find_usages` already sorts by
+        /// (path, line), so consecutive results share a file — the view
+        /// groups by file simply by rendering them in the order they
+        /// arrive, no server-side grouping needed.
+        #[qinvokable]
+        #[cxx_name = "findUsages"]
+        fn find_usages(self: Pin<&mut SearchModel>, name: &QString);
+
+        /// One usage: `is_definition` distinguishes the defining occurrence
+        /// from a reference; `container` is empty when the occurrence has
+        /// none.
+        #[qsignal]
+        #[cxx_name = "usagesFound"]
+        fn usages_found(
+            self: Pin<&mut SearchModel>,
+            path: QString,
+            line: u32,
+            name: QString,
+            is_definition: bool,
+            container: QString,
+        );
+
+        /// Emitted once after the last `usagesFound` of a `findUsages`
+        /// call (including when there were zero usages).
+        #[qsignal]
+        #[cxx_name = "usagesFinished"]
+        fn usages_finished(self: Pin<&mut SearchModel>);
+
+        /// Emitted instead of `usagesFinished` when `findUsages` couldn't
+        /// run at all (no index built yet).
+        #[qsignal]
+        #[cxx_name = "usagesFailed"]
+        fn usages_failed(self: Pin<&mut SearchModel>, message: QString);
     }
 
     // Enables `self.qt_thread()` on `SearchModel` for the background
@@ -1805,6 +1878,103 @@ impl ffi::SearchModel {
                     let message = err.to_string();
                     let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
                         model.as_mut().project_symbols_failed(QString::from(message.as_str()));
+                    });
+                }
+            }
+        });
+    }
+
+    /// Task J — go-to-symbol. See `symbol_search`'s bridge doc comment for
+    /// why this is a thin wrapper over the same `find_definitions` call
+    /// `project_symbols` above uses, just with a caller-supplied (non-empty)
+    /// query instead of `""`.
+    pub fn symbol_search(self: Pin<&mut Self>, query: &QString) {
+        let query = query.to_string();
+        let qt_thread = self.qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            let guard = slot.lock().unwrap();
+            let Some(index) = guard.as_ref() else {
+                drop(guard);
+                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                    model
+                        .as_mut()
+                        .symbol_search_failed(QString::from("No project is open yet."));
+                });
+                return;
+            };
+            let result = index.find_definitions(&query);
+            drop(guard);
+            match result {
+                Ok(matches) => {
+                    for m in matches {
+                        // Same reasoning as project_symbols: nothing
+                        // structural to show for a defining occurrence with
+                        // no outline() kind.
+                        let Some(kind) = m.kind else { continue };
+                        let path = QString::from(m.path.to_string_lossy().as_ref());
+                        let line = m.line as u32;
+                        let name = QString::from(m.name.as_str());
+                        let container = QString::from(m.container.as_deref().unwrap_or(""));
+                        let ffi_kind = to_ffi_symbol_kind(kind);
+                        let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                            model.as_mut().symbol_search_result_found(path, line, ffi_kind, name, container);
+                        });
+                    }
+                    let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                        model.as_mut().symbol_search_finished();
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model.as_mut().symbol_search_failed(QString::from(message.as_str()));
+                    });
+                }
+            }
+        });
+    }
+
+    /// Task J — find-usages: every occurrence of the exact name `name`,
+    /// definitions and references alike. Same background-thread/streamed-
+    /// signal shape as `search`/`project_symbols`/`symbol_search` above.
+    pub fn find_usages(self: Pin<&mut Self>, name: &QString) {
+        let name = name.to_string();
+        let qt_thread = self.qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            let guard = slot.lock().unwrap();
+            let Some(index) = guard.as_ref() else {
+                drop(guard);
+                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                    model
+                        .as_mut()
+                        .usages_failed(QString::from("No project is open yet."));
+                });
+                return;
+            };
+            let result = index.find_usages(&name);
+            drop(guard);
+            match result {
+                Ok(matches) => {
+                    for m in matches {
+                        let path = QString::from(m.path.to_string_lossy().as_ref());
+                        let line = m.line as u32;
+                        let name = QString::from(m.name.as_str());
+                        let is_definition = m.is_definition;
+                        let container = QString::from(m.container.as_deref().unwrap_or(""));
+                        let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                            model.as_mut().usages_found(path, line, name, is_definition, container);
+                        });
+                    }
+                    let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                        model.as_mut().usages_finished();
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model.as_mut().usages_failed(QString::from(message.as_str()));
                     });
                 }
             }

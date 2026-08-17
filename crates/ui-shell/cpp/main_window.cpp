@@ -23,6 +23,7 @@
 #include <QFont>
 #include <QFormLayout>
 #include <QHash>
+#include <functional>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
@@ -519,6 +520,29 @@ private:
     QLabel *languageLabel_ = nullptr;
 };
 
+// Shared by ClassViewPanel, QuickOpenDialog and FindUsagesPanel (Tasks D/I/J)
+// so the "class"/"method"/... label text is spelled once.
+QString symbolKindLabel(FfiSymbolKind kind)
+{
+    switch (kind) {
+    case FfiSymbolKind::Class:
+        return QStringLiteral("class");
+    case FfiSymbolKind::Struct:
+        return QStringLiteral("struct");
+    case FfiSymbolKind::Enum:
+        return QStringLiteral("enum");
+    case FfiSymbolKind::Interface:
+        return QStringLiteral("interface");
+    case FfiSymbolKind::Method:
+        return QStringLiteral("method");
+    case FfiSymbolKind::Function:
+        return QStringLiteral("function");
+    case FfiSymbolKind::Field:
+    default:
+        return QStringLiteral("field");
+    }
+}
+
 // Find-in-Files dock panel (Task H): a query box + regex toggle + results
 // list wired to `SearchModel`. Humble view per CLAUDE.md's hard rule — the
 // search itself and match interpretation happen in Rust/index-core; this
@@ -643,12 +667,18 @@ private:
 class ClassViewPanel : public QWidget
 {
 public:
+    // Task J: `onFindUsagesRequested` is called with a symbol's exact name
+    // when the user picks "Find Usages" from a leaf item's context menu —
+    // the panel doesn't know or care what happens with that name (main_window
+    // wires it to FindUsagesPanel), keeping this class's only job "show the
+    // outline, forward intents".
     ClassViewPanel(DocumentManager *docManager, SearchModel *searchModel, EditorTabs *editorTabs,
-                    QWidget *parent)
+                    std::function<void(const QString &)> onFindUsagesRequested, QWidget *parent)
       : QWidget(parent)
       , docManager_(docManager)
       , searchModel_(searchModel)
       , editorTabs_(editorTabs)
+      , onFindUsagesRequested_(std::move(onFindUsagesRequested))
     {
         modeCombo_ = new QComboBox(this);
         modeCombo_->addItem(tr("Current File"));
@@ -656,11 +686,14 @@ public:
 
         tree_ = new QTreeWidget(this);
         tree_->setHeaderHidden(true);
+        tree_->setContextMenuPolicy(Qt::CustomContextMenu);
         auto *layout = new QVBoxLayout(this);
         layout->addWidget(modeCombo_);
         layout->addWidget(tree_);
 
         connect(tree_, &QTreeWidget::itemDoubleClicked, this, &ClassViewPanel::onItemDoubleClicked);
+        connect(tree_, &QTreeWidget::customContextMenuRequested, this,
+                &ClassViewPanel::onContextMenuRequested);
         connect(modeCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
             projectMode_ = (index == 1);
             if (projectMode_) {
@@ -708,6 +741,9 @@ public:
             item->setText(0, symbol.name + QStringLiteral(" (") + symbolKindLabel(symbol.kind)
                                 + QStringLiteral(")"));
             item->setData(0, Qt::UserRole, static_cast<quint64>(symbol.name_start));
+            // Task J: the bare name, for "Find Usages" — kept separate from
+            // the display text above, which has the "(kind)" suffix baked in.
+            item->setData(0, Qt::UserRole + 2, symbol.name);
             if (depth == 0) {
                 tree_->addTopLevelItem(item);
             } else {
@@ -719,27 +755,6 @@ public:
     }
 
 private:
-    static QString symbolKindLabel(FfiSymbolKind kind)
-    {
-        switch (kind) {
-        case FfiSymbolKind::Class:
-            return QStringLiteral("class");
-        case FfiSymbolKind::Struct:
-            return QStringLiteral("struct");
-        case FfiSymbolKind::Enum:
-            return QStringLiteral("enum");
-        case FfiSymbolKind::Interface:
-            return QStringLiteral("interface");
-        case FfiSymbolKind::Method:
-            return QStringLiteral("method");
-        case FfiSymbolKind::Function:
-            return QStringLiteral("function");
-        case FfiSymbolKind::Field:
-        default:
-            return QStringLiteral("field");
-        }
-    }
-
     // Task I: (re)issue a project-wide query. Results stream back via
     // `addProjectSymbol` below; `fileItems_`/`containerItems_` are rebuilt
     // from scratch each time, keyed off this call's own tree.
@@ -777,6 +792,10 @@ private:
           parent, QStringList { name + QStringLiteral(" (") + symbolKindLabel(kind) + QStringLiteral(")") });
         item->setData(0, Qt::UserRole, path);
         item->setData(0, Qt::UserRole + 1, line);
+        // Task J: bare name for "Find Usages" — group nodes (file/container,
+        // built above with QStringList-only constructors) never get this
+        // role set, so the context menu naturally has nothing to offer them.
+        item->setData(0, Qt::UserRole + 2, name);
     }
 
     void onItemDoubleClicked(QTreeWidgetItem *item)
@@ -797,14 +816,218 @@ private:
         }
     }
 
+    // Task J: "Find Usages" on a leaf symbol item (per-file or project
+    // tier alike — both stash the bare name at UserRole+2).
+    void onContextMenuRequested(const QPoint &pos)
+    {
+        QTreeWidgetItem *item = tree_->itemAt(pos);
+        if (!item) {
+            return;
+        }
+        const QVariant nameData = item->data(0, Qt::UserRole + 2);
+        if (!nameData.isValid() || !onFindUsagesRequested_) {
+            return;
+        }
+        QMenu menu(tree_);
+        QAction *findUsagesAction = menu.addAction(tr("Find Usages"));
+        QAction *chosen = menu.exec(tree_->viewport()->mapToGlobal(pos));
+        if (chosen == findUsagesAction) {
+            onFindUsagesRequested_(nameData.toString());
+        }
+    }
+
     DocumentManager *docManager_;
     SearchModel *searchModel_;
     EditorTabs *editorTabs_;
+    std::function<void(const QString &)> onFindUsagesRequested_;
     QTreeWidget *tree_ = nullptr;
     QComboBox *modeCombo_ = nullptr;
     bool projectMode_ = false;
     QHash<QString, QTreeWidgetItem *> fileItems_;
     QHash<QString, QTreeWidgetItem *> containerItems_;
+};
+
+// Find Usages results dock (Task J): reuses FindInFilesPanel's dockable
+// "list of locations, double-click to jump" shape rather than inventing a
+// new one — find-usages results are the same kind of thing (a list of
+// file:line locations), just fed by `SearchModel::findUsages` instead of
+// `search`, and triggered from Class View's context menu instead of typed
+// free text, so there's no query box here.
+class FindUsagesPanel : public QWidget
+{
+public:
+    FindUsagesPanel(SearchModel *searchModel, EditorTabs *editorTabs, QWidget *parent)
+      : QWidget(parent)
+      , searchModel_(searchModel)
+      , editorTabs_(editorTabs)
+    {
+        statusLabel_ = new QLabel(this);
+        resultsList_ = new QListWidget(this);
+
+        auto *layout = new QVBoxLayout(this);
+        layout->addWidget(statusLabel_);
+        layout->addWidget(resultsList_, 1);
+
+        connect(resultsList_,
+                &QListWidget::itemDoubleClicked,
+                this,
+                &FindUsagesPanel::openSelected);
+        connect(searchModel_, &SearchModel::usagesFound, this, &FindUsagesPanel::addUsage);
+        connect(searchModel_, &SearchModel::usagesFinished, this, [this]() {
+            statusLabel_->setText(tr("%1 usage(s).").arg(resultsList_->count()));
+        });
+        connect(searchModel_, &SearchModel::usagesFailed, this, [this](const QString &message) {
+            statusLabel_->setText(tr("Find usages failed: %1").arg(message));
+        });
+    }
+
+    // Called from ClassViewPanel's "Find Usages" context-menu action (via
+    // main_window's wiring) with the symbol's exact name.
+    void findUsages(const QString &name)
+    {
+        resultsList_->clear();
+        statusLabel_->setText(tr("Searching usages of \"%1\"...").arg(name));
+        searchModel_->findUsages(name);
+    }
+
+private:
+    // `index_core::TextIndex::find_usages` already returns results sorted
+    // by (path, line) — see `SearchModel::find_usages` — so consecutive
+    // rows here already read as grouped by file with no extra tree
+    // structure needed.
+    void addUsage(const QString &path, quint32 line, const QString &name, bool isDefinition,
+                  const QString &container)
+    {
+        Q_UNUSED(name);
+        const QString kindLabel = isDefinition ? tr("def") : tr("ref");
+        const QString label = container.isEmpty()
+          ? tr("%1:%2 [%3]").arg(QFileInfo(path).fileName()).arg(line).arg(kindLabel)
+          : tr("%1:%2 [%3] in %4")
+              .arg(QFileInfo(path).fileName())
+              .arg(line)
+              .arg(kindLabel, container);
+        auto *item = new QListWidgetItem(label, resultsList_);
+        item->setData(Qt::UserRole, path);
+        item->setData(Qt::UserRole + 1, line);
+    }
+
+    void openSelected(QListWidgetItem *item)
+    {
+        if (!item) {
+            return;
+        }
+        editorTabs_->openFileAtLine(item->data(Qt::UserRole).toString(),
+                                     item->data(Qt::UserRole + 1).toInt(), 0);
+    }
+
+    SearchModel *searchModel_;
+    EditorTabs *editorTabs_;
+    QLabel *statusLabel_ = nullptr;
+    QListWidget *resultsList_ = nullptr;
+};
+
+// Go-to-symbol quick-open (Task J): a transient `Ctrl+Shift+O` dialog —
+// "type to search, Enter/double-click to jump, Esc to close" — rather than
+// a permanent dock widget. Go-to-symbol is a one-shot jump, not a result
+// set you keep referring back to (unlike Find in Files/Find Usages), and
+// this is the conventional shape every mainstream IDE uses for it (VS
+// Code's Ctrl+P/Ctrl+Shift+O, JetBrains' Ctrl+N/Ctrl+Shift+N, Visual
+// Studio's Ctrl+,), so a dock widget here would be the novel choice, not
+// this one.
+class QuickOpenDialog : public QDialog
+{
+public:
+    QuickOpenDialog(SearchModel *searchModel, EditorTabs *editorTabs, QWidget *parent)
+      : QDialog(parent)
+      , searchModel_(searchModel)
+      , editorTabs_(editorTabs)
+    {
+        setWindowTitle(tr("Go to Symbol"));
+        resize(480, 360);
+
+        queryEdit_ = new QLineEdit(this);
+        queryEdit_->setPlaceholderText(tr("Type a symbol name..."));
+        resultsList_ = new QListWidget(this);
+
+        auto *layout = new QVBoxLayout(this);
+        layout->addWidget(queryEdit_);
+        layout->addWidget(resultsList_, 1);
+
+        connect(queryEdit_, &QLineEdit::textChanged, this, &QuickOpenDialog::runQuery);
+        connect(queryEdit_, &QLineEdit::returnPressed, this, &QuickOpenDialog::openCurrent);
+        connect(resultsList_, &QListWidget::itemActivated, this, &QuickOpenDialog::openItem);
+
+        connect(searchModel_, &SearchModel::symbolSearchResultFound, this,
+                &QuickOpenDialog::addResult);
+        connect(searchModel_, &SearchModel::symbolSearchFailed, this,
+                [this](const QString &message) {
+                    resultsList_->clear();
+                    new QListWidgetItem(tr("Search failed: %1").arg(message), resultsList_);
+                });
+    }
+
+    // Wired to the "Go to Symbol..." menu action/shortcut: reset to a blank
+    // query and bring the dialog to the front, focused for typing.
+    void popup()
+    {
+        queryEdit_->clear();
+        resultsList_->clear();
+        show();
+        raise();
+        activateWindow();
+        queryEdit_->setFocus();
+    }
+
+private:
+    void runQuery(const QString &text)
+    {
+        resultsList_->clear();
+        if (text.isEmpty()) {
+            return;
+        }
+        // ponytail: no debounce/request-id guard, so a fast typist can
+        // briefly see an older query's results race in after a newer
+        // query already cleared the list (the two background searches
+        // aren't ordered against each other). Add a generation counter if
+        // that's ever visible in practice at the query volumes this
+        // dialog sees.
+        searchModel_->symbolSearch(text);
+    }
+
+    void addResult(const QString &path, quint32 line, FfiSymbolKind kind, const QString &name,
+                   const QString &container)
+    {
+        const QString label = container.isEmpty()
+          ? tr("%1 (%2) — %3:%4")
+              .arg(name, symbolKindLabel(kind), QFileInfo(path).fileName())
+              .arg(line)
+          : tr("%1.%2 (%3) — %4:%5")
+              .arg(container, name, symbolKindLabel(kind), QFileInfo(path).fileName())
+              .arg(line);
+        auto *item = new QListWidgetItem(label, resultsList_);
+        item->setData(Qt::UserRole, path);
+        item->setData(Qt::UserRole + 1, line);
+        if (resultsList_->count() == 1) {
+            resultsList_->setCurrentRow(0);
+        }
+    }
+
+    void openCurrent() { openItem(resultsList_->currentItem()); }
+
+    void openItem(QListWidgetItem *item)
+    {
+        if (!item) {
+            return;
+        }
+        editorTabs_->openFileAtLine(item->data(Qt::UserRole).toString(),
+                                     item->data(Qt::UserRole + 1).toInt(), 0);
+        accept();
+    }
+
+    SearchModel *searchModel_;
+    EditorTabs *editorTabs_;
+    QLineEdit *queryEdit_ = nullptr;
+    QListWidget *resultsList_ = nullptr;
 };
 
 // Subclassed so closeEvent() can run the same unsaved-changes prompt as
@@ -1029,6 +1252,9 @@ struct CentralWidgets
     ClassViewPanel *classViewPanel;
     ads::CDockWidget *classViewDock;
     ads::CDockWidget *terminalDock;
+    FindUsagesPanel *findUsagesPanel;
+    ads::CDockWidget *findUsagesDock;
+    QuickOpenDialog *quickOpenDialog;
 };
 
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
@@ -1063,13 +1289,36 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     findInFilesDock->setWidget(findInFilesPanel);
     dockManager->addDockWidget(ads::BottomDockWidgetArea, findInFilesDock, editorArea);
 
+    // Task J: bottom dock panel, tabbed alongside Find in Files — same
+    // "list of locations" shape, just fed by a symbol name instead of typed
+    // free text. Built before ClassViewPanel so its "Find Usages" callback
+    // (below) can capture this panel and its dock widget.
+    auto *findUsagesPanel = new FindUsagesPanel(searchModel, editorTabs, dockManager);
+    auto *findUsagesDock = new ads::CDockWidget(dockManager, QObject::tr("Find Usages"));
+    findUsagesDock->setWidget(findUsagesPanel);
+    dockManager->addDockWidget(ads::BottomDockWidgetArea, findUsagesDock, editorArea);
+
     // Task D: right-side dock panel, matching where JetBrains-style IDEs
     // dock their Class/Structure View. Reuses the one EditorTabs instance
     // above (its jumpToByteOffset) rather than a second navigation path.
-    auto *classViewPanel = new ClassViewPanel(docManager, searchModel, editorTabs, dockManager);
+    // Task J extends it with a "Find Usages" context-menu action that
+    // raises findUsagesDock and runs the query there.
+    auto *classViewPanel = new ClassViewPanel(
+      docManager, searchModel, editorTabs,
+      [findUsagesPanel, findUsagesDock](const QString &name) {
+          findUsagesDock->toggleView(true);
+          findUsagesDock->raise();
+          findUsagesPanel->findUsages(name);
+      },
+      dockManager);
     auto *classViewDock = new ads::CDockWidget(dockManager, QObject::tr("Class View"));
     classViewDock->setWidget(classViewPanel);
     dockManager->addDockWidget(ads::RightDockWidgetArea, classViewDock, editorArea);
+
+    // Task J: transient go-to-symbol dialog, parented to the top-level
+    // window (not the dock manager) since it's a floating popup, not a
+    // dock widget — see QuickOpenDialog's own doc comment for why.
+    auto *quickOpenDialog = new QuickOpenDialog(searchModel, editorTabs, window);
 
     // Task F3: bottom dock panel, tabbed alongside Find in Files — the
     // conventional spot for an embedded shell in JetBrains/VS-style IDEs.
@@ -1269,7 +1518,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
       });
 
     return CentralWidgets{editorTabs,      dockManager,     findInFilesPanel, findInFilesDock,
-                           classViewPanel,  classViewDock,   terminalDock};
+                           classViewPanel,  classViewDock,   terminalDock,
+                           findUsagesPanel, findUsagesDock,  quickOpenDialog};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -1406,6 +1656,11 @@ QMainWindow *buildMainWindow()
         if (QWidget *w = central.terminalDock->widget()) {
             w->setFocus();
         }
+    });
+    QAction *goToSymbolAction = viewMenu->addAction(QObject::tr("Go to Symbol..."));
+    goToSymbolAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+O")));
+    QObject::connect(goToSymbolAction, &QAction::triggered, window, [central]() {
+        central.quickOpenDialog->popup();
     });
 
     QObject::connect(undoAction, &QAction::triggered, window, [editorTabs]() {
