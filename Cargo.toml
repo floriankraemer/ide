@@ -7,6 +7,8 @@ members = [
     "crates/app-config",
     "crates/mcp-server",
     "crates/pty-core",
+    "crates/terminal-core",
+    "crates/index-core",
     "crates/app-core",
     "crates/ui-shell",
     "crates/app",
