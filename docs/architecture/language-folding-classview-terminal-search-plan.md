@@ -15,7 +15,7 @@ per `CLAUDE.md`.
 | B | done | 4568ebc |
 | C | done | a70036f |
 | D | done | 553d92d |
-| E1 | open | |
+| E1 | done | bb92fdf |
 | F1 | done | 178ac09 |
 | F2 | done | bf0b6a7 |
 | F3 | open | |
