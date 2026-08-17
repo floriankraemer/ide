@@ -27,7 +27,7 @@ graph TB
 | `mcp-server` | (std, dirs, serde, serde_json, tokio, axum) | **No** |
 | `pty-core` | (std, portable-pty) | **No** |
 | `terminal-core` | (std, alacritty_terminal) | **No** |
-| `index-core` | (std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore) | **No** |
+| `index-core` | (std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore, syntax-core) | **No** |
 | `app-core` | `editor-core`, `project-model` | **No** |
 | `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `syntax-core`, `mcp-server`, `index-core` | Yes (adapter + view live here) |
 | `app` | `ui-shell` | Yes |
