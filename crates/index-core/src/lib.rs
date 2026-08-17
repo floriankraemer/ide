@@ -744,6 +744,25 @@ mod tests {
     }
 
     #[test]
+    fn find_definitions_empty_query_lists_every_definition() {
+        // Class View's project-wide tier (Task I) relies on this: an empty
+        // substring query (`str::contains("")` is always true) lists every
+        // indexed definition project-wide, with no separate "list all"
+        // method needed.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "fn add(x: i32, y: i32) -> i32 { x + y }\n");
+        write(dir.path(), "src/Greeter.java", JAVA_FIXTURE);
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let defs = index.find_definitions("").unwrap();
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(names.contains(&"add"), "{names:?}");
+        assert!(names.contains(&"Greeter"), "{names:?}");
+        assert!(names.contains(&"greet"), "{names:?}");
+        assert!(defs.iter().all(|d| d.is_definition));
+    }
+
+    #[test]
     fn reindex_file_updates_symbol_data_on_rename() {
         let dir = tempfile::tempdir().unwrap();
         let file = write(dir.path(), "src/lib.rs", "fn add(x: i32, y: i32) -> i32 { x + y }\n");

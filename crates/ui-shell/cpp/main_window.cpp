@@ -22,6 +22,7 @@
 #include <QFileInfo>
 #include <QFont>
 #include <QFormLayout>
+#include <QHash>
 #include <QHBoxLayout>
 #include <QInputDialog>
 #include <QLabel>
@@ -619,40 +620,76 @@ private:
     QLabel *statusLabel_ = nullptr;
 };
 
-// Class View dock panel (Task D), per-file tier: a QTreeWidget populated
-// from `DocumentManager::tabOutline()` for whichever tab is current.
-// Humble view per CLAUDE.md's hard rule — outline extraction is entirely
-// `syntax_core::outline()`'s job; this only builds tree items from the
-// flattened `FfiSymbolNode` list (reconstructing nesting from each item's
-// `depth`, per that struct's own doc comment) and forwards a double-click
-// to a caret jump via `EditorTabs::jumpToByteOffset`. Same dock-panel shape
-// FindInFilesPanel (Task H) established above.
+// Class View dock panel: a QTreeWidget with two data-source tiers, toggled
+// by `modeCombo_` (Task I extends Task D's original per-file-only panel —
+// "same widget/model, second data-source impl" per the plan doc, not a
+// second panel). Humble view per CLAUDE.md's hard rule — outline/symbol
+// extraction is entirely `syntax_core`/`index_core`'s job; this only builds
+// tree items and forwards double-clicks to a caret jump. Same dock-panel
+// shape FindInFilesPanel (Task H) established above.
+//
+// Per-file tier (Task D): populated from `DocumentManager::tabOutline()`
+// for whichever tab is current, reconstructing nesting from each
+// `FfiSymbolNode`'s `depth` (per that struct's own doc comment).
+//
+// Project tier (Task I): populated by streamed `SearchModel::projectSymbolFound`
+// signals off `index_core::TextIndex::find_definitions("")` (an empty query
+// matches every definition — see the bridge's doc comment), grouped by file
+// then by container. Ephemeral view state, like folding's collapsed-state
+// (plan doc, Task I) — the toggle's position isn't persisted, and switching
+// to Project mode doesn't track tab-switch/save events the way the per-file
+// tier does (`refresh()` becomes a no-op in project mode); switching back
+// re-syncs it.
 class ClassViewPanel : public QWidget
 {
 public:
-    ClassViewPanel(DocumentManager *docManager, EditorTabs *editorTabs, QWidget *parent)
+    ClassViewPanel(DocumentManager *docManager, SearchModel *searchModel, EditorTabs *editorTabs,
+                    QWidget *parent)
       : QWidget(parent)
       , docManager_(docManager)
+      , searchModel_(searchModel)
       , editorTabs_(editorTabs)
     {
+        modeCombo_ = new QComboBox(this);
+        modeCombo_->addItem(tr("Current File"));
+        modeCombo_->addItem(tr("Project"));
+
         tree_ = new QTreeWidget(this);
         tree_->setHeaderHidden(true);
         auto *layout = new QVBoxLayout(this);
+        layout->addWidget(modeCombo_);
         layout->addWidget(tree_);
 
-        connect(tree_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *item) {
-            if (item) {
-                editorTabs_->jumpToByteOffset(item->data(0, Qt::UserRole).toULongLong());
+        connect(tree_, &QTreeWidget::itemDoubleClicked, this, &ClassViewPanel::onItemDoubleClicked);
+        connect(modeCombo_, &QComboBox::currentIndexChanged, this, [this](int index) {
+            projectMode_ = (index == 1);
+            if (projectMode_) {
+                refreshProject();
+            } else {
+                refresh(editorTabs_->currentTabId());
             }
         });
+
+        connect(searchModel_, &SearchModel::projectSymbolFound, this, &ClassViewPanel::addProjectSymbol);
+        connect(searchModel_, &SearchModel::projectSymbolsFinished, this,
+                [this]() { tree_->expandAll(); });
+        connect(searchModel_, &SearchModel::projectSymbolsFailed, this,
+                [this](const QString &message) {
+                    tree_->clear();
+                    new QTreeWidgetItem(tree_, QStringList { tr("Project symbols unavailable: %1").arg(message) });
+                });
     }
 
     // Repopulate the tree from `tabId`'s current outline — called on tab
     // open, on tab switch, and whenever a tab becomes clean (a proxy for
-    // "just saved"; see buildCentralWidget's wiring comment for why).
+    // "just saved"; see buildCentralWidget's wiring comment for why). A
+    // no-op while the Project tier is active (see class doc comment).
     // `tabId == 0` (no tab open) just clears the tree.
     void refresh(quint64 tabId)
     {
+        if (projectMode_) {
+            return;
+        }
         tree_->clear();
         if (tabId == 0) {
             return;
@@ -703,9 +740,71 @@ private:
         }
     }
 
+    // Task I: (re)issue a project-wide query. Results stream back via
+    // `addProjectSymbol` below; `fileItems_`/`containerItems_` are rebuilt
+    // from scratch each time, keyed off this call's own tree.
+    void refreshProject()
+    {
+        tree_->clear();
+        fileItems_.clear();
+        containerItems_.clear();
+        searchModel_->projectSymbols();
+    }
+
+    // One project-wide symbol definition, grouped under a per-file top-level
+    // item and (when it has one) a per-container item nested under that —
+    // `containerItems_` is keyed by `path + container` since two files can
+    // each have their own same-named class.
+    void addProjectSymbol(const QString &path, quint32 line, FfiSymbolKind kind, const QString &name,
+                           const QString &container)
+    {
+        QTreeWidgetItem *fileItem = fileItems_.value(path, nullptr);
+        if (!fileItem) {
+            fileItem = new QTreeWidgetItem(tree_, QStringList { QFileInfo(path).fileName() });
+            fileItems_.insert(path, fileItem);
+        }
+        QTreeWidgetItem *parent = fileItem;
+        if (!container.isEmpty()) {
+            const QString key = path + QChar(0x1f) + container;
+            QTreeWidgetItem *containerItem = containerItems_.value(key, nullptr);
+            if (!containerItem) {
+                containerItem = new QTreeWidgetItem(fileItem, QStringList { container });
+                containerItems_.insert(key, containerItem);
+            }
+            parent = containerItem;
+        }
+        auto *item = new QTreeWidgetItem(
+          parent, QStringList { name + QStringLiteral(" (") + symbolKindLabel(kind) + QStringLiteral(")") });
+        item->setData(0, Qt::UserRole, path);
+        item->setData(0, Qt::UserRole + 1, line);
+    }
+
+    void onItemDoubleClicked(QTreeWidgetItem *item)
+    {
+        if (!item) {
+            return;
+        }
+        if (projectMode_) {
+            // File/container group nodes carry no data — only leaf symbol
+            // items do (see addProjectSymbol above).
+            const QVariant pathData = item->data(0, Qt::UserRole);
+            if (!pathData.isValid()) {
+                return;
+            }
+            editorTabs_->openFileAtLine(pathData.toString(), item->data(0, Qt::UserRole + 1).toInt(), 0);
+        } else {
+            editorTabs_->jumpToByteOffset(item->data(0, Qt::UserRole).toULongLong());
+        }
+    }
+
     DocumentManager *docManager_;
+    SearchModel *searchModel_;
     EditorTabs *editorTabs_;
     QTreeWidget *tree_ = nullptr;
+    QComboBox *modeCombo_ = nullptr;
+    bool projectMode_ = false;
+    QHash<QString, QTreeWidgetItem *> fileItems_;
+    QHash<QString, QTreeWidgetItem *> containerItems_;
 };
 
 // Subclassed so closeEvent() can run the same unsaved-changes prompt as
@@ -967,7 +1066,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // Task D: right-side dock panel, matching where JetBrains-style IDEs
     // dock their Class/Structure View. Reuses the one EditorTabs instance
     // above (its jumpToByteOffset) rather than a second navigation path.
-    auto *classViewPanel = new ClassViewPanel(docManager, editorTabs, dockManager);
+    auto *classViewPanel = new ClassViewPanel(docManager, searchModel, editorTabs, dockManager);
     auto *classViewDock = new ads::CDockWidget(dockManager, QObject::tr("Class View"));
     classViewDock->setWidget(classViewPanel);
     dockManager->addDockWidget(ads::RightDockWidgetArea, classViewDock, editorArea);

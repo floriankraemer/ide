@@ -21,7 +21,7 @@ per `CLAUDE.md`.
 | F3 | done | 077a344 |
 | G1 | done | 49f0320 |
 | H | done | 00842ba |
-| I | open | |
+| I | done | pending |
 | J | open | |
 
 ## Context

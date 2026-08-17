@@ -706,6 +706,43 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "searchFailed"]
         fn search_failed(self: Pin<&mut SearchModel>, message: QString);
+
+        /// Class View's project-wide tier (Task I): list every indexed
+        /// symbol *definition* across the whole project — same
+        /// `index_core::TextIndex` this QObject already owns for Find in
+        /// Files (`find_definitions("")`, an empty substring query matches
+        /// every name), not a second, redundant index build. Runs on a
+        /// background thread and streams results like `search` does, for
+        /// the same reason: querying goes through the same `Mutex` a
+        /// concurrent `buildIndex`/`search` call might be holding.
+        #[qinvokable]
+        #[cxx_name = "projectSymbols"]
+        fn project_symbols(self: Pin<&mut SearchModel>);
+
+        /// One project-wide symbol definition: `container` is empty when
+        /// the symbol has none (a top-level function, not a class member).
+        #[qsignal]
+        #[cxx_name = "projectSymbolFound"]
+        fn project_symbol_found(
+            self: Pin<&mut SearchModel>,
+            path: QString,
+            line: u32,
+            kind: FfiSymbolKind,
+            name: QString,
+            container: QString,
+        );
+
+        /// Emitted once after the last `projectSymbolFound` of a
+        /// `projectSymbols` call (including when there were zero symbols).
+        #[qsignal]
+        #[cxx_name = "projectSymbolsFinished"]
+        fn project_symbols_finished(self: Pin<&mut SearchModel>);
+
+        /// Emitted instead of `projectSymbolsFinished` when `projectSymbols`
+        /// couldn't run at all (no index built yet).
+        #[qsignal]
+        #[cxx_name = "projectSymbolsFailed"]
+        fn project_symbols_failed(self: Pin<&mut SearchModel>, message: QString);
     }
 
     // Enables `self.qt_thread()` on `SearchModel` for the background
@@ -1716,6 +1753,58 @@ impl ffi::SearchModel {
                     let message = err.to_string();
                     let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
                         model.as_mut().search_failed(QString::from(message.as_str()));
+                    });
+                }
+            }
+        });
+    }
+
+    /// Task I: project-wide Class View tier — see `project_symbols`'s
+    /// bridge doc comment for why this reuses `search`'s index handle and
+    /// background-thread/per-match-signal shape instead of a new one.
+    pub fn project_symbols(self: Pin<&mut Self>) {
+        let qt_thread = self.qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            let guard = slot.lock().unwrap();
+            let Some(index) = guard.as_ref() else {
+                drop(guard);
+                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                    model
+                        .as_mut()
+                        .project_symbols_failed(QString::from("No project is open yet."));
+                });
+                return;
+            };
+            // Empty substring query matches every name (`str::contains("")`
+            // is always true), so this lists every indexed definition — no
+            // `index-core` change needed, see the plan doc's Task I.
+            let result = index.find_definitions("");
+            drop(guard);
+            match result {
+                Ok(matches) => {
+                    for m in matches {
+                        // A definition `identifier_occurrences()` found but
+                        // `outline()` didn't also capture (no `kind`) has
+                        // nothing structural to show in a class tree.
+                        let Some(kind) = m.kind else { continue };
+                        let path = QString::from(m.path.to_string_lossy().as_ref());
+                        let line = m.line as u32;
+                        let name = QString::from(m.name.as_str());
+                        let container = QString::from(m.container.as_deref().unwrap_or(""));
+                        let ffi_kind = to_ffi_symbol_kind(kind);
+                        let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                            model.as_mut().project_symbol_found(path, line, ffi_kind, name, container);
+                        });
+                    }
+                    let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                        model.as_mut().project_symbols_finished();
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model.as_mut().project_symbols_failed(QString::from(message.as_str()));
                     });
                 }
             }
