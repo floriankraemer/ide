@@ -120,22 +120,14 @@ fn token_kind_for_capture(capture_name: &str) -> Option<TokenKind> {
 
 /// Highlight `text` as `language`, returning spans in document order.
 ///
-/// Stateless one-shot convenience wrapper: parses fresh and discards the
-/// tree. For repeated highlighting of an evolving document, prefer
-/// [`Highlighter`], which keeps a persistent tree and reparses
-/// incrementally.
+/// Stateless one-shot convenience wrapper for tests/simple callers: builds
+/// a throwaway [`Highlighter`], does one full parse, and discards it. For
+/// repeated highlighting of an evolving document (the real editor use
+/// case), construct a [`Highlighter`] once and call [`Highlighter::edit`]
+/// per change instead — that keeps the persistent tree and reparses
+/// incrementally rather than re-parsing the whole buffer every time.
 pub fn highlight(language: Language, text: &str) -> Vec<HighlightSpan> {
-    let Some(ql) = query_language_for(language) else {
-        return Vec::new();
-    };
-    let mut parser = Parser::new();
-    if parser.set_language(&ql.grammar).is_err() {
-        return Vec::new();
-    }
-    let Some(tree) = parser.parse(text, None) else {
-        return Vec::new();
-    };
-    spans_from_tree(ql, &tree, text)
+    Highlighter::new(language).set_text(text)
 }
 
 fn spans_from_tree(
@@ -160,6 +152,118 @@ fn spans_from_tree(
     }
     spans.sort_by_key(|span| (span.start, span.end));
     spans
+}
+
+/// Byte offset `offset` within `text`, expressed as a tree-sitter
+/// [`tree_sitter::Point`] (row, byte-column-within-row) — the coordinate
+/// `InputEdit` needs alongside byte offsets. `offset` is clamped to
+/// `text.len()`.
+fn point_at(text: &str, offset: usize) -> tree_sitter::Point {
+    let bytes = text.as_bytes();
+    let offset = offset.min(bytes.len());
+    let mut row = 0usize;
+    let mut line_start = 0usize;
+    for (i, &b) in bytes[..offset].iter().enumerate() {
+        if b == b'\n' {
+            row += 1;
+            line_start = i + 1;
+        }
+    }
+    tree_sitter::Point {
+        row,
+        column: offset - line_start,
+    }
+}
+
+/// Stateful, incremental syntax highlighter: keeps a persistent
+/// `tree_sitter::Tree` per instance (one per open document/tab, on the
+/// caller's side) and reparses incrementally via `Tree::edit` +
+/// `Parser::parse(text, Some(&old_tree))` instead of a fresh whole-buffer
+/// parse on every change (upgrade over the v1 ceiling documented on
+/// [`highlight`]'s predecessor — decision A6/A1).
+///
+/// [`Language::PlainText`] is a valid, cheap no-op: `set_text`/`edit` just
+/// track the text and return no spans, so callers don't need to special
+/// case unrecognized extensions.
+pub struct Highlighter {
+    language: Language,
+    parser: Option<Parser>,
+    tree: Option<tree_sitter::Tree>,
+    text: String,
+}
+
+impl Highlighter {
+    /// Create a highlighter for `language`. Cheap: the query/grammar are
+    /// process-wide statics (see [`query_language_for`]), so this only
+    /// allocates a `Parser` and an empty text buffer.
+    pub fn new(language: Language) -> Self {
+        let parser = query_language_for(language).and_then(|ql| {
+            let mut parser = Parser::new();
+            parser.set_language(&ql.grammar).ok()?;
+            Some(parser)
+        });
+        Self {
+            language,
+            parser,
+            tree: None,
+            text: String::new(),
+        }
+    }
+
+    /// Full (re)parse of `text`, discarding any previous incremental tree.
+    /// Use for initial load; use [`Highlighter::edit`] for subsequent
+    /// changes to get incremental reparsing.
+    pub fn set_text(&mut self, text: &str) -> Vec<HighlightSpan> {
+        self.tree = None;
+        self.text = text.to_string();
+        self.reparse()
+    }
+
+    /// Apply one contiguous byte-range replace and reparse incrementally.
+    ///
+    /// `new_text` is the *entire* new document text. `start_byte..
+    /// old_end_byte` is the byte range being replaced in the *previous*
+    /// text (as passed to the last `set_text`/`edit` call); `start_byte..
+    /// new_end_byte` is the corresponding range in `new_text`. This is the
+    /// standard tree-sitter `InputEdit` shape, expressed as byte offsets
+    /// only — row/column `Point`s are derived internally from the old and
+    /// new text so callers don't need to track them.
+    pub fn edit(
+        &mut self,
+        new_text: &str,
+        start_byte: usize,
+        old_end_byte: usize,
+        new_end_byte: usize,
+    ) -> Vec<HighlightSpan> {
+        if let Some(tree) = self.tree.as_mut() {
+            let edit = tree_sitter::InputEdit {
+                start_byte,
+                old_end_byte,
+                new_end_byte,
+                start_position: point_at(&self.text, start_byte),
+                old_end_position: point_at(&self.text, old_end_byte),
+                new_end_position: point_at(new_text, new_end_byte),
+            };
+            tree.edit(&edit);
+        }
+        self.text = new_text.to_string();
+        self.reparse()
+    }
+
+    fn reparse(&mut self) -> Vec<HighlightSpan> {
+        let Some(ql) = query_language_for(self.language) else {
+            return Vec::new();
+        };
+        let Some(parser) = self.parser.as_mut() else {
+            return Vec::new();
+        };
+        let Some(new_tree) = parser.parse(&self.text, self.tree.as_ref()) else {
+            return Vec::new();
+        };
+        let spans = spans_from_tree(ql, &new_tree, &self.text);
+        self.tree = Some(new_tree);
+        spans
+    }
 }
 
 #[cfg(test)]
@@ -269,5 +373,62 @@ mod tests {
             assert!(span.start <= span.end);
             assert!(span.end <= text.len());
         }
+    }
+
+    #[test]
+    fn incremental_edit_matches_a_fresh_full_reparse() {
+        // "let x = 42;" -> "let xy = 42;": insert "y" after "x" (single
+        // char, byte offset 8..8 -> 8..9).
+        let old_text = "fn foo() { let x = 42; }";
+        let new_text = "fn foo() { let xy = 42; }";
+
+        let mut incremental = Highlighter::new(Language::Rust);
+        incremental.set_text(old_text);
+        let incremental_spans = incremental.edit(new_text, 16, 16, 17);
+
+        let fresh_spans = highlight(Language::Rust, new_text);
+
+        assert_eq!(incremental_spans, fresh_spans_sorted(fresh_spans.clone()));
+        // The number literal, well away from the edit, is still classified
+        // correctly and at its new (shifted) position.
+        let number = find(&incremental_spans, TokenKind::Number)
+            .expect("expected a Number span after the edit");
+        assert_eq!(&new_text[number.start..number.end], "42");
+    }
+
+    fn fresh_spans_sorted(mut spans: Vec<HighlightSpan>) -> Vec<HighlightSpan> {
+        spans.sort_by_key(|span| (span.start, span.end));
+        spans
+    }
+
+    #[test]
+    fn editing_inside_a_string_literal_does_not_reclassify_surrounding_code() {
+        // Insert a character inside the string literal "hi" -> "hxi".
+        let old_text = "fn foo() { let s = \"hi\"; let n = 1; }";
+        let new_text = "fn foo() { let s = \"hxi\"; let n = 1; }";
+
+        let mut highlighter = Highlighter::new(Language::Rust);
+        highlighter.set_text(old_text);
+        // Byte 21 is right after the opening quote + "h": edit "i" -> "xi".
+        let spans = highlighter.edit(new_text, 21, 21, 22);
+
+        let keyword = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        assert_eq!(&new_text[keyword.start..keyword.end], "fn");
+
+        let function = find(&spans, TokenKind::Function).expect("expected a Function span");
+        assert_eq!(&new_text[function.start..function.end], "foo");
+
+        let string = find(&spans, TokenKind::String).expect("expected a String span");
+        assert_eq!(&new_text[string.start..string.end], "\"hxi\"");
+
+        let number = find(&spans, TokenKind::Number).expect("expected a Number span");
+        assert_eq!(&new_text[number.start..number.end], "1");
+    }
+
+    #[test]
+    fn highlighter_handles_plain_text_as_a_no_op() {
+        let mut highlighter = Highlighter::new(Language::PlainText);
+        assert!(highlighter.set_text("hello").is_empty());
+        assert!(highlighter.edit("hello world", 5, 5, 11).is_empty());
     }
 }

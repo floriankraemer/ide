@@ -3,6 +3,7 @@
 #include "ui-shell/src/bridge.cxxqt.h"
 
 #include <algorithm>
+#include <cstddef>
 
 #include <QColor>
 #include <QTextBlock>
@@ -40,11 +41,10 @@ QColor colorForKind(FfiTokenKind kind)
 }
 
 // Builds a UTF-16-code-unit-index -> UTF-8-byte-offset table by walking
-// `text` once, so `highlight_line`'s UTF-8 byte spans (syntax-core parses
-// UTF-8, tree-sitter's native unit) can be mapped back to the QString/UTF-16
+// `text` once, so tree-sitter's UTF-8 byte spans (syntax-core parses UTF-8,
+// tree-sitter's native unit) can be mapped back to the QString/UTF-16
 // offsets `QSyntaxHighlighter::setFormat` expects — correct for any Unicode
-// content, not just ASCII, at the cost of one extra O(document) pass
-// alongside the reparse this function already does per block.
+// content, not just ASCII.
 QVector<int> byteOffsetsByUtf16Index(const QString &text)
 {
     QVector<int> offsets;
@@ -94,11 +94,58 @@ int utf16IndexForByteOffset(const QVector<int> &offsets, std::size_t byteOffset)
     return static_cast<int>(std::distance(offsets.begin(), it));
 }
 
+// Byte range that changed between `oldBytes` and `newBytes`, found by
+// trimming the common prefix and common suffix — the standard shape
+// tree-sitter's InputEdit wants (start/oldEnd/newEnd byte offsets), and
+// the only edit-tracking signal this widget needs: QSyntaxHighlighter
+// doesn't hand highlightBlock() a finer-grained edit description, but a
+// single-cursor typing/paste/delete always leaves an unchanged prefix and
+// suffix around the edit, so this recovers it exactly without needing to
+// hook QTextDocument::contentsChange (whose signal-ordering relative to
+// QSyntaxHighlighter's own internal rehighlight scheduling isn't
+// guaranteed to run before highlightBlock()).
+struct ByteEdit
+{
+    std::size_t startByte;
+    std::size_t oldEndByte;
+    std::size_t newEndByte;
+};
+
+ByteEdit diffByteRanges(const QByteArray &oldBytes, const QByteArray &newBytes)
+{
+    const int oldLen = oldBytes.size();
+    const int newLen = newBytes.size();
+    const int maxCommon = std::min(oldLen, newLen);
+
+    int prefix = 0;
+    while (prefix < maxCommon && oldBytes[prefix] == newBytes[prefix]) {
+        ++prefix;
+    }
+
+    int oldEnd = oldLen;
+    int newEnd = newLen;
+    while (oldEnd > prefix && newEnd > prefix && oldBytes[oldEnd - 1] == newBytes[newEnd - 1]) {
+        --oldEnd;
+        --newEnd;
+    }
+
+    return ByteEdit{ static_cast<std::size_t>(prefix), static_cast<std::size_t>(oldEnd),
+                      static_cast<std::size_t>(newEnd) };
+}
+
+rust::Box<SyntaxHighlighterHandle> makeHighlighter(const QString &extension)
+{
+    const QByteArray extBytes = extension.toUtf8();
+    return new_syntax_highlighter(
+      rust::Str(extBytes.constData(), static_cast<std::size_t>(extBytes.size())));
+}
+
 } // namespace
 
 SyntaxHighlighter::SyntaxHighlighter(QTextDocument *document, QString fileExtension)
   : QSyntaxHighlighter(document)
   , fileExtension_(std::move(fileExtension))
+  , highlighter_(makeHighlighter(fileExtension_))
 {
 }
 
@@ -110,22 +157,48 @@ void SyntaxHighlighter::highlightBlock(const QString &text)
         return;
     }
 
-    const QString wholeDocument = document()->toPlainText();
-    const QByteArray textBytes = wholeDocument.toUtf8();
-    const QByteArray extBytes = fileExtension_.toUtf8();
+    // Qt calls highlightBlock() once per block on initial attach and after
+    // edits. The reparse and the UTF-16<->UTF-8 offset table are both
+    // O(whole document) (the latter unavoidably; the former only for its
+    // own text-diff and offset-table bookkeeping now, not for the
+    // tree-sitter parse itself), so this must run once per revision, not
+    // once per block — otherwise opening an N-line file does an O(N) x
+    // O(N) pass.
+    if (document()->revision() != cachedRevision_) {
+        const QString wholeDocument = document()->toPlainText();
+        const QByteArray textBytes = wholeDocument.toUtf8();
 
-    const rust::Vec<FfiHighlightSpan> spans = highlight_line(
-      rust::Str(extBytes.constData(), static_cast<std::size_t>(extBytes.size())),
-      rust::Str(textBytes.constData(), static_cast<std::size_t>(textBytes.size())));
-    if (spans.empty()) {
+        const rust::Vec<FfiHighlightSpan> spans = [&]() {
+            if (!hasParsedOnce_) {
+                hasParsedOnce_ = true;
+                return highlighter_->set_text(
+                  rust::Str(textBytes.constData(), static_cast<std::size_t>(textBytes.size())));
+            }
+            const ByteEdit edit = diffByteRanges(cachedTextBytes_, textBytes);
+            return highlighter_->apply_edit(
+              rust::Str(textBytes.constData(), static_cast<std::size_t>(textBytes.size())),
+              edit.startByte, edit.oldEndByte, edit.newEndByte);
+        }();
+
+        cachedSpans_.clear();
+        cachedSpans_.reserve(static_cast<int>(spans.size()));
+        for (const auto &span : spans) {
+            cachedSpans_.append(span);
+        }
+        cachedByteOffsets_ = byteOffsetsByUtf16Index(wholeDocument);
+        cachedTextBytes_ = textBytes;
+        cachedRevision_ = document()->revision();
+    }
+
+    if (cachedSpans_.isEmpty()) {
         return;
     }
 
-    const QVector<int> byteOffsets = byteOffsetsByUtf16Index(wholeDocument);
+    const QVector<int> &byteOffsets = cachedByteOffsets_;
     const int blockStart = block.position();
     const int blockEnd = blockStart + block.length();
 
-    for (const auto &span : spans) {
+    for (const auto &span : cachedSpans_) {
         const int start = utf16IndexForByteOffset(byteOffsets, span.start);
         const int end = utf16IndexForByteOffset(byteOffsets, span.end);
         if (end <= blockStart || start >= blockEnd) {

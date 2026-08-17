@@ -82,10 +82,37 @@ mod ffi {
     }
 
     extern "Rust" {
-        /// Highlight `text` (UTF-8) for the language implied by
-        /// `extension` (Y2) — a pure per-call function, no QObject state,
-        /// wrapping `syntax_core::highlight`.
-        fn highlight_line(extension: &str, text: &str) -> Vec<FfiHighlightSpan>;
+        /// Opaque per-editor incremental highlighter handle (Y2/A1):
+        /// wraps a `syntax_core::Highlighter`, which keeps a persistent
+        /// `tree_sitter::Tree` and reparses incrementally rather than
+        /// re-parsing the whole buffer on every keystroke. Owned by the
+        /// C++ `SyntaxHighlighter` instance (one per open editor/tab) as
+        /// a `rust::Box`, matching that type's own lifetime — no separate
+        /// registry or `TabId` lookup needed since the box's lifetime
+        /// already tracks the editor's.
+        type SyntaxHighlighterHandle;
+
+        /// Create a handle for `extension`'s language (`PlainText` for
+        /// anything unrecognized, which is a cheap no-op — see
+        /// `syntax_core::Highlighter`'s doc comment).
+        fn new_syntax_highlighter(extension: &str) -> Box<SyntaxHighlighterHandle>;
+
+        /// Full (re)parse of `text`, discarding any previous incremental
+        /// tree. Call once, on initial attach/file load.
+        fn set_text(self: &mut SyntaxHighlighterHandle, text: &str) -> Vec<FfiHighlightSpan>;
+
+        /// Incremental reparse: `new_text` is the full new document text;
+        /// `start_byte..old_end_byte` is the byte range being replaced in
+        /// the previous text, `start_byte..new_end_byte` the
+        /// corresponding range in `new_text` (tree-sitter's `InputEdit`
+        /// shape, byte offsets only — row/column is derived internally).
+        fn apply_edit(
+            self: &mut SyntaxHighlighterHandle,
+            new_text: &str,
+            start_byte: usize,
+            old_end_byte: usize,
+            new_end_byte: usize,
+        ) -> Vec<FfiHighlightSpan>;
     }
 
     unsafe extern "C++Qt" {
@@ -572,11 +599,36 @@ fn to_ffi_result(result: Result<(), AppError>) -> FfiResult {
     }
 }
 
-/// `syntax_core::highlight` wrapped for the FFI seam (Y2). Pure per-call
-/// function, no QObject/session state involved.
-fn highlight_line(extension: &str, text: &str) -> Vec<ffi::FfiHighlightSpan> {
+/// Rust side of the opaque `SyntaxHighlighterHandle` (Y2/A1): one
+/// `syntax_core::Highlighter` per open editor, owned across the FFI seam
+/// by the C++ `SyntaxHighlighter` as a `rust::Box`.
+pub struct SyntaxHighlighterHandle(syntax_core::Highlighter);
+
+fn new_syntax_highlighter(extension: &str) -> Box<SyntaxHighlighterHandle> {
     let language = syntax_core::language_for_extension(extension);
-    syntax_core::highlight(language, text)
+    Box::new(SyntaxHighlighterHandle(syntax_core::Highlighter::new(
+        language,
+    )))
+}
+
+impl SyntaxHighlighterHandle {
+    fn set_text(&mut self, text: &str) -> Vec<ffi::FfiHighlightSpan> {
+        to_ffi_spans(self.0.set_text(text))
+    }
+
+    fn apply_edit(
+        &mut self,
+        new_text: &str,
+        start_byte: usize,
+        old_end_byte: usize,
+        new_end_byte: usize,
+    ) -> Vec<ffi::FfiHighlightSpan> {
+        to_ffi_spans(self.0.edit(new_text, start_byte, old_end_byte, new_end_byte))
+    }
+}
+
+fn to_ffi_spans(spans: Vec<syntax_core::HighlightSpan>) -> Vec<ffi::FfiHighlightSpan> {
+    spans
         .into_iter()
         .map(|span| ffi::FfiHighlightSpan {
             start: span.start,

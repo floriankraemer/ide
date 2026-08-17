@@ -390,7 +390,8 @@ private:
         applyEditorPalette(editor);
         // Y2: self-parents to editor->document(), no manual lifetime
         // management needed. PlainText (unrecognized/no extension) yields
-        // no spans from highlight_line, so this is a harmless no-op then.
+        // no spans from the incremental highlighter, so this is a
+        // harmless no-op then.
         new SyntaxHighlighter(editor->document(), docManager_->tabExtension(tabId));
 
         // L3: only the visible tab's cursor should move the status bar —
