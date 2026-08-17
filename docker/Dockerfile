@@ -38,8 +38,10 @@ FROM base AS linux-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
         qt6-base-dev \
         qt6-base-dev-tools \
+        qt6-base-private-dev \
         libqt6core5compat6-dev \
         libgl1-mesa-dev \
+        libxcb1-dev \
         xvfb \
         xauth \
         x11-apps \

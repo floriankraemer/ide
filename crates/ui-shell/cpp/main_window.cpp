@@ -1,5 +1,6 @@
 #include "main_window.h"
 
+#include "ads_smoke_test.h"
 #include "code_editor.h"
 #include "syntax_highlighter.h"
 #include "theme.h"
@@ -921,6 +922,11 @@ int run_app()
 {
     int argc = 0;
     QApplication app(argc, nullptr);
+
+    // D1 spike: proves ADS actually links and constructs, not just
+    // compiles. Never shown (constructed and torn down immediately), so it
+    // has no visible effect — D3 wires ADS into the real layout.
+    adsSmokeTest();
 
     // buildMainWindow() applies the persisted theme (T2) once AppSettings
     // exists; nothing is shown yet at this point, so there's no unstyled
