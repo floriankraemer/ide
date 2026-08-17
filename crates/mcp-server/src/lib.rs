@@ -37,8 +37,33 @@ pub struct BufferInfo {
 /// variant carries its own `oneshot::Sender` so the HTTP handler that sent
 /// it can `.await` the one reply it's waiting for, no correlation ids
 /// needed.
+/// One project-tree entry, as the MCP `list_project_tree` tool reports it
+/// (M4). Deliberately generic (a bare path string, not `project_model`'s
+/// arena `TreeNode`) — same independence reasoning as `BufferInfo`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProjectTreeEntry {
+    pub path: String,
+    pub is_dir: bool,
+}
+
+/// A tab's last-reported cursor position (M4's `get_cursor_position`).
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct CursorPosition {
+    pub line: u32,
+    pub column: u32,
+}
+
 pub enum EditorCommand {
     ListOpenBuffers(oneshot::Sender<Vec<BufferInfo>>),
+    ListProjectTree(oneshot::Sender<Vec<ProjectTreeEntry>>),
+    ReadBuffer {
+        tab_id: u64,
+        respond: oneshot::Sender<Option<String>>,
+    },
+    GetCursorPosition {
+        tab_id: u64,
+        respond: oneshot::Sender<Option<CursorPosition>>,
+    },
 }
 
 /// The channel half `mcp-server` holds and sends on; the caller (`ui-shell`)
@@ -77,6 +102,25 @@ struct RpcRequest {
     jsonrpc: String,
     id: serde_json::Value,
     method: String,
+    #[serde(default)]
+    params: serde_json::Value,
+}
+
+/// Pull `params.tab_id` out as a `u64`, or a JSON-RPC "invalid params"
+/// error (`-32602`) response if it's missing or the wrong type.
+fn required_tab_id(req: &RpcRequest) -> Result<u64, RpcResponse> {
+    req.params
+        .get("tab_id")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| RpcResponse {
+            jsonrpc: "2.0",
+            id: req.id.clone(),
+            result: None,
+            error: Some(RpcError {
+                code: -32602,
+                message: "params.tab_id must be a non-negative integer".into(),
+            }),
+        })
 }
 
 #[derive(Debug, Serialize)]
@@ -168,6 +212,63 @@ async fn rpc_handler(
                 },
             }
         }
+        "list_project_tree" => {
+            let (respond, receive) = oneshot::channel();
+            match state.commands.send(EditorCommand::ListProjectTree(respond)) {
+                Err(_) => editor_unavailable_response(req.id),
+                Ok(()) => match receive.await {
+                    Ok(entries) => RpcResponse {
+                        jsonrpc: "2.0",
+                        id: req.id,
+                        result: Some(
+                            serde_json::to_value(entries)
+                                .expect("Vec<ProjectTreeEntry> serializes"),
+                        ),
+                        error: None,
+                    },
+                    Err(_) => editor_unavailable_response(req.id),
+                },
+            }
+        }
+        "read_buffer" => match required_tab_id(&req) {
+            Err(response) => response,
+            Ok(tab_id) => {
+                let (respond, receive) = oneshot::channel();
+                match state.commands.send(EditorCommand::ReadBuffer { tab_id, respond }) {
+                    Err(_) => editor_unavailable_response(req.id),
+                    Ok(()) => match receive.await {
+                        Ok(content) => RpcResponse {
+                            jsonrpc: "2.0",
+                            id: req.id,
+                            result: Some(serde_json::json!({ "content": content })),
+                            error: None,
+                        },
+                        Err(_) => editor_unavailable_response(req.id),
+                    },
+                }
+            }
+        },
+        "get_cursor_position" => match required_tab_id(&req) {
+            Err(response) => response,
+            Ok(tab_id) => {
+                let (respond, receive) = oneshot::channel();
+                match state.commands.send(EditorCommand::GetCursorPosition { tab_id, respond }) {
+                    Err(_) => editor_unavailable_response(req.id),
+                    Ok(()) => match receive.await {
+                        Ok(position) => RpcResponse {
+                            jsonrpc: "2.0",
+                            id: req.id,
+                            result: Some(
+                                serde_json::to_value(position)
+                                    .expect("Option<CursorPosition> serializes"),
+                            ),
+                            error: None,
+                        },
+                        Err(_) => editor_unavailable_response(req.id),
+                    },
+                }
+            }
+        },
         other => RpcResponse {
             jsonrpc: "2.0",
             id: req.id,
@@ -335,6 +436,119 @@ mod tests {
         assert_eq!(resp.status(), 200);
         let body: serde_json::Value = resp.json().await.unwrap();
         assert_eq!(body["error"]["code"], -32000);
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn list_project_tree_round_trips_through_the_command_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = start(dir.path(), tx).await.unwrap();
+
+        tokio::spawn(async move {
+            if let Some(EditorCommand::ListProjectTree(respond)) = rx.recv().await {
+                let _ = respond.send(vec![ProjectTreeEntry {
+                    path: "/proj/a.txt".to_string(),
+                    is_dir: false,
+                }]);
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/rpc", handle.port))
+            .bearer_auth(&handle.token)
+            .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "list_project_tree"}))
+            .send()
+            .await
+            .unwrap();
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["result"][0]["path"], "/proj/a.txt");
+        assert_eq!(body["result"][0]["is_dir"], false);
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn read_buffer_round_trips_through_the_command_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = start(dir.path(), tx).await.unwrap();
+
+        tokio::spawn(async move {
+            if let Some(EditorCommand::ReadBuffer { tab_id, respond }) = rx.recv().await {
+                assert_eq!(tab_id, 7);
+                let _ = respond.send(Some("fn main() {}".to_string()));
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/rpc", handle.port))
+            .bearer_auth(&handle.token)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "read_buffer", "params": {"tab_id": 7}
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["result"]["content"], "fn main() {}");
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn read_buffer_without_tab_id_is_invalid_params() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let handle = start(dir.path(), tx).await.unwrap();
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/rpc", handle.port))
+            .bearer_auth(&handle.token)
+            .json(&serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "read_buffer"}))
+            .send()
+            .await
+            .unwrap();
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["error"]["code"], -32602);
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn get_cursor_position_round_trips_through_the_command_channel() {
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let handle = start(dir.path(), tx).await.unwrap();
+
+        tokio::spawn(async move {
+            if let Some(EditorCommand::GetCursorPosition { tab_id, respond }) = rx.recv().await {
+                assert_eq!(tab_id, 3);
+                let _ = respond.send(Some(CursorPosition { line: 2, column: 5 }));
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("http://127.0.0.1:{}/rpc", handle.port))
+            .bearer_auth(&handle.token)
+            .json(&serde_json::json!({
+                "jsonrpc": "2.0", "id": 1, "method": "get_cursor_position", "params": {"tab_id": 3}
+            }))
+            .send()
+            .await
+            .unwrap();
+
+        let body: serde_json::Value = resp.json().await.unwrap();
+        assert_eq!(body["result"]["line"], 2);
+        assert_eq!(body["result"]["column"], 5);
 
         handle.shutdown().await;
     }

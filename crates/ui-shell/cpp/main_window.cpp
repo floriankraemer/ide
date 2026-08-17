@@ -376,7 +376,13 @@ private:
         // L3: only the visible tab's cursor should move the status bar —
         // guards against a background tab's programmatic cursor change
         // (e.g. a reload) touching labels that describe a different tab.
-        connect(editor, &QPlainTextEdit::cursorPositionChanged, this, [this, editor]() {
+        // M4: unlike the status bar, every cursor move is forwarded to
+        // AppSession regardless of visibility, so get_cursor_position stays
+        // accurate for a tab MCP asks about while it's in the background.
+        connect(editor, &QPlainTextEdit::cursorPositionChanged, this, [this, editor, tabId]() {
+            const QTextCursor cursor = editor->textCursor();
+            docManager_->setCursorPosition(tabId, static_cast<quint32>(cursor.blockNumber()),
+                                            static_cast<quint32>(cursor.columnNumber()));
             if (tabWidget_->currentWidget() == editor) {
                 updateStatusBar();
             }

@@ -421,6 +421,13 @@ mod ffi {
         #[cxx_name = "reloadTabFromDisk"]
         fn reload_tab_from_disk(self: Pin<&mut DocumentManager>, tab_id: u64) -> FfiResult;
 
+        /// Forward the view's own cursor position for `tab_id` (M4) — the
+        /// same "Rust remembers, view forwards" split `setTabModified`
+        /// already uses for dirty state (ADR-0003).
+        #[qinvokable]
+        #[cxx_name = "setCursorPosition"]
+        fn set_cursor_position(self: Pin<&mut DocumentManager>, tab_id: u64, line: u32, column: u32);
+
         /// Starts the MCP transport on a dedicated background thread (its
         /// own Tokio runtime, since `run_app()`'s Qt event loop isn't async)
         /// and the `EditorCommand` listener loop that marshals each command
@@ -1078,6 +1085,12 @@ impl ffi::DocumentManager {
         }
     }
 
+    pub fn set_cursor_position(self: Pin<&mut Self>, tab_id: u64, line: u32, column: u32) {
+        self.session
+            .borrow_mut()
+            .set_cursor_position(TabId::from_raw(tab_id), line, column);
+    }
+
     pub fn tab_content(&self, tab_id: u64) -> QString {
         self.session
             .borrow()
@@ -1175,6 +1188,31 @@ fn dispatch_editor_command(doc_manager: Pin<&mut ffi::DocumentManager>, cmd: mcp
                 .map(|(id, title)| mcp_server::BufferInfo { tab_id: id.raw(), title })
                 .collect();
             let _ = respond.send(buffers);
+        }
+        mcp_server::EditorCommand::ListProjectTree(respond) => {
+            let entries = doc_manager
+                .session
+                .borrow()
+                .project_tree_entries()
+                .into_iter()
+                .map(|(path, is_dir)| mcp_server::ProjectTreeEntry {
+                    path: path.to_string_lossy().into_owned(),
+                    is_dir,
+                })
+                .collect();
+            let _ = respond.send(entries);
+        }
+        mcp_server::EditorCommand::ReadBuffer { tab_id, respond } => {
+            let content = doc_manager.session.borrow().tab_content(TabId::from_raw(tab_id));
+            let _ = respond.send(content);
+        }
+        mcp_server::EditorCommand::GetCursorPosition { tab_id, respond } => {
+            let position = doc_manager
+                .session
+                .borrow()
+                .cursor_position(TabId::from_raw(tab_id))
+                .map(|(line, column)| mcp_server::CursorPosition { line, column });
+            let _ = respond.send(position);
         }
     }
 }

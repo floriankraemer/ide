@@ -172,6 +172,10 @@ pub struct AppSession {
     /// see these as "external" changes).
     suppressed_changes: HashMap<PathBuf, Instant>,
     config_dir: PathBuf,
+    /// Last-reported (line, column) per tab, forwarded from the view's own
+    /// cursor (M4's `get_cursor_position` MCP tool — nothing here computes
+    /// a cursor position, it only remembers what the view last reported).
+    cursor_positions: HashMap<TabId, (u32, u32)>,
 }
 
 impl Default for AppSession {
@@ -195,6 +199,7 @@ impl AppSession {
             active: None,
             suppressed_changes: HashMap::new(),
             config_dir,
+            cursor_positions: HashMap::new(),
         }
     }
 
@@ -365,6 +370,39 @@ impl AppSession {
             .iter()
             .map(|e| (e.id, self.tab_title(e.id).unwrap_or_default()))
             .collect()
+    }
+
+    /// Every node in the open project's tree (path + is_dir), skipping the
+    /// invisible root — mirrors what `ProjectTreeModel`'s rows show (MCP's
+    /// `list_project_tree` tool, M4). Empty when no project is open.
+    pub fn project_tree_entries(&self) -> Vec<(PathBuf, bool)> {
+        let Some(project) = self.project.current() else {
+            return Vec::new();
+        };
+        let tree = &project.tree;
+        (0..tree.len())
+            .filter(|&id| id != tree.root_id())
+            .map(|id| {
+                let node = tree.node(id);
+                (node.path.clone(), node.is_dir)
+            })
+            .collect()
+    }
+
+    /// Forward the view's own cursor position for `id` (M4). Nothing here
+    /// computes a position — this only remembers what the view last
+    /// reported, the same "Rust remembers, view forwards" split dirty state
+    /// already uses (ADR-0003). Ignores unknown ids (mirrors `set_tab_dirty`).
+    pub fn set_cursor_position(&mut self, id: TabId, line: u32, column: u32) {
+        if self.doc(id).is_some() {
+            self.cursor_positions.insert(id, (line, column));
+        }
+    }
+
+    /// The last-reported (line, column) for `id`, or `None` if never
+    /// reported (MCP's `get_cursor_position` tool, M4).
+    pub fn cursor_position(&self, id: TabId) -> Option<(u32, u32)> {
+        self.cursor_positions.get(&id).copied()
     }
 
     /// The tab's backing file extension (no leading dot, lowercased), used
@@ -713,6 +751,42 @@ mod tests {
             session.open_tabs(),
             vec![(a.id, "a.txt".to_string()), (b.id, "b.txt".to_string())]
         );
+    }
+
+    #[test]
+    fn project_tree_entries_lists_every_node_except_the_root() {
+        let (project_dir, _config, session) = session_with_project();
+        let mut entries = session.project_tree_entries();
+        entries.sort();
+
+        let mut expected = vec![
+            (project_dir.path().join("a.txt"), false),
+            (project_dir.path().join("b.txt"), false),
+        ];
+        expected.sort();
+        assert_eq!(entries, expected);
+    }
+
+    #[test]
+    fn project_tree_entries_is_empty_with_no_project_open() {
+        let config_dir = tempfile::tempdir().unwrap();
+        let session = AppSession::with_config_dir(config_dir.path().to_path_buf());
+        assert!(session.project_tree_entries().is_empty());
+    }
+
+    #[test]
+    fn cursor_position_round_trips_and_ignores_unknown_tabs() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let tab = session
+            .open_file(&project_dir.path().join("a.txt"))
+            .unwrap();
+
+        assert_eq!(session.cursor_position(tab.id), None);
+        session.set_cursor_position(tab.id, 3, 7);
+        assert_eq!(session.cursor_position(tab.id), Some((3, 7)));
+
+        session.set_cursor_position(TabId::from_raw(999), 1, 1);
+        assert_eq!(session.cursor_position(TabId::from_raw(999)), None);
     }
 
     #[test]

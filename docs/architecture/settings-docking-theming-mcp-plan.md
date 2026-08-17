@@ -43,7 +43,7 @@ per `CLAUDE.md`.
 | M1 | done | `74c0bef` |
 | M2 | done | `16302d2` (docs only — ADR-0004) |
 | M3 | done | `cbe8bec` (`cargo test -p mcp-server -p app-core`; Qt-leakage gate clean on `mcp-server`; Docker `linux-artifact` build verified; MCP-client-against-running-UI round trip not run, no display here) |
-| M4 | todo | |
+| M4 | done | `pending` (`cargo test -p app-core -p mcp-server`; Docker `linux-artifact` build verified; MCP-client-against-running-UI round trip not run, no display here) |
 | M5 | todo | |
 
 ## Context
