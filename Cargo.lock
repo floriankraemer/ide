@@ -2946,6 +2946,7 @@ dependencies = [
  "cxx-qt-build",
  "cxx-qt-lib",
  "editor-core",
+ "index-core",
  "mcp-server",
  "project-model",
  "syntax-core",

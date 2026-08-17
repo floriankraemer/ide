@@ -20,7 +20,7 @@ per `CLAUDE.md`.
 | F2 | done | bf0b6a7 |
 | F3 | open | |
 | G1 | done | 49f0320 |
-| H | open | |
+| H | done | pending |
 | I | open | |
 | J | open | |
 

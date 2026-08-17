@@ -10,6 +10,7 @@
 
 #include <QApplication>
 #include <QByteArray>
+#include <QCheckBox>
 #include <QCloseEvent>
 #include <QColor>
 #include <QColorDialog>
@@ -108,6 +109,27 @@ public:
             return;
         }
         tabWidget_->setCurrentIndex(indexOfTab(result.tab_id));
+    }
+
+    // Task H: open `path` (reusing openFile's own dialog/focus behavior
+    // above) and move the caret to a Find-in-Files match. `line` is
+    // 1-based; `column` is a byte offset within that line from
+    // `index_core::SearchMatch` — treated as a character offset here,
+    // which is exact for ASCII lines and only approximate on lines with
+    // multi-byte UTF-8, since QTextCursor counts characters, not bytes.
+    void openFileAtLine(const QString &path, int line, int column)
+    {
+        openFile(path);
+        auto *editor = currentEditor();
+        if (!editor) {
+            return;
+        }
+        QTextCursor cursor(editor->document()->findBlockByNumber(qMax(0, line - 1)));
+        cursor.movePosition(QTextCursor::StartOfBlock);
+        cursor.movePosition(QTextCursor::Right, QTextCursor::MoveAnchor, qMax(0, column));
+        editor->setTextCursor(cursor);
+        editor->centerCursor();
+        editor->setFocus();
     }
 
     QPlainTextEdit *currentEditor() const
@@ -451,6 +473,107 @@ private:
     QLabel *languageLabel_ = nullptr;
 };
 
+// Find-in-Files dock panel (Task H): a query box + regex toggle + results
+// list wired to `SearchModel`. Humble view per CLAUDE.md's hard rule — the
+// search itself and match interpretation happen in Rust/index-core; this
+// only builds widgets, forwards the query text, and opens the file a
+// double-clicked result points at via EditorTabs::openFileAtLine (the
+// existing "open at path" mechanism, extended above rather than duplicated).
+class FindInFilesPanel : public QWidget
+{
+public:
+    FindInFilesPanel(SearchModel *searchModel, EditorTabs *editorTabs, QWidget *parent)
+      : QWidget(parent)
+      , searchModel_(searchModel)
+      , editorTabs_(editorTabs)
+    {
+        queryEdit_ = new QLineEdit(this);
+        queryEdit_->setPlaceholderText(tr("Find in files..."));
+        regexCheck_ = new QCheckBox(tr("Regex"), this);
+        resultsList_ = new QListWidget(this);
+        statusLabel_ = new QLabel(this);
+
+        auto *topRow = new QHBoxLayout();
+        topRow->addWidget(queryEdit_, 1);
+        topRow->addWidget(regexCheck_);
+
+        auto *layout = new QVBoxLayout(this);
+        layout->addLayout(topRow);
+        layout->addWidget(statusLabel_);
+        layout->addWidget(resultsList_, 1);
+
+        connect(queryEdit_, &QLineEdit::returnPressed, this, &FindInFilesPanel::runSearch);
+        connect(resultsList_,
+                &QListWidget::itemDoubleClicked,
+                this,
+                &FindInFilesPanel::openSelectedMatch);
+
+        connect(searchModel_, &SearchModel::indexReady, this, [this]() {
+            statusLabel_->setText(tr("Index ready."));
+        });
+        connect(searchModel_, &SearchModel::indexFailed, this, [this](const QString &message) {
+            statusLabel_->setText(tr("Index build failed: %1").arg(message));
+        });
+        connect(searchModel_,
+                &SearchModel::searchMatchFound,
+                this,
+                &FindInFilesPanel::addMatch);
+        connect(searchModel_, &SearchModel::searchFinished, this, [this]() {
+            statusLabel_->setText(tr("%1 match(es).").arg(resultsList_->count()));
+        });
+        connect(searchModel_, &SearchModel::searchFailed, this, [this](const QString &message) {
+            statusLabel_->setText(tr("Search failed: %1").arg(message));
+        });
+    }
+
+    // Wired to the "Find in Files..." menu action/shortcut.
+    void focusQuery()
+    {
+        queryEdit_->setFocus();
+        queryEdit_->selectAll();
+    }
+
+private:
+    void runSearch()
+    {
+        const QString pattern = queryEdit_->text();
+        if (pattern.isEmpty()) {
+            return;
+        }
+        resultsList_->clear();
+        statusLabel_->setText(tr("Searching..."));
+        searchModel_->search(pattern, regexCheck_->isChecked());
+    }
+
+    void addMatch(const QString &path, quint32 line, quint32 start, quint32 end, const QString &snippet)
+    {
+        Q_UNUSED(end);
+        auto *item = new QListWidgetItem(
+          tr("%1:%2: %3").arg(QFileInfo(path).fileName()).arg(line).arg(snippet), resultsList_);
+        item->setData(Qt::UserRole, path);
+        item->setData(Qt::UserRole + 1, line);
+        item->setData(Qt::UserRole + 2, start);
+    }
+
+    void openSelectedMatch(QListWidgetItem *item)
+    {
+        if (!item) {
+            return;
+        }
+        const QString path = item->data(Qt::UserRole).toString();
+        const int line = item->data(Qt::UserRole + 1).toInt();
+        const int column = item->data(Qt::UserRole + 2).toInt();
+        editorTabs_->openFileAtLine(path, line, column);
+    }
+
+    SearchModel *searchModel_;
+    EditorTabs *editorTabs_;
+    QLineEdit *queryEdit_ = nullptr;
+    QCheckBox *regexCheck_ = nullptr;
+    QListWidget *resultsList_ = nullptr;
+    QLabel *statusLabel_ = nullptr;
+};
+
 // Subclassed so closeEvent() can run the same unsaved-changes prompt as
 // closing a tab, and persist geometry + dock layout on close (L1, D4). No
 // Q_OBJECT: overriding a virtual function needs no signals/slots/
@@ -668,10 +791,13 @@ struct CentralWidgets
 {
     EditorTabs *editorTabs;
     ads::CDockManager *dockManager;
+    FindInFilesPanel *findInFilesPanel;
+    ads::CDockWidget *findInFilesDock;
 };
 
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
-                                   DocumentManager *docManager, AppSettings *appSettings)
+                                   DocumentManager *docManager, AppSettings *appSettings,
+                                   SearchModel *searchModel)
 {
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
@@ -690,6 +816,24 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     treeDock->setWidget(treeView);
     dockManager->addDockWidget(ads::LeftDockWidgetArea, treeDock, editorArea);
 
+    auto *editorTabs = new EditorTabs(docManager, tabWidget, window);
+
+    // Task H: bottom dock panel, matching where JetBrains/VS-style IDEs
+    // dock their Find in Files results. Reuses the one EditorTabs instance
+    // above (its openFileAtLine) to open a match rather than a second,
+    // parallel "open file" path.
+    auto *findInFilesPanel = new FindInFilesPanel(searchModel, editorTabs, dockManager);
+    auto *findInFilesDock = new ads::CDockWidget(dockManager, QObject::tr("Find in Files"));
+    findInFilesDock->setWidget(findInFilesPanel);
+    dockManager->addDockWidget(ads::BottomDockWidgetArea, findInFilesDock, editorArea);
+
+    // Rebuild the project's text index off the same project-open lifecycle
+    // event the tree/watcher already use (no second, parallel hook).
+    QObject::connect(treeModel,
+                      &ProjectTreeModel::projectOpened,
+                      searchModel,
+                      [searchModel](const QString &rootPath) { searchModel->buildIndex(rootPath); });
+
     // D4: restored after both dock widgets exist for this layout to apply
     // to (ADS matches saved widgets by their title/object name). Empty
     // means nothing was ever saved — first launch, or window_state predates
@@ -698,8 +842,6 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     if (!savedState.isEmpty()) {
         dockManager->restoreState(QByteArray::fromBase64(savedState.toLatin1()));
     }
-
-    auto *editorTabs = new EditorTabs(docManager, tabWidget, window);
 
     // Filesystem-watcher plumbing: ProjectTreeModel's watcher-driven signal
     // already carries the changed path and already runs on the Qt thread
@@ -850,7 +992,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
           }
       });
 
-    return CentralWidgets{editorTabs, dockManager};
+    return CentralWidgets{editorTabs, dockManager, findInFilesPanel, findInFilesDock};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -879,11 +1021,13 @@ QMainWindow *buildMainWindow()
 
     auto *treeModel = new ProjectTreeModel(window);
     auto *docManager = new DocumentManager(window);
+    auto *searchModel = new SearchModel(window);
     // M3: one MCP server per process, started once right after the shared
     // DocumentManager exists — the listener thread it spawns dispatches
     // every EditorCommand back onto this same QObject's Qt thread.
     docManager->startMcpServer();
-    const CentralWidgets central = buildCentralWidget(window, treeModel, docManager, appSettings);
+    const CentralWidgets central =
+      buildCentralWidget(window, treeModel, docManager, appSettings, searchModel);
     EditorTabs *editorTabs = central.editorTabs;
     window->setEditorTabs(editorTabs);
     window->setAppSettings(appSettings);
@@ -961,6 +1105,9 @@ QMainWindow *buildMainWindow()
     copyAction->setShortcut(QKeySequence::Copy);
     QAction *pasteAction = editMenu->addAction(QObject::tr("Paste"));
     pasteAction->setShortcut(QKeySequence::Paste);
+    editMenu->addSeparator();
+    QAction *findInFilesAction = editMenu->addAction(QObject::tr("Find in Files..."));
+    findInFilesAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+F")));
 
     QObject::connect(undoAction, &QAction::triggered, window, [editorTabs]() {
         if (auto *editor = editorTabs->currentEditor()) {
@@ -986,6 +1133,11 @@ QMainWindow *buildMainWindow()
         if (auto *editor = editorTabs->currentEditor()) {
             editor->paste();
         }
+    });
+    QObject::connect(findInFilesAction, &QAction::triggered, window, [central]() {
+        central.findInFilesDock->toggleView(true);
+        central.findInFilesDock->raise();
+        central.findInFilesPanel->focusQuery();
     });
 
     // US-1: relaunching the app reopens the last project automatically.

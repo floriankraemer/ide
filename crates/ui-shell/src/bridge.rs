@@ -302,6 +302,15 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "tabTitleChanged"]
         fn tab_title_changed(self: Pin<&mut ProjectTreeModel>, tab_id: u64, title: QString);
+
+        /// Emitted after `openFolder`/`reopenLastProject` successfully swap
+        /// in a new project root (Task H) — `main_window.cpp` relays this to
+        /// `SearchModel::buildIndex` so the text index is (re)built off the
+        /// same project-open lifecycle event the tree/watcher already use,
+        /// rather than a second, parallel "project opened" hook.
+        #[qsignal]
+        #[cxx_name = "projectOpened"]
+        fn project_opened(self: Pin<&mut ProjectTreeModel>, root_path: QString);
     }
 
     // Enables `self.qt_thread()` on `ProjectTreeModel`, giving the
@@ -550,6 +559,81 @@ mod ffi {
         #[cxx_name = "saveEditorColors"]
         fn save_editor_colors(self: &AppSettings, background: &QString, foreground: &QString);
     }
+
+    extern "RustQt" {
+        /// Find-in-Files adapter (Task H): owns an `index_core::TextIndex`
+        /// for the currently open project and translates the query box's
+        /// intent into it. Like `DocumentManager`/`ProjectTreeModel`, it
+        /// decides nothing itself — building the index and running a
+        /// search both happen on a background `std::thread` (index
+        /// building and search are both I/O-bound; neither may block the
+        /// Qt thread), with every result marshaled back via
+        /// `CxxQtThread::queue()`, the exact pattern `start_mcp_server`
+        /// already established.
+        #[qobject]
+        type SearchModel = super::SearchModelRust;
+
+        /// (Re)build the text index for `root_path`, replacing any
+        /// previous index. Wired to `ProjectTreeModel::projectOpened` in
+        /// `main_window.cpp` — the same project-open lifecycle event the
+        /// tree/watcher already hook, not a second parallel one.
+        #[qinvokable]
+        #[cxx_name = "buildIndex"]
+        fn build_index(self: Pin<&mut SearchModel>, root_path: &QString);
+
+        /// Emitted once a `buildIndex` call finishes indexing successfully.
+        #[qsignal]
+        #[cxx_name = "indexReady"]
+        fn index_ready(self: Pin<&mut SearchModel>);
+
+        /// Emitted when a `buildIndex` call fails (ADR-0003: a typed signal
+        /// per outcome, never a QString success/failure sentinel).
+        #[qsignal]
+        #[cxx_name = "indexFailed"]
+        fn index_failed(self: Pin<&mut SearchModel>, message: QString);
+
+        /// Run Find-in-Files: `pattern` is a literal substring unless
+        /// `is_regex` is set. Every match is delivered as its own
+        /// `searchMatchFound` emission (avoids needing a `Vec<struct>`
+        /// qinvokable/signal payload, which nothing else in this bridge
+        /// uses), followed by exactly one `searchFinished` or
+        /// `searchFailed`.
+        #[qinvokable]
+        #[cxx_name = "search"]
+        fn search(self: Pin<&mut SearchModel>, pattern: &QString, is_regex: bool);
+
+        /// One match: `line` is 1-based, `start`/`end` are byte offsets of
+        /// the match within that line (matching `index_core::SearchMatch`),
+        /// `snippet` is the (trimmed) line text for display.
+        #[qsignal]
+        #[cxx_name = "searchMatchFound"]
+        fn search_match_found(
+            self: Pin<&mut SearchModel>,
+            path: QString,
+            line: u32,
+            start: u32,
+            end: u32,
+            snippet: QString,
+        );
+
+        /// Emitted once after the last `searchMatchFound` of a `search`
+        /// call (including when there were zero matches).
+        #[qsignal]
+        #[cxx_name = "searchFinished"]
+        fn search_finished(self: Pin<&mut SearchModel>);
+
+        /// Emitted instead of `searchFinished` when `search` couldn't run
+        /// at all (no index built yet, or an invalid regex pattern).
+        #[qsignal]
+        #[cxx_name = "searchFailed"]
+        fn search_failed(self: Pin<&mut SearchModel>, message: QString);
+    }
+
+    // Enables `self.qt_thread()` on `SearchModel` for the background
+    // index-build/search threads to marshal results back, same pattern as
+    // `ProjectTreeModel`'s watcher relay and `DocumentManager`'s MCP
+    // listener above.
+    impl cxx_qt::Threading for SearchModel {}
 
     unsafe extern "C++" {
         include!("main_window.h");
@@ -917,6 +1001,7 @@ impl ffi::ProjectTreeModel {
                 self.as_mut().end_reset_model();
             }
             self.as_mut().start_watcher();
+            self.as_mut().emit_project_opened();
             push_recent_project(path);
         }
         to_ffi_result(result)
@@ -930,8 +1015,23 @@ impl ffi::ProjectTreeModel {
                 self.as_mut().end_reset_model();
             }
             self.as_mut().start_watcher();
+            self.as_mut().emit_project_opened();
         }
         opened
+    }
+
+    /// Shared tail for `open_folder`/`reopen_last_project`: re-reads the
+    /// now-current root path from the session (rather than trusting the
+    /// caller-supplied `path` verbatim) and emits `projectOpened`.
+    fn emit_project_opened(mut self: Pin<&mut Self>) {
+        let root = self
+            .session
+            .borrow()
+            .root_path()
+            .map(|p| p.to_string_lossy().into_owned());
+        if let Some(root) = root {
+            self.as_mut().project_opened(QString::from(root.as_str()));
+        }
     }
 
     /// (Re)start the filesystem watcher for whatever project is now
@@ -1312,6 +1412,99 @@ fn dispatch_editor_command(mut doc_manager: Pin<&mut ffi::DocumentManager>, cmd:
             }
             let _ = respond.send(mapped);
         }
+    }
+}
+
+/// Rust side of the `SearchModel` QObject (Task H). The index itself lives
+/// behind a `Mutex` (not the `RefCell` the other adapters use) because,
+/// unlike `AppSession`, it is genuinely accessed from a background thread —
+/// the Qt-thread invokables below only ever clone the `Arc` and hand it off.
+#[derive(Default)]
+pub struct SearchModelRust {
+    index: std::sync::Arc<std::sync::Mutex<Option<index_core::TextIndex>>>,
+}
+
+/// Read-back the line text a match was found on, for the results list's
+/// snippet column. `index_core::SearchMatch` only carries byte offsets, not
+/// the line itself, so this re-reads the file.
+// ponytail: one file re-read per match rather than caching content from the
+// search pass — fine at Find-in-Files result-list sizes; batch/cache this
+// if it ever measurably matters on a huge result set.
+fn line_snippet(path: &std::path::Path, line: usize) -> String {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return String::new();
+    };
+    content.lines().nth(line.saturating_sub(1)).unwrap_or("").trim().to_string()
+}
+
+impl ffi::SearchModel {
+    pub fn build_index(self: Pin<&mut Self>, root_path: &QString) {
+        let root = std::path::PathBuf::from(root_path.to_string());
+        let qt_thread = self.qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || match index_core::TextIndex::build(&root) {
+            Ok(index) => {
+                *slot.lock().unwrap() = Some(index);
+                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                    model.as_mut().index_ready();
+                });
+            }
+            Err(err) => {
+                let message = err.to_string();
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model.as_mut().index_failed(QString::from(message.as_str()));
+                });
+            }
+        });
+    }
+
+    pub fn search(self: Pin<&mut Self>, pattern: &QString, is_regex: bool) {
+        let pattern = pattern.to_string();
+        let qt_thread = self.qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            let guard = slot.lock().unwrap();
+            let Some(index) = guard.as_ref() else {
+                drop(guard);
+                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                    model
+                        .as_mut()
+                        .search_failed(QString::from("No project is open yet."));
+                });
+                return;
+            };
+            let result = index.search(&pattern, is_regex);
+            drop(guard);
+            match result {
+                Ok(matches) => {
+                    for m in matches {
+                        let snippet = line_snippet(&m.path, m.line);
+                        let path = QString::from(m.path.to_string_lossy().as_ref());
+                        let line = m.line as u32;
+                        let start = m.start as u32;
+                        let end = m.end as u32;
+                        let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                            model.as_mut().search_match_found(
+                                path,
+                                line,
+                                start,
+                                end,
+                                QString::from(snippet.as_str()),
+                            );
+                        });
+                    }
+                    let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                        model.as_mut().search_finished();
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model.as_mut().search_failed(QString::from(message.as_str()));
+                    });
+                }
+            }
+        });
     }
 }
 

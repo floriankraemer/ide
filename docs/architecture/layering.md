@@ -29,7 +29,7 @@ graph TB
 | `terminal-core` | (std, alacritty_terminal) | **No** |
 | `index-core` | (std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore) | **No** |
 | `app-core` | `editor-core`, `project-model` | **No** |
-| `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `syntax-core`, `mcp-server` | Yes (adapter + view live here) |
+| `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `syntax-core`, `mcp-server`, `index-core` | Yes (adapter + view live here) |
 | `app` | `ui-shell` | Yes |
 
 `editor-core`, `project-model`, and `app-core` MUST NOT depend on cxx-qt or Qt in any form — no direct dependency, no transitive dependency, no feature-gated dependency.
