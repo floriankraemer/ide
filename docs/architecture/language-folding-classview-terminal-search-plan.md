@@ -23,7 +23,7 @@ per `CLAUDE.md`.
 | H | done | 00842ba |
 | I | done | fdb444e |
 | J | done | d30429e |
-| K | done | PENDING |
+| K | done | 5f7439d |
 
 ## Context
 
