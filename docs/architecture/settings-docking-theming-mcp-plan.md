@@ -46,6 +46,9 @@ per `CLAUDE.md`.
 | M4 | done | `c57201a` (`cargo test -p app-core -p mcp-server`; Docker `linux-artifact` build verified; MCP-client-against-running-UI round trip not run, no display here) |
 | M5 | done | `b461245` (`cargo test -p app-core -p mcp-server`; Docker `linux-artifact` build verified; MCP-client-writes-visibly-affect-UI round trip not run, no display here) |
 | D5 | done | `4d3416b` (`cargo test --workspace`; Docker `linux-artifact` build verified; driven end to end under Xvfb — split, close-others, group collapse, nested split, relaunch restore all confirmed by screenshot) |
+| K1 | done | `c8130b3` (`cargo test -p app-config`) |
+| K2 | done | `c8130b3` (clippy/fmt clean; driven end to end under Xvfb — conflict prompt, live menu update, relaunch persistence, Reset All, Cancel-discards all confirmed by screenshot) |
+| K3 | done | `c8130b3` (Xvfb: prefilled dialog, centred jump, clamped range, jump into a collapsed fold expands it — confirmed by screenshot) |
 
 ## Context
 
@@ -219,6 +222,26 @@ split-pane pattern). Two categories only for this pass: **Appearance**
 `QPalette`/`QFont` to open editors). `File > Settings...` (`Ctrl+,`). No
 placeholder categories with nothing behind them.
 
+**Keymap** (task group K, added after the original draft): `app-config`
+gains a static `ActionDef` catalog — stable action id, menu label, category,
+default shortcut — plus a `Keymap` value object layering the user's
+`Settings::keymap` overrides over it.
+Only overrides are persisted, so changing a shipped default still reaches
+users who never rebound that action, and an explicit empty override means
+"deliberately unbound" rather than "use the default".
+Conflicts are warn-and-steal: `Keymap::conflicts` names the actions a
+shortcut would take from, and `assign` unbinds them — both rules in Rust,
+with the view only rendering the confirmation.
+`main_window.cpp` builds every menu action through `registerAction`, which
+reads `AppSettings::shortcutFor(id)` instead of hardcoding a `QKeySequence`;
+`applyKeymap` re-applies them after the settings dialog commits, so a
+rebinding needs no restart.
+Shortcut strings are `QKeySequence` portable text, canonicalized by
+`QKeySequenceEdit` — Rust compares and stores them, never parses them.
+The Keymap settings page lives in its own `ui-shell/cpp/keymap_page.{h,cpp}`
+(it needs nothing from `EditorTabs`) and edits a draft `Keymap` held by a
+`KeymapEditor` QObject, so Cancel discards by simply never committing.
+
 **Dockable windows**: vendor ADS as a git submodule; extend `build.rs` to
 invoke `moc` over ADS headers and add ADS `.cpp`+generated `moc_*.cpp`
 into the same `CxxQtBuilder` compilation (primary path); fall back to the
@@ -310,8 +333,10 @@ mutation path.
 - *Status bar* — line:col (from `CodeEditor::cursorPositionChanged`),
   static "UTF-8" label (accurate — only UTF-8 is supported today), current
   file's language (reuses the `syntax-core` extension map).
-- Explicitly not doing: encoding detection/conversion, a Keymap settings
-  category with nothing configurable behind it yet.
+- Explicitly not doing: encoding detection/conversion.
+  (A Keymap settings category was deferred here for having nothing
+  configurable behind it; task group K below supplies that, so it is no
+  longer deferred.)
 
 ## Sequencing
 
@@ -352,6 +377,9 @@ run in parallel except where noted.
 | M4 | First-slice read tools | `list_project_tree`, `list_open_buffers`, `read_buffer`, `get_cursor_position` (+ new `AppSession::cursor_position(TabId)` command) | MCP client reads match visible UI state |
 | M5 | First-slice write tools | `open_file`, `edit_buffer`, `save_buffer` via existing `AppSession` commands (same ones the UI adapter calls) | MCP client writes visibly affect UI; round-trips to disk match manual Ctrl+S |
 | D5 | Editor tab context menu + split editor area | Right-click a tab for Close / Close Others (that group only) / Split Vertical / Split Horizontal; the editor dock holds a `QSplitter` tree of tab groups and a split *moves* the clicked tab into a new group; layout + each group's files persisted via a new `editor_layout` setting | `cargo test -p app-config -p app-core`; manual: split both ways, close a group's last tab (collapses), relaunch restores the split and its files |
+| K1 | Keymap model in `app-config` | `keymap.rs`: `ActionDef` catalog (stable ids, labels, categories, default shortcuts) + `Keymap` (default fallback, conflict detection, warn-and-steal `assign`, reset); `Settings::keymap` override map | `cargo test -p app-config`: default fallback, override wins, steal leaves the loser unbound, self-assign is not a conflict, reset restores all, TOML round-trip |
+| K2 | Keymap settings page + menus driven by it | `FfiKeyBinding`, `AppSettings::shortcutFor`, `KeymapEditor` QObject holding the dialog's draft; `registerAction`/`applyKeymap` in `main_window.cpp` replace all eleven hardcoded `setShortcut` calls; `keymap_page.{h,cpp}` renders the table + `QKeySequenceEdit` | Driven end to end under Xvfb: rebind with a conflict prompt, menu updates live, persists across relaunch, Reset All restores defaults, Cancel discards |
+| K3 | Go to Line | `moveCursorToLine` (shared by Find in Files / Class View / Go to Line, clamping to the document), `CodeEditor::ensureBlockVisible` fold expansion, `EditorTabs::goToLine` via `QInputDialog::getInt`, View menu entry with default `Ctrl+G` | Xvfb: `Ctrl+G` prefilled with the current line, jump centres and updates the status bar, a jump into a collapsed fold expands it |
 
 ## Verification approach
 

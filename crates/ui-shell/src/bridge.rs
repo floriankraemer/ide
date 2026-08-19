@@ -60,6 +60,19 @@ mod ffi {
         current_line: QString,
     }
 
+    /// One row of the Keymap settings page, 1:1 with `app_config::Binding`.
+    /// `shortcut` is `QKeySequence` portable text, empty for "unbound";
+    /// `is_default` is resolved in Rust so the view can style rebound rows
+    /// without re-deriving the rule.
+    #[derive(Default)]
+    struct FfiKeyBinding {
+        action_id: QString,
+        label: QString,
+        category: QString,
+        shortcut: QString,
+        is_default: bool,
+    }
+
     /// Token category (Y2), 1:1 with `syntax_core::TokenKind`.
     enum FfiTokenKind {
         Keyword,
@@ -668,6 +681,61 @@ mod ffi {
             foreground: &QString,
             current_line: &QString,
         );
+
+        /// The shortcut `action_id` currently responds to, as `QKeySequence`
+        /// portable text — the user's override if there is one, otherwise the
+        /// default from `app_config::ACTIONS`. Empty means unbound. Menu
+        /// construction asks this per action instead of hardcoding a
+        /// `QKeySequence`, so the fallback rule stays in Rust.
+        #[qinvokable]
+        #[cxx_name = "shortcutFor"]
+        fn shortcut_for(self: &AppSettings, action_id: &QString) -> QString;
+    }
+
+    extern "RustQt" {
+        /// Keymap settings page adapter: holds the *draft* keymap the dialog
+        /// edits, so Cancel discards it by simply never calling `commit`.
+        /// The draft is dialog session state, not domain state — every rule
+        /// it exercises (default fallback, conflict detection, stealing) is
+        /// an `app_config::Keymap` call.
+        #[qobject]
+        type KeymapEditor = super::KeymapEditorRust;
+
+        /// Load the persisted overrides into the draft. Called each time the
+        /// settings dialog opens, so a Cancel-ed edit never leaks into the
+        /// next one.
+        #[qinvokable]
+        #[cxx_name = "beginEdit"]
+        fn begin_edit(self: &KeymapEditor);
+
+        /// Every action with its effective shortcut, in menu order.
+        #[qinvokable]
+        #[cxx_name = "bindings"]
+        fn bindings(self: &KeymapEditor) -> Vec<FfiKeyBinding>;
+
+        /// Labels of the actions that would lose their binding if `shortcut`
+        /// were assigned to `action_id` — what the view puts in its
+        /// confirmation prompt. Empty when there is nothing to steal.
+        #[qinvokable]
+        #[cxx_name = "conflicts"]
+        fn conflicts(self: &KeymapEditor, action_id: &QString, shortcut: &QString) -> QStringList;
+
+        /// Bind `shortcut` to `action_id` in the draft, unbinding whoever
+        /// held it before (the view is expected to have confirmed via
+        /// `conflicts` first). An empty `shortcut` just unbinds `action_id`.
+        #[qinvokable]
+        #[cxx_name = "assign"]
+        fn assign(self: &KeymapEditor, action_id: &QString, shortcut: &QString);
+
+        /// Drop every override in the draft, back to the shipped defaults.
+        #[qinvokable]
+        #[cxx_name = "resetDefaults"]
+        fn reset_defaults(self: &KeymapEditor);
+
+        /// Persist the draft into `Settings::keymap` (the dialog's OK path).
+        #[qinvokable]
+        #[cxx_name = "commit"]
+        fn commit(self: &KeymapEditor);
     }
 
     extern "RustQt" {
@@ -1232,6 +1300,11 @@ impl ffi::AppSettings {
         settings.editor_font_family = family.to_string();
         settings.editor_font_size = size;
         let _ = app_config::save(&config_dir, &settings);
+    }
+
+    pub fn shortcut_for(&self, action_id: &QString) -> QString {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        QString::from(settings.keymap().shortcut_for(&action_id.to_string()))
     }
 
     pub fn editor_colors(&self) -> FfiEditorColors {
@@ -1889,6 +1962,66 @@ fn dispatch_editor_command(
             }
             let _ = respond.send(mapped);
         }
+    }
+}
+
+/// Rust side of the `KeymapEditor` QObject: unlike `AppSettings` (stateless,
+/// re-reads `settings.toml` per call) this one holds the settings dialog's
+/// draft keymap, so an edit only reaches disk when `commit` is called.
+/// `RefCell` rather than `Pin<&mut Self>` mutation, matching how
+/// `TerminalSessionRust` keeps its interior state.
+#[derive(Default)]
+pub struct KeymapEditorRust {
+    draft: RefCell<app_config::Keymap>,
+}
+
+impl ffi::KeymapEditor {
+    pub fn begin_edit(&self) {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        *self.draft.borrow_mut() = settings.keymap();
+    }
+
+    pub fn bindings(&self) -> Vec<ffi::FfiKeyBinding> {
+        self.draft
+            .borrow()
+            .bindings()
+            .into_iter()
+            .map(|binding| ffi::FfiKeyBinding {
+                action_id: QString::from(binding.action.id),
+                label: QString::from(binding.action.label),
+                category: QString::from(binding.action.category),
+                shortcut: QString::from(binding.shortcut.as_str()),
+                is_default: binding.is_default,
+            })
+            .collect()
+    }
+
+    pub fn conflicts(&self, action_id: &QString, shortcut: &QString) -> QStringList {
+        self.draft
+            .borrow()
+            .conflicts(&action_id.to_string(), &shortcut.to_string())
+            .iter()
+            .map(|action| QString::from(action.label))
+            .collect()
+    }
+
+    pub fn assign(&self, action_id: &QString, shortcut: &QString) {
+        self.draft
+            .borrow_mut()
+            .assign(&action_id.to_string(), &shortcut.to_string());
+    }
+
+    pub fn reset_defaults(&self) {
+        self.draft.borrow_mut().reset_to_defaults();
+    }
+
+    pub fn commit(&self) {
+        let config_dir = app_core::resolve_config_dir();
+        let Ok(mut settings) = app_config::load(&config_dir) else {
+            return;
+        };
+        settings.set_keymap(self.draft.borrow().clone());
+        let _ = app_config::save(&config_dir, &settings);
     }
 }
 

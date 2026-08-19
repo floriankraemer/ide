@@ -1,6 +1,7 @@
 #include "main_window.h"
 
 #include "code_editor.h"
+#include "keymap_page.h"
 #include "syntax_highlighter.h"
 #include "terminal_widget.h"
 #include "theme.h"
@@ -25,6 +26,7 @@
 #include <QHash>
 #include <functional>
 #include <QHBoxLayout>
+#include <QHash>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
@@ -68,6 +70,28 @@ namespace {
 // pinned by app-core's error_codes_are_stable test) — the one error kind the
 // view presents as information rather than as an error.
 constexpr int kErrBinaryFile = 3;
+
+// Moves `editor`'s caret to (1-based) `line`, `column` characters into it,
+// and centres the view on it — the shared tail of every jump the IDE makes
+// (Find in Files, Class View, Go to Line).
+//
+// `line` is clamped to the document: QTextDocument::findBlockByNumber returns
+// an invalid block past the end, which silently lands the caret at position 0
+// instead of the last line. Any fold hiding the target is expanded first, so
+// the caret never ends up on an invisible line.
+void moveCursorToLine(QPlainTextEdit *editor, int line, int column)
+{
+    const int blockNumber = qBound(0, line - 1, editor->blockCount() - 1);
+    if (auto *codeEditor = qobject_cast<CodeEditor *>(editor)) {
+        codeEditor->ensureBlockVisible(blockNumber);
+    }
+    QTextCursor cursor(editor->document()->findBlockByNumber(blockNumber));
+    cursor.movePosition(QTextCursor::StartOfBlock);
+    cursor.movePosition(QTextCursor::Right, QTextCursor::MoveAnchor, qMax(0, column));
+    editor->setTextCursor(cursor);
+    editor->centerCursor();
+    editor->setFocus();
+}
 
 // Humble view for the editor area (ADR-0002): owns the QTabWidget <->
 // DocumentManager wiring, decides nothing. Tabs are identified by the
@@ -156,12 +180,7 @@ public:
         if (!editor) {
             return;
         }
-        QTextCursor cursor(editor->document()->findBlockByNumber(qMax(0, line - 1)));
-        cursor.movePosition(QTextCursor::StartOfBlock);
-        cursor.movePosition(QTextCursor::Right, QTextCursor::MoveAnchor, qMax(0, column));
-        editor->setTextCursor(cursor);
-        editor->centerCursor();
-        editor->setFocus();
+        moveCursorToLine(editor, line, column);
     }
 
     QPlainTextEdit *currentEditor() const
@@ -205,13 +224,26 @@ public:
                 lineStart = i + 1;
             }
         }
-        QTextCursor cursor(editor->document()->findBlockByNumber(line));
-        cursor.movePosition(QTextCursor::StartOfBlock);
-        cursor.movePosition(QTextCursor::Right, QTextCursor::MoveAnchor,
-                             qMax<qsizetype>(0, clamped - lineStart));
-        editor->setTextCursor(cursor);
-        editor->centerCursor();
-        editor->setFocus();
+        moveCursorToLine(editor, line + 1, static_cast<int>(qMax<qsizetype>(0, clamped - lineStart)));
+    }
+
+    // View > Go to Line... The spin box is bounded by the document, so an
+    // out-of-range line can't be entered in the first place; the caret is
+    // moved through the same helper every other jump uses, so folds and
+    // centring behave identically.
+    void goToLine()
+    {
+        auto *editor = currentEditor();
+        if (!editor) {
+            return;
+        }
+        bool ok = false;
+        const int line = QInputDialog::getInt(window_, tr("Go to Line"), tr("Line number:"),
+                                               editor->textCursor().blockNumber() + 1, 1,
+                                               editor->blockCount(), 1, &ok);
+        if (ok) {
+            moveCursorToLine(editor, line, 0);
+        }
     }
 
     // Ctrl+S / File > Save.
@@ -1640,7 +1672,36 @@ void populateRecentProjectsMenu(QMenu *menu, AppSettings *appSettings, ProjectTr
 // through `appSettings`, Cancel restores exactly what was active when the
 // dialog opened. Modal and blocking, so every lambda below capturing
 // `&dialog` only ever runs while `dialog` is still alive on this stack frame.
-void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *editorTabs)
+// Adds a menu action whose shortcut comes from the persisted keymap rather
+// than a literal QKeySequence, and records it under its stable action id so
+// Settings > Keymap can re-apply a rebinding without rebuilding the menus.
+//
+// `id` must be one of app_config::ACTIONS' ids — that catalog, not this file,
+// is where an action's default shortcut lives.
+QAction *registerAction(QMenu *menu, const QString &id, const QString &text,
+                         AppSettings *appSettings, QHash<QString, QAction *> &actions)
+{
+    QAction *action = menu->addAction(text);
+    action->setShortcut(
+      QKeySequence(appSettings->shortcutFor(id), QKeySequence::PortableText));
+    actions.insert(id, action);
+    return action;
+}
+
+// Re-reads every registered action's shortcut from settings — run after the
+// Keymap page commits, so a rebinding takes effect without a restart. An
+// action left unbound gets an empty QKeySequence, which Qt renders as no
+// accelerator at all.
+void applyKeymap(const QHash<QString, QAction *> &actions, AppSettings *appSettings)
+{
+    for (auto it = actions.constBegin(); it != actions.constEnd(); ++it) {
+        it.value()->setShortcut(
+          QKeySequence(appSettings->shortcutFor(it.key()), QKeySequence::PortableText));
+    }
+}
+
+void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *editorTabs,
+                        KeymapEditor *keymapEditor, const QHash<QString, QAction *> &actions)
 {
     const QString originalTheme = appSettings->themeName();
     const FfiEditorFont originalFont = appSettings->editorFont();
@@ -1652,6 +1713,7 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     auto *categoryList = new QListWidget(&dialog);
     categoryList->addItem(QObject::tr("Appearance"));
     categoryList->addItem(QObject::tr("Editor"));
+    categoryList->addItem(QObject::tr("Keymap"));
     categoryList->setMaximumWidth(150);
 
     auto *pages = new QStackedWidget(&dialog);
@@ -1744,6 +1806,12 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
 
     pages->addWidget(editorPage);
 
+    // Unlike Appearance/Editor, the keymap isn't applied live: the page edits
+    // a draft held in Rust, so Cancel discards it by never committing, and
+    // the next beginEdit() re-reads from disk.
+    keymapEditor->beginEdit();
+    pages->addWidget(buildKeymapPage(&dialog, keymapEditor));
+
     QObject::connect(categoryList, &QListWidget::currentRowChanged, pages,
                       &QStackedWidget::setCurrentIndex);
     categoryList->setCurrentRow(0);
@@ -1765,6 +1833,8 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
         appSettings->saveEditorFont(fontFamilyEdit->text(),
                                      static_cast<quint32>(fontSizeSpin->value()));
         appSettings->saveEditorColors(*backgroundColor, *foregroundColor, *currentLineColor);
+        keymapEditor->commit();
+        applyKeymap(actions, appSettings);
     } else {
         qApp->setStyleSheet(styleSheetForTheme(originalTheme));
         editorTabs->setEditorFont(QFont(originalFont.family, static_cast<int>(originalFont.size)));
@@ -2074,6 +2144,9 @@ QMainWindow *buildMainWindow()
     window->setWindowTitle(QStringLiteral("IDE"));
 
     auto *appSettings = new AppSettings(window);
+    // Holds the Settings > Keymap page's draft between beginEdit() and
+    // commit(); parented to the window so it outlives each dialog.
+    auto *keymapEditor = new KeymapEditor(window);
     // Live-switch mechanism (T2): re-applying setStyleSheet() at runtime is
     // exactly how a future theme-picker (S1) switches without a restart —
     // this call is that same path, just fired once at startup with the
@@ -2129,18 +2202,33 @@ QMainWindow *buildMainWindow()
     statusBar->addPermanentWidget(encodingLabel);
     editorTabs->attachStatusBar(positionLabel, languageLabel);
 
+    // Every menu action is registered under a stable id from
+    // app_config::ACTIONS and takes its shortcut from the persisted keymap,
+    // so Settings > Keymap can rebind any of them (nothing here hardcodes a
+    // QKeySequence any more).
+    // Boxed so the Preferences lambda (which runs long after this function
+    // returns, and needs the *complete* registry including actions added
+    // below it) shares one instance instead of capturing a dangling
+    // reference — the same std::make_shared trick the settings dialog's
+    // colour pickers use.
+    auto actions = std::make_shared<QHash<QString, QAction *>>();
+
     QMenu *fileMenu = window->menuBar()->addMenu(QObject::tr("&File"));
-    QAction *openFolderAction = fileMenu->addAction(QObject::tr("Open Folder..."));
+    QAction *openFolderAction = registerAction(fileMenu, QStringLiteral("file.openFolder"),
+                                                QObject::tr("Open Folder..."), appSettings, *actions);
     QMenu *recentProjectsMenu = fileMenu->addMenu(QObject::tr("Recent Projects"));
     populateRecentProjectsMenu(recentProjectsMenu, appSettings, treeModel, window);
     fileMenu->addSeparator();
-    QAction *saveAction = fileMenu->addAction(QObject::tr("Save"));
-    saveAction->setShortcut(QKeySequence::Save);
-    QAction *saveAsAction = fileMenu->addAction(QObject::tr("Save As..."));
+    QAction *saveAction = registerAction(fileMenu, QStringLiteral("file.save"),
+                                          QObject::tr("Save"), appSettings, *actions);
+    QAction *saveAsAction = registerAction(fileMenu, QStringLiteral("file.saveAs"),
+                                            QObject::tr("Save As..."), appSettings, *actions);
     fileMenu->addSeparator();
-    QAction *preferencesAction = fileMenu->addAction(QObject::tr("Preferences..."));
+    QAction *preferencesAction = registerAction(fileMenu, QStringLiteral("file.preferences"),
+                                                 QObject::tr("Preferences..."), appSettings, *actions);
     fileMenu->addSeparator();
-    QAction *exitAction = fileMenu->addAction(QObject::tr("Exit"));
+    QAction *exitAction = registerAction(fileMenu, QStringLiteral("file.exit"),
+                                          QObject::tr("Exit"), appSettings, *actions);
 
     QObject::connect(openFolderAction, &QAction::triggered, window,
                       [treeModel, window, recentProjectsMenu, appSettings]() {
@@ -2165,35 +2253,37 @@ QMainWindow *buildMainWindow()
     });
 
     QObject::connect(preferencesAction, &QAction::triggered, window,
-                      [window, appSettings, editorTabs]() {
-                          showSettingsDialog(window, appSettings, editorTabs);
+                      [window, appSettings, editorTabs, keymapEditor, actions]() {
+                          showSettingsDialog(window, appSettings, editorTabs, keymapEditor,
+                                              *actions);
                       });
 
     QMenu *editMenu = window->menuBar()->addMenu(QObject::tr("&Edit"));
-    QAction *undoAction = editMenu->addAction(QObject::tr("Undo"));
-    undoAction->setShortcut(QKeySequence::Undo);
-    QAction *redoAction = editMenu->addAction(QObject::tr("Redo"));
-    redoAction->setShortcut(QKeySequence::Redo);
+    QAction *undoAction = registerAction(editMenu, QStringLiteral("edit.undo"),
+                                          QObject::tr("Undo"), appSettings, *actions);
+    QAction *redoAction = registerAction(editMenu, QStringLiteral("edit.redo"),
+                                          QObject::tr("Redo"), appSettings, *actions);
     editMenu->addSeparator();
-    QAction *cutAction = editMenu->addAction(QObject::tr("Cut"));
-    cutAction->setShortcut(QKeySequence::Cut);
-    QAction *copyAction = editMenu->addAction(QObject::tr("Copy"));
-    copyAction->setShortcut(QKeySequence::Copy);
-    QAction *pasteAction = editMenu->addAction(QObject::tr("Paste"));
-    pasteAction->setShortcut(QKeySequence::Paste);
+    QAction *cutAction = registerAction(editMenu, QStringLiteral("edit.cut"),
+                                         QObject::tr("Cut"), appSettings, *actions);
+    QAction *copyAction = registerAction(editMenu, QStringLiteral("edit.copy"),
+                                          QObject::tr("Copy"), appSettings, *actions);
+    QAction *pasteAction = registerAction(editMenu, QStringLiteral("edit.paste"),
+                                           QObject::tr("Paste"), appSettings, *actions);
     editMenu->addSeparator();
-    QAction *findInFilesAction = editMenu->addAction(QObject::tr("Find in Files..."));
-    findInFilesAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+F")));
+    QAction *findInFilesAction = registerAction(editMenu, QStringLiteral("edit.findInFiles"),
+                                                 QObject::tr("Find in Files..."), appSettings,
+                                                 *actions);
 
     QMenu *viewMenu = window->menuBar()->addMenu(QObject::tr("&View"));
-    QAction *classViewAction = viewMenu->addAction(QObject::tr("Class View"));
-    classViewAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Alt+C")));
+    QAction *classViewAction = registerAction(viewMenu, QStringLiteral("view.classView"),
+                                               QObject::tr("Class View"), appSettings, *actions);
     QObject::connect(classViewAction, &QAction::triggered, window, [central]() {
         central.classViewDock->toggleView(true);
         central.classViewDock->raise();
     });
-    QAction *terminalAction = viewMenu->addAction(QObject::tr("Terminal"));
-    terminalAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+`")));
+    QAction *terminalAction = registerAction(viewMenu, QStringLiteral("view.terminal"),
+                                             QObject::tr("Terminal"), appSettings, *actions);
     QObject::connect(terminalAction, &QAction::triggered, window, [central]() {
         central.terminalDock->toggleView(true);
         central.terminalDock->raise();
@@ -2201,10 +2291,15 @@ QMainWindow *buildMainWindow()
             w->setFocus();
         }
     });
-    QAction *goToSymbolAction = viewMenu->addAction(QObject::tr("Go to Symbol..."));
-    goToSymbolAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+Shift+O")));
+    QAction *goToSymbolAction = registerAction(viewMenu, QStringLiteral("view.goToSymbol"),
+                                               QObject::tr("Go to Symbol..."), appSettings, *actions);
     QObject::connect(goToSymbolAction, &QAction::triggered, window, [central]() {
         central.quickOpenDialog->popup();
+    });
+    QAction *goToLineAction = registerAction(viewMenu, QStringLiteral("view.goToLine"),
+                                             QObject::tr("Go to Line..."), appSettings, *actions);
+    QObject::connect(goToLineAction, &QAction::triggered, window, [editorTabs]() {
+        editorTabs->goToLine();
     });
 
     QObject::connect(undoAction, &QAction::triggered, window, [editorTabs]() {

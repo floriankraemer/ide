@@ -244,6 +244,33 @@ void CodeEditor::toggleFold(int blockNumber)
     }
 }
 
+void CodeEditor::ensureBlockVisible(int blockNumber)
+{
+    QVector<FoldRange> stillCollapsed;
+    bool expandedAny = false;
+    for (const FoldRange &range : collapsedRanges_) {
+        // The fold's header line stays visible while collapsed, so only the
+        // blocks *after* it are actually hidden.
+        if (blockNumber > range.startBlock && blockNumber <= range.endBlock) {
+            setBlocksVisible(range.startBlock, range.endBlock, true);
+            expandedAny = true;
+        } else {
+            stillCollapsed.append(range);
+        }
+    }
+    if (!expandedAny) {
+        return;
+    }
+
+    collapsedRanges_ = stillCollapsed;
+    // Expanding an enclosing range above also revealed any fold nested
+    // inside it that the target line isn't in — re-hide those, so only the
+    // folds standing between the cursor and visibility get opened.
+    for (const FoldRange &range : collapsedRanges_) {
+        setBlocksVisible(range.startBlock, range.endBlock, false);
+    }
+}
+
 void CodeEditor::setFoldRanges(const QVector<FoldRange> &ranges)
 {
     foldRanges_ = ranges;

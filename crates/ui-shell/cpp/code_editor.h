@@ -56,6 +56,11 @@ public:
     // not threaded through app-core/TabId, not persisted across sessions.
     void setFoldRanges(const QVector<FoldRange> &ranges);
 
+    // Expands any collapsed fold hiding `blockNumber`, so a jump (Go to
+    // Line, Find in Files, Go to Symbol) can't park the cursor on an
+    // invisible line. Blocks nothing when the line is already visible.
+    void ensureBlockVisible(int blockNumber);
+
     // S2: explicit override for the current-line band, "#rrggbb" or empty
     // for "derive it from the editor palette" (the same empty-means-theme
     // contract the editor background/foreground overrides use).

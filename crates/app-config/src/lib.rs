@@ -15,6 +15,10 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+pub mod keymap;
+
+pub use keymap::{action, ActionDef, Binding, Keymap, ACTIONS};
+
 /// File name used to persist settings inside the config directory.
 const SETTINGS_FILE: &str = "settings.toml";
 
@@ -63,6 +67,13 @@ pub struct Settings {
     /// view-owns-the-format arrangement as `window_state` above).
     #[serde(default)]
     pub editor_layout: String,
+    /// Keyboard shortcut overrides: action id to `QKeySequence` portable text
+    /// (`""` = deliberately unbound). Only overrides live here — an action
+    /// absent from the map uses the default from [`keymap::ACTIONS`], so
+    /// changing a shipped default still reaches users who never rebound it.
+    /// See [`Keymap`] for the rules layered over this map.
+    #[serde(default)]
+    pub keymap: HashMap<String, String>,
 }
 
 /// Cap on remembered recent projects — enough for a useful menu without
@@ -106,6 +117,17 @@ impl Settings {
         } else {
             self.editor_font_size
         }
+    }
+
+    /// The keyboard shortcuts in force, defaults included — the view asks
+    /// this for every action's binding rather than resolving fallbacks itself.
+    pub fn keymap(&self) -> Keymap {
+        Keymap::from_overrides(self.keymap.clone())
+    }
+
+    /// Replace the shortcut overrides with `keymap`'s.
+    pub fn set_keymap(&mut self, keymap: Keymap) {
+        self.keymap = keymap.into_overrides();
     }
 
     /// Push `path` to the front of `recent_projects`, deduping any existing
@@ -196,12 +218,32 @@ mod tests {
             },
             window_state: "opaque-blob".to_string(),
             editor_layout: "{\"groups\":[]}".to_string(),
+            keymap: HashMap::from([("view.goToLine".to_string(), "Ctrl+L".to_string())]),
         };
 
         save(dir.path(), &settings).unwrap();
         let loaded = load(dir.path()).unwrap();
 
         assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn keymap_round_trips_through_settings() {
+        // Only overrides are persisted; the rest of the catalog keeps its
+        // shipped defaults after a save/load cycle.
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings::default();
+        let mut map = settings.keymap();
+        map.assign("view.goToLine", "Ctrl+Shift+F");
+        settings.set_keymap(map);
+
+        save(dir.path(), &settings).unwrap();
+        let loaded = load(dir.path()).unwrap();
+
+        let map = loaded.keymap();
+        assert_eq!(map.shortcut_for("view.goToLine"), "Ctrl+Shift+F");
+        assert_eq!(map.shortcut_for("edit.findInFiles"), "");
+        assert_eq!(map.shortcut_for("file.save"), "Ctrl+S");
     }
 
     #[test]
