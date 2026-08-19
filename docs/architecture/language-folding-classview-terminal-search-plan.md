@@ -19,7 +19,7 @@ per `CLAUDE.md`.
 | F1 | done | 178ac09 |
 | F2 | done | bf0b6a7 |
 | F3 | done | 077a344 |
-| F4 | done | `HASH` |
+| F4 | done | `fc1e8fd` |
 | G1 | done | 49f0320 |
 | H | done | 00842ba |
 | I | done | fdb444e |
