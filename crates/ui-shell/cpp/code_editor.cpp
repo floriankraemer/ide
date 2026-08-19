@@ -1,19 +1,30 @@
 #include "code_editor.h"
 
+#include <QColor>
+#include <QEvent>
 #include <QFontMetrics>
 #include <QMouseEvent>
+#include <QPalette>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPolygon>
 #include <QResizeEvent>
 #include <QTextBlock>
 #include <QTextDocument>
+#include <QTextEdit>
 
 namespace ui_shell {
 
 namespace {
 // Width reserved for the fold triangle, left of the line-number digits.
 constexpr int kFoldMarkerWidth = 12;
+
+// Nudges `base` away from itself so a band drawn in the result reads as a
+// subtle tint on both dark and light editor backgrounds.
+QColor tinted(const QColor &base, int darkFactor, int lightFactor)
+{
+    return base.lightness() < 128 ? base.lighter(darkFactor) : base.darker(lightFactor);
+}
 } // namespace
 
 CodeEditor::CodeEditor(QWidget *parent)
@@ -22,8 +33,49 @@ CodeEditor::CodeEditor(QWidget *parent)
 {
     connect(this, &CodeEditor::blockCountChanged, this, &CodeEditor::updateLineNumberAreaWidth);
     connect(this, &CodeEditor::updateRequest, this, &CodeEditor::updateLineNumberArea);
+    connect(this, &CodeEditor::cursorPositionChanged, this, &CodeEditor::highlightCurrentLine);
 
     updateLineNumberAreaWidth(0);
+    highlightCurrentLine();
+}
+
+void CodeEditor::setCurrentLineColor(const QString &hex)
+{
+    currentLineColor_ = hex;
+    highlightCurrentLine();
+}
+
+QColor CodeEditor::currentLineBandColor() const
+{
+    return currentLineColor_.isEmpty() ? tinted(palette().color(QPalette::Base), 145, 108)
+                                       : QColor(currentLineColor_);
+}
+
+void CodeEditor::highlightCurrentLine()
+{
+    QList<QTextEdit::ExtraSelection> selections;
+
+    QTextEdit::ExtraSelection line;
+    line.format.setBackground(currentLineBandColor());
+    // Without this the band stops at the end of the text on that line.
+    line.format.setProperty(QTextFormat::FullWidthSelection, true);
+    line.cursor = textCursor();
+    line.cursor.clearSelection();
+    selections.append(line);
+
+    setExtraSelections(selections);
+    lineNumberArea_->update();
+}
+
+void CodeEditor::changeEvent(QEvent *event)
+{
+    QPlainTextEdit::changeEvent(event);
+
+    // MainWindow swaps the editor palette when the theme changes; the band
+    // colour is derived from it, so it has to be recomputed here.
+    if (event->type() == QEvent::PaletteChange) {
+        highlightCurrentLine();
+    }
 }
 
 int CodeEditor::lineNumberAreaWidth() const
@@ -65,8 +117,16 @@ void CodeEditor::resizeEvent(QResizeEvent *event)
 
 void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
 {
+    const QColor base = palette().color(QPalette::Base);
+    const QColor gutterBackground = tinted(base, 130, 106);
+    const QColor currentLineBackground = currentLineBandColor();
+    QColor digitColor = palette().color(QPalette::Text);
+    digitColor.setAlpha(140); // dimmed: numbers are chrome, not content
+    QColor currentDigitColor = palette().color(QPalette::Text);
+    const int currentBlockNumber = textCursor().blockNumber();
+
     QPainter painter(lineNumberArea_);
-    painter.fillRect(event->rect(), Qt::lightGray);
+    painter.fillRect(event->rect(), gutterBackground);
 
     QTextBlock block = firstVisibleBlock();
     int blockNumber = block.blockNumber();
@@ -75,8 +135,14 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
 
     while (block.isValid() && top <= event->rect().bottom()) {
         if (block.isVisible() && bottom >= event->rect().top()) {
+            const bool isCurrent = blockNumber == currentBlockNumber;
+            if (isCurrent) {
+                painter.fillRect(0, top, lineNumberArea_->width(), fontMetrics().height(),
+                                  currentLineBackground);
+            }
+
             const QString number = QString::number(blockNumber + 1);
-            painter.setPen(Qt::black);
+            painter.setPen(isCurrent ? currentDigitColor : digitColor);
             painter.drawText(kFoldMarkerWidth, top, lineNumberArea_->width() - kFoldMarkerWidth - 2,
                               fontMetrics().height(), Qt::AlignRight, number);
 
@@ -95,8 +161,8 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
                     triangle << QPoint(cx - 4, cy - 3) << QPoint(cx + 4, cy - 3)
                              << QPoint(cx, cy + 4);
                 }
-                painter.setPen(Qt::black);
-                painter.setBrush(Qt::black);
+                painter.setPen(digitColor);
+                painter.setBrush(digitColor);
                 painter.drawPolygon(triangle);
             }
         }

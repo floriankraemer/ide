@@ -57,6 +57,7 @@ mod ffi {
     struct FfiEditorColors {
         background: QString,
         foreground: QString,
+        current_line: QString,
     }
 
     /// Token category (Y2), 1:1 with `syntax_core::TokenKind`.
@@ -636,7 +637,12 @@ mod ffi {
         /// Persist the editor colors (S2's Editor page, on OK).
         #[qinvokable]
         #[cxx_name = "saveEditorColors"]
-        fn save_editor_colors(self: &AppSettings, background: &QString, foreground: &QString);
+        fn save_editor_colors(
+            self: &AppSettings,
+            background: &QString,
+            foreground: &QString,
+            current_line: &QString,
+        );
     }
 
     extern "RustQt" {
@@ -1191,16 +1197,25 @@ impl ffi::AppSettings {
             foreground: QString::from(
                 settings.editor_colors.get("foreground").map(String::as_str).unwrap_or(""),
             ),
+            current_line: QString::from(
+                settings.editor_colors.get("current_line").map(String::as_str).unwrap_or(""),
+            ),
         }
     }
 
-    pub fn save_editor_colors(&self, background: &QString, foreground: &QString) {
+    pub fn save_editor_colors(
+        &self,
+        background: &QString,
+        foreground: &QString,
+        current_line: &QString,
+    ) {
         let config_dir = app_core::resolve_config_dir();
         let Ok(mut settings) = app_config::load(&config_dir) else {
             return;
         };
         let background = background.to_string();
         let foreground = foreground.to_string();
+        let current_line = current_line.to_string();
         if background.is_empty() {
             settings.editor_colors.remove("background");
         } else {
@@ -1210,6 +1225,11 @@ impl ffi::AppSettings {
             settings.editor_colors.remove("foreground");
         } else {
             settings.editor_colors.insert("foreground".to_string(), foreground);
+        }
+        if current_line.is_empty() {
+            settings.editor_colors.remove("current_line");
+        } else {
+            settings.editor_colors.insert("current_line".to_string(), current_line);
         }
         let _ = app_config::save(&config_dir, &settings);
     }

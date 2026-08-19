@@ -20,11 +20,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         cmake \
         ninja-build \
         git \
+        libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
         sh -s -- -y --no-modify-path --profile minimal \
         --default-toolchain "${RUST_VERSION}" \
+        --component clippy,rustfmt \
     && rustc --version && cargo --version
 
 WORKDIR /workspace
@@ -45,6 +47,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         xvfb \
         xauth \
         x11-apps \
+        imagemagick \
+        xdotool \
     && rm -rf /var/lib/apt/lists/*
 
 ENV QMAKE=/usr/bin/qmake6
