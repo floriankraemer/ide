@@ -10,10 +10,10 @@
 
 use alacritty_terminal::event::{Event, EventListener};
 use alacritty_terminal::grid::Dimensions;
-#[cfg(test)]
-use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::index::{Column, Line, Point, Side};
+use alacritty_terminal::selection::{Selection, SelectionRange, SelectionType};
 use alacritty_terminal::term::cell::Flags as CellFlags;
-use alacritty_terminal::term::{Config as TermConfig, Term};
+use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor, Rgb};
 
 /// Terminal size in character cells, mirroring `pty_core::PtySize` without
@@ -144,12 +144,18 @@ pub struct CellAttributes {
 }
 
 /// One renderable cell: character plus resolved colors and attributes.
+///
+/// `selected` rides along with the cell rather than being exposed as a
+/// separate range accessor: the view's paint loop already walks every cell
+/// and already swaps fg/bg for `inverse`, so a per-cell flag costs it one
+/// XOR instead of a second lookup structure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderCell {
     pub character: char,
     pub fg: CellColor,
     pub bg: CellColor,
     pub attrs: CellAttributes,
+    pub selected: bool,
 }
 
 /// The cursor's position in the visible grid, zero-indexed from the
@@ -166,6 +172,157 @@ pub struct CursorPosition {
 pub struct Grid {
     pub rows: Vec<Vec<RenderCell>>,
     pub cursor: CursorPosition,
+}
+
+/// A `http(s)` URL found on one grid row. `start_col..end_col` is a
+/// half-open range of cells on `row`, ready for the view to hit-test a
+/// mouse position against and to underline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinkSpan {
+    pub row: usize,
+    pub start_col: usize,
+    pub end_col: usize,
+    pub url: String,
+}
+
+/// What a mouse gesture selects: a free drag, the word under the pointer
+/// (double click), or the whole line (triple click). Maps 1:1 onto the
+/// `alacritty_terminal` selection modes this crate delegates to; `Block`
+/// (alt-drag) is deliberately absent until there's a gesture for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionKind {
+    Simple,
+    Word,
+    Line,
+}
+
+impl From<SelectionKind> for SelectionType {
+    fn from(kind: SelectionKind) -> Self {
+        match kind {
+            SelectionKind::Simple => SelectionType::Simple,
+            SelectionKind::Word => SelectionType::Semantic,
+            SelectionKind::Line => SelectionType::Lines,
+        }
+    }
+}
+
+const URL_SCHEMES: [&str; 2] = ["https://", "http://"];
+
+/// Length of the URL scheme starting at `col`, if one starts exactly there.
+fn scheme_at(chars: &[char], col: usize) -> Option<usize> {
+    URL_SCHEMES.iter().find_map(|scheme| {
+        let len = scheme.chars().count();
+        let matches = chars
+            .get(col..col + len)?
+            .iter()
+            .zip(scheme.chars())
+            .all(|(c, s)| c.eq_ignore_ascii_case(&s));
+        matches.then_some(len)
+    })
+}
+
+/// Characters a URL run keeps consuming. Whitespace and controls end it;
+/// quotes and angle brackets are the conventional delimiters when a URL is
+/// embedded in prose or markup, and are never part of the URL itself.
+fn is_url_char(c: char) -> bool {
+    !c.is_whitespace() && !c.is_control() && !matches!(c, '"' | '\'' | '<' | '>' | '`')
+}
+
+/// Walk back over trailing punctuation that reads as sentence punctuation
+/// rather than part of the URL. A closing bracket only counts as trailing
+/// when it is unbalanced within the match, so
+/// `https://en.wikipedia.org/wiki/Foo_(bar)` keeps its paren while
+/// `(see https://example.com)` does not.
+fn trim_url_end(chars: &[char], body_start: usize, mut end: usize) -> usize {
+    while end > body_start {
+        let last = chars[end - 1];
+        if matches!(last, '.' | ',' | ';' | ':' | '!' | '?') {
+            end -= 1;
+            continue;
+        }
+        let Some(open) = (match last {
+            ')' => Some('('),
+            ']' => Some('['),
+            '}' => Some('{'),
+            _ => None,
+        }) else {
+            break;
+        };
+        let span = &chars[body_start..end];
+        let opens = span.iter().filter(|&&c| c == open).count();
+        let closes = span.iter().filter(|&&c| c == last).count();
+        if closes > opens {
+            end -= 1;
+            continue;
+        }
+        break;
+    }
+    end
+}
+
+/// Every `http(s)` URL in one row of text, as `(start_col, end_col, url)`
+/// with `end_col` exclusive. Character index equals column because this
+/// crate's grid model holds exactly one `char` per cell (the same
+/// simplification `grid()` already makes for wide characters).
+fn find_urls_in_line(line: &str) -> Vec<(usize, usize, String)> {
+    let chars: Vec<char> = line.chars().collect();
+    let mut found = Vec::new();
+    let mut col = 0;
+    while col < chars.len() {
+        let Some(scheme_len) = scheme_at(&chars, col) else {
+            col += 1;
+            continue;
+        };
+        // A scheme only counts at a word boundary, so `shttp://x` is not a
+        // link and `xhttps://` cannot smuggle one in.
+        if col > 0 && chars[col - 1].is_alphanumeric() {
+            col += 1;
+            continue;
+        }
+        let body_start = col + scheme_len;
+        let mut end = body_start;
+        while end < chars.len() && is_url_char(chars[end]) {
+            end += 1;
+        }
+        end = trim_url_end(&chars, body_start, end);
+        if end > body_start {
+            found.push((col, end, chars[col..end].iter().collect()));
+            col = end;
+        } else {
+            // A bare scheme with nothing after it is not a URL.
+            col = body_start;
+        }
+    }
+    found
+}
+
+/// Make clipboard text safe to hand to a shell.
+///
+/// Pasted text is attacker-controlled in the everyday "copied off a web
+/// page" sense, so this is a trust boundary, not a cosmetic tidy-up:
+/// newlines are normalized to CR (what a terminal sends for Enter), tabs
+/// survive, and every other control character — `ESC` above all — is
+/// dropped. Dropping `ESC` is what stops a pasted escape sequence from
+/// being executed and what makes a smuggled `\x1b[201~` unable to close
+/// the bracketed-paste wrapper early.
+pub fn sanitize_paste(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push('\r');
+            }
+            '\n' => out.push('\r'),
+            '\t' => out.push('\t'),
+            c if c.is_control() => {}
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// No-op event sink: `Term` reports OSC/bell/clipboard-style side effects
@@ -204,6 +361,11 @@ impl TerminalEmulator {
     /// `alacritty_terminal` reflows it (matches real terminal resize
     /// behavior: content shifts, it never panics).
     pub fn resize(&mut self, size: GridSize) {
+        // A resize reflows content, so any anchor points the selection held
+        // now refer to different text. `Selection::rotate` only fixes up
+        // scroll-induced shifts, not reflow, so the honest answer is to drop
+        // the selection rather than keep a stale-looking one.
+        self.term.selection = None;
         self.term.resize(size);
     }
 
@@ -217,6 +379,8 @@ impl TerminalEmulator {
         let mut rows: Vec<Vec<RenderCell>> = (0..term_grid.screen_lines())
             .map(|_| Vec::with_capacity(cols))
             .collect();
+
+        let selection = self.selection_range();
 
         for indexed in term_grid.display_iter() {
             let row_idx = (indexed.point.line.0 + term_grid.display_offset() as i32) as usize;
@@ -236,6 +400,7 @@ impl TerminalEmulator {
                     underline: cell.flags.intersects(CellFlags::ALL_UNDERLINES),
                     inverse: cell.flags.contains(CellFlags::INVERSE),
                 },
+                selected: selection.is_some_and(|range| range.contains(indexed.point)),
             });
         }
 
@@ -247,6 +412,129 @@ impl TerminalEmulator {
                 col: cursor_point.column.0,
             },
         }
+    }
+
+    /// Whether the running application asked for bracketed paste
+    /// (`\x1b[?2004h`), i.e. whether it wants pasted text framed so it can
+    /// tell it apart from typing.
+    pub fn bracketed_paste(&self) -> bool {
+        self.term.mode().contains(TermMode::BRACKETED_PASTE)
+    }
+
+    /// The exact bytes a paste of `text` should write to the PTY:
+    /// [`sanitize_paste`]'d, and wrapped in the bracketed-paste markers only
+    /// when the application enabled them — sending the markers otherwise
+    /// would land them in the shell's input as literal text.
+    pub fn paste_payload(&self, text: &str) -> String {
+        let body = sanitize_paste(text);
+        if self.bracketed_paste() {
+            format!("\x1b[200~{body}\x1b[201~")
+        } else {
+            body
+        }
+    }
+
+    /// Clamp a viewport `(row, col)` from the view to a grid [`Point`].
+    ///
+    /// Viewport row `r` maps to `Line(r)` only because this crate has no
+    /// scrollback (`GridSize::total_lines() == screen_lines()`), which pins
+    /// `display_offset` at 0. The assert is the tripwire for the day
+    /// scrollback lands: without it, every mapping here would silently point
+    /// at the wrong line.
+    fn point_at(&self, row: usize, col: usize) -> Point {
+        debug_assert_eq!(
+            self.term.grid().display_offset(),
+            0,
+            "viewport row -> Line mapping assumes no scrollback"
+        );
+        let rows = self.term.grid().screen_lines();
+        let cols = self.term.grid().columns();
+        Point::new(
+            Line(row.min(rows.saturating_sub(1)) as i32),
+            Column(col.min(cols.saturating_sub(1))),
+        )
+    }
+
+    /// Begin a selection at a cell. `right_half` says the click landed on the
+    /// right half of that cell, which decides whether the cell itself is
+    /// included; the view computes it from pixel arithmetic.
+    pub fn selection_start(
+        &mut self,
+        row: usize,
+        col: usize,
+        right_half: bool,
+        kind: SelectionKind,
+    ) {
+        let point = self.point_at(row, col);
+        self.term.selection = Some(Selection::new(kind.into(), point, side(right_half)));
+    }
+
+    /// Extend the in-progress selection to a cell (drag). A no-op when
+    /// nothing was started, so a stray drag can't invent a selection.
+    pub fn selection_update(&mut self, row: usize, col: usize, right_half: bool) {
+        let point = self.point_at(row, col);
+        if let Some(selection) = self.term.selection.as_mut() {
+            selection.update(point, side(right_half));
+        }
+    }
+
+    pub fn selection_clear(&mut self) {
+        self.term.selection = None;
+    }
+
+    /// Whether a selection covers at least one cell — an anchored but empty
+    /// selection (press without drag) does not count.
+    pub fn has_selection(&self) -> bool {
+        self.selection_range().is_some()
+    }
+
+    /// The selected text, with `alacritty_terminal`'s own trailing-whitespace
+    /// and line-joining behavior. Deliberately not re-implemented here.
+    pub fn selection_text(&self) -> Option<String> {
+        self.term.selection_to_string()
+    }
+
+    fn selection_range(&self) -> Option<SelectionRange> {
+        self.term
+            .selection
+            .as_ref()
+            .and_then(|selection| selection.to_range(&self.term))
+    }
+
+    /// The `http(s)` link covering this cell, if any. Only the one row is
+    /// read, so a hover costs a row scan rather than a grid snapshot.
+    pub fn link_at(&self, row: usize, col: usize) -> Option<LinkSpan> {
+        let grid = self.term.grid();
+        if row >= grid.screen_lines() || col >= grid.columns() {
+            return None;
+        }
+        debug_assert_eq!(
+            grid.display_offset(),
+            0,
+            "viewport row -> Line mapping assumes no scrollback"
+        );
+        let line = Line(row as i32);
+        let text: String = (0..grid.columns())
+            .map(|c| grid[Point::new(line, Column(c))].c)
+            .collect();
+        find_urls_in_line(&text)
+            .into_iter()
+            .find(|(start, end, _)| col >= *start && col < *end)
+            .map(|(start_col, end_col, url)| LinkSpan {
+                row,
+                start_col,
+                end_col,
+                url,
+            })
+    }
+}
+
+/// Which half of a cell a click landed on, in `alacritty_terminal`'s terms.
+fn side(right_half: bool) -> Side {
+    if right_half {
+        Side::Right
+    } else {
+        Side::Left
     }
 }
 
@@ -383,5 +671,261 @@ mod tests {
         let p = point(2, 4);
         assert_eq!(p.line, Line(2));
         assert_eq!(p.column, Column(4));
+    }
+    // --- URL scanning -----------------------------------------------------
+
+    #[test]
+    fn finds_http_and_https_urls_with_their_columns() {
+        assert_eq!(
+            find_urls_in_line("see http://example.com now"),
+            vec![(4, 22, "http://example.com".to_string())]
+        );
+        assert_eq!(
+            find_urls_in_line("https://example.com"),
+            vec![(0, 19, "https://example.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn trailing_sentence_punctuation_is_not_part_of_the_url() {
+        assert_eq!(
+            find_urls_in_line("go to https://example.com."),
+            vec![(6, 25, "https://example.com".to_string())]
+        );
+        assert_eq!(
+            find_urls_in_line("https://example.com, then"),
+            vec![(0, 19, "https://example.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn closing_bracket_is_kept_when_balanced_and_dropped_when_not() {
+        assert_eq!(
+            find_urls_in_line("https://en.wikipedia.org/wiki/Foo_(bar)"),
+            vec![(0, 39, "https://en.wikipedia.org/wiki/Foo_(bar)".to_string())]
+        );
+        assert_eq!(
+            find_urls_in_line("(see https://example.com)"),
+            vec![(5, 24, "https://example.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_scheme_inside_a_word_is_not_a_url() {
+        assert!(find_urls_in_line("shttp://example.com").is_empty());
+    }
+
+    #[test]
+    fn a_bare_scheme_with_no_host_is_not_a_url() {
+        assert!(find_urls_in_line("http:// and https://").is_empty());
+    }
+
+    #[test]
+    fn two_urls_on_one_row_are_found_separately() {
+        assert_eq!(
+            find_urls_in_line("http://a.example https://b.example"),
+            vec![
+                (0, 16, "http://a.example".to_string()),
+                (17, 34, "https://b.example".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_url_ending_at_the_last_column_is_still_found() {
+        assert_eq!(
+            find_urls_in_line("x https://example.com"),
+            vec![(2, 21, "https://example.com".to_string())]
+        );
+    }
+
+    #[test]
+    fn quotes_and_angle_brackets_delimit_a_url() {
+        assert_eq!(
+            find_urls_in_line("<https://example.com>"),
+            vec![(1, 20, "https://example.com".to_string())]
+        );
+    }
+
+    // --- link_at ----------------------------------------------------------
+
+    fn emulator_showing(text: &str) -> TerminalEmulator {
+        let mut emulator = TerminalEmulator::new(GridSize::new(4, 40));
+        emulator.feed(text.as_bytes());
+        emulator
+    }
+
+    #[test]
+    fn link_at_hits_every_cell_of_the_span_and_nothing_past_it() {
+        // "see https://example.com" — columns 4..23.
+        let emulator = emulator_showing("see https://example.com");
+
+        let expected = LinkSpan {
+            row: 0,
+            start_col: 4,
+            end_col: 23,
+            url: "https://example.com".to_string(),
+        };
+        assert_eq!(emulator.link_at(0, 4), Some(expected.clone()));
+        assert_eq!(emulator.link_at(0, 22), Some(expected));
+        assert_eq!(emulator.link_at(0, 3), None);
+        assert_eq!(emulator.link_at(0, 23), None);
+    }
+
+    #[test]
+    fn link_at_returns_none_off_the_grid_or_on_a_blank_row() {
+        let emulator = emulator_showing("https://example.com");
+
+        assert_eq!(emulator.link_at(1, 0), None);
+        assert_eq!(emulator.link_at(99, 0), None);
+        assert_eq!(emulator.link_at(0, 99), None);
+    }
+
+    // --- paste ------------------------------------------------------------
+
+    #[test]
+    fn paste_normalizes_newlines_to_carriage_returns() {
+        assert_eq!(sanitize_paste("a\r\nb\nc\rd"), "a\rb\rc\rd");
+    }
+
+    #[test]
+    fn paste_keeps_tabs_and_drops_other_control_characters() {
+        assert_eq!(sanitize_paste("a\tb\x00c\x1bd\x7fe"), "a\tbcde");
+    }
+
+    #[test]
+    fn bracketed_paste_follows_the_applications_request() {
+        let mut emulator = TerminalEmulator::new(GridSize::new(4, 20));
+        assert!(!emulator.bracketed_paste());
+
+        emulator.feed(b"\x1b[?2004h");
+        assert!(emulator.bracketed_paste());
+
+        emulator.feed(b"\x1b[?2004l");
+        assert!(!emulator.bracketed_paste());
+    }
+
+    #[test]
+    fn paste_payload_is_wrapped_only_in_bracketed_paste_mode() {
+        let mut emulator = TerminalEmulator::new(GridSize::new(4, 20));
+        assert_eq!(emulator.paste_payload("ls"), "ls");
+
+        emulator.feed(b"\x1b[?2004h");
+        assert_eq!(emulator.paste_payload("ls"), "\x1b[200~ls\x1b[201~");
+    }
+
+    #[test]
+    fn a_smuggled_end_marker_cannot_close_the_paste_wrapper_early() {
+        let mut emulator = TerminalEmulator::new(GridSize::new(4, 20));
+        emulator.feed(b"\x1b[?2004h");
+
+        let payload = emulator.paste_payload("ls\x1b[201~rm -rf /");
+
+        assert_eq!(payload, "\x1b[200~ls[201~rm -rf /\x1b[201~");
+        assert_eq!(payload.matches("\x1b[201~").count(), 1);
+    }
+
+    // --- selection --------------------------------------------------------
+
+    fn selected_text_of(grid: &Grid) -> String {
+        grid.rows
+            .iter()
+            .flat_map(|row| row.iter())
+            .filter(|cell| cell.selected)
+            .map(|cell| cell.character)
+            .collect()
+    }
+
+    #[test]
+    fn dragging_marks_the_dragged_cells_selected_and_yields_their_text() {
+        let mut emulator = emulator_showing("hello world");
+
+        emulator.selection_start(0, 0, false, SelectionKind::Simple);
+        emulator.selection_update(0, 4, true);
+
+        assert!(emulator.has_selection());
+        assert_eq!(selected_text_of(&emulator.grid()), "hello");
+        assert_eq!(emulator.selection_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn a_backwards_drag_selects_the_same_span() {
+        let mut emulator = emulator_showing("hello world");
+
+        emulator.selection_start(0, 4, true, SelectionKind::Simple);
+        emulator.selection_update(0, 0, false);
+
+        assert_eq!(emulator.selection_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn a_word_selection_expands_to_the_whole_word() {
+        let mut emulator = emulator_showing("hello world");
+
+        emulator.selection_start(0, 8, false, SelectionKind::Word);
+
+        assert_eq!(emulator.selection_text().as_deref(), Some("world"));
+    }
+
+    #[test]
+    fn a_line_selection_takes_the_whole_row() {
+        let mut emulator = emulator_showing("hello world");
+
+        emulator.selection_start(0, 3, false, SelectionKind::Line);
+
+        // A line selection carries its own newline, as alacritty produces it.
+        assert_eq!(emulator.selection_text().as_deref(), Some("hello world\n"));
+    }
+
+    #[test]
+    fn a_press_without_a_drag_is_not_a_selection() {
+        let mut emulator = emulator_showing("hello world");
+
+        // Press and release on the same cell half: the view passes the same
+        // `right_half` both times, so this is the real no-drag case.
+        emulator.selection_start(0, 2, true, SelectionKind::Simple);
+        emulator.selection_update(0, 2, true);
+
+        assert!(!emulator.has_selection());
+    }
+
+    #[test]
+    fn clearing_drops_both_the_text_and_the_cell_flags() {
+        let mut emulator = emulator_showing("hello world");
+        emulator.selection_start(0, 0, false, SelectionKind::Simple);
+        emulator.selection_update(0, 4, true);
+
+        emulator.selection_clear();
+
+        assert!(!emulator.has_selection());
+        assert_eq!(emulator.selection_text(), None);
+        assert_eq!(selected_text_of(&emulator.grid()), "");
+    }
+
+    #[test]
+    fn selection_coordinates_off_the_grid_are_clamped_not_panicked_on() {
+        let mut emulator = emulator_showing("hello world");
+
+        // Both ends clamp to the grid, so this is a full-screen drag rather
+        // than a panic or an out-of-bounds `Point`.
+        emulator.selection_start(999, 999, true, SelectionKind::Simple);
+        emulator.selection_update(0, 0, false);
+
+        assert!(emulator.has_selection());
+        assert!(emulator
+            .selection_text()
+            .unwrap()
+            .starts_with("hello world"));
+    }
+
+    #[test]
+    fn resizing_drops_the_selection() {
+        let mut emulator = emulator_showing("hello world");
+        emulator.selection_start(0, 0, false, SelectionKind::Simple);
+        emulator.selection_update(0, 4, true);
+
+        emulator.resize(GridSize::new(6, 30));
+
+        assert!(!emulator.has_selection());
     }
 }

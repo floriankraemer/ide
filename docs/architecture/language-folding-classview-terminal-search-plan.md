@@ -19,6 +19,7 @@ per `CLAUDE.md`.
 | F1 | done | 178ac09 |
 | F2 | done | bf0b6a7 |
 | F3 | done | 077a344 |
+| F4 | done | `HASH` |
 | G1 | done | 49f0320 |
 | H | done | 00842ba |
 | I | done | fdb444e |
@@ -106,6 +107,7 @@ must stay empty.
 | F1 | `pty-core` | Cross-platform PTY spawn/IO/resize via `portable-pty`; per-platform shell resolution (Windows: `pwsh.exe`/`powershell.exe`/`wsl.exe`; Linux: `$SHELL`) | `cargo test -p pty-core`; Docker `linux-artifact` **and** `windows-artifact` build clean |
 | F2 | `terminal-core` | `alacritty_terminal`-backed grid/cursor/selection state from PTY byte stream | `cargo test -p terminal-core`: known escape-sequence fixtures |
 | F3 | Terminal dock widget | `QPainter`-based grid widget in `cpp/`, forwards input via `CxxQtThread::queue()`; new dock widget at extension point | Manual: real shell opens, keystrokes/output round-trip on Linux and Windows |
+| F4 | Terminal selection, copy/paste, links | Mouse selection (drag/word/line) and `http(s)` link detection in `terminal-core`; `Ctrl+Shift+C`/`Ctrl+Shift+V` as rebindable keymap actions, `Ctrl+Click` opens a link, right-click menu, drag auto-copies to the X11 PRIMARY selection | `cargo test -p terminal-core`: URL-scanner, paste-sanitizing and selection fixtures; manual: select/copy/paste and Ctrl+Click a printed URL |
 | G1 | `index-core` text-index skeleton | tantivy ngram(3) content field + `grep-searcher`/`grep-regex` verification; initial walk via `ignore` crate; incremental updates via `ProjectWatcher` | `cargo test -p index-core`: build+query round trip on a fixture repo |
 | H | Find in Files UI | Search UI wired to `index-core` text schema, match spans highlighted | Manual: multi-language repo, correct results and spans |
 | I | Class View — project-wide tier | Data source swap to `index-core` symbol query (same widget/model as D) | Manual: project-wide tree matches indexed symbols |

@@ -5,23 +5,52 @@
 #include <algorithm>
 #include <cstddef>
 
+#include <QAction>
+#include <QApplication>
+#include <QClipboard>
 #include <QColor>
+#include <QContextMenuEvent>
+#include <QDesktopServices>
+#include <QEvent>
 #include <QFontDatabase>
 #include <QFontMetrics>
 #include <QKeyEvent>
+#include <QKeySequence>
+#include <QMenu>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPaintEvent>
 #include <QPalette>
 #include <QResizeEvent>
 #include <QShowEvent>
+#include <QUrl>
 
 namespace ui_shell {
 
-TerminalWidget::TerminalWidget(TerminalSession *session, QWidget *parent)
+TerminalWidget::TerminalWidget(TerminalSession *session, AppSettings *appSettings,
+                                 QWidget *parent)
   : QWidget(parent)
   , session_(session)
+  , appSettings_(appSettings)
 {
     setFocusPolicy(Qt::StrongFocus);
+    // Needed for Ctrl-hover link feedback, which has to react to moves with
+    // no button held down.
+    setMouseTracking(true);
+
+    copyAction_ = new QAction(tr("Copy"), this);
+    copyAction_->setShortcut(QKeySequence(appSettings_->shortcutFor(QStringLiteral("terminal.copy")),
+                                           QKeySequence::PortableText));
+    copyAction_->setShortcutContext(Qt::WidgetShortcut);
+    connect(copyAction_, &QAction::triggered, this, &TerminalWidget::copySelection);
+    addAction(copyAction_);
+
+    pasteAction_ = new QAction(tr("Paste"), this);
+    pasteAction_->setShortcut(QKeySequence(
+      appSettings_->shortcutFor(QStringLiteral("terminal.paste")), QKeySequence::PortableText));
+    pasteAction_->setShortcutContext(Qt::WidgetShortcut);
+    connect(pasteAction_, &QAction::triggered, this, &TerminalWidget::pasteClipboard);
+    addAction(pasteAction_);
 
     font_ = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     font_.setPointSize(10);
@@ -97,7 +126,9 @@ void TerminalWidget::paintEvent(QPaintEvent *event)
             // An SGR-inverse cell swaps fg/bg; the cursor block does the
             // same on top of whatever the cell already is, so landing on an
             // already-inverse cell cancels back out (XOR).
-            if (cell.inverse != (row == cursorRow && col == cursorCol)) {
+            // A selected cell inverts on top of that again, so selecting an
+            // already-inverse cell cancels back out the same way.
+            if (cell.inverse != (row == cursorRow && col == cursorCol) != cell.selected) {
                 std::swap(fg, bg);
             }
 
@@ -108,6 +139,200 @@ void TerminalWidget::paintEvent(QPaintEvent *event)
             painter.drawText(cellRect, Qt::AlignLeft | Qt::AlignVCenter, cell.character);
         }
     }
+
+    // Ctrl-hovered link: underline the exact span the click would open, so
+    // what is clickable is never a guess.
+    if (hoverLink_.found && hoverLink_.row < rows) {
+        const int y = (static_cast<int>(hoverLink_.row) + 1) * cellHeight_ - 1;
+        painter.setPen(QColor(Qt::white));
+        painter.drawLine(static_cast<int>(hoverLink_.start_col) * cellWidth_, y,
+                          static_cast<int>(hoverLink_.end_col) * cellWidth_, y);
+    }
+}
+
+QPoint TerminalWidget::cellAt(const QPoint &pos) const
+{
+    const int col = std::clamp(pos.x() / cellWidth_, 0, static_cast<int>(cols_) - 1);
+    const int row = std::clamp(pos.y() / cellHeight_, 0, static_cast<int>(rows_) - 1);
+    return {col, row};
+}
+
+bool TerminalWidget::rightHalf(const QPoint &pos) const
+{
+    return (pos.x() % cellWidth_) * 2 >= cellWidth_;
+}
+
+void TerminalWidget::copySelection()
+{
+    if (!session_->hasSelection()) {
+        return;
+    }
+    QGuiApplication::clipboard()->setText(session_->selectionText());
+}
+
+void TerminalWidget::pasteClipboard()
+{
+    const QString text = QGuiApplication::clipboard()->text();
+    if (text.isEmpty()) {
+        return;
+    }
+    session_->paste(text);
+}
+
+void TerminalWidget::openLink(const FfiTerminalLink &link)
+{
+    if (link.found) {
+        QDesktopServices::openUrl(QUrl(link.url));
+    }
+}
+
+void TerminalWidget::updateHoverLink(const QPoint &pos, bool ctrlHeld)
+{
+    const QPoint cell = cellAt(pos);
+    const FfiTerminalLink link =
+      ctrlHeld ? session_->linkAt(static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()))
+               : FfiTerminalLink{};
+    if (link.found == hoverLink_.found && link.row == hoverLink_.row
+        && link.start_col == hoverLink_.start_col && link.end_col == hoverLink_.end_col) {
+        return;
+    }
+    hoverLink_ = link;
+    setCursor(hoverLink_.found ? Qt::PointingHandCursor : Qt::IBeamCursor);
+    update();
+}
+
+void TerminalWidget::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() != Qt::LeftButton) {
+        QWidget::mousePressEvent(event);
+        return;
+    }
+
+    const QPoint cell = cellAt(event->pos());
+
+    // Qt has no triple-click event: a triple click arrives as press,
+    // double-click, press. So the press landing within the double-click
+    // interval of a double click is the third one — select the whole line.
+    if (doubleClickTimer_.isValid()
+        && doubleClickTimer_.elapsed() < QApplication::doubleClickInterval()) {
+        doubleClickTimer_.invalidate();
+        session_->selectionStart(static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()),
+                                  rightHalf(event->pos()), FfiSelectionKind::Line);
+        dragging_ = true;
+        update();
+        event->accept();
+        return;
+    }
+
+    if (event->modifiers().testFlag(Qt::ControlModifier)) {
+        const FfiTerminalLink link =
+          session_->linkAt(static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()));
+        if (link.found) {
+            openLink(link);
+            event->accept();
+            return;
+        }
+    }
+
+    session_->selectionClear();
+    session_->selectionStart(static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()),
+                              rightHalf(event->pos()), FfiSelectionKind::Simple);
+    dragging_ = true;
+    update();
+    event->accept();
+}
+
+void TerminalWidget::mouseMoveEvent(QMouseEvent *event)
+{
+    if (dragging_) {
+        const QPoint cell = cellAt(event->pos());
+        session_->selectionUpdate(static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()),
+                                   rightHalf(event->pos()));
+        update();
+        event->accept();
+        return;
+    }
+    updateHoverLink(event->pos(), event->modifiers().testFlag(Qt::ControlModifier));
+    QWidget::mouseMoveEvent(event);
+}
+
+void TerminalWidget::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (!dragging_) {
+        QWidget::mouseReleaseEvent(event);
+        return;
+    }
+    dragging_ = false;
+
+    // Auto-copy goes to the X11 PRIMARY selection only — the middle-click
+    // clipboard Unix users expect a drag to fill. The regular clipboard is
+    // left alone so a selection never silently overwrites what the user
+    // copied elsewhere; supportsSelection() is false on Windows, where this
+    // is simply skipped.
+    QClipboard *clipboard = QGuiApplication::clipboard();
+    if (clipboard->supportsSelection() && session_->hasSelection()) {
+        clipboard->setText(session_->selectionText(), QClipboard::Selection);
+    }
+    event->accept();
+}
+
+void TerminalWidget::mouseDoubleClickEvent(QMouseEvent *event)
+{
+    if (event->button() != Qt::LeftButton) {
+        QWidget::mouseDoubleClickEvent(event);
+        return;
+    }
+    doubleClickTimer_.restart();
+
+    const QPoint cell = cellAt(event->pos());
+    session_->selectionStart(static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()),
+                              rightHalf(event->pos()), FfiSelectionKind::Word);
+    // A double click also starts a drag in word/line units, matching every
+    // other terminal.
+    dragging_ = true;
+    update();
+    event->accept();
+}
+
+void TerminalWidget::contextMenuEvent(QContextMenuEvent *event)
+{
+    const QPoint cell = cellAt(event->pos());
+    const FfiTerminalLink link =
+      session_->linkAt(static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()));
+
+    QMenu menu(this);
+    copyAction_->setEnabled(session_->hasSelection());
+    menu.addAction(copyAction_);
+    menu.addAction(pasteAction_);
+    if (link.found) {
+        menu.addSeparator();
+        QAction *open = menu.addAction(tr("Open Link"));
+        connect(open, &QAction::triggered, this, [this, link]() { openLink(link); });
+    }
+    menu.exec(event->globalPos());
+    // The action outlives the menu, so leave it usable for its shortcut.
+    copyAction_->setEnabled(true);
+    event->accept();
+}
+
+bool TerminalWidget::event(QEvent *event)
+{
+    // While the terminal has focus, Ctrl+letter belongs to the shell:
+    // Ctrl+C is SIGINT, Ctrl+D is EOF, Ctrl+S/Ctrl+Q are flow control.
+    // Qt offers window-level menu shortcuts (Edit > Copy is Ctrl+C) the key
+    // first, so without accepting the ShortcutOverride here those combos
+    // would never reach keyPressEvent. Only plain Ctrl+letter is taken —
+    // Ctrl+Shift+C/V are this widget's own copy/paste actions, and
+    // Ctrl+` still toggles the dock, so there is always a way back out.
+    if (event->type() == QEvent::ShortcutOverride) {
+        auto *keyEvent = static_cast<QKeyEvent *>(event);
+        if (keyEvent->modifiers() == Qt::ControlModifier && keyEvent->key() >= Qt::Key_A
+            && keyEvent->key() <= Qt::Key_Z) {
+            event->accept();
+            return true;
+        }
+    }
+    return QWidget::event(event);
 }
 
 void TerminalWidget::keyPressEvent(QKeyEvent *event)

@@ -76,6 +76,18 @@ No `tokio` or other async runtime in `pty-core` or `terminal-core`; `tokio` stay
   gap. Its Linux build and unit tests (known VT100/SGR/CUP escape-sequence fixtures) are
   verified clean under `linux-builder`; the MXE cross-build path is still unchecked, so this
   ADR stays Proposed.
+- Selection state, `http(s)` link detection, and paste sanitizing/bracketing (task F4) also
+  live in `terminal-core` and are unit tested there.
+  The widget contributes only pixel-to-cell arithmetic, clipboard access, and
+  `QDesktopServices::openUrl` — the same humble-view split as F3's painting.
+  Selection itself delegates to `alacritty_terminal`'s own `Selection`/`selection_to_string`
+  rather than a hand-rolled model, so word and line expansion come from the emulator's
+  semantic rules instead of a second implementation of them.
+- Accepted limitation: `GridSize::total_lines() == screen_lines()`, so there is no scrollback
+  and `display_offset` is always 0.
+  Both the viewport-row-to-`Line` mapping F4's selection and link lookup depend on and the
+  "a resize clears the selection" rule rest on that invariant, which is asserted in debug
+  builds — adding scrollback means revisiting both.
 - The `WindowsShellKind` enum only names the shell; nothing in `pty-core` verifies the named
   executable actually exists on the target machine before spawning, that's a caller-side
   concern for whichever task builds the terminal dock widget's shell-picker (F3 or later).
