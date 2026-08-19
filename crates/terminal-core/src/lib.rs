@@ -65,7 +65,7 @@ impl CellColor {
     fn from_ansi(color: AnsiColor, default: CellColor) -> Self {
         match color {
             AnsiColor::Spec(Rgb { r, g, b }) => CellColor::rgb(r, g, b),
-            AnsiColor::Named(named) => named_color(named),
+            AnsiColor::Named(named) => named_color(named, default),
             // Indexed colors beyond the named 16 are the 256-color cube /
             // grayscale ramp; approximating those faithfully needs a full
             // palette table, which is over-engineering for a first slice.
@@ -76,8 +76,35 @@ impl CellColor {
     }
 }
 
-fn named_color(named: NamedColor) -> CellColor {
-    named_color_by_index(named as u8).unwrap_or(CellColor::rgb(229, 229, 229))
+/// Resolve a [`NamedColor`] against the caller's `default`.
+///
+/// `NamedColor` is *not* a palette index: only its first 16 variants line up
+/// with the ANSI 0-15 table, while `Foreground`/`Background`/`Cursor` and the
+/// `Dim*` tail have discriminants past 255. Casting the whole enum to `u8`
+/// therefore wrapped a default-background cell onto palette slot 1 (red).
+fn named_color(named: NamedColor, default: CellColor) -> CellColor {
+    let index = match named {
+        // Not palette slots — these mean "whatever the caller's default is",
+        // which `from_ansi` already threads through per fg/bg call.
+        NamedColor::Foreground
+        | NamedColor::Background
+        | NamedColor::Cursor
+        | NamedColor::BrightForeground
+        | NamedColor::DimForeground => return default,
+        // Dim variants share the ANSI 0-7 hues; using the normal slot is a
+        // fair approximation until a real theme/palette lands.
+        NamedColor::DimBlack => 0,
+        NamedColor::DimRed => 1,
+        NamedColor::DimGreen => 2,
+        NamedColor::DimYellow => 3,
+        NamedColor::DimBlue => 4,
+        NamedColor::DimMagenta => 5,
+        NamedColor::DimCyan => 6,
+        NamedColor::DimWhite => 7,
+        // `Black`..`BrightWhite` really do occupy discriminants 0-15.
+        other => other as u8,
+    };
+    named_color_by_index(index).unwrap_or(default)
 }
 
 /// The standard 16-color ANSI palette (indices 0-15), used both for
@@ -310,6 +337,45 @@ mod tests {
 
         let grid = emulator.grid();
         assert!(grid.rows[0][0].attrs.bold);
+    }
+
+    #[test]
+    fn default_cell_background_resolves_to_the_caller_supplied_default() {
+        let default_bg = CellColor::rgb(30, 31, 34);
+        assert_eq!(
+            CellColor::from_ansi(AnsiColor::Named(NamedColor::Background), default_bg),
+            default_bg
+        );
+        let default_fg = CellColor::rgb(169, 183, 198);
+        assert_eq!(
+            CellColor::from_ansi(AnsiColor::Named(NamedColor::Foreground), default_fg),
+            default_fg
+        );
+    }
+
+    #[test]
+    fn named_palette_colors_still_resolve_to_palette_entries() {
+        let default = CellColor::rgb(30, 31, 34);
+        assert_eq!(
+            CellColor::from_ansi(AnsiColor::Named(NamedColor::Red), default),
+            named_color_by_index(1).unwrap()
+        );
+        assert_eq!(
+            CellColor::from_ansi(AnsiColor::Named(NamedColor::BrightWhite), default),
+            named_color_by_index(15).unwrap()
+        );
+        assert_eq!(
+            CellColor::from_ansi(AnsiColor::Named(NamedColor::DimRed), default),
+            named_color_by_index(1).unwrap()
+        );
+    }
+
+    #[test]
+    fn untouched_cells_paint_with_the_default_background() {
+        let emulator = TerminalEmulator::new(GridSize::new(3, 10));
+
+        let grid = emulator.grid();
+        assert_eq!(grid.rows[0][0].bg, CellColor::rgb(0, 0, 0));
     }
 
     #[test]
