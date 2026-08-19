@@ -455,6 +455,12 @@ impl AppSession {
         })
     }
 
+    /// The tab's backing file path. The view persists it so a split editor
+    /// layout can reopen the same files into the same groups next launch.
+    pub fn tab_path(&self, id: TabId) -> Option<PathBuf> {
+        self.doc(id).map(|d| d.path().to_path_buf())
+    }
+
     /// Re-read the tab's backing file from disk, discarding any in-editor
     /// edits (the "Reload" choice on the external-change prompt, US-3).
     pub fn reload_tab(&mut self, id: TabId) -> Result<(), AppError> {
@@ -778,6 +784,16 @@ mod tests {
             session.open_tabs(),
             vec![(a.id, "a.txt".to_string()), (b.id, "b.txt".to_string())]
         );
+    }
+
+    #[test]
+    fn tab_path_returns_the_backing_file_and_none_for_unknown_ids() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let path = project_dir.path().join("a.txt");
+        let tab = session.open_file(&path).unwrap();
+
+        assert_eq!(session.tab_path(tab.id), Some(path));
+        assert_eq!(session.tab_path(TabId::from_raw(9999)), None);
     }
 
     #[test]

@@ -45,6 +45,7 @@ per `CLAUDE.md`.
 | M3 | done | `cbe8bec` (`cargo test -p mcp-server -p app-core`; Qt-leakage gate clean on `mcp-server`; Docker `linux-artifact` build verified; MCP-client-against-running-UI round trip not run, no display here) |
 | M4 | done | `c57201a` (`cargo test -p app-core -p mcp-server`; Docker `linux-artifact` build verified; MCP-client-against-running-UI round trip not run, no display here) |
 | M5 | done | `b461245` (`cargo test -p app-core -p mcp-server`; Docker `linux-artifact` build verified; MCP-client-writes-visibly-affect-UI round trip not run, no display here) |
+| D5 | done | `330d156` (`cargo test --workspace`; Docker `linux-artifact` build verified; driven end to end under Xvfb — split, close-others, group collapse, nested split, relaunch restore all confirmed by screenshot) |
 
 ## Context
 
@@ -350,6 +351,7 @@ run in parallel except where noted.
 | M3 | `EditorCommands` channel + thread wiring | `mcp-server` channel/trait; listener thread spawned in `run_app()`; wired via `CxxQtThread::queue()` | MCP `list_open_buffers` reflects UI-opened tabs in the same process |
 | M4 | First-slice read tools | `list_project_tree`, `list_open_buffers`, `read_buffer`, `get_cursor_position` (+ new `AppSession::cursor_position(TabId)` command) | MCP client reads match visible UI state |
 | M5 | First-slice write tools | `open_file`, `edit_buffer`, `save_buffer` via existing `AppSession` commands (same ones the UI adapter calls) | MCP client writes visibly affect UI; round-trips to disk match manual Ctrl+S |
+| D5 | Editor tab context menu + split editor area | Right-click a tab for Close / Close Others (that group only) / Split Vertical / Split Horizontal; the editor dock holds a `QSplitter` tree of tab groups and a split *moves* the clicked tab into a new group; layout + each group's files persisted via a new `editor_layout` setting | `cargo test -p app-config -p app-core`; manual: split both ways, close a group's last tab (collapses), relaunch restores the split and its files |
 
 ## Verification approach
 

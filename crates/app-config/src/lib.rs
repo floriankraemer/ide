@@ -21,7 +21,7 @@ const SETTINGS_FILE: &str = "settings.toml";
 /// Window position and size, as last saved by the view (`QMainWindow`
 /// geometry). Every field is individually defaulted so a TOML file that only
 /// sets some of them still parses.
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct WindowGeometry {
     #[serde(default)]
     pub x: i32,
@@ -31,17 +31,6 @@ pub struct WindowGeometry {
     pub width: u32,
     #[serde(default)]
     pub height: u32,
-}
-
-impl Default for WindowGeometry {
-    fn default() -> Self {
-        Self {
-            x: 0,
-            y: 0,
-            width: 0,
-            height: 0,
-        }
-    }
 }
 
 /// Structured application settings, round-tripped to `settings.toml` in the
@@ -69,6 +58,11 @@ pub struct Settings {
     /// Opaque persisted layout blob, analogous to `QMainWindow::saveState()`.
     #[serde(default)]
     pub window_state: String,
+    /// Opaque persisted editor split layout: the tab-group splitter tree plus
+    /// the files open in each group, serialized by the view (same
+    /// view-owns-the-format arrangement as `window_state` above).
+    #[serde(default)]
+    pub editor_layout: String,
 }
 
 /// Cap on remembered recent projects — enough for a useful menu without
@@ -201,6 +195,7 @@ mod tests {
                 height: 800,
             },
             window_state: "opaque-blob".to_string(),
+            editor_layout: "{\"groups\":[]}".to_string(),
         };
 
         save(dir.path(), &settings).unwrap();
@@ -292,6 +287,7 @@ mod tests {
         assert!(loaded.recent_projects.is_empty());
         assert_eq!(loaded.window_geometry, WindowGeometry::default());
         assert_eq!(loaded.window_state, "");
+        assert_eq!(loaded.editor_layout, "");
     }
 
     #[test]

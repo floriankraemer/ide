@@ -587,7 +587,7 @@ fn build_symbol_tree(mut raw: Vec<RawSymbol>, text: &str) -> Vec<SymbolNode> {
     let mut roots: Vec<SymbolNode> = Vec::new();
     let mut open: Vec<SymbolNode> = Vec::new();
 
-    fn attach(open: &mut Vec<SymbolNode>, roots: &mut Vec<SymbolNode>, node: SymbolNode) {
+    fn attach(open: &mut [SymbolNode], roots: &mut Vec<SymbolNode>, node: SymbolNode) {
         match open.last_mut() {
             Some(parent) => parent.children.push(node),
             None => roots.push(node),

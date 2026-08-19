@@ -522,6 +522,13 @@ mod ffi {
         #[cxx_name = "tabTitle"]
         fn tab_title(self: &DocumentManager, tab_id: u64) -> QString;
 
+        /// The tab's backing file path, empty for an unknown id — the view
+        /// records it in the persisted editor split layout so the same files
+        /// reopen into the same groups next launch.
+        #[qinvokable]
+        #[cxx_name = "tabPath"]
+        fn tab_path(self: &DocumentManager, tab_id: u64) -> QString;
+
         /// The authoritative dirty flag for `tab_id` (ADR-0003: the view
         /// reads this rather than trusting its own copy).
         #[qinvokable]
@@ -606,6 +613,20 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "saveWindowState"]
         fn save_window_state(self: &AppSettings, state: &QString);
+
+        /// Opaque persisted editor split layout: the tab-group splitter tree
+        /// plus the files open in each group, serialized as JSON by the view
+        /// (the split layout is view state — nothing in `app-core` models
+        /// editor groups). Empty when nothing was ever saved.
+        #[qinvokable]
+        #[cxx_name = "editorLayout"]
+        fn editor_layout(self: &AppSettings) -> QString;
+
+        /// Persist the editor split layout, alongside the dock layout on
+        /// window close.
+        #[qinvokable]
+        #[cxx_name = "saveEditorLayout"]
+        fn save_editor_layout(self: &AppSettings, layout: &QString);
 
         /// Active theme name (T2), e.g. "dark" or "light" — defaults to
         /// "dark" when unset (`Settings::theme_name`). The view maps this to
@@ -1156,6 +1177,20 @@ impl ffi::AppSettings {
         let _ = app_config::save(&config_dir, &settings);
     }
 
+    pub fn editor_layout(&self) -> QString {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        QString::from(settings.editor_layout.as_str())
+    }
+
+    pub fn save_editor_layout(&self, layout: &QString) {
+        let config_dir = app_core::resolve_config_dir();
+        let Ok(mut settings) = app_config::load(&config_dir) else {
+            return;
+        };
+        settings.editor_layout = layout.to_string();
+        let _ = app_config::save(&config_dir, &settings);
+    }
+
     pub fn theme_name(&self) -> QString {
         let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
         QString::from(settings.theme_name())
@@ -1664,6 +1699,14 @@ impl ffi::DocumentManager {
             .borrow()
             .tab_title(TabId::from_raw(tab_id))
             .map(|title| QString::from(title.as_str()))
+            .unwrap_or_default()
+    }
+
+    pub fn tab_path(&self, tab_id: u64) -> QString {
+        self.session
+            .borrow()
+            .tab_path(TabId::from_raw(tab_id))
+            .map(|path| QString::from(path.to_string_lossy().as_ref()))
             .unwrap_or_default()
     }
 

@@ -45,6 +45,12 @@
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStringList>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonValue>
+#include <QSplitter>
+#include <QTabBar>
 #include <QTabWidget>
 #include <QtGui/QTextDocument>
 #include <QTreeView>
@@ -63,41 +69,61 @@ namespace {
 // view presents as information rather than as an error.
 constexpr int kErrBinaryFile = 3;
 
-// Humble view for the tab strip (ADR-0002): owns the QTabWidget <->
+// Humble view for the editor area (ADR-0002): owns the QTabWidget <->
 // DocumentManager wiring, decides nothing. Tabs are identified by the
 // session's stable TabId (ADR-0003); the TabId <-> page-index mapping lives
 // here and only here, as a dynamic property on each page widget — an id
 // never shifts when other tabs close, so there is no index lockstep to
 // maintain and no parallel title list to keep in sync.
+//
+// The area is a QSplitter tree of tab groups (JetBrains-style splits): one
+// group to start, more created by the tab context menu's Split Vertical /
+// Split Horizontal, which *move* the clicked tab into the new group so a
+// TabId still maps to exactly one editor widget. ADS still sees the whole
+// tree as the single "Editor" dock widget, so D4's dock save/restore is
+// untouched by splitting.
 class EditorTabs : public QObject
 {
 public:
-    EditorTabs(DocumentManager *docManager, QTabWidget *tabWidget, QWidget *window)
+    EditorTabs(DocumentManager *docManager, QSplitter *root, QWidget *window)
       : docManager_(docManager)
-      , tabWidget_(tabWidget)
+      , root_(root)
       , window_(window)
     {
-        tabWidget_->setTabsClosable(true);
-        tabWidget_->setUsesScrollButtons(true);
-        // G2: drag-reorder is safe with no adapter/app-core change because
-        // TabId is looked up by scanning each page's dynamic property, not
-        // by a maintained index map (see tabIdAt/indexOfTab below) — a
-        // reorder can't desynchronize anything.
-        tabWidget_->setMovable(true);
-
         connect(docManager_, &DocumentManager::tabOpened, this, &EditorTabs::onTabOpened);
         connect(docManager_, &DocumentManager::tabClosed, this, &EditorTabs::onTabClosed);
         connect(docManager_,
                 &DocumentManager::tabModifiedChanged,
                 this,
                 &EditorTabs::onTabModifiedChanged);
-        connect(tabWidget_, &QTabWidget::tabCloseRequested, this, &EditorTabs::requestCloseTab);
-        connect(tabWidget_, &QTabWidget::currentChanged, docManager_, [this](int index) {
-            if (index >= 0) {
-                docManager_->setActiveTab(tabIdAt(index));
+
+        // Clicking anywhere inside a group — its tab bar or its editor —
+        // makes that group the active one. One application-wide hook beats
+        // per-widget focus plumbing on every page added later.
+        connect(qApp, &QApplication::focusChanged, this, [this](QWidget *, QWidget *now) {
+            for (QWidget *widget = now; widget; widget = widget->parentWidget()) {
+                auto *group = qobject_cast<QTabWidget *>(widget);
+                if (!group || !groups_.contains(group)) {
+                    continue;
+                }
+                if (group != activeGroup_ && group->currentIndex() >= 0) {
+                    setActiveGroup(group, group->currentIndex());
+                }
+                return;
             }
-            updateStatusBar();
         });
+
+        activeGroup_ = makeGroup();
+        root_->addWidget(activeGroup_);
+    }
+
+    // Class View follows whatever tab is current; EditorTabs has no
+    // Q_OBJECT (no moc target) so it hands out a callback rather than a
+    // signal, matching how ClassViewPanel already receives its "Find
+    // Usages" hook.
+    void setActiveTabChangedCallback(std::function<void()> callback)
+    {
+        activeTabChanged_ = std::move(callback);
     }
 
     // Opens `path`, or focuses its tab if already open (US-3). The session
@@ -114,7 +140,7 @@ public:
             QMessageBox::critical(window_, tr("Cannot open file"), result.message);
             return;
         }
-        tabWidget_->setCurrentIndex(indexOfTab(result.tab_id));
+        focusTab(result.tab_id);
     }
 
     // Task H: open `path` (reusing openFile's own dialog/focus behavior
@@ -140,14 +166,19 @@ public:
 
     QPlainTextEdit *currentEditor() const
     {
-        return qobject_cast<QPlainTextEdit *>(tabWidget_->currentWidget());
+        return activeGroup_ ? qobject_cast<QPlainTextEdit *>(activeGroup_->currentWidget())
+                            : nullptr;
     }
 
-    // Task D: the TabId of whichever tab is current, or 0 (the "no tab"
-    // sentinel, matching FfiOpenResult's convention) when none is open.
-    // Public wrapper over the private tabIdAt/tabWidget_ pair below, for
-    // ClassViewPanel to know which tab its outline belongs to.
-    quint64 currentTabId() const { return tabIdAt(tabWidget_->currentIndex()); }
+    // Task D: the TabId of whichever tab is current in the active group, or
+    // 0 (the "no tab" sentinel, matching FfiOpenResult's convention) when
+    // none is open. Public wrapper over the private tabIdAt/activeGroup_
+    // pair below, for ClassViewPanel to know which tab its outline belongs
+    // to.
+    quint64 currentTabId() const
+    {
+        return activeGroup_ ? tabIdAt(activeGroup_, activeGroup_->currentIndex()) : 0;
+    }
 
     // Task D: move the caret to a byte offset within the *current* tab's
     // text and focus it — used by ClassViewPanel's jump-to-symbol, which
@@ -164,7 +195,7 @@ public:
         if (!editor) {
             return;
         }
-        const QByteArray utf8 = docManager_->tabContent(tabIdAt(tabWidget_->currentIndex())).toUtf8();
+        const QByteArray utf8 = docManager_->tabContent(currentTabId()).toUtf8();
         const qsizetype clamped = qMin<qsizetype>(static_cast<qsizetype>(byteOffset), utf8.size());
         int line = 0;
         qsizetype lineStart = 0;
@@ -184,18 +215,26 @@ public:
     }
 
     // Ctrl+S / File > Save.
-    void saveCurrentTab() { saveTab(tabWidget_->currentIndex()); }
+    void saveCurrentTab()
+    {
+        if (activeGroup_) {
+            saveTab(activeGroup_, activeGroup_->currentIndex());
+        }
+    }
 
     // File > Save As... (L2): the session repoints the tab at the chosen
     // path and writes there; the tree's own watcher picks up the new file
     // for free (no explicit tree-refresh call needed here).
     void saveCurrentTabAs()
     {
-        const int index = tabWidget_->currentIndex();
+        if (!activeGroup_) {
+            return;
+        }
+        const int index = activeGroup_->currentIndex();
         if (index < 0) {
             return;
         }
-        auto *editor = qobject_cast<QPlainTextEdit *>(tabWidget_->widget(index));
+        auto *editor = qobject_cast<QPlainTextEdit *>(activeGroup_->widget(index));
         if (!editor) {
             return;
         }
@@ -203,14 +242,14 @@ public:
         if (path.isEmpty()) {
             return;
         }
-        const quint64 tabId = tabIdAt(index);
+        const quint64 tabId = tabIdAt(activeGroup_, index);
         const auto result = docManager_->saveTabAs(tabId, path, editor->toPlainText());
         if (result.code != 0) {
             QMessageBox::critical(window_, tr("Cannot save file"), result.message);
             return;
         }
         editor->document()->setModified(false);
-        renderTabText(index, docManager_->tabTitle(tabId), false);
+        renderTabText(activeGroup_, index, docManager_->tabTitle(tabId), false);
     }
 
     // L3: registers the status bar's line:col and language labels, and
@@ -227,9 +266,11 @@ public:
     // caller can abort the close.
     bool confirmCloseAllTabs()
     {
-        for (int i = 0; i < tabWidget_->count(); ++i) {
-            if (!confirmCloseTab(i)) {
-                return false;
+        for (QTabWidget *group : std::as_const(groups_)) {
+            for (int i = 0; i < group->count(); ++i) {
+                if (!confirmCloseTab(group, i)) {
+                    return false;
+                }
             }
         }
         return true;
@@ -242,11 +283,7 @@ public:
     void setEditorFont(const QFont &font)
     {
         editorFont_ = font;
-        for (int i = 0; i < tabWidget_->count(); ++i) {
-            if (auto *editor = qobject_cast<QPlainTextEdit *>(tabWidget_->widget(i))) {
-                editor->setFont(font);
-            }
-        }
+        forEachEditor([&font](QPlainTextEdit *editor) { editor->setFont(font); });
     }
 
     // `backgroundHex`/`foregroundHex` empty means "use the theme's default
@@ -260,22 +297,18 @@ public:
         editorBackground_ = backgroundHex;
         editorForeground_ = foregroundHex;
         editorCurrentLine_ = currentLineHex;
-        for (int i = 0; i < tabWidget_->count(); ++i) {
-            if (auto *editor = qobject_cast<QPlainTextEdit *>(tabWidget_->widget(i))) {
-                applyEditorAppearance(editor);
-            }
-        }
+        forEachEditor([this](QPlainTextEdit *editor) { applyEditorAppearance(editor); });
     }
 
     // Rename/delete via the tree changed a tab's title (US-2b) — re-render
     // the label, preserving the unsaved-changes indicator.
     void onTabTitleChanged(quint64 tabId, const QString &title)
     {
-        const int index = indexOfTab(tabId);
-        if (index < 0) {
+        const TabLoc loc = locate(tabId);
+        if (!loc.group) {
             return;
         }
-        renderTabText(index, title, docManager_->tabIsModified(tabId));
+        renderTabText(loc.group, loc.index, title, docManager_->tabIsModified(tabId));
     }
 
     // M5: an MCP client's edit_buffer call changed the tab's content —
@@ -286,11 +319,7 @@ public:
     // a human typed the same edit.
     void onBufferEditedExternally(quint64 tabId, const QString &content)
     {
-        const int index = indexOfTab(tabId);
-        if (index < 0) {
-            return;
-        }
-        auto *editor = qobject_cast<QPlainTextEdit *>(tabWidget_->widget(index));
+        auto *editor = editorForTab(tabId);
         if (!editor) {
             return;
         }
@@ -305,11 +334,7 @@ public:
     // known to differ from what's on disk.
     void handleExternalChange(quint64 tabId, const QString &path)
     {
-        const int index = indexOfTab(tabId);
-        if (index < 0) {
-            return;
-        }
-        auto *editor = qobject_cast<QPlainTextEdit *>(tabWidget_->widget(index));
+        auto *editor = editorForTab(tabId);
         if (!editor) {
             return;
         }
@@ -338,42 +363,323 @@ public:
         }
     }
 
-private:
-    // The one TabId <-> index mapping (ADR-0003): the id rides on the page
-    // widget itself, so closes and reorders can never desynchronize it.
-    quint64 tabIdAt(int index) const
+    // The split layout as JSON, for AppSettings to persist on close: the
+    // splitter tree (orientation + sizes) with each group's file paths and
+    // its current file. Paths, not TabIds — ids are per-run and mean
+    // nothing to the next launch.
+    QString saveLayout() const
     {
-        QWidget *widget = tabWidget_->widget(index);
+        return QString::fromUtf8(QJsonDocument(serializeSplitter(root_)).toJson(QJsonDocument::Compact));
+    }
+
+    // Rebuilds the splitter tree written by saveLayout() and reopens each
+    // group's files into it. Called once at startup with nothing open yet;
+    // an empty/unparseable/file-less layout leaves the single default group
+    // as built by the constructor. Files that no longer open (deleted,
+    // now-unreadable) are skipped — a stale entry must not cost the user
+    // the rest of the layout.
+    void restoreLayout(const QString &json)
+    {
+        const QJsonDocument doc = QJsonDocument::fromJson(json.toUtf8());
+        if (!doc.isObject()) {
+            return;
+        }
+        const QJsonObject rootObject = doc.object();
+        if (rootObject.value(QStringLiteral("type")).toString() != QLatin1String("splitter")) {
+            return;
+        }
+
+        suspendActivation_ = true;
+        for (QTabWidget *group : std::as_const(groups_)) {
+            group->setParent(nullptr);
+            delete group;
+        }
+        groups_.clear();
+        activeGroup_ = nullptr;
+
+        applySplitter(root_, rootObject);
+        suspendActivation_ = false;
+
+        if (groups_.isEmpty()) {
+            activeGroup_ = makeGroup();
+            root_->addWidget(activeGroup_);
+            return;
+        }
+        QTabWidget *group = restoredActiveGroup_ ? restoredActiveGroup_ : groups_.first();
+        setActiveGroup(group, group->currentIndex());
+    }
+
+private:
+    // Where a tab lives now: which group's tab strip, and at which index in
+    // it. `group == nullptr` means "no such open tab".
+    struct TabLoc
+    {
+        QTabWidget *group = nullptr;
+        int index = -1;
+    };
+
+    // The one TabId <-> (group, index) mapping (ADR-0003): the id rides on
+    // the page widget itself, so closes, reorders and splits can never
+    // desynchronize it.
+    quint64 tabIdAt(QTabWidget *group, int index) const
+    {
+        QWidget *widget = group ? group->widget(index) : nullptr;
         return widget ? widget->property("tabId").toULongLong() : 0;
     }
 
-    int indexOfTab(quint64 tabId) const
+    TabLoc locate(quint64 tabId) const
     {
-        for (int i = 0; i < tabWidget_->count(); ++i) {
-            if (tabIdAt(i) == tabId) {
-                return i;
+        for (QTabWidget *group : std::as_const(groups_)) {
+            for (int i = 0; i < group->count(); ++i) {
+                if (tabIdAt(group, i) == tabId) {
+                    return {group, i};
+                }
             }
         }
-        return -1;
+        return {};
+    }
+
+    QPlainTextEdit *editorForTab(quint64 tabId) const
+    {
+        const TabLoc loc = locate(tabId);
+        return loc.group ? qobject_cast<QPlainTextEdit *>(loc.group->widget(loc.index)) : nullptr;
+    }
+
+    void forEachEditor(const std::function<void(QPlainTextEdit *)> &apply) const
+    {
+        for (QTabWidget *group : std::as_const(groups_)) {
+            for (int i = 0; i < group->count(); ++i) {
+                if (auto *editor = qobject_cast<QPlainTextEdit *>(group->widget(i))) {
+                    apply(editor);
+                }
+            }
+        }
+    }
+
+    void focusTab(quint64 tabId)
+    {
+        const TabLoc loc = locate(tabId);
+        if (!loc.group) {
+            return;
+        }
+        loc.group->setCurrentIndex(loc.index);
+        setActiveGroup(loc.group, loc.index);
+    }
+
+    // One tab group: everything a group needs to behave like the single tab
+    // strip used to, plus the context menu and the "clicking me activates
+    // me" wiring.
+    QTabWidget *makeGroup()
+    {
+        auto *group = new QTabWidget(root_);
+        group->setTabsClosable(true);
+        group->setUsesScrollButtons(true);
+        // G2: drag-reorder is safe with no adapter/app-core change because
+        // TabId is looked up by scanning each page's dynamic property, not
+        // by a maintained index map (see tabIdAt/locate above) — a reorder
+        // can't desynchronize anything.
+        group->setMovable(true);
+
+        connect(group, &QTabWidget::tabCloseRequested, this,
+                [this, group](int index) { requestCloseTab(group, index); });
+        connect(group, &QTabWidget::currentChanged, this, [this, group](int index) {
+            // Ignored while a split/restore is moving pages around: the
+            // structural code sets the active group itself once it's done.
+            if (suspendActivation_ || index < 0) {
+                return;
+            }
+            setActiveGroup(group, index);
+        });
+
+        group->tabBar()->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(group->tabBar(), &QTabBar::customContextMenuRequested, this,
+                [this, group](const QPoint &pos) { showTabContextMenu(group, pos); });
+
+        groups_.append(group);
+        return group;
+    }
+
+    void setActiveGroup(QTabWidget *group, int index)
+    {
+        activeGroup_ = group;
+        if (index >= 0) {
+            docManager_->setActiveTab(tabIdAt(group, index));
+        }
+        updateStatusBar();
+        if (activeTabChanged_) {
+            activeTabChanged_();
+        }
+    }
+
+    // Right-click on a tab: Close / Close Others (this group only) / the
+    // two splits. Splitting *moves* the clicked tab, so it needs a second
+    // tab to leave behind — with one tab the split would just relabel the
+    // same group.
+    void showTabContextMenu(QTabWidget *group, const QPoint &pos)
+    {
+        const int index = group->tabBar()->tabAt(pos);
+        if (index < 0) {
+            return;
+        }
+
+        QMenu menu(group);
+        QAction *closeAction = menu.addAction(tr("Close"));
+        QAction *closeOthersAction = menu.addAction(tr("Close Others"));
+        closeOthersAction->setEnabled(group->count() > 1);
+        menu.addSeparator();
+        // JetBrains naming: "vertical" describes the divider, so a vertical
+        // split puts the panes side by side (a Qt::Horizontal splitter).
+        QAction *splitVerticalAction = menu.addAction(tr("Split Vertical"));
+        QAction *splitHorizontalAction = menu.addAction(tr("Split Horizontal"));
+        splitVerticalAction->setEnabled(group->count() > 1);
+        splitHorizontalAction->setEnabled(group->count() > 1);
+
+        QAction *chosen = menu.exec(group->tabBar()->mapToGlobal(pos));
+        if (chosen == closeAction) {
+            requestCloseTab(group, index);
+        } else if (chosen == closeOthersAction) {
+            closeOtherTabs(group, index);
+        } else if (chosen == splitVerticalAction) {
+            splitTab(group, index, Qt::Horizontal);
+        } else if (chosen == splitHorizontalAction) {
+            splitTab(group, index, Qt::Vertical);
+        }
+    }
+
+    // Ids, not indices: each close shifts the ones after it.
+    void closeOtherTabs(QTabWidget *group, int keptIndex)
+    {
+        QList<quint64> victims;
+        for (int i = 0; i < group->count(); ++i) {
+            if (i != keptIndex) {
+                victims.append(tabIdAt(group, i));
+            }
+        }
+        for (const quint64 tabId : std::as_const(victims)) {
+            const TabLoc loc = locate(tabId);
+            if (!loc.group) {
+                continue;
+            }
+            if (!confirmCloseTab(loc.group, loc.index)) {
+                return; // Cancel on one tab abandons the rest, as on exit.
+            }
+            docManager_->closeTab(tabId);
+        }
+    }
+
+    // Moves the tab into a brand-new group beside (Qt::Horizontal) or below
+    // (Qt::Vertical) its current one. Pure widget surgery: no AppSession
+    // call, no TabId change, so a file still has exactly one editor widget.
+    void splitTab(QTabWidget *group, int index, Qt::Orientation orientation)
+    {
+        if (group->count() < 2) {
+            return;
+        }
+        auto *parent = qobject_cast<QSplitter *>(group->parentWidget());
+        if (!parent) {
+            return;
+        }
+
+        QWidget *page = group->widget(index);
+        const QString title = group->tabText(index);
+
+        QSplitter *target = parent;
+        int insertPos = parent->indexOf(group) + 1;
+        if (parent->count() > 1 && parent->orientation() != orientation) {
+            // The parent already splits the other way and has siblings to
+            // keep — nest a new splitter around just this group.
+            const QList<int> parentSizes = parent->sizes();
+            const int groupPos = parent->indexOf(group);
+            // Parentless on purpose: a QSplitter adopts any child created
+            // with it as parent, which would append the new splitter as an
+            // extra pane before replaceWidget() could put it in place.
+            auto *nested = new QSplitter(orientation);
+            parent->replaceWidget(groupPos, nested);
+            nested->addWidget(group);
+            // replaceWidget() hands the old widget back hidden.
+            group->show();
+            parent->setSizes(parentSizes);
+            target = nested;
+            insertPos = 1;
+        } else {
+            parent->setOrientation(orientation);
+        }
+
+        suspendActivation_ = true;
+        auto *newGroup = makeGroup();
+        target->insertWidget(insertPos, newGroup);
+        group->removeTab(index);
+        newGroup->addTab(page, title);
+        suspendActivation_ = false;
+
+        target->setSizes(evenSizes(target));
+        setActiveGroup(newGroup, newGroup->indexOf(page));
+        page->setFocus();
+    }
+
+    static QList<int> evenSizes(QSplitter *splitter)
+    {
+        const int count = qMax(1, splitter->count());
+        const int extent =
+          splitter->orientation() == Qt::Horizontal ? splitter->width() : splitter->height();
+        return QList<int>(count, qMax(1, extent / count));
+    }
+
+    // A group that just lost its last tab disappears, unless it's the only
+    // one left (an empty editor area still needs somewhere to open into).
+    void collapseGroup(QTabWidget *group)
+    {
+        if (groups_.size() < 2) {
+            return;
+        }
+        auto *parent = qobject_cast<QSplitter *>(group->parentWidget());
+        groups_.removeAll(group);
+        group->setParent(nullptr);
+        group->deleteLater();
+        pruneSplitters(parent);
+
+        if (activeGroup_ == group) {
+            QTabWidget *next = groups_.first();
+            setActiveGroup(next, next->currentIndex());
+        }
+    }
+
+    // A nested splitter left with a single child adds a level of nothing —
+    // hoist the child into the grandparent so a later split reads the
+    // orientation it can actually see.
+    void pruneSplitters(QSplitter *splitter)
+    {
+        while (splitter && splitter != root_ && splitter->count() == 1) {
+            auto *grandParent = qobject_cast<QSplitter *>(splitter->parentWidget());
+            if (!grandParent) {
+                return;
+            }
+            const QList<int> sizes = grandParent->sizes();
+            grandParent->replaceWidget(grandParent->indexOf(splitter), splitter->widget(0));
+            splitter->setParent(nullptr);
+            splitter->deleteLater();
+            grandParent->setSizes(sizes);
+            splitter = grandParent;
+        }
     }
 
     // Label rendering: the session's display title verbatim, plus the
     // view's own unsaved-changes dot.
-    void renderTabText(int index, const QString &title, bool modified)
+    void renderTabText(QTabWidget *group, int index, const QString &title, bool modified)
     {
-        tabWidget_->setTabText(index, modified ? title + QStringLiteral(" •") : title);
+        group->setTabText(index, modified ? title + QStringLiteral(" •") : title);
     }
 
     // Writes the tab's content to disk. Shows an error dialog and leaves the
     // dirty state set on failure (US-4: no silent data loss). Returns
     // whether the save succeeded.
-    bool saveTab(int index)
+    bool saveTab(QTabWidget *group, int index)
     {
-        auto *editor = qobject_cast<QPlainTextEdit *>(tabWidget_->widget(index));
+        auto *editor = qobject_cast<QPlainTextEdit *>(group->widget(index));
         if (!editor) {
             return false;
         }
-        const auto result = docManager_->saveTab(tabIdAt(index), editor->toPlainText());
+        const auto result = docManager_->saveTab(tabIdAt(group, index), editor->toPlainText());
         if (result.code != 0) {
             QMessageBox::critical(window_, tr("Cannot save file"), result.message);
             return false;
@@ -385,16 +691,16 @@ private:
     // Save/Discard/Cancel prompt for a tab with unsaved changes (US-3/US-4).
     // Returns true if the tab is now safe to close. Dirtiness is read from
     // the session — Rust owns that flag (ADR-0003).
-    bool confirmCloseTab(int index)
+    bool confirmCloseTab(QTabWidget *group, int index)
     {
-        if (!docManager_->tabIsModified(tabIdAt(index))) {
+        if (!docManager_->tabIsModified(tabIdAt(group, index))) {
             return true;
         }
 
         const auto choice = QMessageBox::question(
           window_,
           tr("Unsaved changes"),
-          tr("\"%1\" has unsaved changes. Save before closing?").arg(tabWidget_->tabText(index)),
+          tr("\"%1\" has unsaved changes. Save before closing?").arg(group->tabText(index)),
           QMessageBox::Save | QMessageBox::Discard | QMessageBox::Cancel,
           QMessageBox::Save);
 
@@ -402,17 +708,17 @@ private:
             return false;
         }
         if (choice == QMessageBox::Save) {
-            return saveTab(index);
+            return saveTab(group, index);
         }
         return true; // Discard.
     }
 
-    void requestCloseTab(int index)
+    void requestCloseTab(QTabWidget *group, int index)
     {
-        if (!confirmCloseTab(index)) {
+        if (!confirmCloseTab(group, index)) {
             return;
         }
-        docManager_->closeTab(tabIdAt(index));
+        docManager_->closeTab(tabIdAt(group, index));
     }
 
     // L3: line:col + language for whatever tab is current, or blank when
@@ -434,7 +740,7 @@ private:
         positionLabel_->setText(QObject::tr("Ln %1, Col %2")
                                    .arg(cursor.blockNumber() + 1)
                                    .arg(cursor.columnNumber() + 1));
-        languageLabel_->setText(docManager_->tabLanguageName(tabIdAt(tabWidget_->currentIndex())));
+        languageLabel_->setText(docManager_->tabLanguageName(currentTabId()));
     }
 
     // Shared with setEditorColors, and with onTabOpened's initial apply.
@@ -462,7 +768,8 @@ private:
 
     void onTabOpened(quint64 tabId, const QString &title)
     {
-        auto *editor = new CodeEditor(tabWidget_);
+        QTabWidget *group = activeGroup_ ? activeGroup_ : groups_.first();
+        auto *editor = new CodeEditor(group);
         editor->setProperty("tabId", QVariant::fromValue(tabId));
         editor->setPlainText(docManager_->tabContent(tabId));
         editor->document()->setModified(false);
@@ -486,7 +793,7 @@ private:
             const QTextCursor cursor = editor->textCursor();
             docManager_->setCursorPosition(tabId, static_cast<quint32>(cursor.blockNumber()),
                                             static_cast<quint32>(cursor.columnNumber()));
-            if (tabWidget_->currentWidget() == editor) {
+            if (activeGroup_ && activeGroup_->currentWidget() == editor) {
                 updateStatusBar();
             }
         });
@@ -500,32 +807,160 @@ private:
                 docManager_,
                 [this, tabId](bool modified) { docManager_->setTabModified(tabId, modified); });
 
-        tabWidget_->addTab(editor, title);
+        group->addTab(editor, title);
     }
 
     void onTabClosed(quint64 tabId)
     {
-        const int index = indexOfTab(tabId);
-        if (index < 0) {
+        const TabLoc loc = locate(tabId);
+        if (!loc.group) {
             return;
         }
-        QWidget *widget = tabWidget_->widget(index);
-        tabWidget_->removeTab(index);
+        QWidget *widget = loc.group->widget(loc.index);
+        loc.group->removeTab(loc.index);
         delete widget;
+        if (loc.group->count() == 0) {
+            collapseGroup(loc.group);
+        }
     }
 
     void onTabModifiedChanged(quint64 tabId, bool modified)
     {
-        const int index = indexOfTab(tabId);
-        if (index < 0) {
+        const TabLoc loc = locate(tabId);
+        if (!loc.group) {
             return;
         }
-        renderTabText(index, docManager_->tabTitle(tabId), modified);
+        renderTabText(loc.group, loc.index, docManager_->tabTitle(tabId), modified);
+    }
+
+    QJsonObject serializeSplitter(const QSplitter *splitter) const
+    {
+        QJsonArray children;
+        for (int i = 0; i < splitter->count(); ++i) {
+            QWidget *child = splitter->widget(i);
+            if (auto *group = qobject_cast<QTabWidget *>(child)) {
+                children.append(serializeGroup(group));
+            } else if (auto *nested = qobject_cast<QSplitter *>(child)) {
+                children.append(serializeSplitter(nested));
+            }
+        }
+        QJsonArray sizes;
+        for (const int size : splitter->sizes()) {
+            sizes.append(size);
+        }
+
+        QJsonObject object;
+        object[QStringLiteral("type")] = QStringLiteral("splitter");
+        object[QStringLiteral("orientation")] =
+          splitter->orientation() == Qt::Horizontal ? QStringLiteral("h") : QStringLiteral("v");
+        object[QStringLiteral("sizes")] = sizes;
+        object[QStringLiteral("children")] = children;
+        return object;
+    }
+
+    QJsonObject serializeGroup(QTabWidget *group) const
+    {
+        QJsonArray files;
+        for (int i = 0; i < group->count(); ++i) {
+            const QString path = docManager_->tabPath(tabIdAt(group, i));
+            if (!path.isEmpty()) {
+                files.append(path);
+            }
+        }
+
+        QJsonObject object;
+        object[QStringLiteral("type")] = QStringLiteral("group");
+        object[QStringLiteral("files")] = files;
+        object[QStringLiteral("active")] = docManager_->tabPath(
+          tabIdAt(group, group->currentIndex()));
+        object[QStringLiteral("focused")] = group == activeGroup_;
+        return object;
+    }
+
+    void applySplitter(QSplitter *splitter, const QJsonObject &object)
+    {
+        splitter->setOrientation(
+          object.value(QStringLiteral("orientation")).toString() == QLatin1String("v")
+            ? Qt::Vertical
+            : Qt::Horizontal);
+
+        const QJsonArray children = object.value(QStringLiteral("children")).toArray();
+        for (const QJsonValue &child : children) {
+            const QJsonObject childObject = child.toObject();
+            if (childObject.value(QStringLiteral("type")).toString() == QLatin1String("group")) {
+                restoreGroup(splitter, childObject);
+            } else if (childObject.value(QStringLiteral("type")).toString()
+                       == QLatin1String("splitter")) {
+                auto *nested = new QSplitter(splitter);
+                splitter->addWidget(nested);
+                applySplitter(nested, childObject);
+            }
+        }
+
+        QList<int> sizes;
+        const QJsonArray savedSizes = object.value(QStringLiteral("sizes")).toArray();
+        for (const QJsonValue &size : savedSizes) {
+            sizes.append(size.toInt());
+        }
+        if (sizes.size() == splitter->count()) {
+            splitter->setSizes(sizes);
+        }
+    }
+
+    void restoreGroup(QSplitter *splitter, const QJsonObject &object)
+    {
+        const QJsonArray files = object.value(QStringLiteral("files")).toArray();
+        if (files.isEmpty()) {
+            return; // Nothing to show in it — don't restore an empty pane.
+        }
+
+        auto *group = makeGroup();
+        splitter->addWidget(group);
+        // onTabOpened puts each new tab in the active group, so this is how
+        // a restored file lands in the group it was saved from.
+        activeGroup_ = group;
+
+        const QString activePath = object.value(QStringLiteral("active")).toString();
+        quint64 activeTabId = 0;
+        for (const QJsonValue &file : files) {
+            const QString path = file.toString();
+            const auto result = docManager_->openFile(path);
+            if (result.code != 0) {
+                continue; // Deleted or unreadable since last run — skip it.
+            }
+            if (path == activePath) {
+                activeTabId = result.tab_id;
+            }
+        }
+        if (group->count() == 0) {
+            // Every file in this group failed to reopen.
+            groups_.removeAll(group);
+            group->setParent(nullptr);
+            delete group;
+            return;
+        }
+        if (activeTabId != 0) {
+            const TabLoc loc = locate(activeTabId);
+            if (loc.group == group) {
+                group->setCurrentIndex(loc.index);
+            }
+        }
+        if (object.value(QStringLiteral("focused")).toBool()) {
+            restoredActiveGroup_ = group;
+        }
     }
 
     DocumentManager *docManager_;
-    QTabWidget *tabWidget_;
+    QSplitter *root_;
     QWidget *window_;
+    QList<QTabWidget *> groups_;
+    QTabWidget *activeGroup_ = nullptr;
+    QTabWidget *restoredActiveGroup_ = nullptr;
+    // True while a split or a restore is moving pages between groups: the
+    // currentChanged bookkeeping would otherwise treat those moves as the
+    // user activating a group.
+    bool suspendActivation_ = false;
+    std::function<void()> activeTabChanged_;
     QFont editorFont_;
     QString editorBackground_;
     QString editorForeground_;
@@ -1141,6 +1576,11 @@ protected:
                   QString::fromLatin1(dockManager_->saveState().toBase64());
                 appSettings_->saveWindowState(state);
             }
+            if (editorTabs_) {
+                // The editor split layout is the view's own JSON (ADS knows
+                // nothing about the splitter tree inside the editor dock).
+                appSettings_->saveEditorLayout(editorTabs_->saveLayout());
+            }
         }
         QMainWindow::closeEvent(event);
     }
@@ -1336,10 +1776,10 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
 // Sidebar tree + tabbed editor area, PHPStorm-style (US-5): each panel is
 // its own ADS CDockWidget (D3) — float/redock each independently, room left
 // for future dock widgets (search, run console, MCP activity log) without
-// restructuring this function again. The tab strip stays one QTabWidget
-// inside its dock widget (not one dock widget per open file, per the plan's
-// migration scope) — G2's drag-reorder is unaffected either way, since it's
-// internal to that QTabWidget.
+// restructuring this function again. The editor stays one dock widget (not
+// one per open file, per the plan's migration scope): the splits inside it
+// are a QSplitter tree of tab groups owned by EditorTabs (D5), invisible to
+// ADS, and G2's drag-reorder stays internal to each group's QTabWidget.
 // Return value of buildCentralWidget(): the tab-strip adapter (needed by
 // menu wiring) plus the dock manager (needed by IdeMainWindow for D4's
 // close-time saveState()) — one caller, so a tiny struct beats an
@@ -1367,9 +1807,12 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // CDockManager::CDockManager) — no explicit setCentralWidget() call.
     auto *dockManager = new ads::CDockManager(window);
 
-    auto *tabWidget = new QTabWidget();
+    // The editor area is a QSplitter tree of tab groups (see EditorTabs) so
+    // a tab can be split off into a second pane; ADS still sees the whole
+    // tree as this one dock widget, leaving D4's dock save/restore alone.
+    auto *editorRoot = new QSplitter(Qt::Horizontal);
     auto *editorDock = new ads::CDockWidget(dockManager, QObject::tr("Editor"));
-    editorDock->setWidget(tabWidget);
+    editorDock->setWidget(editorRoot);
     auto *editorArea = dockManager->addDockWidget(ads::CenterDockWidgetArea, editorDock);
 
     auto *treeView = new QTreeView();
@@ -1379,7 +1822,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     treeDock->setWidget(treeView);
     dockManager->addDockWidget(ads::LeftDockWidgetArea, treeDock, editorArea);
 
-    auto *editorTabs = new EditorTabs(docManager, tabWidget, window);
+    auto *editorTabs = new EditorTabs(docManager, editorRoot, window);
 
     // Task H: bottom dock panel, matching where JetBrains/VS-style IDEs
     // dock their Find in Files results. Reuses the one EditorTabs instance
@@ -1442,10 +1885,9 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                       [classViewPanel, editorTabs](quint64, const QString &) {
                           classViewPanel->refresh(editorTabs->currentTabId());
                       });
-    QObject::connect(tabWidget, &QTabWidget::currentChanged, classViewPanel,
-                      [classViewPanel, editorTabs](int) {
-                          classViewPanel->refresh(editorTabs->currentTabId());
-                      });
+    editorTabs->setActiveTabChangedCallback([classViewPanel, editorTabs]() {
+        classViewPanel->refresh(editorTabs->currentTabId());
+    });
     QObject::connect(docManager, &DocumentManager::tabModifiedChanged, classViewPanel,
                       [classViewPanel, editorTabs](quint64 tabId, bool modified) {
                           if (!modified && tabId == editorTabs->currentTabId()) {
@@ -1800,6 +2242,13 @@ QMainWindow *buildMainWindow()
     // Reuses the same watcher-start path as "Open Folder...", so the tree
     // is live-refreshing from the moment it's populated.
     treeModel->reopenLastProject();
+
+    // Reopens the persisted editor split layout last: after the font/color
+    // settings above (so restored tabs are styled like any other) and after
+    // the project is back, so restored files show up under a live tree.
+    // Files are addressed by absolute path and reopen even if they sit
+    // outside the reopened project.
+    editorTabs->restoreLayout(appSettings->editorLayout());
 
     return window;
 }
