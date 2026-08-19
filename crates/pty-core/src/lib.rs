@@ -263,7 +263,10 @@ mod tests {
         }
 
         let text = String::from_utf8_lossy(&output);
-        assert!(text.contains("hello"), "expected 'hello' in output, got: {text:?}");
+        assert!(
+            text.contains("hello"),
+            "expected 'hello' in output, got: {text:?}"
+        );
 
         session.wait().expect("wait");
     }
@@ -298,7 +301,10 @@ mod tests {
         let mut session = PtySession::spawn(&shell, PtySize::new(24, 80)).expect("spawn");
 
         let mut reader = session.take_reader().expect("reader available once");
-        assert!(session.take_reader().is_none(), "second take must yield None");
+        assert!(
+            session.take_reader().is_none(),
+            "second take must yield None"
+        );
 
         let mut output = Vec::new();
         let mut buf = [0u8; 256];
@@ -340,7 +346,10 @@ mod tests {
 
     #[test]
     fn windows_shell_kinds_map_to_expected_programs() {
-        assert_eq!(ShellSpec::windows(WindowsShellKind::PowerShellCore).program, "pwsh.exe");
+        assert_eq!(
+            ShellSpec::windows(WindowsShellKind::PowerShellCore).program,
+            "pwsh.exe"
+        );
         assert_eq!(
             ShellSpec::windows(WindowsShellKind::WindowsPowerShell).program,
             "powershell.exe"

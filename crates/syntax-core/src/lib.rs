@@ -142,11 +142,8 @@ struct QueryLanguage {
 fn rust_query_language() -> &'static QueryLanguage {
     static RUST: LazyLock<QueryLanguage> = LazyLock::new(|| {
         let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        let query = Query::new(
-            &grammar,
-            include_str!("../queries/rust/highlights.scm"),
-        )
-        .expect("rust highlights.scm must compile against tree-sitter-rust's grammar");
+        let query = Query::new(&grammar, include_str!("../queries/rust/highlights.scm"))
+            .expect("rust highlights.scm must compile against tree-sitter-rust's grammar");
         QueryLanguage { grammar, query }
     });
     &RUST
@@ -155,11 +152,8 @@ fn rust_query_language() -> &'static QueryLanguage {
 fn json_query_language() -> &'static QueryLanguage {
     static JSON: LazyLock<QueryLanguage> = LazyLock::new(|| {
         let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
-        let query = Query::new(
-            &grammar,
-            include_str!("../queries/json/highlights.scm"),
-        )
-        .expect("json highlights.scm must compile against tree-sitter-json's grammar");
+        let query = Query::new(&grammar, include_str!("../queries/json/highlights.scm"))
+            .expect("json highlights.scm must compile against tree-sitter-json's grammar");
         QueryLanguage { grammar, query }
     });
     &JSON
@@ -172,11 +166,8 @@ fn csharp_query_language() -> &'static QueryLanguage {
         // dependency in Cargo.toml. This older release's binding exposes a
         // `language()` fn returning `tree_sitter::Language` directly.
         let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
-        let query = Query::new(
-            &grammar,
-            include_str!("../queries/csharp/highlights.scm"),
-        )
-        .expect("csharp highlights.scm must compile against tree-sitter-c-sharp's grammar");
+        let query = Query::new(&grammar, include_str!("../queries/csharp/highlights.scm"))
+            .expect("csharp highlights.scm must compile against tree-sitter-c-sharp's grammar");
         QueryLanguage { grammar, query }
     });
     &CSHARP
@@ -185,11 +176,8 @@ fn csharp_query_language() -> &'static QueryLanguage {
 fn java_query_language() -> &'static QueryLanguage {
     static JAVA: LazyLock<QueryLanguage> = LazyLock::new(|| {
         let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
-        let query = Query::new(
-            &grammar,
-            include_str!("../queries/java/highlights.scm"),
-        )
-        .expect("java highlights.scm must compile against tree-sitter-java's grammar");
+        let query = Query::new(&grammar, include_str!("../queries/java/highlights.scm"))
+            .expect("java highlights.scm must compile against tree-sitter-java's grammar");
         QueryLanguage { grammar, query }
     });
     &JAVA
@@ -200,11 +188,8 @@ fn php_query_language() -> &'static QueryLanguage {
         // `php_only` (body-only grammar), not `LANGUAGE_PHP` (embedded
         // HTML) — v1 design decision, see the plan doc.
         let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
-        let query = Query::new(
-            &grammar,
-            include_str!("../queries/php/highlights.scm"),
-        )
-        .expect("php highlights.scm must compile against tree-sitter-php's php_only grammar");
+        let query = Query::new(&grammar, include_str!("../queries/php/highlights.scm"))
+            .expect("php highlights.scm must compile against tree-sitter-php's php_only grammar");
         QueryLanguage { grammar, query }
     });
     &PHP
@@ -620,11 +605,7 @@ fn build_symbol_tree(mut raw: Vec<RawSymbol>, text: &str) -> Vec<SymbolNode> {
     roots
 }
 
-fn spans_from_tree(
-    ql: &QueryLanguage,
-    tree: &tree_sitter::Tree,
-    text: &str,
-) -> Vec<HighlightSpan> {
+fn spans_from_tree(ql: &QueryLanguage, tree: &tree_sitter::Tree, text: &str) -> Vec<HighlightSpan> {
     let mut spans = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(&ql.query, tree.root_node(), text.as_bytes());
@@ -995,7 +976,10 @@ mod tests {
         let mut starts: Vec<usize> = occurrences.iter().map(|o| o.start).collect();
         let mut sorted_starts = starts.clone();
         sorted_starts.sort_unstable();
-        assert_eq!(starts, sorted_starts, "occurrences must be in document order");
+        assert_eq!(
+            starts, sorted_starts,
+            "occurrences must be in document order"
+        );
         starts.dedup();
     }
 
@@ -1042,7 +1026,10 @@ mod tests {
         let type_span = spans
             .iter()
             .find(|s| s.kind == TokenKind::Type && &CSHARP_SNIPPET[s.start..s.end] == "Greeter");
-        assert!(type_span.is_some(), "expected `Greeter` highlighted as a Type");
+        assert!(
+            type_span.is_some(),
+            "expected `Greeter` highlighted as a Type"
+        );
     }
 
     #[test]
@@ -1096,7 +1083,10 @@ mod tests {
         let type_span = spans
             .iter()
             .find(|s| s.kind == TokenKind::Type && &JAVA_SNIPPET[s.start..s.end] == "Greeter");
-        assert!(type_span.is_some(), "expected `Greeter` highlighted as a Type");
+        assert!(
+            type_span.is_some(),
+            "expected `Greeter` highlighted as a Type"
+        );
     }
 
     #[test]
@@ -1150,7 +1140,10 @@ mod tests {
         let type_span = spans
             .iter()
             .find(|s| s.kind == TokenKind::Type && &PHP_SNIPPET[s.start..s.end] == "Greeter");
-        assert!(type_span.is_some(), "expected `Greeter` highlighted as a Type");
+        assert!(
+            type_span.is_some(),
+            "expected `Greeter` highlighted as a Type"
+        );
     }
 
     #[test]
@@ -1249,8 +1242,10 @@ mod tests {
         highlighter.set_text(CSHARP_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
-            ranges.iter().any(|r| r.start == CSHARP_SNIPPET.find('{').unwrap()
-                && r.end == CSHARP_SNIPPET.rfind('}').unwrap() + 1),
+            ranges
+                .iter()
+                .any(|r| r.start == CSHARP_SNIPPET.find('{').unwrap()
+                    && r.end == CSHARP_SNIPPET.rfind('}').unwrap() + 1),
             "expected the class body to be foldable: {ranges:?}"
         );
     }
@@ -1274,8 +1269,10 @@ mod tests {
         highlighter.set_text(JAVA_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
-            ranges.iter().any(|r| r.start == JAVA_SNIPPET.find('{').unwrap()
-                && r.end == JAVA_SNIPPET.rfind('}').unwrap() + 1),
+            ranges
+                .iter()
+                .any(|r| r.start == JAVA_SNIPPET.find('{').unwrap()
+                    && r.end == JAVA_SNIPPET.rfind('}').unwrap() + 1),
             "expected the class body to be foldable: {ranges:?}"
         );
     }
@@ -1299,8 +1296,10 @@ mod tests {
         highlighter.set_text(PHP_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
-            ranges.iter().any(|r| r.start == PHP_SNIPPET.find('{').unwrap()
-                && r.end == PHP_SNIPPET.rfind('}').unwrap() + 1),
+            ranges
+                .iter()
+                .any(|r| r.start == PHP_SNIPPET.find('{').unwrap()
+                    && r.end == PHP_SNIPPET.rfind('}').unwrap() + 1),
             "expected the class body to be foldable: {ranges:?}"
         );
     }
@@ -1359,21 +1358,38 @@ mod tests {
             .iter()
             .find(|s| s.kind == SymbolKind::Struct && s.name == "Point")
             .expect("expected a Point struct root");
-        let field_names: Vec<&str> = point_struct.children.iter().map(|c| c.name.as_str()).collect();
+        let field_names: Vec<&str> = point_struct
+            .children
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
         assert_eq!(field_names, vec!["x", "y"]);
-        assert!(point_struct.children.iter().all(|c| c.kind == SymbolKind::Field));
+        assert!(point_struct
+            .children
+            .iter()
+            .all(|c| c.kind == SymbolKind::Field));
 
         let point_impl = roots
             .iter()
             .find(|s| s.kind == SymbolKind::Class && s.name == "Point")
             .expect("expected a Point impl root");
-        let method_names: Vec<&str> = point_impl.children.iter().map(|c| c.name.as_str()).collect();
+        let method_names: Vec<&str> = point_impl
+            .children
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
         assert_eq!(method_names, vec!["new", "dist"]);
-        assert!(point_impl.children.iter().all(|c| c.kind == SymbolKind::Function));
+        assert!(point_impl
+            .children
+            .iter()
+            .all(|c| c.kind == SymbolKind::Function));
 
         // Name byte ranges point at just the identifier, not the whole
         // definition.
-        assert_eq!(&text[point_struct.name_start..point_struct.name_end], "Point");
+        assert_eq!(
+            &text[point_struct.name_start..point_struct.name_end],
+            "Point"
+        );
     }
 
     #[test]

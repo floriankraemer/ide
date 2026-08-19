@@ -9,12 +9,12 @@
 //! [`TerminalEmulator::feed`].
 
 use alacritty_terminal::event::{Event, EventListener};
-use alacritty_terminal::term::{Config as TermConfig, Term};
-use alacritty_terminal::term::cell::Flags as CellFlags;
-use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor, Rgb};
 use alacritty_terminal::grid::Dimensions;
 #[cfg(test)]
 use alacritty_terminal::index::{Column, Line, Point};
+use alacritty_terminal::term::cell::Flags as CellFlags;
+use alacritty_terminal::term::{Config as TermConfig, Term};
+use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor, Rgb};
 
 /// Terminal size in character cells, mirroring `pty_core::PtySize` without
 /// depending on `pty-core` — `terminal-core` stays a standalone emulation
@@ -161,7 +161,10 @@ pub struct TerminalEmulator {
 impl TerminalEmulator {
     pub fn new(size: GridSize) -> Self {
         let term = Term::new(TermConfig::default(), &size, NullEventListener);
-        Self { term, parser: Processor::new() }
+        Self {
+            term,
+            parser: Processor::new(),
+        }
     }
 
     /// Interpret raw bytes (text and/or escape sequences) read from the PTY,
@@ -190,7 +193,9 @@ impl TerminalEmulator {
 
         for indexed in term_grid.display_iter() {
             let row_idx = (indexed.point.line.0 + term_grid.display_offset() as i32) as usize;
-            let Some(row) = rows.get_mut(row_idx) else { continue };
+            let Some(row) = rows.get_mut(row_idx) else {
+                continue;
+            };
             let cell = indexed.cell;
             let fg = CellColor::from_ansi(cell.fg, CellColor::rgb(229, 229, 229));
             let bg = CellColor::from_ansi(cell.bg, default);

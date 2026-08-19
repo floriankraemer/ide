@@ -181,7 +181,10 @@ fn command_result_response<T>(
             jsonrpc: "2.0",
             id,
             result: None,
-            error: Some(RpcError { code: -32001, message }),
+            error: Some(RpcError {
+                code: -32001,
+                message,
+            }),
         },
     }
 }
@@ -297,7 +300,10 @@ async fn rpc_handler(
             Err(response) => response,
             Ok(tab_id) => {
                 let (respond, receive) = oneshot::channel();
-                match state.commands.send(EditorCommand::ReadBuffer { tab_id, respond }) {
+                match state
+                    .commands
+                    .send(EditorCommand::ReadBuffer { tab_id, respond })
+                {
                     Err(_) => editor_unavailable_response(req.id),
                     Ok(()) => match receive.await {
                         Ok(content) => RpcResponse {
@@ -315,7 +321,10 @@ async fn rpc_handler(
             Err(response) => response,
             Ok(tab_id) => {
                 let (respond, receive) = oneshot::channel();
-                match state.commands.send(EditorCommand::GetCursorPosition { tab_id, respond }) {
+                match state
+                    .commands
+                    .send(EditorCommand::GetCursorPosition { tab_id, respond })
+                {
                     Err(_) => editor_unavailable_response(req.id),
                     Ok(()) => match receive.await {
                         Ok(position) => RpcResponse {
@@ -336,24 +345,33 @@ async fn rpc_handler(
             Err(response) => response,
             Ok(path) => {
                 let (respond, receive) = oneshot::channel();
-                match state.commands.send(EditorCommand::OpenFile { path, respond }) {
+                match state
+                    .commands
+                    .send(EditorCommand::OpenFile { path, respond })
+                {
                     Err(_) => editor_unavailable_response(req.id),
                     Ok(()) => match receive.await {
-                        Ok(result) => command_result_response(req.id, result, |tab_id| {
-                            serde_json::json!({ "tab_id": tab_id })
-                        }),
+                        Ok(result) => command_result_response(
+                            req.id,
+                            result,
+                            |tab_id| serde_json::json!({ "tab_id": tab_id }),
+                        ),
                         Err(_) => editor_unavailable_response(req.id),
                     },
                 }
             }
         },
-        "edit_buffer" => match required_tab_id(&req).and_then(|tab_id| {
-            required_string(&req, "content").map(|content| (tab_id, content))
-        }) {
+        "edit_buffer" => match required_tab_id(&req)
+            .and_then(|tab_id| required_string(&req, "content").map(|content| (tab_id, content)))
+        {
             Err(response) => response,
             Ok((tab_id, content)) => {
                 let (respond, receive) = oneshot::channel();
-                match state.commands.send(EditorCommand::EditBuffer { tab_id, content, respond }) {
+                match state.commands.send(EditorCommand::EditBuffer {
+                    tab_id,
+                    content,
+                    respond,
+                }) {
                     Err(_) => editor_unavailable_response(req.id),
                     Ok(()) => match receive.await {
                         Ok(result) => {
@@ -368,7 +386,10 @@ async fn rpc_handler(
             Err(response) => response,
             Ok(tab_id) => {
                 let (respond, receive) = oneshot::channel();
-                match state.commands.send(EditorCommand::SaveBuffer { tab_id, respond }) {
+                match state
+                    .commands
+                    .send(EditorCommand::SaveBuffer { tab_id, respond })
+                {
                     Err(_) => editor_unavailable_response(req.id),
                     Ok(()) => match receive.await {
                         Ok(result) => {
@@ -421,14 +442,19 @@ pub async fn start(config_dir: &Path, commands: EditorCommandSender) -> io::Resu
     let token = generate_token();
 
     std::fs::create_dir_all(config_dir)?;
-    let discovery = Discovery { port, token: token.clone() };
+    let discovery = Discovery {
+        port,
+        token: token.clone(),
+    };
     std::fs::write(
         discovery_file_path(config_dir),
         serde_json::to_string_pretty(&discovery).expect("Discovery serializes"),
     )?;
 
     let state = AppState { token, commands };
-    let app = Router::new().route("/rpc", post(rpc_handler)).with_state(state.clone());
+    let app = Router::new()
+        .route("/rpc", post(rpc_handler))
+        .with_state(state.clone());
 
     let (shutdown_tx, shutdown_rx) = oneshot::channel();
     let join = tokio::spawn(async move {
@@ -730,7 +756,12 @@ mod tests {
         let handle = start(dir.path(), tx).await.unwrap();
 
         tokio::spawn(async move {
-            if let Some(EditorCommand::EditBuffer { tab_id, content, respond }) = rx.recv().await {
+            if let Some(EditorCommand::EditBuffer {
+                tab_id,
+                content,
+                respond,
+            }) = rx.recv().await
+            {
                 assert_eq!(tab_id, 5);
                 assert_eq!(content, "new content");
                 let _ = respond.send(Ok(()));

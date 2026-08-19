@@ -140,7 +140,10 @@ fn compile_ads_qrc(ads_dir: &Path, tool_dirs: &[PathBuf]) -> PathBuf {
             return output;
         }
     }
-    panic!("could not run rcc (tried: {candidates:?}) to compile {}", qrc_file.display());
+    panic!(
+        "could not run rcc (tried: {candidates:?}) to compile {}",
+        qrc_file.display()
+    );
 }
 
 /// Runs `moc` on an ADS header directly rather than through
@@ -154,7 +157,13 @@ fn compile_ads_qrc(ads_dir: &Path, tool_dirs: &[PathBuf]) -> PathBuf {
 /// branch (`QDockWidget`) instead of Windows's (`QWidget`), which then fails
 /// to link, not compile — verified this actually flips the branch with a
 /// throwaway test header before relying on it.
-fn moc_ads_header(header: &str, ads_dir: &Path, tool_dirs: &[PathBuf], includes: &[PathBuf], is_windows: bool) -> PathBuf {
+fn moc_ads_header(
+    header: &str,
+    ads_dir: &Path,
+    tool_dirs: &[PathBuf],
+    includes: &[PathBuf],
+    is_windows: bool,
+) -> PathBuf {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
     let header_path = ads_dir.join(header);
     let output = out_dir.join(format!("moc_{}.cpp", header.replace(['/', '.'], "_")));
@@ -178,7 +187,10 @@ fn moc_ads_header(header: &str, ads_dir: &Path, tool_dirs: &[PathBuf], includes:
             return output;
         }
     }
-    panic!("could not run moc (tried: {candidates:?}) on {}", header_path.display());
+    panic!(
+        "could not run moc (tried: {candidates:?}) on {}",
+        header_path.display()
+    );
 }
 
 /// ADS's `ads_globals.h` defaults `ADS_EXPORT` to `Q_DECL_IMPORT` unless
@@ -254,7 +266,8 @@ fn main() {
     if needs_xcb {
         // Matches CMakeLists.txt's `if (UNIX AND NOT APPLE) ... linux/FloatingWidgetTitleBar` block.
         let linux_header = "linux/FloatingWidgetTitleBar.h";
-        let moc_output = moc_ads_header(linux_header, ads_dir, &tool_dirs, &moc_includes, is_windows);
+        let moc_output =
+            moc_ads_header(linux_header, ads_dir, &tool_dirs, &moc_includes, is_windows);
         builder = builder
             .cpp_file(moc_output)
             .cpp_file(ads_dir.join("linux/FloatingWidgetTitleBar.cpp"));

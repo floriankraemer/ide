@@ -142,7 +142,6 @@ mod ffi {
         inverse: bool,
     }
 
-
     extern "Rust" {
         /// Opaque per-editor incremental highlighter handle (Y2/A1):
         /// wraps a `syntax_core::Highlighter`, which keeps a persistent
@@ -557,7 +556,12 @@ mod ffi {
         /// already uses for dirty state (ADR-0003).
         #[qinvokable]
         #[cxx_name = "setCursorPosition"]
-        fn set_cursor_position(self: Pin<&mut DocumentManager>, tab_id: u64, line: u32, column: u32);
+        fn set_cursor_position(
+            self: Pin<&mut DocumentManager>,
+            tab_id: u64,
+            line: u32,
+            column: u32,
+        );
 
         /// Starts the MCP transport on a dedicated background thread (its
         /// own Tokio runtime, since `run_app()`'s Qt event loop isn't async)
@@ -1041,7 +1045,10 @@ impl SyntaxHighlighterHandle {
         old_end_byte: usize,
         new_end_byte: usize,
     ) -> Vec<ffi::FfiHighlightSpan> {
-        to_ffi_spans(self.0.edit(new_text, start_byte, old_end_byte, new_end_byte))
+        to_ffi_spans(
+            self.0
+                .edit(new_text, start_byte, old_end_byte, new_end_byte),
+        )
     }
 
     fn fold_ranges(&self) -> Vec<ffi::FfiFoldRange> {
@@ -1083,7 +1090,11 @@ fn to_ffi_token_kind(kind: syntax_core::TokenKind) -> ffi::FfiTokenKind {
 /// `depth` (root = 0) so `FfiSymbolNode`'s doc comment's reconstruction
 /// works: siblings/children stay in the tree's own document order since
 /// `syntax_core::outline()` already returns them that way.
-fn flatten_symbol_tree(nodes: &[syntax_core::SymbolNode], depth: u32, out: &mut Vec<ffi::FfiSymbolNode>) {
+fn flatten_symbol_tree(
+    nodes: &[syntax_core::SymbolNode],
+    depth: u32,
+    out: &mut Vec<ffi::FfiSymbolNode>,
+) {
     for node in nodes {
         out.push(ffi::FfiSymbolNode {
             name: QString::from(node.name.as_str()),
@@ -1227,13 +1238,25 @@ impl ffi::AppSettings {
         let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
         FfiEditorColors {
             background: QString::from(
-                settings.editor_colors.get("background").map(String::as_str).unwrap_or(""),
+                settings
+                    .editor_colors
+                    .get("background")
+                    .map(String::as_str)
+                    .unwrap_or(""),
             ),
             foreground: QString::from(
-                settings.editor_colors.get("foreground").map(String::as_str).unwrap_or(""),
+                settings
+                    .editor_colors
+                    .get("foreground")
+                    .map(String::as_str)
+                    .unwrap_or(""),
             ),
             current_line: QString::from(
-                settings.editor_colors.get("current_line").map(String::as_str).unwrap_or(""),
+                settings
+                    .editor_colors
+                    .get("current_line")
+                    .map(String::as_str)
+                    .unwrap_or(""),
             ),
         }
     }
@@ -1254,17 +1277,23 @@ impl ffi::AppSettings {
         if background.is_empty() {
             settings.editor_colors.remove("background");
         } else {
-            settings.editor_colors.insert("background".to_string(), background);
+            settings
+                .editor_colors
+                .insert("background".to_string(), background);
         }
         if foreground.is_empty() {
             settings.editor_colors.remove("foreground");
         } else {
-            settings.editor_colors.insert("foreground".to_string(), foreground);
+            settings
+                .editor_colors
+                .insert("foreground".to_string(), foreground);
         }
         if current_line.is_empty() {
             settings.editor_colors.remove("current_line");
         } else {
-            settings.editor_colors.insert("current_line".to_string(), current_line);
+            settings
+                .editor_colors
+                .insert("current_line".to_string(), current_line);
         }
         let _ = app_config::save(&config_dir, &settings);
     }
@@ -1620,7 +1649,12 @@ impl ffi::DocumentManager {
         to_ffi_result(result)
     }
 
-    pub fn save_tab_as(mut self: Pin<&mut Self>, tab_id: u64, path: &QString, content: &QString) -> FfiResult {
+    pub fn save_tab_as(
+        mut self: Pin<&mut Self>,
+        tab_id: u64,
+        path: &QString,
+        content: &QString,
+    ) -> FfiResult {
         let path = std::path::PathBuf::from(path.to_string());
         let result = self.session.borrow_mut().save_tab_as(
             TabId::from_raw(tab_id),
@@ -1762,7 +1796,10 @@ impl ffi::DocumentManager {
 /// Runs on the Qt thread (queued there by `start_mcp_server`'s listener):
 /// does the actual `AppSession`-mediated work for one `EditorCommand` and
 /// answers it through the command's own `oneshot::Sender`.
-fn dispatch_editor_command(mut doc_manager: Pin<&mut ffi::DocumentManager>, cmd: mcp_server::EditorCommand) {
+fn dispatch_editor_command(
+    mut doc_manager: Pin<&mut ffi::DocumentManager>,
+    cmd: mcp_server::EditorCommand,
+) {
     match cmd {
         mcp_server::EditorCommand::ListOpenBuffers(respond) => {
             let buffers = doc_manager
@@ -1770,7 +1807,10 @@ fn dispatch_editor_command(mut doc_manager: Pin<&mut ffi::DocumentManager>, cmd:
                 .borrow()
                 .open_tabs()
                 .into_iter()
-                .map(|(id, title)| mcp_server::BufferInfo { tab_id: id.raw(), title })
+                .map(|(id, title)| mcp_server::BufferInfo {
+                    tab_id: id.raw(),
+                    title,
+                })
                 .collect();
             let _ = respond.send(buffers);
         }
@@ -1788,7 +1828,10 @@ fn dispatch_editor_command(mut doc_manager: Pin<&mut ffi::DocumentManager>, cmd:
             let _ = respond.send(entries);
         }
         mcp_server::EditorCommand::ReadBuffer { tab_id, respond } => {
-            let content = doc_manager.session.borrow().tab_content(TabId::from_raw(tab_id));
+            let content = doc_manager
+                .session
+                .borrow()
+                .tab_content(TabId::from_raw(tab_id));
             let _ = respond.send(content);
         }
         mcp_server::EditorCommand::GetCursorPosition { tab_id, respond } => {
@@ -1804,7 +1847,9 @@ fn dispatch_editor_command(mut doc_manager: Pin<&mut ffi::DocumentManager>, cmd:
             // translation, session call, tabOpened emission on a new tab)
             // rather than duplicating it — MCP and the UI's "Open File"
             // dialog end up on the exact same path.
-            let result = doc_manager.as_mut().open_file(&QString::from(path.as_str()));
+            let result = doc_manager
+                .as_mut()
+                .open_file(&QString::from(path.as_str()));
             let mapped = if result.code == 0 {
                 Ok(result.tab_id)
             } else {
@@ -1812,7 +1857,11 @@ fn dispatch_editor_command(mut doc_manager: Pin<&mut ffi::DocumentManager>, cmd:
             };
             let _ = respond.send(mapped);
         }
-        mcp_server::EditorCommand::EditBuffer { tab_id, content, respond } => {
+        mcp_server::EditorCommand::EditBuffer {
+            tab_id,
+            content,
+            respond,
+        } => {
             let result = doc_manager
                 .session
                 .borrow_mut()
@@ -1830,7 +1879,10 @@ fn dispatch_editor_command(mut doc_manager: Pin<&mut ffi::DocumentManager>, cmd:
             let _ = respond.send(mapped);
         }
         mcp_server::EditorCommand::SaveBuffer { tab_id, respond } => {
-            let result = doc_manager.session.borrow_mut().save_buffer(TabId::from_raw(tab_id));
+            let result = doc_manager
+                .session
+                .borrow_mut()
+                .save_buffer(TabId::from_raw(tab_id));
             let mapped = result.map_err(|err| err.to_string());
             if mapped.is_ok() {
                 doc_manager.as_mut().tab_modified_changed(tab_id, false);
@@ -1859,7 +1911,12 @@ fn line_snippet(path: &std::path::Path, line: usize) -> String {
     let Ok(content) = std::fs::read_to_string(path) else {
         return String::new();
     };
-    content.lines().nth(line.saturating_sub(1)).unwrap_or("").trim().to_string()
+    content
+        .lines()
+        .nth(line.saturating_sub(1))
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 impl ffi::SearchModel {
@@ -1925,7 +1982,9 @@ impl ffi::SearchModel {
                 Err(err) => {
                     let message = err.to_string();
                     let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                        model.as_mut().search_failed(QString::from(message.as_str()));
+                        model
+                            .as_mut()
+                            .search_failed(QString::from(message.as_str()));
                     });
                 }
             }
@@ -2023,7 +2082,9 @@ impl ffi::SearchModel {
                         let container = QString::from(m.container.as_deref().unwrap_or(""));
                         let ffi_kind = to_ffi_symbol_kind(kind);
                         let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                            model.as_mut().project_symbol_found(path, line, ffi_kind, name, container);
+                            model
+                                .as_mut()
+                                .project_symbol_found(path, line, ffi_kind, name, container);
                         });
                     }
                     let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
@@ -2033,7 +2094,9 @@ impl ffi::SearchModel {
                 Err(err) => {
                     let message = err.to_string();
                     let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                        model.as_mut().project_symbols_failed(QString::from(message.as_str()));
+                        model
+                            .as_mut()
+                            .project_symbols_failed(QString::from(message.as_str()));
                     });
                 }
             }
@@ -2074,7 +2137,9 @@ impl ffi::SearchModel {
                         let container = QString::from(m.container.as_deref().unwrap_or(""));
                         let ffi_kind = to_ffi_symbol_kind(kind);
                         let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                            model.as_mut().symbol_search_result_found(path, line, ffi_kind, name, container);
+                            model
+                                .as_mut()
+                                .symbol_search_result_found(path, line, ffi_kind, name, container);
                         });
                     }
                     let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
@@ -2084,7 +2149,9 @@ impl ffi::SearchModel {
                 Err(err) => {
                     let message = err.to_string();
                     let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                        model.as_mut().symbol_search_failed(QString::from(message.as_str()));
+                        model
+                            .as_mut()
+                            .symbol_search_failed(QString::from(message.as_str()));
                     });
                 }
             }
@@ -2120,7 +2187,9 @@ impl ffi::SearchModel {
                         let is_definition = m.is_definition;
                         let container = QString::from(m.container.as_deref().unwrap_or(""));
                         let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                            model.as_mut().usages_found(path, line, name, is_definition, container);
+                            model
+                                .as_mut()
+                                .usages_found(path, line, name, is_definition, container);
                         });
                     }
                     let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
@@ -2130,7 +2199,9 @@ impl ffi::SearchModel {
                 Err(err) => {
                     let message = err.to_string();
                     let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                        model.as_mut().usages_failed(QString::from(message.as_str()));
+                        model
+                            .as_mut()
+                            .usages_failed(QString::from(message.as_str()));
                     });
                 }
             }
@@ -2233,8 +2304,12 @@ impl ffi::TerminalSession {
                 match reader.read(&mut buf) {
                     Ok(0) => break, // EOF: the shell exited.
                     Ok(n) => {
-                        let Ok(mut guard) = emulator_slot.lock() else { break };
-                        let Some(emulator) = guard.as_mut() else { break };
+                        let Ok(mut guard) = emulator_slot.lock() else {
+                            break;
+                        };
+                        let Some(emulator) = guard.as_mut() else {
+                            break;
+                        };
                         emulator.feed(&buf[..n]);
                         drop(guard);
                         let _ = qt_thread.queue(|mut session: Pin<&mut Self>| {

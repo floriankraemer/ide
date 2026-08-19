@@ -55,7 +55,9 @@ use tantivy::schema::{
 use tantivy::tokenizer::NgramTokenizer;
 use tantivy::{doc, Index, IndexReader, IndexWriter, Term};
 
-use syntax_core::{identifier_occurrences, language_for_extension, outline, SymbolKind, SymbolNode};
+use syntax_core::{
+    identifier_occurrences, language_for_extension, outline, SymbolKind, SymbolNode,
+};
 
 /// Directory (relative to the project root) the tantivy index lives under.
 const INDEX_DIR_NAME: &str = ".ide-index";
@@ -133,7 +135,10 @@ fn build_schema() -> (Schema, Fields) {
     let content_indexing = TextFieldIndexing::default()
         .set_tokenizer("ngram3")
         .set_index_option(IndexRecordOption::Basic);
-    let content = builder.add_text_field("content", TextOptions::default().set_indexing_options(content_indexing));
+    let content = builder.add_text_field(
+        "content",
+        TextOptions::default().set_indexing_options(content_indexing),
+    );
 
     let doc_type = builder.add_text_field("doc_type", STRING | STORED);
     // Exact term field, not tokenized — `find_usages` needs exact-name
@@ -211,7 +216,11 @@ struct FlatSymbol<'a> {
     container: Option<&'a str>,
 }
 
-fn flatten_outline<'a>(nodes: &'a [SymbolNode], parent: Option<&'a str>, out: &mut BTreeMap<(usize, usize), FlatSymbol<'a>>) {
+fn flatten_outline<'a>(
+    nodes: &'a [SymbolNode],
+    parent: Option<&'a str>,
+    out: &mut BTreeMap<(usize, usize), FlatSymbol<'a>>,
+) {
     for node in nodes {
         out.insert(
             (node.name_start, node.name_end),
@@ -227,7 +236,10 @@ fn flatten_outline<'a>(nodes: &'a [SymbolNode], parent: Option<&'a str>, out: &m
 /// 1-based line number of byte offset `offset` within `text` (matches
 /// `grep-searcher`'s convention, as used by [`SearchMatch::line`]).
 fn line_number_at(text: &str, offset: usize) -> usize {
-    1 + text.as_bytes()[..offset.min(text.len())].iter().filter(|&&b| b == b'\n').count()
+    1 + text.as_bytes()[..offset.min(text.len())]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count()
 }
 
 /// A tantivy-backed text index for one project root, with ripgrep-crate
@@ -255,9 +267,10 @@ impl TextIndex {
 
         let (schema, fields) = build_schema();
         let index = Index::create_in_dir(&index_dir, schema)?;
-        index
-            .tokenizers()
-            .register("ngram3", NgramTokenizer::new(NGRAM_SIZE, NGRAM_SIZE, false)?);
+        index.tokenizers().register(
+            "ngram3",
+            NgramTokenizer::new(NGRAM_SIZE, NGRAM_SIZE, false)?,
+        );
 
         let mut writer: IndexWriter = index.writer(50_000_000)?;
         for entry in ignore::WalkBuilder::new(project_root).build() {
@@ -309,7 +322,8 @@ impl TextIndex {
     /// indexed.
     pub fn reindex_file(&mut self, path: &Path) -> Result<(), IndexError> {
         let key = path.to_string_lossy().into_owned();
-        self.writer.delete_term(Term::from_field_text(self.fields.path, &key));
+        self.writer
+            .delete_term(Term::from_field_text(self.fields.path, &key));
         if let Ok(content) = fs::read_to_string(path) {
             index_symbols(&mut self.writer, &self.fields, &key, &content)?;
             self.writer.add_document(doc!(
@@ -329,7 +343,8 @@ impl TextIndex {
     /// the shared `path` term).
     pub fn remove_file(&mut self, path: &Path) -> Result<(), IndexError> {
         let key = path.to_string_lossy().into_owned();
-        self.writer.delete_term(Term::from_field_text(self.fields.path, &key));
+        self.writer
+            .delete_term(Term::from_field_text(self.fields.path, &key));
         self.writer.commit()?;
         self.reader.reload()?;
         Ok(())
@@ -348,7 +363,8 @@ impl TextIndex {
             owned_pattern = escape_literal(pattern);
             &owned_pattern
         };
-        let matcher = RegexMatcher::new(regex_pattern).map_err(|e| IndexError::Query(e.to_string()))?;
+        let matcher =
+            RegexMatcher::new(regex_pattern).map_err(|e| IndexError::Query(e.to_string()))?;
 
         let mut matches = Vec::new();
         for path in self.candidate_files(pattern)? {
@@ -439,7 +455,10 @@ impl TextIndex {
     pub fn find_definitions(&self, name_query: &str) -> Result<Vec<SymbolMatch>, IndexError> {
         let searcher = self.reader.searcher();
         let query = BooleanQuery::new(vec![
-            (Occur::Must, doc_type_query(self.fields.doc_type, DOC_TYPE_SYMBOL)),
+            (
+                Occur::Must,
+                doc_type_query(self.fields.doc_type, DOC_TYPE_SYMBOL),
+            ),
             (
                 Occur::Must,
                 Box::new(TermQuery::new(
@@ -462,7 +481,10 @@ impl TextIndex {
     pub fn find_usages(&self, exact_name: &str) -> Result<Vec<SymbolMatch>, IndexError> {
         let searcher = self.reader.searcher();
         let query = BooleanQuery::new(vec![
-            (Occur::Must, doc_type_query(self.fields.doc_type, DOC_TYPE_SYMBOL)),
+            (
+                Occur::Must,
+                doc_type_query(self.fields.doc_type, DOC_TYPE_SYMBOL),
+            ),
             (
                 Occur::Must,
                 Box::new(TermQuery::new(
@@ -489,9 +511,18 @@ impl TextIndex {
         let mut matches = Vec::with_capacity(top_docs.len());
         for (_score, doc_address) in top_docs {
             let retrieved: tantivy::TantivyDocument = searcher.doc(doc_address)?;
-            let get_str = |field| retrieved.get_first(field).and_then(|v| v.as_str()).map(str::to_string);
-            let Some(name) = get_str(self.fields.sym_name) else { continue };
-            let Some(path) = get_str(self.fields.path) else { continue };
+            let get_str = |field| {
+                retrieved
+                    .get_first(field)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            };
+            let Some(name) = get_str(self.fields.sym_name) else {
+                continue;
+            };
+            let Some(path) = get_str(self.fields.path) else {
+                continue;
+            };
             let line = retrieved
                 .get_first(self.fields.sym_line)
                 .and_then(|v| v.as_u64())
@@ -517,7 +548,10 @@ impl TextIndex {
 }
 
 fn doc_type_query(field: tantivy::schema::Field, value: &str) -> Box<dyn tantivy::query::Query> {
-    Box::new(TermQuery::new(Term::from_field_text(field, value), IndexRecordOption::Basic))
+    Box::new(TermQuery::new(
+        Term::from_field_text(field, value),
+        IndexRecordOption::Basic,
+    ))
 }
 
 /// Index the definition/reference rows for one file's already-read
@@ -527,8 +561,16 @@ fn doc_type_query(field: tantivy::schema::Field, value: &str) -> Box<dyn tantivy
 /// shared name-token byte range rather than indexing both separately, so a
 /// definition site appears exactly once in `find_usages` results, not
 /// twice.
-fn index_symbols(writer: &mut IndexWriter, fields: &Fields, path_key: &str, content: &str) -> Result<(), IndexError> {
-    let extension = Path::new(path_key).extension().and_then(|e| e.to_str()).unwrap_or("");
+fn index_symbols(
+    writer: &mut IndexWriter,
+    fields: &Fields,
+    path_key: &str,
+    content: &str,
+) -> Result<(), IndexError> {
+    let extension = Path::new(path_key)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("");
     let language = language_for_extension(extension);
 
     let roots = outline(language, content);
@@ -582,7 +624,11 @@ mod tests {
     #[test]
     fn substring_search_finds_file_line_and_span() {
         let dir = tempfile::tempdir().unwrap();
-        let file = write(dir.path(), "src/main.rs", "fn main() {\n    println!(\"hello world\");\n}\n");
+        let file = write(
+            dir.path(),
+            "src/main.rs",
+            "fn main() {\n    println!(\"hello world\");\n}\n",
+        );
         let index = TextIndex::build(dir.path()).unwrap();
 
         let matches = index.search("hello world", false).unwrap();
@@ -658,12 +704,17 @@ mod tests {
 
     // --- symbol/reference schema (E1) ---
 
-    const JAVA_FIXTURE: &str = "public class Greeter {\n    public String greet() {\n        return \"hi\";\n    }\n}\n";
+    const JAVA_FIXTURE: &str =
+        "public class Greeter {\n    public String greet() {\n        return \"hi\";\n    }\n}\n";
 
     #[test]
     fn find_definitions_locates_a_rust_function_by_name() {
         let dir = tempfile::tempdir().unwrap();
-        let file = write(dir.path(), "src/lib.rs", "fn add(x: i32, y: i32) -> i32 { x + y }\n");
+        let file = write(
+            dir.path(),
+            "src/lib.rs",
+            "fn add(x: i32, y: i32) -> i32 { x + y }\n",
+        );
         let index = TextIndex::build(dir.path()).unwrap();
 
         let defs = index.find_definitions("add").unwrap();
@@ -678,7 +729,11 @@ mod tests {
     #[test]
     fn find_definitions_locates_a_java_class_by_name_proving_language_dispatch() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "src/lib.rs", "fn add(x: i32, y: i32) -> i32 { x + y }\n");
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "fn add(x: i32, y: i32) -> i32 { x + y }\n",
+        );
         write(dir.path(), "src/Greeter.java", JAVA_FIXTURE);
         let index = TextIndex::build(dir.path()).unwrap();
 
@@ -697,7 +752,11 @@ mod tests {
     #[test]
     fn find_definitions_does_substring_matching() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "src/lib.rs", "fn add(x: i32, y: i32) -> i32 { x + y }\n");
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "fn add(x: i32, y: i32) -> i32 { x + y }\n",
+        );
         let index = TextIndex::build(dir.path()).unwrap();
 
         assert_eq!(index.find_definitions("ad").unwrap().len(), 1);
@@ -707,7 +766,11 @@ mod tests {
     #[test]
     fn find_usages_finds_every_occurrence_of_an_exact_name() {
         let dir = tempfile::tempdir().unwrap();
-        let file = write(dir.path(), "src/lib.rs", "fn add(x: i32) -> i32 { x + x }\n");
+        let file = write(
+            dir.path(),
+            "src/lib.rs",
+            "fn add(x: i32) -> i32 { x + x }\n",
+        );
         let index = TextIndex::build(dir.path()).unwrap();
 
         let usages = index.find_usages("x").unwrap();
@@ -720,7 +783,11 @@ mod tests {
     #[test]
     fn find_usages_is_exact_not_substring() {
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "src/lib.rs", "fn add(x: i32, y: i32) -> i32 { x + y }\n");
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "fn add(x: i32, y: i32) -> i32 { x + y }\n",
+        );
         let index = TextIndex::build(dir.path()).unwrap();
 
         assert_eq!(index.find_usages("ad").unwrap().len(), 0);
@@ -750,7 +817,11 @@ mod tests {
         // indexed definition project-wide, with no separate "list all"
         // method needed.
         let dir = tempfile::tempdir().unwrap();
-        write(dir.path(), "src/lib.rs", "fn add(x: i32, y: i32) -> i32 { x + y }\n");
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "fn add(x: i32, y: i32) -> i32 { x + y }\n",
+        );
         write(dir.path(), "src/Greeter.java", JAVA_FIXTURE);
         let index = TextIndex::build(dir.path()).unwrap();
 
@@ -765,14 +836,22 @@ mod tests {
     #[test]
     fn reindex_file_updates_symbol_data_on_rename() {
         let dir = tempfile::tempdir().unwrap();
-        let file = write(dir.path(), "src/lib.rs", "fn add(x: i32, y: i32) -> i32 { x + y }\n");
+        let file = write(
+            dir.path(),
+            "src/lib.rs",
+            "fn add(x: i32, y: i32) -> i32 { x + y }\n",
+        );
         let mut index = TextIndex::build(dir.path()).unwrap();
         assert_eq!(index.find_definitions("add").unwrap().len(), 1);
 
         fs::write(&file, "fn sum(x: i32, y: i32) -> i32 { x + y }\n").unwrap();
         index.reindex_file(&file).unwrap();
 
-        assert_eq!(index.find_definitions("add").unwrap().len(), 0, "old name must be gone");
+        assert_eq!(
+            index.find_definitions("add").unwrap().len(),
+            0,
+            "old name must be gone"
+        );
         let defs = index.find_definitions("sum").unwrap();
         assert_eq!(defs.len(), 1, "{defs:?}");
         assert_eq!(defs[0].kind, Some(SymbolKind::Function));
@@ -781,7 +860,11 @@ mod tests {
     #[test]
     fn remove_file_drops_its_symbol_data_too() {
         let dir = tempfile::tempdir().unwrap();
-        let file = write(dir.path(), "src/lib.rs", "fn add(x: i32, y: i32) -> i32 { x + y }\n");
+        let file = write(
+            dir.path(),
+            "src/lib.rs",
+            "fn add(x: i32, y: i32) -> i32 { x + y }\n",
+        );
         let mut index = TextIndex::build(dir.path()).unwrap();
         assert_eq!(index.find_definitions("add").unwrap().len(), 1);
 
