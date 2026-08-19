@@ -3,6 +3,18 @@
 Cross-platform IDE: Rust core + Qt6 Widgets via cxx-qt (QML planned later).
 Architecture authority: `docs/architecture/layering.md` and the ADRs in `docs/architecture/decisions/`. Read them before structural work.
 
+## Development environment
+
+Always use Docker containers for development (builds, tests, running the app) — never the bare host.
+
+```sh
+docker build --target linux-builder -t ide-linux-builder -f docker/Dockerfile .
+docker run --rm -v "$(pwd)":/workspace -w /workspace ide-linux-builder \
+    cargo test --workspace
+```
+
+`linux-builder` has the full Qt6 dev toolchain (`docker/Dockerfile`); mount the workspace rather than baking in source so edits are picked up without a rebuild. Use the same image for `cargo build`/`cargo build --release -p app`.
+
 ## Starting a session
 
 Before starting work, read `docs/architecture/settings-docking-theming-mcp-plan.md`'s Progress table and `git log` to find the next open task. Update the task's row (status + commit hash) in the same commit that finishes it — status and code must never drift apart.
