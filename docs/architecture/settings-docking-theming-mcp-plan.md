@@ -46,9 +46,9 @@ per `CLAUDE.md`.
 | M4 | done | `c57201a` (`cargo test -p app-core -p mcp-server`; Docker `linux-artifact` build verified; MCP-client-against-running-UI round trip not run, no display here) |
 | M5 | done | `b461245` (`cargo test -p app-core -p mcp-server`; Docker `linux-artifact` build verified; MCP-client-writes-visibly-affect-UI round trip not run, no display here) |
 | D5 | done | `4d3416b` (`cargo test --workspace`; Docker `linux-artifact` build verified; driven end to end under Xvfb — split, close-others, group collapse, nested split, relaunch restore all confirmed by screenshot) |
-| K1 | done | `c8130b3` (`cargo test -p app-config`) |
-| K2 | done | `c8130b3` (clippy/fmt clean; driven end to end under Xvfb — conflict prompt, live menu update, relaunch persistence, Reset All, Cancel-discards all confirmed by screenshot) |
-| K3 | done | `c8130b3` (Xvfb: prefilled dialog, centred jump, clamped range, jump into a collapsed fold expands it — confirmed by screenshot) |
+| K1 | done | `7443b01` (`cargo test -p app-config`) |
+| K2 | done | `7443b01` (clippy/fmt clean; driven end to end under Xvfb — conflict prompt, live menu update, relaunch persistence, Reset All, Cancel-discards all confirmed by screenshot) |
+| K3 | done | `7443b01` (Xvfb: prefilled dialog, centred jump, clamped range, jump into a collapsed fold expands it — confirmed by screenshot) |
 
 ## Context
 
