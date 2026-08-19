@@ -14,6 +14,9 @@ use ropey::Rope;
 mod binary_detect;
 pub use binary_detect::{looks_binary, looks_binary_file};
 
+pub mod search;
+pub use search::{find_matches, replacements, Replacement, SearchError, SearchOptions, TextMatch};
+
 /// A single open file: a rope-backed buffer, its backing path, and a
 /// dirty flag tracking unsaved edits.
 pub struct Document {

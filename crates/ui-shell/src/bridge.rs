@@ -95,6 +95,35 @@ mod ffi {
         kind: FfiTokenKind,
     }
 
+    /// One in-editor find match, as a half-open `[start, end)` range of
+    /// UTF-16 code units — the unit `QTextCursor::setPosition` takes, so
+    /// the view can use these directly without an offset table (unlike
+    /// `FfiHighlightSpan`, which stays in UTF-8 to match `syntax_core`).
+    struct FfiTextMatch {
+        start: u32,
+        end: u32,
+    }
+
+    /// One find match plus the text that replaces it. `text` is already
+    /// capture-expanded (`$1`) by `editor_core::search` — the view only
+    /// splices it in, it never composes replacement text itself.
+    struct FfiReplacement {
+        start: u32,
+        end: u32,
+        text: QString,
+    }
+
+    /// One project-wide replace target, addressed exactly like the
+    /// `searchMatchFound` payload it came from: 1-based `line`, byte offsets
+    /// within that line.
+    #[derive(Default)]
+    struct FfiFileReplacement {
+        path: QString,
+        line: u32,
+        start: u32,
+        end: u32,
+    }
+
     /// Structural symbol kind (Task D), 1:1 with `syntax_core::SymbolKind`.
     enum FfiSymbolKind {
         Class,
@@ -153,6 +182,28 @@ mod ffi {
         italic: bool,
         underline: bool,
         inverse: bool,
+        /// Inside the current mouse selection — the view paints it by
+        /// swapping fg/bg, the same way it already handles `inverse`.
+        selected: bool,
+    }
+
+    /// What a terminal mouse gesture selects (Task F4), 1:1 with
+    /// `terminal_core::SelectionKind`.
+    enum FfiSelectionKind {
+        Simple,
+        Word,
+        Line,
+    }
+
+    /// `TerminalSession::linkAt`'s result. `found == false` means "no link
+    /// at that cell", at which point the other fields are meaningless — a
+    /// typed flag rather than an empty-`QString` sentinel (ADR-0003).
+    struct FfiTerminalLink {
+        found: bool,
+        url: QString,
+        row: u32,
+        start_col: u32,
+        end_col: u32,
     }
 
     extern "Rust" {
@@ -443,6 +494,46 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "bufferEditedExternally"]
         fn buffer_edited_externally(self: Pin<&mut DocumentManager>, tab_id: u64, content: QString);
+
+        /// Emitted when a find/replace pattern does not compile. A
+        /// `Vec<T>` return has no room for an error code, and ADR-0003
+        /// bans a sentinel value, so the failure travels as its own typed
+        /// signal (the shape `SearchModel::searchFailed` already uses) and
+        /// the invokable returns an empty vec.
+        #[qsignal]
+        #[cxx_name = "findPatternInvalid"]
+        fn find_pattern_invalid(self: Pin<&mut DocumentManager>, message: QString);
+
+        /// Every match of `pattern` in `text`, in document order.
+        ///
+        /// `text` is the widget's *current* buffer, passed in rather than
+        /// read from the session: `Document`'s rope only catches up at
+        /// save time, so searching it would search pre-edit text. Same
+        /// reason `saveTab` takes its content.
+        #[qinvokable]
+        #[cxx_name = "findMatches"]
+        fn find_matches(
+            self: Pin<&mut DocumentManager>,
+            text: &QString,
+            pattern: &QString,
+            is_regex: bool,
+            case_sensitive: bool,
+        ) -> Vec<FfiTextMatch>;
+
+        /// The same matches as `findMatches`, each carrying the text that
+        /// replaces it. The view applies the spans it wants (one, or all
+        /// in reverse order inside a single edit block) — deciding *what*
+        /// the replacement text is stays here.
+        #[qinvokable]
+        #[cxx_name = "replacementsFor"]
+        fn replacements_for(
+            self: Pin<&mut DocumentManager>,
+            text: &QString,
+            pattern: &QString,
+            replacement: &QString,
+            is_regex: bool,
+            case_sensitive: bool,
+        ) -> Vec<FfiReplacement>;
 
         /// Open `path` as a new tab, or focus its existing tab if already
         /// open (US-3: focus-not-duplicate). The session enforces the
@@ -778,7 +869,47 @@ mod ffi {
         /// `searchFailed`.
         #[qinvokable]
         #[cxx_name = "search"]
-        fn search(self: Pin<&mut SearchModel>, pattern: &QString, is_regex: bool);
+        fn search(
+            self: Pin<&mut SearchModel>,
+            pattern: &QString,
+            is_regex: bool,
+            case_sensitive: bool,
+        );
+
+        /// Apply a project-wide replace to exactly the spans in `edits` —
+        /// the ones the user left checked in the results list, not "every
+        /// match of the pattern". The replacement text per span is expanded
+        /// here (so `$1` works), the write goes to disk, and the touched
+        /// files are re-indexed; open tabs learn about it through the
+        /// existing external-change flow.
+        #[qinvokable]
+        #[cxx_name = "replaceInFiles"]
+        fn replace_in_files(
+            self: Pin<&mut SearchModel>,
+            edits: Vec<FfiFileReplacement>,
+            pattern: &QString,
+            replacement: &QString,
+            is_regex: bool,
+            case_sensitive: bool,
+        );
+
+        /// Emitted once a `replaceInFiles` call finishes: how many files
+        /// were rewritten, how many spans, and how many files were skipped
+        /// because they changed since the search.
+        #[qsignal]
+        #[cxx_name = "replaceFinished"]
+        fn replace_finished(
+            self: Pin<&mut SearchModel>,
+            files: u32,
+            matches: u32,
+            skipped_files: u32,
+        );
+
+        /// Emitted instead of `replaceFinished` when the replace could not
+        /// run at all (no index built yet, or an invalid pattern).
+        #[qsignal]
+        #[cxx_name = "replaceFailed"]
+        fn replace_failed(self: Pin<&mut SearchModel>, message: QString);
 
         /// One match: `line` is 1-based, `start`/`end` are byte offsets of
         /// the match within that line (matching `index_core::SearchMatch`),
@@ -1028,6 +1159,55 @@ mod ffi {
         #[cxx_name = "cursorCol"]
         fn cursor_col(self: &TerminalSession) -> u32;
 
+        /// Begin a mouse selection at a grid cell (Task F4). `right_half`
+        /// is which half of the cell the click landed on, which decides
+        /// whether that cell is included; out-of-range coordinates are
+        /// clamped by `terminal-core`, not here.
+        #[qinvokable]
+        #[cxx_name = "selectionStart"]
+        fn selection_start(
+            self: &TerminalSession,
+            row: u32,
+            col: u32,
+            right_half: bool,
+            kind: FfiSelectionKind,
+        );
+
+        /// Extend the in-progress selection to a cell (drag).
+        #[qinvokable]
+        #[cxx_name = "selectionUpdate"]
+        fn selection_update(self: &TerminalSession, row: u32, col: u32, right_half: bool);
+
+        #[qinvokable]
+        #[cxx_name = "selectionClear"]
+        fn selection_clear(self: &TerminalSession);
+
+        /// Whether a selection covers at least one cell. The view gates
+        /// its Copy action on this rather than on `selectionText()` being
+        /// non-empty.
+        #[qinvokable]
+        #[cxx_name = "hasSelection"]
+        fn has_selection(self: &TerminalSession) -> bool;
+
+        /// The selected text, empty when there is no selection (guard with
+        /// `hasSelection()`).
+        #[qinvokable]
+        #[cxx_name = "selectionText"]
+        fn selection_text(self: &TerminalSession) -> QString;
+
+        /// Paste clipboard text into the shell. The rules — control-character
+        /// stripping, newline normalization, and bracketed-paste framing —
+        /// live in `terminal-core`; the view only supplies the text.
+        #[qinvokable]
+        #[cxx_name = "paste"]
+        fn paste(self: Pin<&mut TerminalSession>, text: &QString);
+
+        /// The `http(s)` link covering a grid cell, for hover feedback and
+        /// Ctrl+Click activation.
+        #[qinvokable]
+        #[cxx_name = "linkAt"]
+        fn link_at(self: &TerminalSession, row: u32, col: u32) -> FfiTerminalLink;
+
         /// Emitted on the Qt thread (queued there from the background
         /// reader thread) after new PTY output has been fed into the
         /// emulator and is ready to paint.
@@ -1079,6 +1259,58 @@ fn shared_session() -> Rc<RefCell<AppSession>> {
 }
 
 /// Translate a command result into the FFI struct (ADR-0003).
+/// Turns the view's "these spans, this pattern, this replacement" into the
+/// concrete per-span replacement text `index_core` applies.
+///
+/// The expansion runs `editor_core::replacements` over just the matched
+/// slice, so a regex `$1` refers to the capture inside that match — the same
+/// engine the in-editor Replace uses, not a second implementation.
+fn resolve_replacements(
+    edits: &[(std::path::PathBuf, usize, usize, usize)],
+    pattern: &str,
+    replacement: &str,
+    opts: editor_core::SearchOptions,
+) -> Result<Vec<index_core::FileReplacement>, String> {
+    let mut out = Vec::with_capacity(edits.len());
+    let mut cached: Option<(&std::path::Path, Vec<String>)> = None;
+    for (path, line, start, end) in edits {
+        if cached.as_ref().is_none_or(|(p, _)| *p != path.as_path()) {
+            let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+            cached = Some((path.as_path(), content.lines().map(str::to_owned).collect()));
+        }
+        let lines = &cached.as_ref().expect("just populated").1;
+        let Some(matched) = lines
+            .get(line.wrapping_sub(1))
+            .and_then(|l| l.get(*start..*end))
+        else {
+            // The file changed since the search; `replace_in_files` counts
+            // this file as skipped rather than rewriting the wrong span.
+            continue;
+        };
+        let expanded = editor_core::replacements(matched, pattern, replacement, opts)
+            .map_err(|e| e.to_string())?;
+        let Some(first) = expanded.into_iter().next() else {
+            continue;
+        };
+        out.push(index_core::FileReplacement {
+            path: path.clone(),
+            line: *line,
+            start: *start,
+            end: *end,
+            text: first.text,
+        });
+    }
+    Ok(out)
+}
+
+/// The two view-facing booleans as the domain type they mean.
+fn search_options(is_regex: bool, case_sensitive: bool) -> editor_core::SearchOptions {
+    editor_core::SearchOptions {
+        regex: is_regex,
+        case_sensitive,
+    }
+}
+
 fn to_ffi_result(result: Result<(), AppError>) -> FfiResult {
     match result {
         Ok(()) => FfiResult::default(),
@@ -1704,6 +1936,61 @@ impl ffi::DocumentManager {
         }
     }
 
+    pub fn find_matches(
+        mut self: Pin<&mut Self>,
+        text: &QString,
+        pattern: &QString,
+        is_regex: bool,
+        case_sensitive: bool,
+    ) -> Vec<ffi::FfiTextMatch> {
+        let opts = search_options(is_regex, case_sensitive);
+        match editor_core::find_matches(&text.to_string(), &pattern.to_string(), opts) {
+            Ok(matches) => matches
+                .into_iter()
+                .map(|m| ffi::FfiTextMatch {
+                    start: m.start as u32,
+                    end: m.end as u32,
+                })
+                .collect(),
+            Err(err) => {
+                self.as_mut()
+                    .find_pattern_invalid(QString::from(err.to_string().as_str()));
+                Vec::new()
+            }
+        }
+    }
+
+    pub fn replacements_for(
+        mut self: Pin<&mut Self>,
+        text: &QString,
+        pattern: &QString,
+        replacement: &QString,
+        is_regex: bool,
+        case_sensitive: bool,
+    ) -> Vec<ffi::FfiReplacement> {
+        let opts = search_options(is_regex, case_sensitive);
+        match editor_core::replacements(
+            &text.to_string(),
+            &pattern.to_string(),
+            &replacement.to_string(),
+            opts,
+        ) {
+            Ok(items) => items
+                .into_iter()
+                .map(|r| ffi::FfiReplacement {
+                    start: r.start as u32,
+                    end: r.end as u32,
+                    text: QString::from(r.text.as_str()),
+                })
+                .collect(),
+            Err(err) => {
+                self.as_mut()
+                    .find_pattern_invalid(QString::from(err.to_string().as_str()));
+                Vec::new()
+            }
+        }
+    }
+
     pub fn close_tab(mut self: Pin<&mut Self>, tab_id: u64) {
         let closed = self.session.borrow_mut().close_tab(TabId::from_raw(tab_id));
         if closed {
@@ -2073,7 +2360,7 @@ impl ffi::SearchModel {
         });
     }
 
-    pub fn search(self: Pin<&mut Self>, pattern: &QString, is_regex: bool) {
+    pub fn search(self: Pin<&mut Self>, pattern: &QString, is_regex: bool, case_sensitive: bool) {
         let pattern = pattern.to_string();
         let qt_thread = self.qt_thread();
         let slot = std::sync::Arc::clone(&self.index);
@@ -2088,7 +2375,7 @@ impl ffi::SearchModel {
                 });
                 return;
             };
-            let result = index.search(&pattern, is_regex);
+            let result = index.search(&pattern, is_regex, case_sensitive);
             drop(guard);
             match result {
                 Ok(matches) => {
@@ -2124,6 +2411,78 @@ impl ffi::SearchModel {
         });
     }
 
+    pub fn replace_in_files(
+        self: Pin<&mut Self>,
+        edits: Vec<ffi::FfiFileReplacement>,
+        pattern: &QString,
+        replacement: &QString,
+        is_regex: bool,
+        case_sensitive: bool,
+    ) {
+        let pattern = pattern.to_string();
+        let replacement = replacement.to_string();
+        let opts = search_options(is_regex, case_sensitive);
+        let edits: Vec<(std::path::PathBuf, usize, usize, usize)> = edits
+            .into_iter()
+            .map(|e| {
+                (
+                    std::path::PathBuf::from(e.path.to_string()),
+                    e.line as usize,
+                    e.start as usize,
+                    e.end as usize,
+                )
+            })
+            .collect();
+        let qt_thread = self.qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            let mut guard = slot.lock().unwrap();
+            let Some(index) = guard.as_mut() else {
+                drop(guard);
+                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                    model
+                        .as_mut()
+                        .replace_failed(QString::from("No project is open yet."));
+                });
+                return;
+            };
+
+            let resolved = match resolve_replacements(&edits, &pattern, &replacement, opts) {
+                Ok(resolved) => resolved,
+                Err(message) => {
+                    drop(guard);
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model
+                            .as_mut()
+                            .replace_failed(QString::from(message.as_str()));
+                    });
+                    return;
+                }
+            };
+            let result = index.replace_in_files(&resolved);
+            drop(guard);
+            match result {
+                Ok(report) => {
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model.as_mut().replace_finished(
+                            report.files as u32,
+                            report.matches as u32,
+                            report.skipped_files as u32,
+                        );
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model
+                            .as_mut()
+                            .replace_failed(QString::from(message.as_str()));
+                    });
+                }
+            }
+        });
+    }
+
     /// Quick Open's full-text half — same shape as `search` above (literal
     /// substring, background thread, per-match signal), just emitting the
     /// dedicated `quick_open_text_*` signals instead of `search`'s so
@@ -2144,7 +2503,7 @@ impl ffi::SearchModel {
                 });
                 return;
             };
-            let result = index.search(&pattern, false);
+            let result = index.search(&pattern, false, false);
             drop(guard);
             match result {
                 Ok(matches) => {
@@ -2371,6 +2730,7 @@ fn to_ffi_terminal_cell(cell: terminal_core::RenderCell) -> ffi::FfiTerminalCell
         italic: cell.attrs.italic,
         underline: cell.attrs.underline,
         inverse: cell.attrs.inverse,
+        selected: cell.selected,
     }
 }
 
@@ -2512,6 +2872,94 @@ impl ffi::TerminalSession {
 
     pub fn cursor_col(&self) -> u32 {
         self.snapshot().map_or(0, |g| g.cursor.col as u32)
+    }
+
+    /// Run `body` against the live emulator, if a session has been started.
+    /// The selection invokables take `&self` (not `Pin<&mut Self>`) because
+    /// the emulator lives behind the `Arc<Mutex<..>>` the reader thread also
+    /// holds — the `&mut` they need comes from the lock, not from the
+    /// QObject, so C++ is spared a pin dance for what is a read-side gesture.
+    fn with_emulator<T>(
+        &self,
+        body: impl FnOnce(&mut terminal_core::TerminalEmulator) -> T,
+    ) -> Option<T> {
+        let mut guard = self.emulator.lock().ok()?;
+        guard.as_mut().map(body)
+    }
+
+    pub fn selection_start(
+        &self,
+        row: u32,
+        col: u32,
+        right_half: bool,
+        kind: ffi::FfiSelectionKind,
+    ) {
+        let kind = match kind {
+            ffi::FfiSelectionKind::Word => terminal_core::SelectionKind::Word,
+            ffi::FfiSelectionKind::Line => terminal_core::SelectionKind::Line,
+            // `FfiSelectionKind` is a C++-facing enum, so it is not
+            // exhaustively matchable from Rust; Simple is the safe default.
+            _ => terminal_core::SelectionKind::Simple,
+        };
+        self.with_emulator(|emulator| {
+            emulator.selection_start(row as usize, col as usize, right_half, kind)
+        });
+    }
+
+    pub fn selection_update(&self, row: u32, col: u32, right_half: bool) {
+        self.with_emulator(|emulator| {
+            emulator.selection_update(row as usize, col as usize, right_half)
+        });
+    }
+
+    pub fn selection_clear(&self) {
+        self.with_emulator(terminal_core::TerminalEmulator::selection_clear);
+    }
+
+    pub fn has_selection(&self) -> bool {
+        self.with_emulator(|emulator| emulator.has_selection())
+            .unwrap_or(false)
+    }
+
+    pub fn selection_text(&self) -> QString {
+        let text = self
+            .with_emulator(|emulator| emulator.selection_text())
+            .flatten()
+            .unwrap_or_default();
+        QString::from(text.as_str())
+    }
+
+    pub fn paste(self: Pin<&mut Self>, text: &QString) {
+        let Some(payload) =
+            self.with_emulator(|emulator| emulator.paste_payload(&text.to_string()))
+        else {
+            return;
+        };
+        if let Some(session) = self.pty_session.borrow_mut().as_mut() {
+            let _ = session.write(payload.as_bytes());
+        }
+    }
+
+    pub fn link_at(&self, row: u32, col: u32) -> ffi::FfiTerminalLink {
+        let link = self
+            .with_emulator(|emulator| emulator.link_at(row as usize, col as usize))
+            .flatten();
+        match link {
+            Some(link) => ffi::FfiTerminalLink {
+                found: true,
+                url: QString::from(link.url.as_str()),
+                row: link.row as u32,
+                start_col: link.start_col as u32,
+                end_col: link.end_col as u32,
+            },
+            None => ffi::FfiTerminalLink {
+                found: false,
+                url: QString::default(),
+                row: 0,
+                start_col: 0,
+                end_col: 0,
+            },
+        }
     }
 }
 

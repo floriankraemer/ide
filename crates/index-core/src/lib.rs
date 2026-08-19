@@ -44,7 +44,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use grep_matcher::Matcher;
-use grep_regex::RegexMatcher;
+use grep_regex::RegexMatcherBuilder;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::Searcher;
 use tantivy::collector::TopDocs;
@@ -107,6 +107,27 @@ pub struct SearchMatch {
     pub line: usize,
     pub start: usize,
     pub end: usize,
+}
+
+/// One span to rewrite, addressed exactly like the [`SearchMatch`] it came
+/// from: 1-based `line`, byte offsets within that line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileReplacement {
+    pub path: PathBuf,
+    pub line: usize,
+    pub start: usize,
+    pub end: usize,
+    pub text: String,
+}
+
+/// What [`TextIndex::replace_in_files`] actually did.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ReplaceReport {
+    pub files: usize,
+    pub matches: usize,
+    /// Files left untouched because they changed since the search, or could
+    /// not be read/written.
+    pub skipped_files: usize,
 }
 
 struct Fields {
@@ -337,6 +358,67 @@ impl TextIndex {
         Ok(())
     }
 
+    /// Apply `edits` to the files they name and re-index each touched file.
+    ///
+    /// Spans are the ones `search` produced: `line` is 1-based, `start`/`end`
+    /// are byte offsets within that line. Edits are grouped per file and
+    /// applied back-to-front (last line first, rightmost span first) so that
+    /// earlier spans keep their recorded offsets.
+    ///
+    /// A file whose lines no longer contain the recorded spans — it changed
+    /// between the search and the replace — is skipped whole and counted in
+    /// [`ReplaceReport::skipped_files`], never partially rewritten.
+    ///
+    /// Open editor tabs need no special handling: the write lands on disk and
+    /// the existing watcher -> `check_external_change` flow prompts affected
+    /// tabs to reload, the same as any other outside-the-editor change.
+    pub fn replace_in_files(
+        &mut self,
+        edits: &[FileReplacement],
+    ) -> Result<ReplaceReport, IndexError> {
+        let mut by_file: BTreeMap<&Path, Vec<&FileReplacement>> = BTreeMap::new();
+        for edit in edits {
+            by_file.entry(edit.path.as_path()).or_default().push(edit);
+        }
+
+        let mut report = ReplaceReport::default();
+        for (path, mut file_edits) in by_file {
+            let Ok(content) = fs::read_to_string(path) else {
+                report.skipped_files += 1;
+                continue;
+            };
+            // `split_inclusive` keeps each line's terminator, so re-joining
+            // preserves the file's original line endings and trailing newline.
+            let mut lines: Vec<String> = content.split_inclusive('\n').map(String::from).collect();
+
+            // Last line first, rightmost span first within a line.
+            file_edits.sort_by(|a, b| b.line.cmp(&a.line).then(b.start.cmp(&a.start)));
+            let applicable = file_edits.iter().all(|e| {
+                e.line >= 1
+                    && e.start <= e.end
+                    && lines
+                        .get(e.line - 1)
+                        .is_some_and(|l| e.end <= l.trim_end_matches(['\n', '\r']).len())
+            });
+            if !applicable {
+                report.skipped_files += 1;
+                continue;
+            }
+
+            for edit in &file_edits {
+                lines[edit.line - 1].replace_range(edit.start..edit.end, &edit.text);
+            }
+            if fs::write(path, lines.concat()).is_err() {
+                report.skipped_files += 1;
+                continue;
+            }
+            report.files += 1;
+            report.matches += file_edits.len();
+            self.reindex_file(path)?;
+        }
+        Ok(report)
+    }
+
     /// Drop `path`'s entry from the index so it no longer appears in
     /// subsequent `search`/`find_definitions`/`find_usages` results (its
     /// text doc and every symbol/reference doc it produced, all keyed by
@@ -355,7 +437,16 @@ impl TextIndex {
     /// exact line/span matches. `pattern` is a literal substring unless
     /// `is_regex` is set, in which case it's a regex per the `regex` crate's
     /// syntax (what `grep-regex` implements).
-    pub fn search(&self, pattern: &str, is_regex: bool) -> Result<Vec<SearchMatch>, IndexError> {
+    ///
+    /// Every occurrence is reported, including several on one line — Replace
+    /// in Files applies the spans this returns, so missing the second match
+    /// on a line would silently leave it behind.
+    pub fn search(
+        &self,
+        pattern: &str,
+        is_regex: bool,
+        case_sensitive: bool,
+    ) -> Result<Vec<SearchMatch>, IndexError> {
         let owned_pattern;
         let regex_pattern: &str = if is_regex {
             pattern
@@ -363,24 +454,37 @@ impl TextIndex {
             owned_pattern = escape_literal(pattern);
             &owned_pattern
         };
-        let matcher =
-            RegexMatcher::new(regex_pattern).map_err(|e| IndexError::Query(e.to_string()))?;
+        let matcher = RegexMatcherBuilder::new()
+            .case_insensitive(!case_sensitive)
+            .build(regex_pattern)
+            .map_err(|e| IndexError::Query(e.to_string()))?;
 
         let mut matches = Vec::new();
-        for path in self.candidate_files(pattern)? {
+        for path in self.candidate_files(pattern, case_sensitive)? {
             let mut searcher = Searcher::new();
             let path_for_sink = path.clone();
             let search_result = searcher.search_path(
                 &matcher,
                 &path,
                 UTF8(|line_number, line| {
-                    if let Ok(Some(m)) = matcher.find(line.as_bytes()) {
+                    let mut from = 0;
+                    while let Ok(Some(m)) = matcher.find_at(line.as_bytes(), from) {
                         matches.push(SearchMatch {
                             path: path_for_sink.clone(),
                             line: line_number as usize,
                             start: m.start(),
                             end: m.end(),
                         });
+                        // A zero-width match would otherwise pin `from` and
+                        // spin forever on this line.
+                        from = if m.end() > m.start() {
+                            m.end()
+                        } else {
+                            m.end() + 1
+                        };
+                        if from > line.len() {
+                            break;
+                        }
                     }
                     Ok(true)
                 }),
@@ -403,14 +507,25 @@ impl TextIndex {
     // searches always fall back to "every indexed file" as candidates —
     // upgrade to extracting a literal prefix/substring from the regex if
     // Find-in-Files needs to stay fast on very large repos.
-    fn candidate_files(&self, pattern: &str) -> Result<Vec<PathBuf>, IndexError> {
+    // ponytail: a case-insensitive search skips ngram narrowing entirely
+    // and scans every indexed file — upgrade to a lowercased companion
+    // ngram field if case-insensitive Find in Files gets slow on big repos.
+    fn candidate_files(
+        &self,
+        pattern: &str,
+        case_sensitive: bool,
+    ) -> Result<Vec<PathBuf>, IndexError> {
         let searcher = self.reader.searcher();
         let num_docs = searcher.num_docs() as usize;
         if num_docs == 0 {
             return Ok(Vec::new());
         }
 
-        let narrowed = if pattern.chars().count() >= NGRAM_SIZE {
+        // The `content` ngram tokenizer is case-sensitive (no lowercase
+        // filter), so narrowing a case-insensitive query would drop files
+        // that only differ in case. Narrowing is an optimisation, not a
+        // correctness requirement — fall back to every text doc.
+        let narrowed = if case_sensitive && pattern.chars().count() >= NGRAM_SIZE {
             let query_parser = QueryParser::for_index(&self.index, vec![self.fields.content]);
             query_parser.parse_query(pattern).ok()
         } else {
@@ -631,7 +746,7 @@ mod tests {
         );
         let index = TextIndex::build(dir.path()).unwrap();
 
-        let matches = index.search("hello world", false).unwrap();
+        let matches = index.search("hello world", false, true).unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].path, file);
         assert_eq!(matches[0].line, 2);
@@ -640,12 +755,89 @@ mod tests {
     }
 
     #[test]
+    fn case_insensitive_search_finds_a_differently_cased_hit() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.txt", "Widget factory\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        assert!(index.search("widget", false, true).unwrap().is_empty());
+        assert_eq!(index.search("widget", false, false).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn every_occurrence_on_a_line_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.txt", "one two one two one\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let matches = index.search("one", false, true).unwrap();
+        assert_eq!(matches.len(), 3);
+        assert_eq!(
+            matches.iter().map(|m| m.start).collect::<Vec<_>>(),
+            vec![0, 8, 16]
+        );
+    }
+
+    #[test]
+    fn replace_in_files_rewrites_every_span_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(dir.path(), "a.txt", "one two one\nkeep me\none\n");
+        let mut index = TextIndex::build(dir.path()).unwrap();
+
+        let edits: Vec<FileReplacement> = index
+            .search("one", false, true)
+            .unwrap()
+            .into_iter()
+            .map(|m| FileReplacement {
+                path: m.path,
+                line: m.line,
+                start: m.start,
+                end: m.end,
+                text: "1".into(),
+            })
+            .collect();
+        let report = index.replace_in_files(&edits).unwrap();
+
+        assert_eq!(report.files, 1);
+        assert_eq!(report.matches, 3);
+        assert_eq!(report.skipped_files, 0);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "1 two 1\nkeep me\n1\n");
+        // The index followed the write, so the old text is gone from it.
+        assert!(index.search("one", false, true).unwrap().is_empty());
+    }
+
+    #[test]
+    fn replace_in_files_skips_a_file_that_changed_since_the_search() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(dir.path(), "a.txt", "needle here\n");
+        let mut index = TextIndex::build(dir.path()).unwrap();
+        let matches = index.search("needle", false, true).unwrap();
+
+        fs::write(&file, "x\n").unwrap();
+        let edits: Vec<FileReplacement> = matches
+            .into_iter()
+            .map(|m| FileReplacement {
+                path: m.path,
+                line: m.line,
+                start: m.start,
+                end: m.end,
+                text: "pin".into(),
+            })
+            .collect();
+        let report = index.replace_in_files(&edits).unwrap();
+
+        assert_eq!(report.files, 0);
+        assert_eq!(report.skipped_files, 1);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "x\n");
+    }
+
+    #[test]
     fn regex_search_finds_matching_lines() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "a.txt", "foo123\nbar\nfoo456\n");
         let index = TextIndex::build(dir.path()).unwrap();
 
-        let mut matches = index.search(r"foo\d+", true).unwrap();
+        let mut matches = index.search(r"foo\d+", true, true).unwrap();
         matches.sort_by_key(|m| m.line);
         assert_eq!(matches.len(), 2);
         assert_eq!(matches[0].line, 1);
@@ -670,7 +862,7 @@ mod tests {
         write(dir.path(), "kept.txt", "needle here too");
         let index = TextIndex::build(dir.path()).unwrap();
 
-        let matches = index.search("needle", false).unwrap();
+        let matches = index.search("needle", false, true).unwrap();
         assert_eq!(matches.len(), 1);
         assert!(matches[0].path.ends_with("kept.txt"));
     }
@@ -680,12 +872,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = write(dir.path(), "a.txt", "original content");
         let mut index = TextIndex::build(dir.path()).unwrap();
-        assert_eq!(index.search("updated", false).unwrap().len(), 0);
+        assert_eq!(index.search("updated", false, true).unwrap().len(), 0);
 
         fs::write(&file, "updated content").unwrap();
         index.reindex_file(&file).unwrap();
 
-        let matches = index.search("updated", false).unwrap();
+        let matches = index.search("updated", false, true).unwrap();
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].path, file);
     }
@@ -695,11 +887,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let file = write(dir.path(), "a.txt", "findme");
         let mut index = TextIndex::build(dir.path()).unwrap();
-        assert_eq!(index.search("findme", false).unwrap().len(), 1);
+        assert_eq!(index.search("findme", false, true).unwrap().len(), 1);
 
         index.remove_file(&file).unwrap();
 
-        assert_eq!(index.search("findme", false).unwrap().len(), 0);
+        assert_eq!(index.search("findme", false, true).unwrap().len(), 0);
     }
 
     // --- symbol/reference schema (E1) ---

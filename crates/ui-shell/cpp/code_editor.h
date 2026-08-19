@@ -3,6 +3,7 @@
 #include <QColor>
 #include <QPlainTextEdit>
 #include <QSize>
+#include <QPair>
 #include <QString>
 #include <QVector>
 #include <QWidget>
@@ -61,6 +62,12 @@ public:
     // invisible line. Blocks nothing when the line is already visible.
     void ensureBlockVisible(int blockNumber);
 
+    // Find (F3): the spans the find bar wants painted, as [start, end)
+    // document positions. Purely decorative — the widget neither computes
+    // them (editor_core::search does) nor tracks which one is current
+    // beyond `currentMatch`, an index into `matches` or -1 for none.
+    void setMatchSelections(const QVector<QPair<int, int>> &matches, int currentMatch);
+
     // S2: explicit override for the current-line band, "#rrggbb" or empty
     // for "derive it from the editor palette" (the same empty-means-theme
     // contract the editor background/foreground overrides use).
@@ -88,6 +95,8 @@ private:
     void setBlocksVisible(int fromBlockExclusive, int toBlockInclusive, bool visible);
 
     LineNumberArea *lineNumberArea_;
+    QVector<QPair<int, int>> matchSelections_;
+    int currentMatch_ = -1;
     QString currentLineColor_;
     QVector<FoldRange> foldRanges_;
     QVector<FoldRange> collapsedRanges_;

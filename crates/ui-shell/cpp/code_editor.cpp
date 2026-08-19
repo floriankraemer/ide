@@ -10,6 +10,7 @@
 #include <QPolygon>
 #include <QResizeEvent>
 #include <QTextBlock>
+#include <QTextCursor>
 #include <QTextDocument>
 #include <QTextEdit>
 
@@ -51,6 +52,15 @@ QColor CodeEditor::currentLineBandColor() const
                                        : QColor(currentLineColor_);
 }
 
+void CodeEditor::setMatchSelections(const QVector<QPair<int, int>> &matches, int currentMatch)
+{
+    matchSelections_ = matches;
+    currentMatch_ = currentMatch;
+    // Match highlights ride on the same extra-selection list as the
+    // current-line band, so both are (re)applied from one place.
+    highlightCurrentLine();
+}
+
 void CodeEditor::highlightCurrentLine()
 {
     QList<QTextEdit::ExtraSelection> selections;
@@ -62,6 +72,17 @@ void CodeEditor::highlightCurrentLine()
     line.cursor = textCursor();
     line.cursor.clearSelection();
     selections.append(line);
+
+    const QColor matchColor = tinted(palette().color(QPalette::Base), 190, 135);
+    const QColor currentMatchColor = tinted(palette().color(QPalette::Base), 260, 175);
+    for (int i = 0; i < matchSelections_.size(); ++i) {
+        QTextEdit::ExtraSelection match;
+        match.format.setBackground(i == currentMatch_ ? currentMatchColor : matchColor);
+        match.cursor = textCursor();
+        match.cursor.setPosition(matchSelections_[i].first);
+        match.cursor.setPosition(matchSelections_[i].second, QTextCursor::KeepAnchor);
+        selections.append(match);
+    }
 
     setExtraSelections(selections);
     lineNumberArea_->update();

@@ -1,6 +1,7 @@
 #include "main_window.h"
 
 #include "code_editor.h"
+#include "find_bar.h"
 #include "keymap_page.h"
 #include "syntax_highlighter.h"
 #include "terminal_widget.h"
@@ -44,6 +45,7 @@
 #include <QPoint>
 #include <QPushButton>
 #include <QRect>
+#include <QSet>
 #include <QSpinBox>
 #include <QStackedWidget>
 #include <QStringList>
@@ -189,6 +191,18 @@ public:
                             : nullptr;
     }
 
+    // The current editor's find bar, or nothing when no tab is open.
+    void withFindBar(const std::function<void(FindBar *)> &action)
+    {
+        auto *editor = currentEditor();
+        if (!editor) {
+            return;
+        }
+        if (auto *bar = editor->findChild<FindBar *>()) {
+            action(bar);
+        }
+    }
+
     // Task D: the TabId of whichever tab is current in the active group, or
     // 0 (the "no tab" sentinel, matching FfiOpenResult's convention) when
     // none is open. Public wrapper over the private tabIdAt/activeGroup_
@@ -226,6 +240,14 @@ public:
         }
         moveCursorToLine(editor, line + 1, static_cast<int>(qMax<qsizetype>(0, clamped - lineStart)));
     }
+
+    // Edit > Find/Replace/Find Next/Find Previous. Each just forwards to
+    // the current editor's own bar — the bar is what talks to
+    // `DocumentManager`, and finding no bar (no tab open) is a no-op.
+    void showFindBar() { withFindBar([](FindBar *bar) { bar->showFind(); }); }
+    void showReplaceBar() { withFindBar([](FindBar *bar) { bar->showReplace(); }); }
+    void findNext() { withFindBar([](FindBar *bar) { bar->findNext(); }); }
+    void findPrevious() { withFindBar([](FindBar *bar) { bar->findPrevious(); }); }
 
     // View > Go to Line... The spin box is bounded by the document, so an
     // out-of-range line can't be entered in the first place; the caret is
@@ -814,6 +836,9 @@ private:
         // to the gutter on the same revision-change hook that already
         // drives highlighting.
         new SyntaxHighlighter(editor->document(), docManager_->tabExtension(tabId), editor);
+        // Find (F3): one bar per editor, floated over it, hidden until
+        // Ctrl+F/Ctrl+R. Parented to the editor, so it dies with the tab.
+        new FindBar(editor, docManager_);
 
         // L3: only the visible tab's cursor should move the status bar —
         // guards against a background tab's programmatic cursor change
@@ -1041,19 +1066,32 @@ public:
         queryEdit_ = new QLineEdit(this);
         queryEdit_->setPlaceholderText(tr("Find in files..."));
         regexCheck_ = new QCheckBox(tr("Regex"), this);
+        caseCheck_ = new QCheckBox(tr("Match case"), this);
         resultsList_ = new QListWidget(this);
         statusLabel_ = new QLabel(this);
+        replaceEdit_ = new QLineEdit(this);
+        replaceEdit_->setPlaceholderText(tr("Replace with..."));
+        auto *replaceAllButton = new QPushButton(tr("Replace All"), this);
 
         auto *topRow = new QHBoxLayout();
         topRow->addWidget(queryEdit_, 1);
         topRow->addWidget(regexCheck_);
+        topRow->addWidget(caseCheck_);
+
+        auto *replaceRow = new QHBoxLayout();
+        replaceRow->addWidget(replaceEdit_, 1);
+        replaceRow->addWidget(replaceAllButton);
 
         auto *layout = new QVBoxLayout(this);
         layout->addLayout(topRow);
+        layout->addLayout(replaceRow);
         layout->addWidget(statusLabel_);
         layout->addWidget(resultsList_, 1);
 
         connect(queryEdit_, &QLineEdit::returnPressed, this, &FindInFilesPanel::runSearch);
+        connect(regexCheck_, &QCheckBox::toggled, this, &FindInFilesPanel::runSearch);
+        connect(caseCheck_, &QCheckBox::toggled, this, &FindInFilesPanel::runSearch);
+        connect(replaceAllButton, &QPushButton::clicked, this, &FindInFilesPanel::replaceAll);
         connect(resultsList_,
                 &QListWidget::itemDoubleClicked,
                 this,
@@ -1070,10 +1108,36 @@ public:
                 this,
                 &FindInFilesPanel::addMatch);
         connect(searchModel_, &SearchModel::searchFinished, this, [this]() {
-            statusLabel_->setText(tr("%1 match(es).").arg(resultsList_->count()));
+            // A replace re-runs the search to drop now-stale rows; its report
+            // is what the user wants to read, so it survives that refresh.
+            const QString counts = tr("%1 match(es).").arg(resultsList_->count());
+            statusLabel_->setText(pendingReplaceStatus_.isEmpty()
+                                    ? counts
+                                    : pendingReplaceStatus_ + QStringLiteral(" ") + counts);
+            pendingReplaceStatus_.clear();
         });
         connect(searchModel_, &SearchModel::searchFailed, this, [this](const QString &message) {
             statusLabel_->setText(tr("Search failed: %1").arg(message));
+        });
+        connect(searchModel_,
+                &SearchModel::replaceFinished,
+                this,
+                [this](quint32 files, quint32 matches, quint32 skipped) {
+                    pendingReplaceStatus_ = (
+                      skipped == 0
+                        ? tr("Replaced %1 match(es) in %2 file(s).").arg(matches).arg(files)
+                        : tr("Replaced %1 match(es) in %2 file(s); %3 file(s) skipped (changed "
+                             "since the search).")
+                            .arg(matches)
+                            .arg(files)
+                            .arg(skipped));
+                    statusLabel_->setText(pendingReplaceStatus_);
+                    // The files on disk moved on; the listed spans no longer
+                    // describe them, so re-run rather than leave stale rows.
+                    runSearch();
+                });
+        connect(searchModel_, &SearchModel::replaceFailed, this, [this](const QString &message) {
+            statusLabel_->setText(tr("Replace failed: %1").arg(message));
         });
     }
 
@@ -1093,17 +1157,69 @@ private:
         }
         resultsList_->clear();
         statusLabel_->setText(tr("Searching..."));
-        searchModel_->search(pattern, regexCheck_->isChecked());
+        searchModel_->search(pattern, regexCheck_->isChecked(), caseCheck_->isChecked());
     }
 
     void addMatch(const QString &path, quint32 line, quint32 start, quint32 end, const QString &snippet)
     {
-        Q_UNUSED(end);
         auto *item = new QListWidgetItem(
           tr("%1:%2: %3").arg(QFileInfo(path).fileName()).arg(line).arg(snippet), resultsList_);
         item->setData(Qt::UserRole, path);
         item->setData(Qt::UserRole + 1, line);
         item->setData(Qt::UserRole + 2, start);
+        item->setData(Qt::UserRole + 3, end);
+        // Checked by default, so Replace All means "all of these" unless the
+        // user opts individual matches out.
+        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
+        item->setCheckState(Qt::Checked);
+    }
+
+    // Replace only the checked matches, after a confirmation naming the
+    // counts — a project-wide rewrite has no undo, so it is never one click
+    // away.
+    void replaceAll()
+    {
+        rust::Vec<FfiFileReplacement> edits;
+        QSet<QString> files;
+        for (int i = 0; i < resultsList_->count(); ++i) {
+            const QListWidgetItem *item = resultsList_->item(i);
+            if (item->checkState() != Qt::Checked) {
+                continue;
+            }
+            const QString path = item->data(Qt::UserRole).toString();
+            files.insert(path);
+            FfiFileReplacement edit;
+            edit.path = path;
+            edit.line = item->data(Qt::UserRole + 1).toUInt();
+            edit.start = item->data(Qt::UserRole + 2).toUInt();
+            edit.end = item->data(Qt::UserRole + 3).toUInt();
+            edits.push_back(std::move(edit));
+        }
+        if (edits.empty()) {
+            statusLabel_->setText(tr("No matches selected."));
+            return;
+        }
+
+        const auto answer = QMessageBox::question(
+          this,
+          tr("Replace in Files"),
+          tr("Replace %1 match(es) across %2 file(s) with \"%3\"?\n\nThis writes to disk and "
+             "cannot be undone.")
+            .arg(edits.size())
+            .arg(files.size())
+            .arg(replaceEdit_->text()),
+          QMessageBox::Yes | QMessageBox::No,
+          QMessageBox::No);
+        if (answer != QMessageBox::Yes) {
+            return;
+        }
+
+        statusLabel_->setText(tr("Replacing..."));
+        searchModel_->replaceInFiles(std::move(edits),
+                                     queryEdit_->text(),
+                                     replaceEdit_->text(),
+                                     regexCheck_->isChecked(),
+                                     caseCheck_->isChecked());
     }
 
     void openSelectedMatch(QListWidgetItem *item)
@@ -1121,6 +1237,9 @@ private:
     EditorTabs *editorTabs_;
     QLineEdit *queryEdit_ = nullptr;
     QCheckBox *regexCheck_ = nullptr;
+    QCheckBox *caseCheck_ = nullptr;
+    QLineEdit *replaceEdit_ = nullptr;
+    QString pendingReplaceStatus_;
     QListWidget *resultsList_ = nullptr;
     QLabel *statusLabel_ = nullptr;
 };
@@ -1863,6 +1982,7 @@ struct CentralWidgets
     ClassViewPanel *classViewPanel;
     ads::CDockWidget *classViewDock;
     ads::CDockWidget *terminalDock;
+    TerminalWidget *terminalWidget;
     FindUsagesPanel *findUsagesPanel;
     ads::CDockWidget *findUsagesDock;
     QuickOpenDialog *quickOpenDialog;
@@ -1938,7 +2058,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // conventional spot for an embedded shell in JetBrains/VS-style IDEs.
     // The widget itself only starts the PTY once it's actually shown/sized
     // (TerminalWidget::showEvent/resizeEvent), not eagerly here.
-    auto *terminalWidget = new TerminalWidget(terminalSession, dockManager);
+    auto *terminalWidget = new TerminalWidget(terminalSession, appSettings, dockManager);
     auto *terminalDock = new ads::CDockWidget(dockManager, QObject::tr("Terminal"));
     terminalDock->setWidget(terminalWidget);
     dockManager->addDockWidget(ads::BottomDockWidgetArea, terminalDock, editorArea);
@@ -2131,7 +2251,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
       });
 
     return CentralWidgets{editorTabs,      dockManager,     findInFilesPanel, findInFilesDock,
-                           classViewPanel,  classViewDock,   terminalDock,
+                           classViewPanel,  classViewDock,   terminalDock,     terminalWidget,
                            findUsagesPanel, findUsagesDock,  quickOpenDialog};
 }
 
@@ -2213,6 +2333,13 @@ QMainWindow *buildMainWindow()
     // colour pickers use.
     auto actions = std::make_shared<QHash<QString, QAction *>>();
 
+    // The terminal's Copy/Paste are QActions on the terminal widget itself
+    // (widget-scoped shortcuts, so Ctrl+C keeps reaching the shell), but they
+    // are registered in the same map as the menu actions so Settings > Keymap
+    // lists them and applyKeymap() re-applies a rebinding without a restart.
+    actions->insert(QStringLiteral("terminal.copy"), central.terminalWidget->copyAction());
+    actions->insert(QStringLiteral("terminal.paste"), central.terminalWidget->pasteAction());
+
     QMenu *fileMenu = window->menuBar()->addMenu(QObject::tr("&File"));
     QAction *openFolderAction = registerAction(fileMenu, QStringLiteral("file.openFolder"),
                                                 QObject::tr("Open Folder..."), appSettings, *actions);
@@ -2271,6 +2398,23 @@ QMainWindow *buildMainWindow()
     QAction *pasteAction = registerAction(editMenu, QStringLiteral("edit.paste"),
                                            QObject::tr("Paste"), appSettings, *actions);
     editMenu->addSeparator();
+    QAction *findAction = registerAction(editMenu, QStringLiteral("edit.find"),
+                                         QObject::tr("Find..."), appSettings, *actions);
+    QObject::connect(findAction, &QAction::triggered, window,
+                     [editorTabs]() { editorTabs->showFindBar(); });
+    QAction *replaceAction = registerAction(editMenu, QStringLiteral("edit.replace"),
+                                            QObject::tr("Replace..."), appSettings, *actions);
+    QObject::connect(replaceAction, &QAction::triggered, window,
+                     [editorTabs]() { editorTabs->showReplaceBar(); });
+    QAction *findNextAction = registerAction(editMenu, QStringLiteral("edit.findNext"),
+                                             QObject::tr("Find Next"), appSettings, *actions);
+    QObject::connect(findNextAction, &QAction::triggered, window,
+                     [editorTabs]() { editorTabs->findNext(); });
+    QAction *findPreviousAction = registerAction(editMenu, QStringLiteral("edit.findPrevious"),
+                                                 QObject::tr("Find Previous"), appSettings,
+                                                 *actions);
+    QObject::connect(findPreviousAction, &QAction::triggered, window,
+                     [editorTabs]() { editorTabs->findPrevious(); });
     QAction *findInFilesAction = registerAction(editMenu, QStringLiteral("edit.findInFiles"),
                                                  QObject::tr("Find in Files..."), appSettings,
                                                  *actions);

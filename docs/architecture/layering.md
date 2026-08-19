@@ -20,7 +20,7 @@ graph TB
 
 | Crate | May depend on | Qt/cxx-qt allowed |
 |-------|---------------|-------------------|
-| `editor-core` | (std only) | **No** |
+| `editor-core` | (std, ropey, regex) | **No** |
 | `project-model` | (std, notify) | **No** |
 | `syntax-core` | (std, tree-sitter, tree-sitter-rust, tree-sitter-json) | **No** |
 | `app-config` | (std, dirs, serde, toml) | **No** |

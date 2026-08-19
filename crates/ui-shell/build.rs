@@ -242,6 +242,8 @@ fn main() {
         // 0.9), so this is also the first place build.rs runs moc directly.
         .cpp_file("cpp/code_editor.h")
         .cpp_file("cpp/code_editor.cpp")
+        .cpp_file("cpp/find_bar.h")
+        .cpp_file("cpp/find_bar.cpp")
         .cpp_file("cpp/keymap_page.cpp")
         .cpp_file("cpp/theme.cpp")
         .cpp_file("cpp/syntax_highlighter.cpp")

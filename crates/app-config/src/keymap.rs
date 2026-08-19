@@ -85,6 +85,30 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "Ctrl+V",
     },
     ActionDef {
+        id: "edit.find",
+        label: "Find...",
+        category: "Edit",
+        default_shortcut: "Ctrl+F",
+    },
+    ActionDef {
+        id: "edit.replace",
+        label: "Replace...",
+        category: "Edit",
+        default_shortcut: "Ctrl+R",
+    },
+    ActionDef {
+        id: "edit.findNext",
+        label: "Find Next",
+        category: "Edit",
+        default_shortcut: "F3",
+    },
+    ActionDef {
+        id: "edit.findPrevious",
+        label: "Find Previous",
+        category: "Edit",
+        default_shortcut: "Shift+F3",
+    },
+    ActionDef {
         id: "edit.findInFiles",
         label: "Find in Files...",
         category: "Edit",
@@ -113,6 +137,21 @@ pub const ACTIONS: &[ActionDef] = &[
         label: "Go to Line...",
         category: "View",
         default_shortcut: "Ctrl+G",
+    },
+    // Terminal copy/paste deliberately avoid Ctrl+C/Ctrl+V: in a terminal
+    // those belong to the shell (Ctrl+C is SIGINT), so the conventional
+    // Ctrl+Shift pair is the default here.
+    ActionDef {
+        id: "terminal.copy",
+        label: "Copy",
+        category: "Terminal",
+        default_shortcut: "Ctrl+Shift+C",
+    },
+    ActionDef {
+        id: "terminal.paste",
+        label: "Paste",
+        category: "Terminal",
+        default_shortcut: "Ctrl+Shift+V",
     },
 ];
 
