@@ -24,6 +24,7 @@ per `CLAUDE.md`.
 | I | done | fdb444e |
 | J | done | d30429e |
 | K | done | 5f7439d |
+| L | done | `262ca25` |
 
 ## Context
 
@@ -110,6 +111,7 @@ must stay empty.
 | I | Class View — project-wide tier | Data source swap to `index-core` symbol query (same widget/model as D) | Manual: project-wide tree matches indexed symbols |
 | J | Symbol Search UI | Go-to-symbol (`is_definition=true` query) + find-usages (all occurrences by name, grouped by file) | Manual: multi-file fixture, find a symbol and its usages |
 | K | Class View/Search refinements | C# auto-properties captured as `SymbolKind::Field` (tags.scm gap fix); alphabetical sort toggle in Class View (both tiers); Quick Open merges Find in Files' full-text results into a second "Text matches" section | `cargo test -p syntax-core`: new C# property fixture; manual: sort toggle, mixed symbol+text quick-open query |
+| L | Current-line highlight | Full-width band behind the cursor's line plus a matching gutter row, theme-derived by default and overridable from Settings > Editor (`editor_colors.current_line`) | Manual: band follows the cursor; Settings colour applies live, persists, and Cancel reverts |
 
 ## Sequencing
 

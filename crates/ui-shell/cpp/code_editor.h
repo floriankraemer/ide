@@ -1,10 +1,13 @@
 #pragma once
 
+#include <QColor>
 #include <QPlainTextEdit>
 #include <QSize>
+#include <QString>
 #include <QVector>
 #include <QWidget>
 
+class QEvent;
 class QMouseEvent;
 class QPaintEvent;
 class QResizeEvent;
@@ -53,19 +56,34 @@ public:
     // not threaded through app-core/TabId, not persisted across sessions.
     void setFoldRanges(const QVector<FoldRange> &ranges);
 
+    // S2: explicit override for the current-line band, "#rrggbb" or empty
+    // for "derive it from the editor palette" (the same empty-means-theme
+    // contract the editor background/foreground overrides use).
+    void setCurrentLineColor(const QString &hex);
+
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    void changeEvent(QEvent *event) override;
 
 private slots:
     void updateLineNumberAreaWidth(int newBlockCount);
     void updateLineNumberArea(const QRect &rect, int dy);
+    // Paints a full-width band behind the line holding the cursor, in
+    // `currentLineBandColor()`.
+    void highlightCurrentLine();
 
 private:
+    // The band colour: the explicit override when set, otherwise a tint of
+    // the editor palette (set per-theme by MainWindow) so it follows the
+    // theme by default.
+    QColor currentLineBandColor() const;
+
     bool foldStartingAt(int blockNumber, FoldRange *out) const;
     void toggleFold(int blockNumber);
     void setBlocksVisible(int fromBlockExclusive, int toBlockInclusive, bool visible);
 
     LineNumberArea *lineNumberArea_;
+    QString currentLineColor_;
     QVector<FoldRange> foldRanges_;
     QVector<FoldRange> collapsedRanges_;
 };

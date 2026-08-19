@@ -254,13 +254,15 @@ public:
     // only the roles with a value keeps that default live even after a
     // theme switch, rather than freezing whatever color was current when
     // the override was set.
-    void setEditorColors(const QString &backgroundHex, const QString &foregroundHex)
+    void setEditorColors(const QString &backgroundHex, const QString &foregroundHex,
+                          const QString &currentLineHex)
     {
         editorBackground_ = backgroundHex;
         editorForeground_ = foregroundHex;
+        editorCurrentLine_ = currentLineHex;
         for (int i = 0; i < tabWidget_->count(); ++i) {
             if (auto *editor = qobject_cast<QPlainTextEdit *>(tabWidget_->widget(i))) {
-                applyEditorPalette(editor);
+                applyEditorAppearance(editor);
             }
         }
     }
@@ -436,6 +438,16 @@ private:
     }
 
     // Shared with setEditorColors, and with onTabOpened's initial apply.
+    void applyEditorAppearance(QPlainTextEdit *editor)
+    {
+        applyEditorPalette(editor);
+        // The current-line band is not a QPalette role, so it can't ride
+        // along with the palette and is pushed to the editor separately.
+        if (auto *codeEditor = qobject_cast<CodeEditor *>(editor)) {
+            codeEditor->setCurrentLineColor(editorCurrentLine_);
+        }
+    }
+
     void applyEditorPalette(QPlainTextEdit *editor)
     {
         QPalette pal = qApp->palette();
@@ -455,7 +467,7 @@ private:
         editor->setPlainText(docManager_->tabContent(tabId));
         editor->document()->setModified(false);
         editor->setFont(editorFont_);
-        applyEditorPalette(editor);
+        applyEditorAppearance(editor);
         // Y2: self-parents to editor->document(), no manual lifetime
         // management needed. PlainText (unrecognized/no extension) yields
         // no spans from the incremental highlighter, so this is a
@@ -517,6 +529,7 @@ private:
     QFont editorFont_;
     QString editorBackground_;
     QString editorForeground_;
+    QString editorCurrentLine_;
     QLabel *positionLabel_ = nullptr;
     QLabel *languageLabel_ = nullptr;
 };
@@ -1236,8 +1249,9 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     // than each capturing a stale copy.
     auto backgroundColor = std::make_shared<QString>(originalColors.background);
     auto foregroundColor = std::make_shared<QString>(originalColors.foreground);
-    auto applyColorsLive = [editorTabs, backgroundColor, foregroundColor]() {
-        editorTabs->setEditorColors(*backgroundColor, *foregroundColor);
+    auto currentLineColor = std::make_shared<QString>(originalColors.current_line);
+    auto applyColorsLive = [editorTabs, backgroundColor, foregroundColor, currentLineColor]() {
+        editorTabs->setEditorColors(*backgroundColor, *foregroundColor, *currentLineColor);
     };
 
     auto *backgroundButton = new QPushButton(QObject::tr("Background Color..."), editorPage);
@@ -1270,6 +1284,24 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
                       });
     editorForm->addRow(foregroundButton);
 
+    auto *currentLineButton = new QPushButton(QObject::tr("Current Line Color..."), editorPage);
+    QObject::connect(currentLineButton, &QPushButton::clicked, &dialog,
+                      [&dialog, currentLineColor, applyColorsLive]() {
+                          // Empty means "derived from the theme", which has no
+                          // single hex to seed the picker with — the editor
+                          // background is the closest starting point.
+                          const QColor initial = currentLineColor->isEmpty()
+                            ? qApp->palette().color(QPalette::Base)
+                            : QColor(*currentLineColor);
+                          const QColor chosen = QColorDialog::getColor(
+                            initial, &dialog, QObject::tr("Current Line Color"));
+                          if (chosen.isValid()) {
+                              *currentLineColor = chosen.name();
+                              applyColorsLive();
+                          }
+                      });
+    editorForm->addRow(currentLineButton);
+
     pages->addWidget(editorPage);
 
     QObject::connect(categoryList, &QListWidget::currentRowChanged, pages,
@@ -1292,11 +1324,12 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
         appSettings->saveTheme(themeCombo->currentData().toString());
         appSettings->saveEditorFont(fontFamilyEdit->text(),
                                      static_cast<quint32>(fontSizeSpin->value()));
-        appSettings->saveEditorColors(*backgroundColor, *foregroundColor);
+        appSettings->saveEditorColors(*backgroundColor, *foregroundColor, *currentLineColor);
     } else {
         qApp->setStyleSheet(styleSheetForTheme(originalTheme));
         editorTabs->setEditorFont(QFont(originalFont.family, static_cast<int>(originalFont.size)));
-        editorTabs->setEditorColors(originalColors.background, originalColors.foreground);
+        editorTabs->setEditorColors(originalColors.background, originalColors.foreground,
+                                     originalColors.current_line);
     }
 }
 
@@ -1639,7 +1672,8 @@ QMainWindow *buildMainWindow()
     const FfiEditorFont savedFont = appSettings->editorFont();
     editorTabs->setEditorFont(QFont(savedFont.family, static_cast<int>(savedFont.size)));
     const FfiEditorColors savedColors = appSettings->editorColors();
-    editorTabs->setEditorColors(savedColors.background, savedColors.foreground);
+    editorTabs->setEditorColors(savedColors.background, savedColors.foreground,
+                                 savedColors.current_line);
 
     // L3: line:col + language update per current tab / cursor move; "UTF-8"
     // is static since only UTF-8 is supported today (US-2b's binary-file
