@@ -45,7 +45,7 @@ per `CLAUDE.md`.
 | M3 | done | `cbe8bec` (`cargo test -p mcp-server -p app-core`; Qt-leakage gate clean on `mcp-server`; Docker `linux-artifact` build verified; MCP-client-against-running-UI round trip not run, no display here) |
 | M4 | done | `c57201a` (`cargo test -p app-core -p mcp-server`; Docker `linux-artifact` build verified; MCP-client-against-running-UI round trip not run, no display here) |
 | M5 | done | `b461245` (`cargo test -p app-core -p mcp-server`; Docker `linux-artifact` build verified; MCP-client-writes-visibly-affect-UI round trip not run, no display here) |
-| D5 | done | `330d156` (`cargo test --workspace`; Docker `linux-artifact` build verified; driven end to end under Xvfb — split, close-others, group collapse, nested split, relaunch restore all confirmed by screenshot) |
+| D5 | done | `4d3416b` (`cargo test --workspace`; Docker `linux-artifact` build verified; driven end to end under Xvfb — split, close-others, group collapse, nested split, relaunch restore all confirmed by screenshot) |
 
 ## Context
 
