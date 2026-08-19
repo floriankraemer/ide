@@ -10,14 +10,14 @@ The design decisions are recorded in [ADR 0009](decisions/0009-find-and-replace.
 
 | Task | Status | Commit |
 |---|---|---|
-| F1 | done | `pending` |
-| F2 | done | `pending` |
-| F3 | done | `pending` |
-| F4 | done | `pending` |
-| F5 | done | `pending` |
-| F6 | done | `pending` |
-| F7 | done | `pending` |
-| F8 | done | `pending` |
+| F1 | done | `bd765ee` |
+| F2 | done | `bd765ee` |
+| F3 | done | `bd765ee` |
+| F4 | done | `bd765ee` |
+| F5 | done | `bd765ee` |
+| F6 | done | `bd765ee` |
+| F7 | done | `bd765ee` |
+| F8 | done | `bd765ee` |
 
 ## Context
 
