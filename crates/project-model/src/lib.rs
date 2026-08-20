@@ -69,6 +69,10 @@ pub struct TreeNode {
 
 /// An in-memory snapshot of the project root's directory tree, built by
 /// walking the root once. Node 0 is always the root.
+/// Directory the project search index is written into (owned by
+/// `index-core`, mirrored here only so the sidebar tree can skip it).
+const INDEX_DIR_NAME: &str = ".ide-index";
+
 pub struct DirectoryTree {
     nodes: Vec<TreeNode>,
 }
@@ -119,6 +123,11 @@ impl DirectoryTree {
             let path = entry.path();
             let is_dir = entry.file_type()?.is_dir();
             let name = entry.file_name().to_string_lossy().into_owned();
+            if is_dir && name == INDEX_DIR_NAME {
+                // The search index the IDE writes into the project is an
+                // implementation detail, not part of the user's project.
+                continue;
+            }
 
             let id = nodes.len();
             nodes.push(TreeNode {
@@ -604,5 +613,22 @@ mod tests {
             .map(|&id| tree.node(id).name.as_str())
             .collect();
         assert!(root_children.contains(&"brand_new.txt"));
+    }
+
+    #[test]
+    fn the_search_index_directory_is_hidden_from_the_tree() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".ide-index")).unwrap();
+        fs::write(dir.path().join(".ide-index/meta.json"), "{}").unwrap();
+        fs::write(dir.path().join("visible.txt"), "x").unwrap();
+
+        let tree = DirectoryTree::build(dir.path()).unwrap();
+        let names: Vec<&str> = (0..tree.len())
+            .map(|i| tree.node(i).name.as_str())
+            .collect();
+
+        assert!(names.contains(&"visible.txt"));
+        assert!(!names.contains(&".ide-index"));
+        assert!(!names.contains(&"meta.json"));
     }
 }
