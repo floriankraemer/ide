@@ -388,6 +388,60 @@ fn line_and_col_at(text: &str, offset: usize) -> (usize, usize) {
     (line, clamped - line_start)
 }
 
+/// Where one project's index is in its lifecycle. Opening a project starts
+/// a build that takes seconds to minutes on a real repository, so "there is
+/// no index to query" is four different situations to a user — no project,
+/// still building, ready, or a build that failed — and only one of them is
+/// "no project is open". Keeping them apart is what stops a query fired
+/// right after Open Folder from claiming no folder is open.
+#[derive(Default)]
+pub enum IndexSlot {
+    /// No project has been opened in this session yet.
+    #[default]
+    NoProject,
+    /// A project is open and its index is being built or brought up to date.
+    Building,
+    /// Ready to answer queries.
+    Ready(Box<TextIndex>),
+    /// A project is open but its index could not be built.
+    Failed(String),
+}
+
+impl IndexSlot {
+    /// The index, if it can answer a query right now.
+    pub fn ready(&self) -> Option<&TextIndex> {
+        match self {
+            IndexSlot::Ready(index) => Some(index),
+            _ => None,
+        }
+    }
+
+    /// Mutable access for the incremental single-file updates the
+    /// filesystem watcher drives.
+    pub fn ready_mut(&mut self) -> Option<&mut TextIndex> {
+        match self {
+            IndexSlot::Ready(index) => Some(index),
+            _ => None,
+        }
+    }
+
+    /// Why a query cannot run right now, phrased for the user; `None` when
+    /// the index is ready. This is the whole rule the UI layer needs — the
+    /// bridge only forwards the string it gets here.
+    pub fn unavailable_reason(&self) -> Option<String> {
+        match self {
+            IndexSlot::Ready(_) => None,
+            IndexSlot::NoProject => Some("No project is open yet.".to_string()),
+            IndexSlot::Building => {
+                Some("The project index is still being built — try again in a moment.".to_string())
+            }
+            IndexSlot::Failed(message) => {
+                Some(format!("The project index could not be built: {message}"))
+            }
+        }
+    }
+}
+
 /// A tantivy-backed text index for one project root, with ripgrep-crate
 /// verification on top (see module docs for the two-stage design).
 pub struct TextIndex {
@@ -1413,6 +1467,42 @@ mod tests {
         }
         fs::write(&path, content).unwrap();
         path
+    }
+
+    #[test]
+    fn a_project_whose_index_is_still_building_is_not_reported_as_no_project() {
+        let building = IndexSlot::Building.unavailable_reason().unwrap();
+        assert!(building.contains("still being built"), "{building}");
+        assert_ne!(
+            building,
+            IndexSlot::NoProject.unavailable_reason().unwrap(),
+            "an open project must never be reported as no project at all"
+        );
+    }
+
+    #[test]
+    fn a_failed_index_build_reports_its_own_error() {
+        let reason = IndexSlot::Failed("disk on fire".to_string())
+            .unavailable_reason()
+            .unwrap();
+        assert!(reason.contains("disk on fire"), "{reason}");
+    }
+
+    #[test]
+    fn a_ready_index_has_no_reason_and_answers_queries() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.rs", "let needle = 2;\n");
+        let slot = IndexSlot::Ready(Box::new(TextIndex::build(dir.path()).unwrap()));
+        assert_eq!(slot.unavailable_reason(), None);
+        assert!(slot.ready().is_some());
+    }
+
+    #[test]
+    fn only_a_ready_slot_hands_out_the_index() {
+        assert!(IndexSlot::default().ready().is_none());
+        assert!(IndexSlot::Building.ready().is_none());
+        assert!(IndexSlot::Building.ready_mut().is_none());
+        assert!(IndexSlot::Failed("x".to_string()).ready().is_none());
     }
 
     #[test]
