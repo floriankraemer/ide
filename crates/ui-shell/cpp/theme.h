@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QColor>
+#include <QPalette>
 #include <QString>
 
 namespace ui_shell {
@@ -29,5 +30,18 @@ QString lightStyleSheet();
 // an unrecognized value degrades to the default rather than an unstyled
 // window.
 QString styleSheetForTheme(const QString &themeName);
+
+// The QSS above only reaches widgets we wrote selectors for. Qt Advanced
+// Docking System ships its own stylesheet, applied to the CDockManager
+// widget itself, and every color in it resolves through `palette(...)` roles
+// — as does `find_bar.cpp`. A widget-level sheet beats the application one
+// on equal specificity, so dock chrome can only be themed by giving the
+// application a palette that matches the stylesheet (issue #11).
+QPalette paletteForTheme(const QString &themeName);
+
+// Applies both halves of a theme to the running QApplication. Callers should
+// use this rather than setStyleSheet() alone, so palette and QSS can never
+// drift apart.
+void applyTheme(const QString &themeName);
 
 } // namespace ui_shell
