@@ -2552,7 +2552,7 @@ impl ffi::KeymapEditor {
 /// once and only re-indexing serialises them.
 #[derive(Default)]
 pub struct SearchModelRust {
-    index: std::sync::Arc<std::sync::RwLock<Option<index_core::TextIndex>>>,
+    index: std::sync::Arc<std::sync::RwLock<index_core::IndexSlot>>,
     context: std::sync::Arc<std::sync::Mutex<SearchContext>>,
     /// Separate query guards so the popup and the results panel never
     /// cancel each other.
@@ -2687,15 +2687,20 @@ impl ffi::SearchModel {
         let qt_thread = self.qt_thread();
         let slot = std::sync::Arc::clone(&self.index);
         self.as_ref().load_context();
+        // Marked as building *before* the worker starts, so a query fired in
+        // the seconds-to-minutes window between Open Folder and `indexReady`
+        // is answered with "still building" rather than "no project open".
+        *slot.write().unwrap() = index_core::IndexSlot::Building;
         std::thread::spawn(move || match index_core::TextIndex::open_or_build(&root) {
             Ok(index) => {
-                *slot.write().unwrap() = Some(index);
+                *slot.write().unwrap() = index_core::IndexSlot::Ready(Box::new(index));
                 let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
                     model.as_mut().index_ready();
                 });
             }
             Err(err) => {
                 let message = err.to_string();
+                *slot.write().unwrap() = index_core::IndexSlot::Failed(message.clone());
                 let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
                     model.as_mut().index_failed(QString::from(message.as_str()));
                 });
@@ -2707,7 +2712,7 @@ impl ffi::SearchModel {
         let path = std::path::PathBuf::from(path.to_string());
         let slot = std::sync::Arc::clone(&self.index);
         std::thread::spawn(move || {
-            if let Some(index) = slot.write().unwrap().as_mut() {
+            if let Some(index) = slot.write().unwrap().ready_mut() {
                 // A file that became unreadable is dropped from the index by
                 // `reindex_file` itself, so there is nothing to report here.
                 let _ = index.reindex_file(&path);
@@ -2719,7 +2724,7 @@ impl ffi::SearchModel {
         let path = std::path::PathBuf::from(path.to_string());
         let slot = std::sync::Arc::clone(&self.index);
         std::thread::spawn(move || {
-            if let Some(index) = slot.write().unwrap().as_mut() {
+            if let Some(index) = slot.write().unwrap().ready_mut() {
                 let _ = index.remove_file(&path);
             }
         });
@@ -2821,12 +2826,13 @@ impl ffi::SearchModel {
             }
 
             let index_guard = slot.read().unwrap();
-            let Some(index) = index_guard.as_ref() else {
+            let Some(index) = index_guard.ready() else {
+                let reason = index_guard.unavailable_reason().unwrap_or_default();
                 drop(index_guard);
                 let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
                     model
                         .as_mut()
-                        .query_failed(generation, QString::from("No project is open yet."));
+                        .query_failed(generation, QString::from(reason.as_str()));
                 });
                 return;
             };
@@ -2938,12 +2944,13 @@ impl ffi::SearchModel {
 
         std::thread::spawn(move || {
             let index_guard = slot.read().unwrap();
-            let Some(index) = index_guard.as_ref() else {
+            let Some(index) = index_guard.ready() else {
+                let reason = index_guard.unavailable_reason().unwrap_or_default();
                 drop(index_guard);
                 let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
                     model
                         .as_mut()
-                        .search_failed(generation, QString::from("No project is open yet."));
+                        .search_failed(generation, QString::from(reason.as_str()));
                 });
                 return;
             };
@@ -3011,12 +3018,12 @@ impl ffi::SearchModel {
         let slot = std::sync::Arc::clone(&self.index);
         std::thread::spawn(move || {
             let mut guard = slot.write().unwrap();
-            let Some(index) = guard.as_mut() else {
+            let reason = guard.unavailable_reason();
+            let Some(index) = guard.ready_mut() else {
+                let reason = reason.unwrap_or_default();
                 drop(guard);
-                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
-                    model
-                        .as_mut()
-                        .replace_failed(QString::from("No project is open yet."));
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model.as_mut().replace_failed(QString::from(reason.as_str()));
                 });
                 return;
             };
@@ -3065,12 +3072,11 @@ impl ffi::SearchModel {
         let slot = std::sync::Arc::clone(&self.index);
         std::thread::spawn(move || {
             let guard = slot.read().unwrap();
-            let Some(index) = guard.as_ref() else {
+            let Some(index) = guard.ready() else {
+                let reason = guard.unavailable_reason().unwrap_or_default();
                 drop(guard);
-                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
-                    model
-                        .as_mut()
-                        .project_symbols_failed(QString::from("No project is open yet."));
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model.as_mut().project_symbols_failed(QString::from(reason.as_str()));
                 });
                 return;
             };
@@ -3118,12 +3124,11 @@ impl ffi::SearchModel {
         let slot = std::sync::Arc::clone(&self.index);
         std::thread::spawn(move || {
             let guard = slot.read().unwrap();
-            let Some(index) = guard.as_ref() else {
+            let Some(index) = guard.ready() else {
+                let reason = guard.unavailable_reason().unwrap_or_default();
                 drop(guard);
-                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
-                    model
-                        .as_mut()
-                        .usages_failed(QString::from("No project is open yet."));
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model.as_mut().usages_failed(QString::from(reason.as_str()));
                 });
                 return;
             };
@@ -3165,11 +3170,11 @@ impl ffi::SearchModel {
         let slot = std::sync::Arc::clone(&self.index);
         std::thread::spawn(move || {
             let guard = slot.read().unwrap();
-            // Without an index (no project open, or one still building) the
-            // buffer alone still answers a same-file declaration, which is
+            // Without a ready index (no project open, or one still building)
+            // the buffer alone still answers a same-file declaration, which is
             // the majority of what a Ctrl+Click asks about — far better than
             // refusing the gesture outright.
-            let result = match guard.as_ref() {
+            let result = match guard.ready() {
                 Some(index) => index.resolve_declaration(&path, &content, byte_offset),
                 None => Ok(index_core::resolve_declaration_in_buffer(
                     &path,
@@ -3231,12 +3236,11 @@ impl ffi::SearchModel {
         let slot = std::sync::Arc::clone(&self.index);
         std::thread::spawn(move || {
             let guard = slot.read().unwrap();
-            let Some(index) = guard.as_ref() else {
+            let Some(index) = guard.ready() else {
+                let reason = guard.unavailable_reason().unwrap_or_default();
                 drop(guard);
-                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
-                    model
-                        .as_mut()
-                        .usages_failed(QString::from("No project is open yet."));
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model.as_mut().usages_failed(QString::from(reason.as_str()));
                 });
                 return;
             };
