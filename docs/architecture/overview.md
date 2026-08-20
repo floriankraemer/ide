@@ -49,7 +49,7 @@ graph TB
 | `index-core` | support | Project index: text search (tantivy + ripgrep crates) and symbols/references, plus declaration resolution ([ADR-0011](decisions/0011-code-navigation.md)) | No |
 | `pty-core` | support | Cross-platform PTY transport for the embedded terminal | No |
 | `terminal-core` | support | VT100/grid state over `alacritty_terminal` | No |
-| `mcp-server` | support | MCP transport so an agent can read and drive the editor | No |
+| `mcp-server` | support | MCP server (protocol + transport) so an agent can read and drive the editor and query the project index ([ADR-0004](decisions/0004-mcp-transport.md), [ADR-0012](decisions/0012-mcp-protocol-index-and-lifecycle.md)) | No |
 | `ui-shell` | adapter + view | `src/bridge.rs`: cxx-qt QObject translation; `cpp/`: Widgets, layout, menus, dialogs, `QApplication` | Yes |
 | `app` | main | Thin binary; hands off to `ui-shell` | Yes |
 
@@ -85,5 +85,5 @@ Each of these gets its own ADR under `decisions/` when it becomes real.
 
 - [Layering rules](layering.md) — binding dependency and logic-placement rules.
 - [ADR-0001](decisions/0001-core-tech-stack.md), [ADR-0002](decisions/0002-application-layer-and-humble-view.md), [ADR-0003](decisions/0003-ffi-conventions.md) — the binding stack, layering and FFI decisions.
-- The remaining ADRs under `decisions/` cover MCP transport, docking, the terminal, the project index, find and replace, and code navigation.
+- The remaining ADRs under `decisions/` cover MCP (transport, then protocol/index/lifecycle), docking, the terminal, the project index, find and replace, and code navigation.
 - [MVP implementation plan](mvp-implementation-plan.md) — historical.
