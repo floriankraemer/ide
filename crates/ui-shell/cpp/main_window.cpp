@@ -1995,7 +1995,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
 {
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
-    // CDockManager::CDockManager) — no explicit setCentralWidget() call.
+    // CDockManager::CDockManager) — no explicit QMainWindow::setCentralWidget().
     auto *dockManager = new ads::CDockManager(window);
 
     // The editor area is a QSplitter tree of tab groups (see EditorTabs) so
@@ -2004,7 +2004,11 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     auto *editorRoot = new QSplitter(Qt::Horizontal);
     auto *editorDock = new ads::CDockWidget(dockManager, QObject::tr("Editor"));
     editorDock->setWidget(editorRoot);
-    auto *editorArea = dockManager->addDockWidget(ads::CenterDockWidgetArea, editorDock);
+    // The editor is ADS's *central* dock widget, not an ordinary center-area
+    // one: a central widget absorbs the leftover space, so the side and
+    // bottom panels keep their size hints instead of splitting the window
+    // into equal shares and squeezing the editor down to nothing.
+    auto *editorArea = dockManager->setCentralWidget(editorDock);
 
     auto *treeView = new QTreeView();
     treeView->setModel(treeModel);
@@ -2025,7 +2029,11 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     auto *searchResultsPanel = new SearchResultsPanel(searchModel, openAt, dockManager);
     auto *searchResultsDock = new ads::CDockWidget(dockManager, QObject::tr("Search Results"));
     searchResultsDock->setWidget(searchResultsPanel);
-    dockManager->addDockWidget(ads::BottomDockWidgetArea, searchResultsDock, editorArea);
+    // First bottom panel: it creates the bottom dock area; every panel after
+    // it is added *into* that area (CenterDockWidgetArea) so they become tabs
+    // rather than each stacking one more split between editor and status bar.
+    auto *bottomArea =
+      dockManager->addDockWidget(ads::BottomDockWidgetArea, searchResultsDock, editorArea);
 
     // Task J: bottom dock panel, tabbed alongside Find in Files — same
     // "list of locations" shape, just fed by a symbol name instead of typed
@@ -2034,7 +2042,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     auto *findUsagesPanel = new FindUsagesPanel(searchModel, editorTabs, dockManager);
     auto *findUsagesDock = new ads::CDockWidget(dockManager, QObject::tr("Find Usages"));
     findUsagesDock->setWidget(findUsagesPanel);
-    dockManager->addDockWidget(ads::BottomDockWidgetArea, findUsagesDock, editorArea);
+    dockManager->addDockWidget(ads::CenterDockWidgetArea, findUsagesDock, bottomArea);
 
     // Task D: right-side dock panel, matching where JetBrains-style IDEs
     // dock their Class/Structure View. Reuses the one EditorTabs instance
@@ -2069,7 +2077,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     auto *terminalWidget = new TerminalWidget(terminalSession, appSettings, dockManager);
     auto *terminalDock = new ads::CDockWidget(dockManager, QObject::tr("Terminal"));
     terminalDock->setWidget(terminalWidget);
-    dockManager->addDockWidget(ads::BottomDockWidgetArea, terminalDock, editorArea);
+    dockManager->addDockWidget(ads::CenterDockWidgetArea, terminalDock, bottomArea);
 
     // Class View tracks whatever tab is current: refresh on open, on
     // switch, and whenever a tab becomes clean. `tabModifiedChanged`
@@ -2101,6 +2109,12 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                       &ProjectTreeModel::projectOpened,
                       searchModel,
                       [searchModel](const QString &rootPath) { searchModel->openIndex(rootPath); });
+
+    // Initial bottom-panel height: without it the area is sized from the
+    // terminal's tiny size hint (~60px), which is unusable for every panel
+    // tabbed there. Overridden by restoreState() below once a layout has
+    // been saved.
+    dockManager->setSplitterSizes(bottomArea, {520, 200});
 
     // D4: restored after both dock widgets exist for this layout to apply
     // to (ADS matches saved widgets by their title/object name). Empty

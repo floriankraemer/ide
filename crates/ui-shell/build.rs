@@ -234,6 +234,19 @@ fn main() {
         })
         .collect();
 
+    // cxx-qt-build tracks the Rust bridge, not the hand-written C++, and any
+    // `rerun-if-changed` at all switches cargo off its "rerun on any change in
+    // the package" default — so every input this script reads is listed here.
+    // Without it an edit to `cpp/` silently keeps the previously compiled
+    // objects and the app runs stale view code.
+    for entry in std::fs::read_dir("cpp").expect("cpp/ must exist") {
+        let path = entry.expect("readable cpp/ entry").path();
+        println!("cargo:rerun-if-changed={}", path.display());
+    }
+    println!("cargo:rerun-if-changed=src/bridge.rs");
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed={}", ads_dir.display());
+
     let mut builder = cxx_qt_build::CxxQtBuilder::new()
         .file("src/bridge.rs")
         .cpp_file("cpp/main_window.cpp")
