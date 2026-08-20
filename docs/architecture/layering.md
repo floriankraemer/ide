@@ -23,11 +23,11 @@ graph TB
 | `editor-core` | (std, ropey, regex) | **No** |
 | `project-model` | (std, notify) | **No** |
 | `syntax-core` | (std, tree-sitter, tree-sitter-rust, tree-sitter-json) | **No** |
-| `app-config` | (std, dirs, serde, toml) | **No** |
+| `app-config` | (std, dirs, serde, toml, nucleo-matcher) | **No** |
 | `mcp-server` | (std, dirs, serde, serde_json, tokio, axum) | **No** |
 | `pty-core` | (std, portable-pty) | **No** |
 | `terminal-core` | (std, alacritty_terminal) | **No** |
-| `index-core` | (std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore, syntax-core) | **No** |
+| `index-core` | (std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore, nucleo-matcher, syntax-core) | **No** |
 | `app-core` | `editor-core`, `project-model` | **No** |
 | `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `syntax-core`, `mcp-server`, `index-core`, `pty-core`, `terminal-core` | Yes (adapter + view live here) |
 | `app` | `ui-shell` | Yes |
@@ -37,7 +37,7 @@ graph TB
 ## Where logic may live
 
 - **Business rules and orchestration** (open rules, path construction, delete/rename → tab policy, watcher policy, dirty tracking, jump history): only in the Qt-free crates, normally `app-core`.
-- **Rules that need the project index** (which declaration a caret resolves to, ADR-0010's local-file-then-project ranking) live in `index-core`, not `app-core`: `app-core` may not depend on `index-core`, and the index itself is owned by `ui-shell`'s `SearchModel`. They are still Qt-free and unit-tested like any other rule.
+- **Rules that need the project index** (which declaration a caret resolves to, ADR-0011's local-file-then-project ranking) live in `index-core`, not `app-core`: `app-core` may not depend on `index-core`, and the index itself is owned by `ui-shell`'s `SearchModel`. They are still Qt-free and unit-tested like any other rule.
 - **`bridge.rs` (adapter)**: translation only — QString/QModelIndex ↔ Rust types, session call, emit signal, refresh model. No domain state, no rules, no branching beyond type mapping.
 - **`cpp/` (view)**: widget construction, layout, menus, dialogs, signal wiring only. It may ask "what happened" and show the answer; it never decides "what should happen".
 
@@ -68,6 +68,7 @@ cargo tree -p pty-core -e normal | grep -i qt       # must be empty
 cargo tree -p pty-core -e normal | grep -i tokio    # must be empty
 cargo tree -p terminal-core -e normal | grep -i qt    # must be empty
 cargo tree -p terminal-core -e normal | grep -i tokio # must be empty
+cargo tree -p app-config -e normal | grep -i qt     # must be empty
 cargo tree -p index-core -e normal | grep -i qt     # must be empty
 cargo tree -p index-core -e normal | grep -i tokio  # must be empty
 ```

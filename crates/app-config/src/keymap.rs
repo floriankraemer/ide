@@ -8,6 +8,9 @@
 
 use std::collections::HashMap;
 
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Matcher, Utf32Str};
+
 /// One user-triggerable command: a stable id (the persisted key), the menu
 /// label the settings UI shows, the menu it lives under, and the shortcut it
 /// has when the user hasn't rebound it.
@@ -125,6 +128,24 @@ pub const ACTIONS: &[ActionDef] = &[
         label: "Terminal",
         category: "View",
         default_shortcut: "Ctrl+`",
+    },
+    ActionDef {
+        id: "view.searchEverywhere",
+        label: "Search Everywhere...",
+        category: "View",
+        default_shortcut: "Ctrl+Shift+E",
+    },
+    ActionDef {
+        id: "view.goToFile",
+        label: "Go to File...",
+        category: "View",
+        default_shortcut: "Ctrl+Shift+N",
+    },
+    ActionDef {
+        id: "view.findAction",
+        label: "Find Action...",
+        category: "View",
+        default_shortcut: "Ctrl+Shift+A",
     },
     ActionDef {
         id: "view.goToSymbol",
@@ -309,6 +330,76 @@ impl Keymap {
     }
 }
 
+/// One action matched by [`search_actions`], with the shortcut it currently
+/// responds to and the character positions in `"Category: Label"` that the
+/// query matched — enough for the results list to render and run it without
+/// asking anything else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActionMatch {
+    pub action: &'static ActionDef,
+    pub shortcut: String,
+    pub score: u32,
+    pub positions: Vec<u32>,
+}
+
+/// The haystack an action is matched against: `"Category: Label"`, so both
+/// `"edit find"` and `"find in files"` reach Find in Files.
+fn action_haystack(action: &ActionDef) -> String {
+    format!("{}: {}", action.category, action.label)
+}
+
+/// Search Everywhere's action tier: fuzzy-rank [`ACTIONS`] against `query`,
+/// best first, at most `limit` hits. An empty query lists the first `limit`
+/// actions in menu order.
+///
+/// Matching lives here rather than in the view because which actions exist
+/// and what they are called is this crate's knowledge — the view only
+/// renders the rows and triggers the ids.
+pub fn search_actions(query: &str, keymap: &Keymap, limit: usize) -> Vec<ActionMatch> {
+    let bind = |action: &'static ActionDef, score: u32, positions: Vec<u32>| ActionMatch {
+        action,
+        shortcut: keymap.shortcut_for(action.id).to_string(),
+        score,
+        positions,
+    };
+
+    if query.is_empty() {
+        return ACTIONS
+            .iter()
+            .take(limit)
+            .map(|a| bind(a, 0, Vec::new()))
+            .collect();
+    }
+
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    let mut buf = Vec::new();
+
+    let mut scored: Vec<ActionMatch> = ACTIONS
+        .iter()
+        .filter_map(|action| {
+            let haystack = action_haystack(action);
+            let mut positions = Vec::new();
+            let score = pattern.indices(
+                Utf32Str::new(&haystack, &mut buf),
+                &mut matcher,
+                &mut positions,
+            )?;
+            positions.sort_unstable();
+            positions.dedup();
+            Some(bind(action, score, positions))
+        })
+        .collect();
+    // Ties break towards the shorter label — the more specific command.
+    scored.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.action.label.len().cmp(&b.action.label.len()))
+    });
+    scored.truncate(limit);
+    scored
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,5 +509,34 @@ mod tests {
         assert_eq!(bindings.len(), ACTIONS.len());
         assert_eq!(bindings[0].action.id, ACTIONS[0].id);
         assert!(bindings.iter().all(|b| b.is_default));
+    }
+
+    #[test]
+    fn search_actions_ranks_the_closest_command_first() {
+        let hits = search_actions("find in files", &keymap(), 10);
+        assert_eq!(hits[0].action.id, "edit.findInFiles");
+        assert_eq!(hits[0].shortcut, "Ctrl+Shift+F");
+        assert!(!hits[0].positions.is_empty());
+    }
+
+    #[test]
+    fn search_actions_matches_the_category_too() {
+        let hits = search_actions("view terminal", &keymap(), 10);
+        assert_eq!(hits[0].action.id, "view.terminal");
+    }
+
+    #[test]
+    fn search_actions_reports_the_users_override_not_the_default() {
+        let mut map = keymap();
+        map.assign("edit.findInFiles", "Ctrl+Alt+F");
+        let hits = search_actions("find in files", &map, 5);
+        assert_eq!(hits[0].shortcut, "Ctrl+Alt+F");
+    }
+
+    #[test]
+    fn search_actions_honours_the_limit_and_lists_actions_when_empty() {
+        assert_eq!(search_actions("", &keymap(), 3).len(), 3);
+        assert_eq!(search_actions("", &keymap(), 3)[0].action.id, ACTIONS[0].id);
+        assert!(search_actions("zzzznotacommand", &keymap(), 10).is_empty());
     }
 }

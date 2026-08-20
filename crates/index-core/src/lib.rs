@@ -44,15 +44,19 @@
 //! in different classes both matching a usage search for `run` is expected
 //! behavior, not a bug — there is no cross-file type/binding inference here.
 
-use std::collections::BTreeMap;
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcherBuilder;
 use grep_searcher::sinks::UTF8;
 use grep_searcher::Searcher;
+use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
+use nucleo_matcher::{Config, Utf32Str};
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::{
@@ -114,6 +118,28 @@ pub struct SearchMatch {
     pub line: usize,
     pub start: usize,
     pub end: usize,
+    /// The whole line the match sits on, as the verification pass already
+    /// had it in hand. Carried here so result lists never have to re-read
+    /// the file to show a snippet.
+    pub line_text: String,
+}
+
+/// One fuzzy file-name hit from [`TextIndex::find_files`]. `positions` are
+/// character (not byte) offsets into `relative`, for match highlighting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileMatch {
+    pub path: PathBuf,
+    pub relative: String,
+    pub score: u32,
+    pub positions: Vec<u32>,
+}
+
+/// One indexed file, kept in memory for the file-name tier of Search
+/// Everywhere. Fuzzy-matching a flat slice of paths is microseconds even at
+/// 100k files, so this tier deliberately does not go through tantivy.
+struct FileEntry {
+    path: PathBuf,
+    relative: String,
 }
 
 /// One span to rewrite, addressed exactly like the [`SearchMatch`] it came
@@ -149,6 +175,12 @@ struct Fields {
     sym_is_definition: tantivy::schema::Field,
     inh_type: tantivy::schema::Field,
     inh_supertype: tantivy::schema::Field,
+    /// Text docs only: file modification time (seconds since the epoch) and
+    /// byte length as of the last indexing pass. Together they are the
+    /// change-detection key [`TextIndex::open_or_build`] uses to skip
+    /// re-reading unchanged files on project open.
+    mtime_secs: tantivy::schema::Field,
+    size_bytes: tantivy::schema::Field,
 }
 
 /// Discriminant values for the `doc_type` field — see the module doc's
@@ -190,6 +222,8 @@ fn build_schema() -> (Schema, Fields) {
     // `delete_term(path)` on reindex still wipes them in one call.
     let inh_type = builder.add_text_field("inh_type", STRING | STORED);
     let inh_supertype = builder.add_text_field("inh_supertype", STRING | STORED);
+    let mtime_secs = builder.add_u64_field("mtime_secs", STORED);
+    let size_bytes = builder.add_u64_field("size_bytes", STORED);
 
     (
         builder.build(),
@@ -205,8 +239,42 @@ fn build_schema() -> (Schema, Fields) {
             sym_is_definition,
             inh_type,
             inh_supertype,
+            mtime_secs,
+            size_bytes,
         },
     )
+}
+
+/// File metadata used to decide whether an indexed file needs re-reading.
+/// A file whose modification time *and* byte length both match what the
+/// index recorded is assumed unchanged — the same heuristic every build
+/// system uses, and the reason a warm project open costs a directory walk
+/// rather than a full re-index.
+// ponytail: second-granularity mtime plus size, so an edit that keeps a
+// file's byte length and lands in the same second as the last indexing pass
+// is missed on project open — the watcher-driven `reindex_file` path covers
+// live edits, so this only affects changes made while the IDE was closed.
+// Upgrade to a content hash if that ever bites.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct FileStamp {
+    mtime_secs: u64,
+    size_bytes: u64,
+}
+
+fn stamp_of(path: &Path) -> FileStamp {
+    let Ok(meta) = fs::metadata(path) else {
+        return FileStamp::default();
+    };
+    let mtime_secs = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    FileStamp {
+        mtime_secs,
+        size_bytes: meta.len(),
+    }
 }
 
 fn symbol_kind_to_str(kind: SymbolKind) -> &'static str {
@@ -328,6 +396,7 @@ pub struct TextIndex {
     writer: IndexWriter,
     reader: IndexReader,
     fields: Fields,
+    files: Vec<FileEntry>,
 }
 
 impl TextIndex {
@@ -350,33 +419,53 @@ impl TextIndex {
             NgramTokenizer::new(NGRAM_SIZE, NGRAM_SIZE, false)?,
         );
 
-        let mut writer: IndexWriter = index.writer(50_000_000)?;
-        for entry in ignore::WalkBuilder::new(project_root).build() {
-            let entry = match entry {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            let path = entry.path();
-            if path.starts_with(&index_dir) {
-                continue;
-            }
-            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
-                continue;
-            }
-            if let Ok(content) = fs::read_to_string(path) {
-                let path_key = path.to_string_lossy().into_owned();
-                index_symbols(&mut writer, &fields, &path_key, &content)?;
-                writer.add_document(doc!(
-                    fields.path => path_key,
-                    fields.doc_type => DOC_TYPE_TEXT,
-                    fields.content => content,
-                ))?;
-            }
-            // Non-UTF8/binary files are silently skipped — text search has
-            // nothing to offer them.
-        }
-        writer.commit()?;
+        let writer: IndexWriter = index.writer(50_000_000)?;
+        let reader = index.reader()?;
+        let mut this = Self {
+            root: project_root.to_path_buf(),
+            index,
+            writer,
+            reader,
+            fields,
+            files: Vec::new(),
+        };
+        this.sync_from_disk(&HashMap::new())?;
+        Ok(this)
+    }
 
+    /// Open the index already stored under `<project_root>/.ide-index/` and
+    /// bring it up to date, re-reading only files whose modification time or
+    /// size changed and dropping files that disappeared. Falls back to a
+    /// full [`build`](Self::build) when there is no usable index there (first
+    /// run, a schema change, or a corrupt directory).
+    ///
+    /// This is what a project open should call: an unchanged repository costs
+    /// one directory walk plus a `stat` per file, not a full re-index.
+    pub fn open_or_build(project_root: &Path) -> Result<Self, IndexError> {
+        match Self::open_existing(project_root) {
+            Ok(mut index) => {
+                let stamps = index.indexed_stamps()?;
+                index.sync_from_disk(&stamps)?;
+                Ok(index)
+            }
+            Err(_) => Self::build(project_root),
+        }
+    }
+
+    fn open_existing(project_root: &Path) -> Result<Self, IndexError> {
+        let index_dir = project_root.join(INDEX_DIR_NAME);
+        let (schema, fields) = build_schema();
+        let index = Index::open_in_dir(&index_dir)?;
+        if index.schema() != schema {
+            // An index written by an older schema is not readable field for
+            // field; rebuilding is the only safe answer.
+            return Err(IndexError::Tantivy("index schema mismatch".to_string()));
+        }
+        index.tokenizers().register(
+            "ngram3",
+            NgramTokenizer::new(NGRAM_SIZE, NGRAM_SIZE, false)?,
+        );
+        let writer: IndexWriter = index.writer(50_000_000)?;
         let reader = index.reader()?;
         Ok(Self {
             root: project_root.to_path_buf(),
@@ -384,25 +473,143 @@ impl TextIndex {
             writer,
             reader,
             fields,
+            files: Vec::new(),
         })
+    }
+
+    /// `path -> (mtime, size)` for every text doc currently in the index.
+    fn indexed_stamps(&self) -> Result<HashMap<String, FileStamp>, IndexError> {
+        let searcher = self.reader.searcher();
+        let num_docs = searcher.num_docs() as usize;
+        if num_docs == 0 {
+            return Ok(HashMap::new());
+        }
+        let text_only = TermQuery::new(
+            Term::from_field_text(self.fields.doc_type, DOC_TYPE_TEXT),
+            IndexRecordOption::Basic,
+        );
+        let top_docs = searcher.search(&text_only, &TopDocs::with_limit(num_docs))?;
+        let mut stamps = HashMap::with_capacity(top_docs.len());
+        for (_score, address) in top_docs {
+            let retrieved: tantivy::TantivyDocument = searcher.doc(address)?;
+            let Some(path) = retrieved
+                .get_first(self.fields.path)
+                .and_then(|v| v.as_str())
+            else {
+                continue;
+            };
+            let u64_field = |field| {
+                retrieved
+                    .get_first(field)
+                    .and_then(|v: &tantivy::schema::OwnedValue| v.as_u64())
+                    .unwrap_or(0)
+            };
+            stamps.insert(
+                path.to_string(),
+                FileStamp {
+                    mtime_secs: u64_field(self.fields.mtime_secs),
+                    size_bytes: u64_field(self.fields.size_bytes),
+                },
+            );
+        }
+        Ok(stamps)
+    }
+
+    /// Walk the project, re-indexing every file whose stamp differs from
+    /// `known` and removing indexed files that no longer exist, then rebuild
+    /// the in-memory file list. One commit for the whole pass.
+    fn sync_from_disk(&mut self, known: &HashMap<String, FileStamp>) -> Result<(), IndexError> {
+        let index_dir = self.root.join(INDEX_DIR_NAME);
+        let mut seen: Vec<(PathBuf, String)> = Vec::new();
+        let mut dirty = false;
+
+        for entry in ignore::WalkBuilder::new(&self.root).build() {
+            let Ok(entry) = entry else { continue };
+            let path = entry.path();
+            if path.starts_with(&index_dir) {
+                continue;
+            }
+            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+                continue;
+            }
+            let key = path.to_string_lossy().into_owned();
+            let stamp = stamp_of(path);
+            if known.get(&key) == Some(&stamp) {
+                seen.push((path.to_path_buf(), key));
+                continue;
+            }
+            if self.write_file_doc(path, stamp)? {
+                dirty = true;
+                seen.push((path.to_path_buf(), key));
+            }
+        }
+
+        let live: std::collections::HashSet<&str> =
+            seen.iter().map(|(_, key)| key.as_str()).collect();
+        for key in known.keys() {
+            if !live.contains(key.as_str()) {
+                self.writer
+                    .delete_term(Term::from_field_text(self.fields.path, key));
+                dirty = true;
+            }
+        }
+
+        if dirty {
+            self.writer.commit()?;
+            self.reader.reload()?;
+        }
+
+        self.files = seen
+            .into_iter()
+            .map(|(path, _)| FileEntry {
+                relative: relative_display(&self.root, &path),
+                path,
+            })
+            .collect();
+        Ok(())
+    }
+
+    /// Delete any existing docs for `path` and re-add them from disk,
+    /// without committing. Returns whether the file was indexable (readable
+    /// UTF-8 text) — binary/unreadable files are dropped from the index and
+    /// from the file list, since neither text nor file search can serve
+    /// them.
+    fn write_file_doc(&mut self, path: &Path, stamp: FileStamp) -> Result<bool, IndexError> {
+        let key = path.to_string_lossy().into_owned();
+        self.writer
+            .delete_term(Term::from_field_text(self.fields.path, &key));
+        let Ok(content) = fs::read_to_string(path) else {
+            return Ok(false);
+        };
+        index_symbols(&mut self.writer, &self.fields, &key, &content)?;
+        self.writer.add_document(doc!(
+            self.fields.path => key,
+            self.fields.doc_type => DOC_TYPE_TEXT,
+            self.fields.content => content,
+            self.fields.mtime_secs => stamp.mtime_secs,
+            self.fields.size_bytes => stamp.size_bytes,
+        ))?;
+        Ok(true)
     }
 
     pub fn root(&self) -> &Path {
         &self.root
     }
 
-    /// Is `path` inside this index's own `.ide-index/` directory?
+    /// Whether `path` is part of the index's own on-disk storage.
     ///
-    /// `build()` skips that directory when walking, and single-file
-    /// updates must ignore it too — for a much sharper reason. The index
-    /// lives *inside* the project root, so a caller driving
-    /// `reindex_file` from a filesystem watcher sees every commit this
-    /// index makes as a change to the project, re-enters `reindex_file`,
-    /// commits again, and never stops. Guarding here rather than in that
-    /// caller keeps the rule with the directory layout that causes it,
-    /// and protects any future caller for free.
-    fn is_own_index_path(&self, path: &Path) -> bool {
+    /// The index lives *inside* the project it indexes, so a filesystem
+    /// watcher on the project root sees every commit this index makes. Acting
+    /// on those events would re-index the index — which writes more index
+    /// files, which produces more events, forever. Every mutating entry point
+    /// filters through here so no caller can reintroduce that loop.
+    pub fn is_index_internal(&self, path: &Path) -> bool {
         path.starts_with(self.root.join(INDEX_DIR_NAME))
+    }
+
+    /// Number of files currently held in the file-name tier.
+    pub fn indexed_file_count(&self) -> usize {
+        self.files.len()
     }
 
     /// Re-index a single file: drops any existing entry for `path` — its
@@ -413,23 +620,29 @@ impl TextIndex {
     /// integration) pass the same path form used when the file was first
     /// indexed.
     pub fn reindex_file(&mut self, path: &Path) -> Result<(), IndexError> {
-        if self.is_own_index_path(path) {
+        if self.is_index_internal(path) {
             return Ok(());
         }
-        let key = path.to_string_lossy().into_owned();
-        self.writer
-            .delete_term(Term::from_field_text(self.fields.path, &key));
-        if let Ok(content) = fs::read_to_string(path) {
-            index_symbols(&mut self.writer, &self.fields, &key, &content)?;
-            self.writer.add_document(doc!(
-                self.fields.path => key,
-                self.fields.doc_type => DOC_TYPE_TEXT,
-                self.fields.content => content,
-            ))?;
-        }
+        let indexable = self.write_file_doc(path, stamp_of(path))?;
         self.writer.commit()?;
         self.reader.reload()?;
+        self.track_file(path, indexable);
         Ok(())
+    }
+
+    /// Keep the file-name tier in step with a single-file index change.
+    fn track_file(&mut self, path: &Path, present: bool) {
+        let existing = self.files.iter().position(|f| f.path == path);
+        match (existing, present) {
+            (None, true) => self.files.push(FileEntry {
+                relative: relative_display(&self.root, path),
+                path: path.to_path_buf(),
+            }),
+            (Some(i), false) => {
+                self.files.swap_remove(i);
+            }
+            _ => {}
+        }
     }
 
     /// Apply `edits` to the files they name and re-index each touched file.
@@ -498,7 +711,7 @@ impl TextIndex {
     /// text doc and every symbol/reference doc it produced, all keyed by
     /// the shared `path` term).
     pub fn remove_file(&mut self, path: &Path) -> Result<(), IndexError> {
-        if self.is_own_index_path(path) {
+        if self.is_index_internal(path) {
             return Ok(());
         }
         let key = path.to_string_lossy().into_owned();
@@ -506,7 +719,79 @@ impl TextIndex {
             .delete_term(Term::from_field_text(self.fields.path, &key));
         self.writer.commit()?;
         self.reader.reload()?;
+        self.track_file(path, false);
         Ok(())
+    }
+
+    /// Go-to-file: fuzzy-rank the indexed file list against `query`, best
+    /// first, at most `limit` hits. An empty query lists the first `limit`
+    /// files, which is what an empty Search Everywhere box shows.
+    ///
+    /// Scores are computed first and only the winners get their match
+    /// positions resolved, so a large project pays one cheap scoring pass
+    /// rather than an allocation per candidate.
+    pub fn find_files(&self, query: &str, limit: usize) -> Vec<FileMatch> {
+        if limit == 0 {
+            return Vec::new();
+        }
+        if query.is_empty() {
+            return self
+                .files
+                .iter()
+                .take(limit)
+                .map(|f| FileMatch {
+                    path: f.path.clone(),
+                    relative: f.relative.clone(),
+                    score: 0,
+                    positions: Vec::new(),
+                })
+                .collect();
+        }
+
+        let mut matcher = nucleo_matcher::Matcher::new(Config::DEFAULT.match_paths());
+        let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        let mut buf = Vec::new();
+
+        // Min-heap of the best `limit` hits so far: cheaper than sorting
+        // every match on a big repo. `Reverse` puts the weakest survivor on
+        // top, which is exactly the one to evict.
+        let mut best: BinaryHeap<Reverse<(u32, Reverse<usize>, usize)>> = BinaryHeap::new();
+        for (i, entry) in self.files.iter().enumerate() {
+            let haystack = Utf32Str::new(&entry.relative, &mut buf);
+            let Some(score) = pattern.score(haystack, &mut matcher) else {
+                continue;
+            };
+            // Ties break towards the shorter path — the more specific hit.
+            let key = Reverse((score, Reverse(entry.relative.len()), i));
+            if best.len() < limit {
+                best.push(key);
+            } else if best.peek().is_some_and(|worst| key.0 > worst.0) {
+                best.pop();
+                best.push(key);
+            }
+        }
+
+        let mut ranked: Vec<(u32, Reverse<usize>, usize)> =
+            best.into_iter().map(|Reverse(key)| key).collect();
+        ranked.sort_unstable_by(|a, b| b.cmp(a));
+
+        ranked
+            .into_iter()
+            .map(|(score, _, i)| {
+                let entry = &self.files[i];
+                let mut positions = Vec::new();
+                let haystack = Utf32Str::new(&entry.relative, &mut buf);
+                pattern.indices(haystack, &mut matcher, &mut positions);
+                positions.sort_unstable();
+                positions.dedup();
+                FileMatch {
+                    path: entry.path.clone(),
+                    relative: entry.relative.clone(),
+                    score,
+                    positions,
+                }
+            })
+            .collect()
     }
 
     /// Find-in-Files: narrow candidate files via the ngram(3) tantivy index,
@@ -524,6 +809,28 @@ impl TextIndex {
         is_regex: bool,
         case_sensitive: bool,
     ) -> Result<Vec<SearchMatch>, IndexError> {
+        self.search_with(
+            pattern,
+            is_regex,
+            case_sensitive,
+            usize::MAX,
+            &AtomicBool::new(false),
+        )
+    }
+
+    /// [`search`](Self::search) with a result ceiling and a cancellation
+    /// flag. Both matter for search-as-you-type: an abandoned keystroke's
+    /// scan stops as soon as `cancel` flips rather than running the whole
+    /// project to completion, and `limit` keeps a three-character query on a
+    /// huge repo from materialising a million matches nobody will read.
+    pub fn search_with(
+        &self,
+        pattern: &str,
+        is_regex: bool,
+        case_sensitive: bool,
+        limit: usize,
+        cancel: &AtomicBool,
+    ) -> Result<Vec<SearchMatch>, IndexError> {
         let owned_pattern;
         let regex_pattern: &str = if is_regex {
             pattern
@@ -538,19 +845,30 @@ impl TextIndex {
 
         let mut matches = Vec::new();
         for path in self.candidate_files(pattern, case_sensitive)? {
+            if cancel.load(Ordering::Relaxed) || matches.len() >= limit {
+                break;
+            }
             let mut searcher = Searcher::new();
             let path_for_sink = path.clone();
             let search_result = searcher.search_path(
                 &matcher,
                 &path,
                 UTF8(|line_number, line| {
+                    if cancel.load(Ordering::Relaxed) {
+                        return Ok(false);
+                    }
+                    let trimmed = line.trim_end_matches(['\n', '\r']);
                     let mut from = 0;
                     while let Ok(Some(m)) = matcher.find_at(line.as_bytes(), from) {
+                        if matches.len() >= limit {
+                            return Ok(false);
+                        }
                         matches.push(SearchMatch {
                             path: path_for_sink.clone(),
                             line: line_number as usize,
                             start: m.start(),
                             end: m.end(),
+                            line_text: trimmed.to_string(),
                         });
                         // A zero-width match would otherwise pin `from` and
                         // spin forever on this line.
@@ -663,6 +981,39 @@ impl TextIndex {
         matches.retain(|m| m.name.contains(name_query));
         matches.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
         Ok(matches)
+    }
+
+    /// Go-to-symbol for search-as-you-type: the same definition set as
+    /// [`find_definitions`](Self::find_definitions), but fuzzy-matched and
+    /// ranked best-first rather than exact-substring filtered and ordered by
+    /// file. An empty query returns the first `limit` definitions.
+    pub fn find_definitions_ranked(
+        &self,
+        query: &str,
+        limit: usize,
+    ) -> Result<Vec<SymbolMatch>, IndexError> {
+        let mut matches = self.find_definitions("")?;
+        if query.is_empty() {
+            matches.truncate(limit);
+            return Ok(matches);
+        }
+
+        let mut matcher = nucleo_matcher::Matcher::new(Config::DEFAULT);
+        let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+        let mut buf = Vec::new();
+        let mut scored: Vec<(u32, SymbolMatch)> = matches
+            .into_iter()
+            .filter_map(|m| {
+                let score = pattern.score(Utf32Str::new(&m.name, &mut buf), &mut matcher)?;
+                Some((score, m))
+            })
+            .collect();
+        scored.sort_by(|a, b| {
+            b.0.cmp(&a.0)
+                .then_with(|| a.1.name.len().cmp(&b.1.name.len()))
+                .then_with(|| (&a.1.path, a.1.line).cmp(&(&b.1.path, b.1.line)))
+        });
+        Ok(scored.into_iter().take(limit).map(|(_, m)| m).collect())
     }
 
     /// Find-usages: every occurrence (definitions and references alike) of
@@ -1031,6 +1382,14 @@ fn index_symbols(
     Ok(())
 }
 
+/// Project-relative, forward-slashed display form of `path` — what the file
+/// tier matches against and shows, so a query like `src/main` behaves the
+/// same on Windows as on Linux.
+fn relative_display(root: &Path, path: &Path) -> String {
+    let relative = path.strip_prefix(root).unwrap_or(path);
+    relative.to_string_lossy().replace('\\', "/")
+}
+
 fn escape_literal(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for c in s.chars() {
@@ -1054,6 +1413,154 @@ mod tests {
         }
         fs::write(&path, content).unwrap();
         path
+    }
+
+    #[test]
+    fn search_match_carries_the_line_it_was_found_on() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.rs", "let x = 1;\nlet needle = 2;\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let matches = index.search("needle", false, true).unwrap();
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].line_text, "let needle = 2;");
+    }
+
+    #[test]
+    fn search_with_stops_at_the_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.txt", "hit\nhit\nhit\nhit\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let matches = index
+            .search_with("hit", false, true, 2, &AtomicBool::new(false))
+            .unwrap();
+        assert_eq!(matches.len(), 2);
+    }
+
+    #[test]
+    fn search_with_returns_nothing_once_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.txt", "hit\nhit\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let cancelled = AtomicBool::new(true);
+        let matches = index
+            .search_with("hit", false, true, usize::MAX, &cancelled)
+            .unwrap();
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn find_files_ranks_the_closer_filename_first() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/main.rs", "");
+        write(dir.path(), "src/vendor/mainframe_adapter.rs", "");
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let hits = index.find_files("main.rs", 10);
+        assert_eq!(hits[0].relative, "src/main.rs");
+    }
+
+    #[test]
+    fn find_files_matches_across_path_segments_and_reports_positions() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/widgets/button.rs", "");
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let hits = index.find_files("widbut", 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].relative, "src/widgets/button.rs");
+        assert!(!hits[0].positions.is_empty());
+        // Positions must address the string they highlight.
+        let chars: Vec<char> = hits[0].relative.chars().collect();
+        for position in &hits[0].positions {
+            assert!((*position as usize) < chars.len());
+        }
+    }
+
+    #[test]
+    fn find_files_honours_the_limit_and_lists_files_for_an_empty_query() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            write(dir.path(), &format!("f{i}.txt"), "x");
+        }
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        assert_eq!(index.find_files("", 3).len(), 3);
+        assert_eq!(index.find_files("txt", 2).len(), 2);
+        assert_eq!(index.indexed_file_count(), 5);
+    }
+
+    #[test]
+    fn the_file_tier_follows_reindex_and_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = write(dir.path(), "kept.txt", "a");
+        let index_path = dir.path().join("added.txt");
+        let mut index = TextIndex::build(dir.path()).unwrap();
+        assert_eq!(index.indexed_file_count(), 1);
+
+        fs::write(&index_path, "b").unwrap();
+        index.reindex_file(&index_path).unwrap();
+        assert_eq!(index.indexed_file_count(), 2);
+        assert_eq!(index.find_files("added", 5).len(), 1);
+
+        index.remove_file(&kept).unwrap();
+        assert_eq!(index.indexed_file_count(), 1);
+        assert!(index.find_files("kept", 5).is_empty());
+    }
+
+    #[test]
+    fn open_or_build_reuses_the_index_and_applies_the_delta() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "stable.txt", "unchanged marker\n");
+        let changed = write(dir.path(), "changed.txt", "old\n");
+        let doomed = write(dir.path(), "doomed.txt", "doomed marker\n");
+        drop(TextIndex::build(dir.path()).unwrap());
+
+        // Different byte length, so the (mtime, size) stamp differs even
+        // within the same second.
+        fs::write(&changed, "brand new content\n").unwrap();
+        fs::remove_file(&doomed).unwrap();
+        write(dir.path(), "fresh.txt", "fresh marker\n");
+
+        let index = TextIndex::open_or_build(dir.path()).unwrap();
+        assert_eq!(
+            index.search("unchanged marker", false, true).unwrap().len(),
+            1
+        );
+        assert_eq!(index.search("brand new", false, true).unwrap().len(), 1);
+        assert!(index.search("old", false, true).unwrap().is_empty());
+        assert!(index
+            .search("doomed marker", false, true)
+            .unwrap()
+            .is_empty());
+        assert_eq!(index.search("fresh marker", false, true).unwrap().len(), 1);
+        assert_eq!(index.indexed_file_count(), 3);
+    }
+
+    #[test]
+    fn open_or_build_builds_from_scratch_when_no_index_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.txt", "hello\n");
+
+        let index = TextIndex::open_or_build(dir.path()).unwrap();
+        assert_eq!(index.search("hello", false, true).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn find_definitions_ranked_puts_the_best_fuzzy_hit_first() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "a.rs",
+            "fn open_file() {}\nfn open_project_file_dialog() {}\n",
+        );
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let hits = index.find_definitions_ranked("openfile", 10).unwrap();
+        assert_eq!(hits[0].name, "open_file");
+        assert_eq!(index.find_definitions_ranked("", 1).unwrap().len(), 1);
     }
 
     #[test]
@@ -1612,5 +2119,23 @@ mod tests {
 
         // And the real file's rows are untouched by that no-op.
         assert_eq!(index.find_definitions_exact("add").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn index_internal_paths_are_never_reindexed() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.txt", "hello\n");
+        let mut index = TextIndex::build(dir.path()).unwrap();
+        let before = index.indexed_file_count();
+
+        // What the project watcher reports when the index commits its own
+        // segment files.
+        let internal = dir.path().join(".ide-index").join("meta.json");
+        assert!(index.is_index_internal(&internal));
+        index.reindex_file(&internal).unwrap();
+        index.remove_file(&internal).unwrap();
+
+        assert_eq!(index.indexed_file_count(), before);
+        assert!(index.find_files("meta", 5).is_empty());
     }
 }

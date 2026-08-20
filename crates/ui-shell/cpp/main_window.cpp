@@ -3,6 +3,8 @@
 #include "code_editor.h"
 #include "find_bar.h"
 #include "keymap_page.h"
+#include "search_everywhere_dialog.h"
+#include "search_results_panel.h"
 #include "syntax_highlighter.h"
 #include "terminal_widget.h"
 #include "theme.h"
@@ -15,6 +17,11 @@
 #include <QByteArray>
 #include <QCheckBox>
 #include <QCloseEvent>
+#include <QElapsedTimer>
+#include <QKeyEvent>
+#include <QSet>
+#include <QTimer>
+#include <QTreeWidget>
 #include <QColor>
 #include <QColorDialog>
 #include <QComboBox>
@@ -1193,201 +1200,6 @@ QString symbolKindLabel(FfiSymbolKind kind)
     }
 }
 
-// Find-in-Files dock panel (Task H): a query box + regex toggle + results
-// list wired to `SearchModel`. Humble view per CLAUDE.md's hard rule — the
-// search itself and match interpretation happen in Rust/index-core; this
-// only builds widgets, forwards the query text, and opens the file a
-// double-clicked result points at via EditorTabs::openFileAtLine (the
-// existing "open at path" mechanism, extended above rather than duplicated).
-class FindInFilesPanel : public QWidget
-{
-public:
-    FindInFilesPanel(SearchModel *searchModel, EditorTabs *editorTabs, QWidget *parent)
-      : QWidget(parent)
-      , searchModel_(searchModel)
-      , editorTabs_(editorTabs)
-    {
-        queryEdit_ = new QLineEdit(this);
-        queryEdit_->setPlaceholderText(tr("Find in files..."));
-        regexCheck_ = new QCheckBox(tr("Regex"), this);
-        caseCheck_ = new QCheckBox(tr("Match case"), this);
-        resultsList_ = new QListWidget(this);
-        statusLabel_ = new QLabel(this);
-        replaceEdit_ = new QLineEdit(this);
-        replaceEdit_->setPlaceholderText(tr("Replace with..."));
-        auto *replaceAllButton = new QPushButton(tr("Replace All"), this);
-
-        auto *topRow = new QHBoxLayout();
-        topRow->addWidget(queryEdit_, 1);
-        topRow->addWidget(regexCheck_);
-        topRow->addWidget(caseCheck_);
-
-        auto *replaceRow = new QHBoxLayout();
-        replaceRow->addWidget(replaceEdit_, 1);
-        replaceRow->addWidget(replaceAllButton);
-
-        auto *layout = new QVBoxLayout(this);
-        layout->addLayout(topRow);
-        layout->addLayout(replaceRow);
-        layout->addWidget(statusLabel_);
-        layout->addWidget(resultsList_, 1);
-
-        connect(queryEdit_, &QLineEdit::returnPressed, this, &FindInFilesPanel::runSearch);
-        connect(regexCheck_, &QCheckBox::toggled, this, &FindInFilesPanel::runSearch);
-        connect(caseCheck_, &QCheckBox::toggled, this, &FindInFilesPanel::runSearch);
-        connect(replaceAllButton, &QPushButton::clicked, this, &FindInFilesPanel::replaceAll);
-        connect(resultsList_,
-                &QListWidget::itemDoubleClicked,
-                this,
-                &FindInFilesPanel::openSelectedMatch);
-
-        connect(searchModel_, &SearchModel::indexReady, this, [this]() {
-            statusLabel_->setText(tr("Index ready."));
-        });
-        connect(searchModel_, &SearchModel::indexFailed, this, [this](const QString &message) {
-            statusLabel_->setText(tr("Index build failed: %1").arg(message));
-        });
-        connect(searchModel_,
-                &SearchModel::searchMatchFound,
-                this,
-                &FindInFilesPanel::addMatch);
-        connect(searchModel_, &SearchModel::searchFinished, this, [this]() {
-            // A replace re-runs the search to drop now-stale rows; its report
-            // is what the user wants to read, so it survives that refresh.
-            const QString counts = tr("%1 match(es).").arg(resultsList_->count());
-            statusLabel_->setText(pendingReplaceStatus_.isEmpty()
-                                    ? counts
-                                    : pendingReplaceStatus_ + QStringLiteral(" ") + counts);
-            pendingReplaceStatus_.clear();
-        });
-        connect(searchModel_, &SearchModel::searchFailed, this, [this](const QString &message) {
-            statusLabel_->setText(tr("Search failed: %1").arg(message));
-        });
-        connect(searchModel_,
-                &SearchModel::replaceFinished,
-                this,
-                [this](quint32 files, quint32 matches, quint32 skipped) {
-                    pendingReplaceStatus_ = (
-                      skipped == 0
-                        ? tr("Replaced %1 match(es) in %2 file(s).").arg(matches).arg(files)
-                        : tr("Replaced %1 match(es) in %2 file(s); %3 file(s) skipped (changed "
-                             "since the search).")
-                            .arg(matches)
-                            .arg(files)
-                            .arg(skipped));
-                    statusLabel_->setText(pendingReplaceStatus_);
-                    // The files on disk moved on; the listed spans no longer
-                    // describe them, so re-run rather than leave stale rows.
-                    runSearch();
-                });
-        connect(searchModel_, &SearchModel::replaceFailed, this, [this](const QString &message) {
-            statusLabel_->setText(tr("Replace failed: %1").arg(message));
-        });
-    }
-
-    // Wired to the "Find in Files..." menu action/shortcut.
-    void focusQuery()
-    {
-        queryEdit_->setFocus();
-        queryEdit_->selectAll();
-    }
-
-private:
-    void runSearch()
-    {
-        const QString pattern = queryEdit_->text();
-        if (pattern.isEmpty()) {
-            return;
-        }
-        resultsList_->clear();
-        statusLabel_->setText(tr("Searching..."));
-        searchModel_->search(pattern, regexCheck_->isChecked(), caseCheck_->isChecked());
-    }
-
-    void addMatch(const QString &path, quint32 line, quint32 start, quint32 end, const QString &snippet)
-    {
-        auto *item = new QListWidgetItem(
-          tr("%1:%2: %3").arg(QFileInfo(path).fileName()).arg(line).arg(snippet), resultsList_);
-        item->setData(Qt::UserRole, path);
-        item->setData(Qt::UserRole + 1, line);
-        item->setData(Qt::UserRole + 2, start);
-        item->setData(Qt::UserRole + 3, end);
-        // Checked by default, so Replace All means "all of these" unless the
-        // user opts individual matches out.
-        item->setFlags(item->flags() | Qt::ItemIsUserCheckable);
-        item->setCheckState(Qt::Checked);
-    }
-
-    // Replace only the checked matches, after a confirmation naming the
-    // counts — a project-wide rewrite has no undo, so it is never one click
-    // away.
-    void replaceAll()
-    {
-        rust::Vec<FfiFileReplacement> edits;
-        QSet<QString> files;
-        for (int i = 0; i < resultsList_->count(); ++i) {
-            const QListWidgetItem *item = resultsList_->item(i);
-            if (item->checkState() != Qt::Checked) {
-                continue;
-            }
-            const QString path = item->data(Qt::UserRole).toString();
-            files.insert(path);
-            FfiFileReplacement edit;
-            edit.path = path;
-            edit.line = item->data(Qt::UserRole + 1).toUInt();
-            edit.start = item->data(Qt::UserRole + 2).toUInt();
-            edit.end = item->data(Qt::UserRole + 3).toUInt();
-            edits.push_back(std::move(edit));
-        }
-        if (edits.empty()) {
-            statusLabel_->setText(tr("No matches selected."));
-            return;
-        }
-
-        const auto answer = QMessageBox::question(
-          this,
-          tr("Replace in Files"),
-          tr("Replace %1 match(es) across %2 file(s) with \"%3\"?\n\nThis writes to disk and "
-             "cannot be undone.")
-            .arg(edits.size())
-            .arg(files.size())
-            .arg(replaceEdit_->text()),
-          QMessageBox::Yes | QMessageBox::No,
-          QMessageBox::No);
-        if (answer != QMessageBox::Yes) {
-            return;
-        }
-
-        statusLabel_->setText(tr("Replacing..."));
-        searchModel_->replaceInFiles(std::move(edits),
-                                     queryEdit_->text(),
-                                     replaceEdit_->text(),
-                                     regexCheck_->isChecked(),
-                                     caseCheck_->isChecked());
-    }
-
-    void openSelectedMatch(QListWidgetItem *item)
-    {
-        if (!item) {
-            return;
-        }
-        const QString path = item->data(Qt::UserRole).toString();
-        const int line = item->data(Qt::UserRole + 1).toInt();
-        const int column = item->data(Qt::UserRole + 2).toInt();
-        editorTabs_->openFileAtLine(path, line, column);
-    }
-
-    SearchModel *searchModel_;
-    EditorTabs *editorTabs_;
-    QLineEdit *queryEdit_ = nullptr;
-    QCheckBox *regexCheck_ = nullptr;
-    QCheckBox *caseCheck_ = nullptr;
-    QLineEdit *replaceEdit_ = nullptr;
-    QString pendingReplaceStatus_;
-    QListWidget *resultsList_ = nullptr;
-    QLabel *statusLabel_ = nullptr;
-};
-
 // Class View dock panel: a QTreeWidget with two data-source tiers, toggled
 // by `modeCombo_` (Task I extends Task D's original per-file-only panel —
 // "same widget/model, second data-source impl" per the plan doc, not a
@@ -1715,163 +1527,6 @@ private:
     QListWidget *resultsList_ = nullptr;
 };
 
-// Go-to-symbol quick-open (Task J): a transient `Ctrl+Shift+O` dialog —
-// "type to search, Enter/double-click to jump, Esc to close" — rather than
-// a permanent dock widget. Go-to-symbol is a one-shot jump, not a result
-// set you keep referring back to (unlike Find in Files/Find Usages), and
-// this is the conventional shape every mainstream IDE uses for it (VS
-// Code's Ctrl+P/Ctrl+Shift+O, JetBrains' Ctrl+N/Ctrl+Shift+N, Visual
-// Studio's Ctrl+,), so a dock widget here would be the novel choice, not
-// this one.
-class QuickOpenDialog : public QDialog
-{
-public:
-    QuickOpenDialog(SearchModel *searchModel, EditorTabs *editorTabs, QWidget *parent)
-      : QDialog(parent)
-      , searchModel_(searchModel)
-      , editorTabs_(editorTabs)
-    {
-        setWindowTitle(tr("Go to Symbol"));
-        resize(480, 360);
-
-        queryEdit_ = new QLineEdit(this);
-        queryEdit_->setPlaceholderText(tr("Type a symbol name..."));
-        resultsList_ = new QListWidget(this);
-
-        auto *layout = new QVBoxLayout(this);
-        layout->addWidget(queryEdit_);
-        layout->addWidget(resultsList_, 1);
-
-        connect(queryEdit_, &QLineEdit::textChanged, this, &QuickOpenDialog::runQuery);
-        connect(queryEdit_, &QLineEdit::returnPressed, this, &QuickOpenDialog::openCurrent);
-        connect(resultsList_, &QListWidget::itemActivated, this, &QuickOpenDialog::openItem);
-
-        connect(searchModel_, &SearchModel::symbolSearchResultFound, this,
-                &QuickOpenDialog::addResult);
-        connect(searchModel_, &SearchModel::symbolSearchFailed, this,
-                [this](const QString &message) {
-                    resultsList_->clear();
-                    new QListWidgetItem(tr("Search failed: %1").arg(message), resultsList_);
-                });
-
-        // User-requested "Search Everywhere" merge: fold Find in Files'
-        // full-text results into this same dialog, in a second labeled
-        // section below the symbol results. Kept on a dedicated signal
-        // (`quickOpenTextMatchFound`, not `searchMatchFound`) so this
-        // dialog's queries never leak into `FindInFilesPanel`'s list —
-        // both listen off the one shared `SearchModel` instance.
-        connect(searchModel_, &SearchModel::quickOpenTextMatchFound, this,
-                &QuickOpenDialog::addTextResult);
-    }
-
-    // Wired to the "Go to Symbol..." menu action/shortcut: reset to a blank
-    // query and bring the dialog to the front, focused for typing.
-    void popup()
-    {
-        queryEdit_->clear();
-        resultsList_->clear();
-        show();
-        raise();
-        activateWindow();
-        queryEdit_->setFocus();
-    }
-
-private:
-    void runQuery(const QString &text)
-    {
-        resultsList_->clear();
-        textSeparator_ = nullptr;
-        textResultCount_ = 0;
-        if (text.isEmpty()) {
-            return;
-        }
-        // ponytail: no debounce/request-id guard, so a fast typist can
-        // briefly see an older query's results race in after a newer
-        // query already cleared the list (the two background searches
-        // aren't ordered against each other). Add a generation counter if
-        // that's ever visible in practice at the query volumes this
-        // dialog sees.
-        searchModel_->symbolSearch(text);
-        searchModel_->quickOpenTextSearch(text);
-    }
-
-    void addResult(const FfiSymbolMatch &row)
-    {
-        const QString label = row.container.isEmpty()
-          ? tr("%1 (%2) — %3:%4")
-              .arg(row.name, symbolKindLabel(row.kind), QFileInfo(row.path).fileName())
-              .arg(row.line)
-          : tr("%1.%2 (%3) — %4:%5")
-              .arg(row.container, row.name, symbolKindLabel(row.kind),
-                    QFileInfo(row.path).fileName())
-              .arg(row.line);
-        auto *item = new QListWidgetItem(label, resultsList_);
-        item->setData(Qt::UserRole, row.path);
-        item->setData(Qt::UserRole + 1, row.line);
-        item->setData(Qt::UserRole + 2, row.column);
-        if (resultsList_->count() == 1) {
-            resultsList_->setCurrentRow(0);
-        }
-    }
-
-    // Task J's full-text half: one Find-in-Files-style match, appended
-    // under a "Text matches" separator that's inserted lazily on the first
-    // hit (so an empty section never appears). Capped — this dialog is a
-    // narrow quick-open list, not an exhaustive results view; Find in
-    // Files stays the place for that.
-    // ponytail: cap is a fixed constant, not user-configurable; raise it
-    // if 30 ever feels too tight in practice.
-    void addTextResult(const QString &path, quint32 line, quint32 start, quint32 end,
-                        const QString &snippet)
-    {
-        Q_UNUSED(start);
-        Q_UNUSED(end);
-        static constexpr int kMaxTextResults = 30;
-        if (textResultCount_ >= kMaxTextResults) {
-            return;
-        }
-        if (!textSeparator_) {
-            textSeparator_ = new QListWidgetItem(tr("Text matches"), resultsList_);
-            textSeparator_->setFlags(Qt::NoItemFlags);
-            QFont font = textSeparator_->font();
-            font.setBold(true);
-            textSeparator_->setFont(font);
-        }
-        auto *item = new QListWidgetItem(
-          tr("%1 — %2:%3").arg(snippet, QFileInfo(path).fileName()).arg(line), resultsList_);
-        item->setData(Qt::UserRole, path);
-        item->setData(Qt::UserRole + 1, line);
-        ++textResultCount_;
-    }
-
-    void openCurrent() { openItem(resultsList_->currentItem()); }
-
-    void openItem(QListWidgetItem *item)
-    {
-        if (!item) {
-            return;
-        }
-        const QVariant pathData = item->data(Qt::UserRole);
-        if (!pathData.isValid()) {
-            // The "Text matches" separator carries no data.
-            return;
-        }
-        // Symbol rows carry the name token's column; a text match has
-        // none, and its (invalid) variant converts to 0 — the start of the
-        // line, which is where a text hit belongs anyway.
-        editorTabs_->openFileAtLine(pathData.toString(), item->data(Qt::UserRole + 1).toInt(),
-                                     item->data(Qt::UserRole + 2).toInt());
-        accept();
-    }
-
-    SearchModel *searchModel_;
-    EditorTabs *editorTabs_;
-    QLineEdit *queryEdit_ = nullptr;
-    QListWidget *resultsList_ = nullptr;
-    QListWidgetItem *textSeparator_ = nullptr;
-    int textResultCount_ = 0;
-};
-
 // Subclassed so closeEvent() can run the same unsaved-changes prompt as
 // closing a tab, and persist geometry + dock layout on close (L1, D4). No
 // Q_OBJECT: overriding a virtual function needs no signals/slots/
@@ -1882,8 +1537,37 @@ public:
     void setEditorTabs(EditorTabs *editorTabs) { editorTabs_ = editorTabs; }
     void setAppSettings(AppSettings *appSettings) { appSettings_ = appSettings; }
     void setDockManager(ads::CDockManager *dockManager) { dockManager_ = dockManager; }
+    // Opens Search Everywhere. Set once the popup exists; until then the
+    // double-Shift gesture is simply inert.
+    void setSearchEverywhereTrigger(std::function<void()> trigger)
+    {
+        searchEverywhere_ = std::move(trigger);
+    }
 
 protected:
+    // JetBrains' double-Shift gesture: two Shift presses inside
+    // kDoubleShiftMs open Search Everywhere. Handled here rather than as a
+    // QShortcut because a bare modifier is not a key sequence Qt can bind.
+    void keyPressEvent(QKeyEvent *event) override
+    {
+        static constexpr int kDoubleShiftMs = 300;
+        if (event->key() == Qt::Key_Shift && !event->isAutoRepeat()) {
+            if (lastShift_.isValid() && lastShift_.elapsed() < kDoubleShiftMs) {
+                lastShift_.invalidate();
+                if (searchEverywhere_) {
+                    searchEverywhere_();
+                }
+                return;
+            }
+            lastShift_.start();
+        } else if (!event->text().isEmpty()) {
+            // Any real keystroke between the two presses means the user was
+            // typing, not gesturing.
+            lastShift_.invalidate();
+        }
+        QMainWindow::keyPressEvent(event);
+    }
+
     void closeEvent(QCloseEvent *event) override
     {
         if (editorTabs_ && !editorTabs_->confirmCloseAllTabs()) {
@@ -1912,6 +1596,8 @@ protected:
     }
 
 private:
+    std::function<void()> searchEverywhere_;
+    QElapsedTimer lastShift_;
     EditorTabs *editorTabs_ = nullptr;
     AppSettings *appSettings_ = nullptr;
     ads::CDockManager *dockManager_ = nullptr;
@@ -2292,15 +1978,15 @@ struct CentralWidgets
 {
     EditorTabs *editorTabs;
     ads::CDockManager *dockManager;
-    FindInFilesPanel *findInFilesPanel;
-    ads::CDockWidget *findInFilesDock;
+    SearchResultsPanel *searchResultsPanel;
+    ads::CDockWidget *searchResultsDock;
     ClassViewPanel *classViewPanel;
     ads::CDockWidget *classViewDock;
     ads::CDockWidget *terminalDock;
     TerminalWidget *terminalWidget;
     FindUsagesPanel *findUsagesPanel;
     ads::CDockWidget *findUsagesDock;
-    QuickOpenDialog *quickOpenDialog;
+    SearchEverywhereDialog *searchEverywhereDialog;
 };
 
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
@@ -2333,10 +2019,13 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // dock their Find in Files results. Reuses the one EditorTabs instance
     // above (its openFileAtLine) to open a match rather than a second,
     // parallel "open file" path.
-    auto *findInFilesPanel = new FindInFilesPanel(searchModel, editorTabs, dockManager);
-    auto *findInFilesDock = new ads::CDockWidget(dockManager, QObject::tr("Find in Files"));
-    findInFilesDock->setWidget(findInFilesPanel);
-    dockManager->addDockWidget(ads::BottomDockWidgetArea, findInFilesDock, editorArea);
+    auto openAt = [editorTabs](const QString &path, int line, int column) {
+        editorTabs->openFileAtLine(path, line, column);
+    };
+    auto *searchResultsPanel = new SearchResultsPanel(searchModel, openAt, dockManager);
+    auto *searchResultsDock = new ads::CDockWidget(dockManager, QObject::tr("Search Results"));
+    searchResultsDock->setWidget(searchResultsPanel);
+    dockManager->addDockWidget(ads::BottomDockWidgetArea, searchResultsDock, editorArea);
 
     // Task J: bottom dock panel, tabbed alongside Find in Files — same
     // "list of locations" shape, just fed by a symbol name instead of typed
@@ -2364,10 +2053,14 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     classViewDock->setWidget(classViewPanel);
     dockManager->addDockWidget(ads::RightDockWidgetArea, classViewDock, editorArea);
 
-    // Task J: transient go-to-symbol dialog, parented to the top-level
-    // window (not the dock manager) since it's a floating popup, not a
-    // dock widget — see QuickOpenDialog's own doc comment for why.
-    auto *quickOpenDialog = new QuickOpenDialog(searchModel, editorTabs, window);
+    // Search Everywhere: a transient popup parented to the top-level window
+    // (not the dock manager) since it's a floating overlay, not a dock
+    // widget. It hands a query off to the Search Results dock on Ctrl+Enter,
+    // which is why it is built after that panel. The action map it triggers
+    // commands through is filled later in buildMainWindow, so it takes a
+    // pointer to the map rather than a copy.
+    auto *searchEverywhereDialog =
+      new SearchEverywhereDialog(searchModel, openAt, searchResultsPanel, window);
 
     // Task F3: bottom dock panel, tabbed alongside Find in Files — the
     // conventional spot for an embedded shell in JetBrains/VS-style IDEs.
@@ -2400,12 +2093,14 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                           }
                       });
 
-    // Rebuild the project's text index off the same project-open lifecycle
-    // event the tree/watcher already use (no second, parallel hook).
+    // Open the project's text index off the same project-open lifecycle
+    // event the tree/watcher already use (no second, parallel hook). Opening
+    // reuses whatever is already on disk and re-reads only what changed, so
+    // a warm start costs a walk rather than a full index build.
     QObject::connect(treeModel,
                       &ProjectTreeModel::projectOpened,
                       searchModel,
-                      [searchModel](const QString &rootPath) { searchModel->buildIndex(rootPath); });
+                      [searchModel](const QString &rootPath) { searchModel->openIndex(rootPath); });
 
     // D4: restored after both dock widgets exist for this layout to apply
     // to (ADS matches saved widgets by their title/object name). Empty
@@ -2426,16 +2121,41 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                       docManager,
                       [docManager](const QString &path) { docManager->checkExternalChange(path); });
 
-    // N4: the same watcher event keeps the symbol index in step with disk.
-    // It fires for the app's own saves as well as outside edits, so one
-    // hook covers both — and `reindexFile` handles a deletion too, since
-    // it drops the file's rows before deciding whether to re-add them.
-    // Without this the index froze at project-open time and every jump
-    // drifted onto a stale line after the first edit.
+    // Keep the search index in step with the disk. Paths are coalesced over a
+    // short window because a single save can produce several watcher events,
+    // and re-indexing a file is far more expensive than remembering its name.
+    auto *dirtyPaths = new QSet<QString>();
+    auto *reindexTimer = new QTimer(window);
+    reindexTimer->setSingleShot(true);
+    reindexTimer->setInterval(300);
+    QObject::connect(reindexTimer, &QTimer::timeout, searchModel, [searchModel, dirtyPaths]() {
+        for (const QString &path : std::as_const(*dirtyPaths)) {
+            if (QFileInfo::exists(path)) {
+                searchModel->reindexFile(path);
+            } else {
+                searchModel->removeIndexedFile(path);
+            }
+        }
+        dirtyPaths->clear();
+    });
     QObject::connect(treeModel,
                       &ProjectTreeModel::filesChangedExternally,
                       searchModel,
-                      [searchModel](const QString &path) { searchModel->reindexFile(path); });
+                      [dirtyPaths, reindexTimer](const QString &path) {
+                          dirtyPaths->insert(path);
+                          reindexTimer->start();
+                      });
+
+    // Every file the user opens feeds Search Everywhere's Recent tier.
+    QObject::connect(docManager,
+                      &DocumentManager::tabOpened,
+                      searchModel,
+                      [searchModel, docManager](quint64 tabId, const QString &) {
+                          const QString path = docManager->tabPath(tabId);
+                          if (!path.isEmpty()) {
+                              searchModel->noteRecentFile(path);
+                          }
+                      });
 
     QObject::connect(docManager,
                       &DocumentManager::externalChangeDetected,
@@ -2576,9 +2296,10 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
           }
       });
 
-    return CentralWidgets{editorTabs,      dockManager,     findInFilesPanel, findInFilesDock,
-                           classViewPanel,  classViewDock,   terminalDock,     terminalWidget,
-                           findUsagesPanel, findUsagesDock,  quickOpenDialog};
+    return CentralWidgets{editorTabs,      dockManager,    searchResultsPanel,
+                           searchResultsDock, classViewPanel, classViewDock,
+                           terminalDock,    terminalWidget, findUsagesPanel,
+                           findUsagesDock,  searchEverywhereDialog};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -2761,10 +2482,28 @@ QMainWindow *buildMainWindow()
             w->setFocus();
         }
     });
+    // Every entry point opens the same popup, just preselected on a
+    // different tab — one search surface, several doors into it.
+    QAction *searchEverywhereAction =
+      registerAction(viewMenu, QStringLiteral("view.searchEverywhere"),
+                     QObject::tr("Search Everywhere..."), appSettings, *actions);
+    QObject::connect(searchEverywhereAction, &QAction::triggered, window, [central]() {
+        central.searchEverywhereDialog->popup(SearchEverywhereDialog::Tier::All);
+    });
+    QAction *goToFileAction = registerAction(viewMenu, QStringLiteral("view.goToFile"),
+                                             QObject::tr("Go to File..."), appSettings, *actions);
+    QObject::connect(goToFileAction, &QAction::triggered, window, [central]() {
+        central.searchEverywhereDialog->popup(SearchEverywhereDialog::Tier::Files);
+    });
+    QAction *findActionAction = registerAction(viewMenu, QStringLiteral("view.findAction"),
+                                               QObject::tr("Find Action..."), appSettings, *actions);
+    QObject::connect(findActionAction, &QAction::triggered, window, [central]() {
+        central.searchEverywhereDialog->popup(SearchEverywhereDialog::Tier::Actions);
+    });
     QAction *goToSymbolAction = registerAction(viewMenu, QStringLiteral("view.goToSymbol"),
                                                QObject::tr("Go to Symbol..."), appSettings, *actions);
     QObject::connect(goToSymbolAction, &QAction::triggered, window, [central]() {
-        central.quickOpenDialog->popup();
+        central.searchEverywhereDialog->popup(SearchEverywhereDialog::Tier::Symbols);
     });
     QAction *goToLineAction = registerAction(viewMenu, QStringLiteral("view.goToLine"),
                                              QObject::tr("Go to Line..."), appSettings, *actions);
@@ -2871,9 +2610,17 @@ QMainWindow *buildMainWindow()
         }
     });
     QObject::connect(findInFilesAction, &QAction::triggered, window, [central]() {
-        central.findInFilesDock->toggleView(true);
-        central.findInFilesDock->raise();
-        central.findInFilesPanel->focusQuery();
+        central.searchResultsDock->toggleView(true);
+        central.searchResultsDock->raise();
+        central.searchResultsPanel->focusQuery();
+    });
+
+    // The popup triggers commands through this registry, which only exists
+    // once every menu above has been built.
+    central.searchEverywhereDialog->setActions(actions.get());
+    // JetBrains' double-Shift gesture, on top of the rebindable shortcut.
+    window->setSearchEverywhereTrigger([central]() {
+        central.searchEverywhereDialog->popup(SearchEverywhereDialog::Tier::All);
     });
 
     // US-1: relaunching the app reopens the last project automatically.

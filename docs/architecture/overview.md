@@ -46,7 +46,7 @@ graph TB
 | `app-core` | application | `AppSession`: orchestration, command methods, typed `AppError`, jump history | No |
 | `app-config` | support | `settings.toml` load/save, theme, editor font/colors, keymap | No |
 | `syntax-core` | support | tree-sitter parsing: highlighting, folding, outline, occurrences, supertype edges | No |
-| `index-core` | support | Project index: text search (tantivy + ripgrep crates) and symbols/references, plus declaration resolution ([ADR-0010](decisions/0010-code-navigation.md)) | No |
+| `index-core` | support | Project index: text search (tantivy + ripgrep crates) and symbols/references, plus declaration resolution ([ADR-0011](decisions/0011-code-navigation.md)) | No |
 | `pty-core` | support | Cross-platform PTY transport for the embedded terminal | No |
 | `terminal-core` | support | VT100/grid state over `alacritty_terminal` | No |
 | `mcp-server` | support | MCP transport so an agent can read and drive the editor | No |
@@ -74,7 +74,7 @@ Artifacts land in `dist/`.
 The following are documented direction per ADR-0001 but have no code and no crates today; add them when the work starts, not before:
 
 - **LSP client** — language-server integration in the Rust core.
-  This is also the upgrade path past ADR-0010's deliberately name-based declaration resolution.
+  This is also the upgrade path past ADR-0011's deliberately name-based declaration resolution.
 - **Debugger adapter (DAP)** — same placement rationale as LSP.
 - **Plugin host** — hybrid model: native dylib loader (stable C ABI) for trusted, perf-critical integrations; sandboxed WASM runtime (wasmtime) with a narrower, capability-based API for third-party plugins.
 - **QML view** — the planned replacement for the Widgets view; the humble-view split exists so this swap stays cheap.

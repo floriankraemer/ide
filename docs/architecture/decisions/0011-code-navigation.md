@@ -1,4 +1,4 @@
-# 0010. Code navigation: local-file-first declaration resolution, hover-free of resolution, supertype edges as a third index schema
+# 0011. Code navigation: local-file-first declaration resolution, hover-free of resolution, supertype edges as a third index schema
 
 ## Status
 

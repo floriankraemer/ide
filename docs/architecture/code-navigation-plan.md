@@ -37,7 +37,7 @@ Two supporting gaps made the feature unreliable if built naively:
 1. **Two-tier resolution, local file first, project index second.**
    Local-file candidates are definition-position occurrences of the same name in the buffer the caret is in, ranked nearest-preceding-first; they win outright over project-wide candidates.
    Shadowing falls out of the ordering (an inner `let x` is nearer the caret than an outer one) instead of needing a scope graph.
-   See [ADR-0010](decisions/0010-code-navigation.md).
+   See [ADR-0011](decisions/0011-code-navigation.md).
 2. **No scope queries, no binding resolver.**
    Upgrading all five `locals.scm` files to real tree-sitter scope queries (`@local.scope`/`@local.definition`) was rejected: five languages of scope-chain work for a precision delta decision 1 already covers on the cases users actually `Ctrl+Click`.
    Cross-file type/binding resolution stays an explicit ADR-0008 non-goal.
@@ -92,7 +92,7 @@ New `Navigate` menu and `ActionDef`s, the ambiguity chooser, caret-driven Find U
 
 ### N9 — Docs
 
-ADR-0010, this plan doc, and the `layering.md`/`overview.md` sync.
+ADR-0011, this plan doc, and the `layering.md`/`overview.md` sync.
 `overview.md` had drifted well past this task — it still described the MVP and listed five of the eleven crates — so it was brought back in line with the code rather than only patched where navigation touched it.
 
 ## Fixed along the way

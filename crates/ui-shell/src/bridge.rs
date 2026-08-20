@@ -124,6 +124,50 @@ mod ffi {
         end: u32,
     }
 
+    /// Which tier a Search Everywhere hit came from. The view uses it to
+    /// group results under section headers and to decide what activating a
+    /// row does (open a file, jump to a line, trigger an action).
+    enum FfiHitKind {
+        RecentFile,
+        File,
+        Symbol,
+        Text,
+        Action,
+    }
+
+    /// Which tiers a Search Everywhere query should run, mirroring the
+    /// popup's tabs. Narrowing here rather than filtering in the view means
+    /// the Files tab never greps the project and the Text tab never scans
+    /// symbols — the work is skipped, not discarded.
+    enum FfiTierFilter {
+        All,
+        Files,
+        Symbols,
+        Text,
+        Actions,
+    }
+
+    /// One Search Everywhere hit, tier-agnostic on purpose: every tier
+    /// produces the same row shape so the view renders one list rather than
+    /// four.
+    ///
+    /// `text` is the primary label and the string `positions` (character
+    /// offsets) highlight; `detail` is the dimmer secondary label. For file
+    /// and text hits `path`/`line` address where to jump; for actions
+    /// `action_id` names the command to trigger and everything else is
+    /// empty.
+    struct FfiSearchHit {
+        kind: FfiHitKind,
+        path: QString,
+        line: u32,
+        start: u32,
+        end: u32,
+        text: QString,
+        detail: QString,
+        action_id: QString,
+        positions: Vec<u32>,
+    }
+
     /// Structural symbol kind (Task D), 1:1 with `syntax_core::SymbolKind`.
     /// `Class` is only nominally the default — a row with no kind of its
     /// own carries `has_kind == false` and this value is not read.
@@ -924,13 +968,83 @@ mod ffi {
         #[qobject]
         type SearchModel = super::SearchModelRust;
 
-        /// (Re)build the text index for `root_path`, replacing any
-        /// previous index. Wired to `ProjectTreeModel::projectOpened` in
+        /// Open the project index for `root_path`, reusing what is already
+        /// on disk and re-reading only the files that changed since the last
+        /// run (a full build only happens on a first run or an unusable
+        /// index). Wired to `ProjectTreeModel::projectOpened` in
         /// `main_window.cpp` — the same project-open lifecycle event the
         /// tree/watcher already hook, not a second parallel one.
         #[qinvokable]
-        #[cxx_name = "buildIndex"]
-        fn build_index(self: Pin<&mut SearchModel>, root_path: &QString);
+        #[cxx_name = "openIndex"]
+        fn open_index(self: Pin<&mut SearchModel>, root_path: &QString);
+
+        /// Re-index one file after it changed on disk, so search results
+        /// never go stale while the project stays open. Driven by the
+        /// existing filesystem watcher; a path that is gone or unreadable
+        /// simply drops out of the index.
+        #[qinvokable]
+        #[cxx_name = "reindexFile"]
+        fn reindex_file(self: Pin<&mut SearchModel>, path: &QString);
+
+        /// Drop a deleted file from the index (the watcher's remove/rename
+        /// counterpart to `reindexFile`).
+        #[qinvokable]
+        #[cxx_name = "removeIndexedFile"]
+        fn remove_indexed_file(self: Pin<&mut SearchModel>, path: &QString);
+
+        /// Record `path` as most-recently-opened: it feeds Search
+        /// Everywhere's Recent tier and is persisted to `settings.toml`.
+        #[qinvokable]
+        #[cxx_name = "noteRecentFile"]
+        fn note_recent_file(self: Pin<&mut SearchModel>, path: &QString);
+
+        /// Re-read the keymap so the action tier reports current shortcuts.
+        /// Called at startup and after the Settings keymap page commits.
+        #[qinvokable]
+        #[cxx_name = "refreshKeymap"]
+        fn refresh_keymap(self: Pin<&mut SearchModel>);
+
+        /// Search Everywhere: run `query` across every tier (recent files,
+        /// actions, file names, symbols, then full text) and stream the hits
+        /// back as `resultsBatch` emissions tagged with `generation`,
+        /// followed by exactly one `queryFinished`/`queryFailed` for that
+        /// same generation.
+        ///
+        /// `generation` is the view's monotonically increasing query id. A
+        /// newer call cancels the running one mid-scan, and the view drops
+        /// any batch whose generation is not the one it is waiting for —
+        /// which is what keeps search-as-you-type from either stalling or
+        /// interleaving stale results.
+        #[qinvokable]
+        #[cxx_name = "searchEverywhere"]
+        fn search_everywhere(
+            self: Pin<&mut SearchModel>,
+            query: &QString,
+            tiers: FfiTierFilter,
+            generation: u64,
+            limit: u32,
+        );
+
+        /// A batch of Search Everywhere hits for `generation`, in rank
+        /// order within a tier and tier order across batches. Batched
+        /// rather than one signal per hit because a signal per hit means a
+        /// cross-thread hop per hit.
+        #[qsignal]
+        #[cxx_name = "resultsBatch"]
+        fn results_batch(self: Pin<&mut SearchModel>, generation: u64, hits: Vec<FfiSearchHit>);
+
+        /// Emitted once after the last `resultsBatch` of a
+        /// `searchEverywhere` call, including when it found nothing or was
+        /// superseded before finishing.
+        #[qsignal]
+        #[cxx_name = "queryFinished"]
+        fn query_finished(self: Pin<&mut SearchModel>, generation: u64);
+
+        /// Emitted instead of `queryFinished` when the query couldn't run
+        /// at all (no project open yet).
+        #[qsignal]
+        #[cxx_name = "queryFailed"]
+        fn query_failed(self: Pin<&mut SearchModel>, generation: u64, message: QString);
 
         /// Emitted once a `buildIndex` call finishes indexing successfully.
         #[qsignal]
@@ -944,11 +1058,12 @@ mod ffi {
         fn index_failed(self: Pin<&mut SearchModel>, message: QString);
 
         /// Run Find-in-Files: `pattern` is a literal substring unless
-        /// `is_regex` is set. Every match is delivered as its own
-        /// `searchMatchFound` emission (avoids needing a `Vec<struct>`
-        /// qinvokable/signal payload, which nothing else in this bridge
-        /// uses), followed by exactly one `searchFinished` or
-        /// `searchFailed`.
+        /// `is_regex` is set. Matches stream back as `searchBatch`
+        /// emissions tagged with `generation`, followed by exactly one
+        /// `searchFinished` or `searchFailed`. `generation` works exactly as
+        /// it does for `searchEverywhere` — a newer search cancels the
+        /// running one — but the two use separate counters so typing in the
+        /// popup never cancels the results panel's search.
         #[qinvokable]
         #[cxx_name = "search"]
         fn search(
@@ -956,6 +1071,7 @@ mod ffi {
             pattern: &QString,
             is_regex: bool,
             case_sensitive: bool,
+            generation: u64,
         );
 
         /// Apply a project-wide replace to exactly the spans in `edits` —
@@ -993,68 +1109,26 @@ mod ffi {
         #[cxx_name = "replaceFailed"]
         fn replace_failed(self: Pin<&mut SearchModel>, message: QString);
 
-        /// One match: `line` is 1-based, `start`/`end` are byte offsets of
-        /// the match within that line (matching `index_core::SearchMatch`),
-        /// `snippet` is the (trimmed) line text for display.
+        /// A batch of Find-in-Files matches for `generation`, as
+        /// `FfiHitKind::Text` hits: `line` is 1-based, `start`/`end` are
+        /// byte offsets of the match within that line (matching
+        /// `index_core::SearchMatch`), `text` is the trimmed line for
+        /// display.
         #[qsignal]
-        #[cxx_name = "searchMatchFound"]
-        fn search_match_found(
-            self: Pin<&mut SearchModel>,
-            path: QString,
-            line: u32,
-            start: u32,
-            end: u32,
-            snippet: QString,
-        );
+        #[cxx_name = "searchBatch"]
+        fn search_batch(self: Pin<&mut SearchModel>, generation: u64, hits: Vec<FfiSearchHit>);
 
-        /// Emitted once after the last `searchMatchFound` of a `search`
-        /// call (including when there were zero matches).
+        /// Emitted once after the last `searchBatch` of a `search` call
+        /// (including when there were zero matches).
         #[qsignal]
         #[cxx_name = "searchFinished"]
-        fn search_finished(self: Pin<&mut SearchModel>);
+        fn search_finished(self: Pin<&mut SearchModel>, generation: u64);
 
         /// Emitted instead of `searchFinished` when `search` couldn't run
         /// at all (no index built yet, or an invalid regex pattern).
         #[qsignal]
         #[cxx_name = "searchFailed"]
-        fn search_failed(self: Pin<&mut SearchModel>, message: QString);
-
-        /// Quick Open's full-text half (user-requested "Search Everywhere"
-        /// merge of Find in Files results into Go to Symbol): a literal
-        /// substring search over the same index, kept as its own
-        /// invokable/signal trio — same reasoning as `symbolSearch` below
-        /// keeping its own signal rather than reusing `projectSymbolFound`
-        /// — so `QuickOpenDialog` and `FindInFilesPanel` don't leak results
-        /// into each other despite sharing one `SearchModel`.
-        #[qinvokable]
-        #[cxx_name = "quickOpenTextSearch"]
-        fn quick_open_text_search(self: Pin<&mut SearchModel>, query: &QString);
-
-        /// One Quick Open text match: same payload shape as
-        /// `searchMatchFound`.
-        #[qsignal]
-        #[cxx_name = "quickOpenTextMatchFound"]
-        fn quick_open_text_match_found(
-            self: Pin<&mut SearchModel>,
-            path: QString,
-            line: u32,
-            start: u32,
-            end: u32,
-            snippet: QString,
-        );
-
-        /// Emitted once after the last `quickOpenTextMatchFound` of a
-        /// `quickOpenTextSearch` call (including when there were zero
-        /// matches).
-        #[qsignal]
-        #[cxx_name = "quickOpenTextSearchFinished"]
-        fn quick_open_text_search_finished(self: Pin<&mut SearchModel>);
-
-        /// Emitted instead of `quickOpenTextSearchFinished` when
-        /// `quickOpenTextSearch` couldn't run at all (no index built yet).
-        #[qsignal]
-        #[cxx_name = "quickOpenTextSearchFailed"]
-        fn quick_open_text_search_failed(self: Pin<&mut SearchModel>, message: QString);
+        fn search_failed(self: Pin<&mut SearchModel>, generation: u64, message: QString);
 
         /// Class View's project-wide tier (Task I): list every indexed
         /// symbol *definition* across the whole project — same
@@ -1088,37 +1162,6 @@ mod ffi {
         #[cxx_name = "projectSymbolsFailed"]
         fn project_symbols_failed(self: Pin<&mut SearchModel>, message: QString);
 
-        /// Task J — go-to-symbol: definition sites whose name contains
-        /// `query` (non-empty; an empty query is `projectSymbols`'s job
-        /// above, same underlying `find_definitions` call, just always
-        /// narrowed here). Runs on a background thread and streams results
-        /// like `projectSymbols`, for the same reason (shared `Mutex` with
-        /// a concurrent `buildIndex`/`search` call).
-        #[qinvokable]
-        #[cxx_name = "symbolSearch"]
-        fn symbol_search(self: Pin<&mut SearchModel>, query: &QString);
-
-        /// One go-to-symbol result: same row shape as
-        /// `projectSymbolFound`, kept as a separate signal (rather than
-        /// reusing that one) so the quick-open dialog and the Class View
-        /// project tier can listen independently without filtering each
-        /// other's emissions.
-        #[qsignal]
-        #[cxx_name = "symbolSearchResultFound"]
-        fn symbol_search_result_found(self: Pin<&mut SearchModel>, row: FfiSymbolMatch);
-
-        /// Emitted once after the last `symbolSearchResultFound` of a
-        /// `symbolSearch` call (including when there were zero results).
-        #[qsignal]
-        #[cxx_name = "symbolSearchFinished"]
-        fn symbol_search_finished(self: Pin<&mut SearchModel>);
-
-        /// Emitted instead of `symbolSearchFinished` when `symbolSearch`
-        /// couldn't run at all (no index built yet).
-        #[qsignal]
-        #[cxx_name = "symbolSearchFailed"]
-        fn symbol_search_failed(self: Pin<&mut SearchModel>, message: QString);
-
         /// Task J — find-usages: every occurrence (definitions and
         /// references alike) of the exact name `name`, across the whole
         /// project. `index_core::TextIndex::find_usages` already sorts by
@@ -1147,21 +1190,6 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "usagesFailed"]
         fn usages_failed(self: Pin<&mut SearchModel>, message: QString);
-
-        /// N4 — re-index one file after it changed on disk, so symbol
-        /// line numbers don't drift away from what the editor shows.
-        /// Wired to the project watcher's `filesChangedExternally`, which
-        /// fires for the app's own saves as well as outside edits — one
-        /// hook rather than a second, parallel save-time path.
-        ///
-        /// A deletion needs no separate call: `TextIndex::reindex_file`
-        /// deletes the file's rows first and only re-adds them if the
-        /// path is still readable. A no-op when no index has been built
-        /// yet; failures arrive on `indexFailed`, since there is no
-        /// per-file UI to report them to.
-        #[qinvokable]
-        #[cxx_name = "reindexFile"]
-        fn reindex_file(self: Pin<&mut SearchModel>, path: &QString);
 
         /// N2 — Go to Declaration: where is the identifier at
         /// `byte_offset` in `content` declared? `path` and `content`
@@ -2514,40 +2542,151 @@ impl ffi::KeymapEditor {
 }
 
 /// Rust side of the `SearchModel` QObject (Task H). The index itself lives
-/// behind a `Mutex` (not the `RefCell` the other adapters use) because,
-/// unlike `AppSession`, it is genuinely accessed from a background thread —
+/// behind an `RwLock` (not the `RefCell` the other adapters use) because,
+/// unlike `AppSession`, it is genuinely accessed from background threads —
 /// the Qt-thread invokables below only ever clone the `Arc` and hand it off.
+/// A read lock is enough for every query, so several searches can run at
+/// once and only re-indexing serialises them.
 #[derive(Default)]
 pub struct SearchModelRust {
-    index: std::sync::Arc<std::sync::Mutex<Option<index_core::TextIndex>>>,
+    index: std::sync::Arc<std::sync::RwLock<Option<index_core::TextIndex>>>,
+    context: std::sync::Arc<std::sync::Mutex<SearchContext>>,
+    /// Separate query guards so the popup and the results panel never
+    /// cancel each other.
+    everywhere: std::sync::Arc<QueryGuard>,
+    find_in_files: std::sync::Arc<QueryGuard>,
 }
 
-/// Read-back the line text a match was found on, for the results list's
-/// snippet column. `index_core::SearchMatch` only carries byte offsets, not
-/// the line itself, so this re-reads the file.
-// ponytail: one file re-read per match rather than caching content from the
-// search pass — fine at Find-in-Files result-list sizes; batch/cache this
-// if it ever measurably matters on a huge result set.
-fn line_snippet(path: &std::path::Path, line: usize) -> String {
-    let Ok(content) = std::fs::read_to_string(path) else {
-        return String::new();
-    };
-    content
-        .lines()
-        .nth(line.saturating_sub(1))
-        .unwrap_or("")
-        .trim()
-        .to_string()
+/// The non-index inputs Search Everywhere's cheap tiers need. Cached here
+/// rather than re-read from `settings.toml` per keystroke.
+#[derive(Default)]
+struct SearchContext {
+    recent_files: Vec<std::path::PathBuf>,
+    keymap: app_config::keymap::Keymap,
+}
+
+/// Search-as-you-type bookkeeping for one query stream: which generation the
+/// view is currently waiting for, and the flag that tells the running worker
+/// to stop scanning because a newer keystroke superseded it.
+#[derive(Default)]
+struct QueryGuard {
+    generation: std::sync::atomic::AtomicU64,
+    cancel: std::sync::Mutex<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl QueryGuard {
+    /// Cancel whatever is running and take ownership of `generation`,
+    /// returning the fresh cancellation flag for the new worker. The old
+    /// worker keeps its own (now-raised) flag, so it stops without the new
+    /// one ever seeing a cancellation meant for its predecessor.
+    fn begin(&self, generation: u64) -> std::sync::Arc<std::sync::atomic::AtomicBool> {
+        use std::sync::atomic::Ordering;
+        self.generation.store(generation, Ordering::SeqCst);
+        let mut slot = self.cancel.lock().unwrap();
+        slot.store(true, Ordering::Relaxed);
+        let fresh = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        *slot = std::sync::Arc::clone(&fresh);
+        fresh
+    }
+
+    /// Whether `generation` is still the one the view wants.
+    fn is_current(&self, generation: u64) -> bool {
+        self.generation.load(std::sync::atomic::Ordering::SeqCst) == generation
+    }
+}
+
+/// Hits per `searchBatch` emission. Find in Files can produce tens of
+/// thousands of matches and one signal per match is one cross-thread hop
+/// per match; batching turns that into a handful of hops.
+const SEARCH_BATCH_SIZE: usize = 256;
+
+/// Ceiling on Find-in-Files matches. A three-character query on a large repo
+/// can match more lines than any human will scroll.
+// ponytail: a fixed ceiling with no "showing first N of M" affordance in the
+// results panel — add a count and a "load more" if users hit it in anger.
+const MAX_FIND_IN_FILES_MATCHES: usize = 10_000;
+
+/// Build one Search Everywhere row.
+fn hit(kind: ffi::FfiHitKind, text: &str, detail: &str, positions: Vec<u32>) -> ffi::FfiSearchHit {
+    ffi::FfiSearchHit {
+        kind,
+        path: QString::from(""),
+        line: 0,
+        start: 0,
+        end: 0,
+        text: QString::from(text),
+        detail: QString::from(detail),
+        action_id: QString::from(""),
+        positions,
+    }
+}
+
+/// Human label for a symbol hit's secondary column.
+fn symbol_detail(m: &index_core::SymbolMatch) -> String {
+    let kind = m
+        .kind
+        .map(|k| match k {
+            syntax_core::SymbolKind::Class => "class",
+            syntax_core::SymbolKind::Struct => "struct",
+            syntax_core::SymbolKind::Enum => "enum",
+            syntax_core::SymbolKind::Interface => "interface",
+            syntax_core::SymbolKind::Method => "method",
+            syntax_core::SymbolKind::Function => "function",
+            syntax_core::SymbolKind::Field => "field",
+        })
+        .unwrap_or("symbol");
+    match &m.container {
+        Some(container) => format!("{kind} in {container}"),
+        None => kind.to_string(),
+    }
+}
+
+/// Turn one text match into a `FfiHitKind::Text` row, shared by Search
+/// Everywhere's text tier and Find in Files so both render identically.
+fn text_hit(m: index_core::SearchMatch, root: &std::path::Path) -> ffi::FfiSearchHit {
+    let path = m.path.to_string_lossy().into_owned();
+    let trimmed = m.line_text.trim_start();
+    // The trim shifts the match span, which the view highlights.
+    let shift = m.line_text.len() - trimmed.len();
+    let display = trimmed.trim_end();
+    let start = m.start.saturating_sub(shift);
+    let end = m.end.saturating_sub(shift);
+    // The view highlights character offsets, not byte offsets — they only
+    // agree on ASCII lines.
+    let positions: Vec<u32> = display
+        .char_indices()
+        .enumerate()
+        .filter(|(_, (byte, _))| *byte >= start && *byte < end)
+        .map(|(index, _)| index as u32)
+        .collect();
+    let relative = m
+        .path
+        .strip_prefix(root)
+        .unwrap_or(&m.path)
+        .to_string_lossy()
+        .into_owned();
+    ffi::FfiSearchHit {
+        kind: ffi::FfiHitKind::Text,
+        path: QString::from(path.as_str()),
+        line: m.line as u32,
+        start: start as u32,
+        end: end as u32,
+        text: QString::from(display),
+        detail: QString::from(format!("{relative}:{}", m.line).as_str()),
+        action_id: QString::from(""),
+        positions,
+    }
 }
 
 impl ffi::SearchModel {
-    pub fn build_index(self: Pin<&mut Self>, root_path: &QString) {
+    pub fn open_index(self: Pin<&mut Self>, root_path: &QString) {
         let root = std::path::PathBuf::from(root_path.to_string());
         let qt_thread = self.qt_thread();
         let slot = std::sync::Arc::clone(&self.index);
-        std::thread::spawn(move || match index_core::TextIndex::build(&root) {
+        self.as_ref().load_context();
+        std::thread::spawn(move || match index_core::TextIndex::open_or_build(&root) {
             Ok(index) => {
-                *slot.lock().unwrap() = Some(index);
+                *slot.write().unwrap() = Some(index);
                 let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
                     model.as_mut().index_ready();
                 });
@@ -2561,43 +2700,274 @@ impl ffi::SearchModel {
         });
     }
 
-    pub fn search(self: Pin<&mut Self>, pattern: &QString, is_regex: bool, case_sensitive: bool) {
-        let pattern = pattern.to_string();
-        let qt_thread = self.qt_thread();
+    pub fn reindex_file(self: Pin<&mut Self>, path: &QString) {
+        let path = std::path::PathBuf::from(path.to_string());
         let slot = std::sync::Arc::clone(&self.index);
         std::thread::spawn(move || {
-            let guard = slot.lock().unwrap();
-            let Some(index) = guard.as_ref() else {
-                drop(guard);
-                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+            if let Some(index) = slot.write().unwrap().as_mut() {
+                // A file that became unreadable is dropped from the index by
+                // `reindex_file` itself, so there is nothing to report here.
+                let _ = index.reindex_file(&path);
+            }
+        });
+    }
+
+    pub fn remove_indexed_file(self: Pin<&mut Self>, path: &QString) {
+        let path = std::path::PathBuf::from(path.to_string());
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            if let Some(index) = slot.write().unwrap().as_mut() {
+                let _ = index.remove_file(&path);
+            }
+        });
+    }
+
+    pub fn note_recent_file(self: Pin<&mut Self>, path: &QString) {
+        let path = std::path::PathBuf::from(path.to_string());
+        {
+            let mut context = self.context.lock().unwrap();
+            context.recent_files.retain(|p| p != &path);
+            context.recent_files.insert(0, path.clone());
+        }
+        let config_dir = app_core::resolve_config_dir();
+        let Ok(mut settings) = app_config::load(&config_dir) else {
+            return;
+        };
+        settings.push_recent_file(path);
+        let _ = app_config::save(&config_dir, &settings);
+    }
+
+    pub fn refresh_keymap(self: Pin<&mut Self>) {
+        self.as_ref().load_context();
+    }
+
+    /// Re-read the settings-derived half of the search context (recent
+    /// files, keymap) so the cheap tiers answer from memory.
+    fn load_context(&self) {
+        let Ok(settings) = app_config::load(&app_core::resolve_config_dir()) else {
+            return;
+        };
+        let mut context = self.context.lock().unwrap();
+        context.keymap = settings.keymap();
+        context.recent_files = settings.recent_files.clone();
+    }
+
+    pub fn search_everywhere(
+        self: Pin<&mut Self>,
+        query: &QString,
+        tiers: ffi::FfiTierFilter,
+        generation: u64,
+        limit: u32,
+    ) {
+        let query = query.to_string();
+        let limit = (limit as usize).max(1);
+        let qt_thread = self.qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        let context = std::sync::Arc::clone(&self.context);
+        let guard = std::sync::Arc::clone(&self.everywhere);
+        let cancel = guard.begin(generation);
+
+        std::thread::spawn(move || {
+            use std::sync::atomic::Ordering;
+
+            let wanted =
+                |tier: ffi::FfiTierFilter| tiers == ffi::FfiTierFilter::All || tiers == tier;
+            let superseded = || cancel.load(Ordering::Relaxed) || !guard.is_current(generation);
+            let emit = |hits: Vec<ffi::FfiSearchHit>| {
+                if hits.is_empty() {
+                    return;
+                }
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model.as_mut().results_batch(generation, hits);
+                });
+            };
+            let finish = || {
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model.as_mut().query_finished(generation);
+                });
+            };
+
+            // Recent files answer from memory, so the empty-query landing
+            // view paints before any index work starts. Once there is a query
+            // the file tier covers them, ranked.
+            if query.is_empty() && wanted(ffi::FfiTierFilter::Files) {
+                let context = context.lock().unwrap();
+                emit(
+                    context
+                        .recent_files
+                        .iter()
+                        .take(limit)
+                        .map(|path| {
+                            let display = path.to_string_lossy().into_owned();
+                            let name = path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_else(|| display.clone());
+                            let mut row =
+                                hit(ffi::FfiHitKind::RecentFile, &name, &display, Vec::new());
+                            row.path = QString::from(display.as_str());
+                            row
+                        })
+                        .collect(),
+                );
+            }
+
+            if superseded() {
+                finish();
+                return;
+            }
+
+            let index_guard = slot.read().unwrap();
+            let Some(index) = index_guard.as_ref() else {
+                drop(index_guard);
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
                     model
                         .as_mut()
-                        .search_failed(QString::from("No project is open yet."));
+                        .query_failed(generation, QString::from("No project is open yet."));
                 });
                 return;
             };
-            let result = index.search(&pattern, is_regex, case_sensitive);
-            drop(guard);
+
+            if wanted(ffi::FfiTierFilter::Files) {
+                emit(
+                    index
+                        .find_files(&query, limit)
+                        .into_iter()
+                        .map(|m| {
+                            let mut row = hit(ffi::FfiHitKind::File, &m.relative, "", m.positions);
+                            row.path = QString::from(m.path.to_string_lossy().as_ref());
+                            row
+                        })
+                        .collect(),
+                );
+            }
+
+            if superseded() {
+                drop(index_guard);
+                finish();
+                return;
+            }
+
+            if !query.is_empty() && wanted(ffi::FfiTierFilter::Symbols) {
+                // ponytail: symbol rows carry no highlight positions —
+                // `find_definitions_ranked` scores without reporting match
+                // indices. Thread them through if the visual inconsistency
+                // with the file tier starts to show.
+                if let Ok(symbols) = index.find_definitions_ranked(&query, limit) {
+                    emit(
+                        symbols
+                            .into_iter()
+                            .map(|m| {
+                                let detail = symbol_detail(&m);
+                                let mut row =
+                                    hit(ffi::FfiHitKind::Symbol, &m.name, &detail, Vec::new());
+                                row.path = QString::from(m.path.to_string_lossy().as_ref());
+                                row.line = m.line as u32;
+                                row
+                            })
+                            .collect(),
+                    );
+                }
+            }
+
+            if superseded() {
+                drop(index_guard);
+                finish();
+                return;
+            }
+
+            // Actions also answer from memory, but rank below the project's
+            // own files and symbols: a query is far more often about the code
+            // than about a command. An empty query in the All tab is the
+            // recent-files landing view, so the whole command list stays out
+            // of it — browsing commands is what the Actions tab is for.
+            if wanted(ffi::FfiTierFilter::Actions)
+                && (!query.is_empty() || tiers == ffi::FfiTierFilter::Actions)
+            {
+                let context = context.lock().unwrap();
+                emit(
+                    app_config::keymap::search_actions(&query, &context.keymap, limit)
+                        .into_iter()
+                        .map(|m| {
+                            let label = format!("{}: {}", m.action.category, m.action.label);
+                            let mut row =
+                                hit(ffi::FfiHitKind::Action, &label, &m.shortcut, m.positions);
+                            row.action_id = QString::from(m.action.id);
+                            row
+                        })
+                        .collect(),
+                );
+            }
+
+            if superseded() {
+                drop(index_guard);
+                finish();
+                return;
+            }
+
+            // A one-character query would scan the whole project for
+            // something every file contains; the other tiers already answer
+            // it usefully.
+            if query.chars().count() >= 2 && wanted(ffi::FfiTierFilter::Text) {
+                if let Ok(matches) = index.search_with(&query, false, false, limit, &cancel) {
+                    let root = index.root().to_path_buf();
+                    emit(matches.into_iter().map(|m| text_hit(m, &root)).collect());
+                }
+            }
+
+            drop(index_guard);
+            finish();
+        });
+    }
+
+    pub fn search(
+        self: Pin<&mut Self>,
+        pattern: &QString,
+        is_regex: bool,
+        case_sensitive: bool,
+        generation: u64,
+    ) {
+        let pattern = pattern.to_string();
+        let qt_thread = self.qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        let guard = std::sync::Arc::clone(&self.find_in_files);
+        let cancel = guard.begin(generation);
+
+        std::thread::spawn(move || {
+            let index_guard = slot.read().unwrap();
+            let Some(index) = index_guard.as_ref() else {
+                drop(index_guard);
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model
+                        .as_mut()
+                        .search_failed(generation, QString::from("No project is open yet."));
+                });
+                return;
+            };
+            let result = index.search_with(
+                &pattern,
+                is_regex,
+                case_sensitive,
+                MAX_FIND_IN_FILES_MATCHES,
+                &cancel,
+            );
+            let root = index.root().to_path_buf();
+            drop(index_guard);
+
             match result {
                 Ok(matches) => {
-                    for m in matches {
-                        let snippet = line_snippet(&m.path, m.line);
-                        let path = QString::from(m.path.to_string_lossy().as_ref());
-                        let line = m.line as u32;
-                        let start = m.start as u32;
-                        let end = m.end as u32;
+                    for chunk in matches.chunks(SEARCH_BATCH_SIZE) {
+                        if !guard.is_current(generation) {
+                            break;
+                        }
+                        let hits: Vec<ffi::FfiSearchHit> =
+                            chunk.iter().cloned().map(|m| text_hit(m, &root)).collect();
                         let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                            model.as_mut().search_match_found(
-                                path,
-                                line,
-                                start,
-                                end,
-                                QString::from(snippet.as_str()),
-                            );
+                            model.as_mut().search_batch(generation, hits);
                         });
                     }
-                    let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
-                        model.as_mut().search_finished();
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model.as_mut().search_finished(generation);
                     });
                 }
                 Err(err) => {
@@ -2605,7 +2975,7 @@ impl ffi::SearchModel {
                     let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
                         model
                             .as_mut()
-                            .search_failed(QString::from(message.as_str()));
+                            .search_failed(generation, QString::from(message.as_str()));
                     });
                 }
             }
@@ -2637,7 +3007,7 @@ impl ffi::SearchModel {
         let qt_thread = self.qt_thread();
         let slot = std::sync::Arc::clone(&self.index);
         std::thread::spawn(move || {
-            let mut guard = slot.lock().unwrap();
+            let mut guard = slot.write().unwrap();
             let Some(index) = guard.as_mut() else {
                 drop(guard);
                 let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
@@ -2684,62 +3054,6 @@ impl ffi::SearchModel {
         });
     }
 
-    /// Quick Open's full-text half — same shape as `search` above (literal
-    /// substring, background thread, per-match signal), just emitting the
-    /// dedicated `quick_open_text_*` signals instead of `search`'s so
-    /// `FindInFilesPanel` (which listens to `search_match_found`) never
-    /// sees these results.
-    pub fn quick_open_text_search(self: Pin<&mut Self>, query: &QString) {
-        let pattern = query.to_string();
-        let qt_thread = self.qt_thread();
-        let slot = std::sync::Arc::clone(&self.index);
-        std::thread::spawn(move || {
-            let guard = slot.lock().unwrap();
-            let Some(index) = guard.as_ref() else {
-                drop(guard);
-                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
-                    model
-                        .as_mut()
-                        .quick_open_text_search_failed(QString::from("No project is open yet."));
-                });
-                return;
-            };
-            let result = index.search(&pattern, false, false);
-            drop(guard);
-            match result {
-                Ok(matches) => {
-                    for m in matches {
-                        let snippet = line_snippet(&m.path, m.line);
-                        let path = QString::from(m.path.to_string_lossy().as_ref());
-                        let line = m.line as u32;
-                        let start = m.start as u32;
-                        let end = m.end as u32;
-                        let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                            model.as_mut().quick_open_text_match_found(
-                                path,
-                                line,
-                                start,
-                                end,
-                                QString::from(snippet.as_str()),
-                            );
-                        });
-                    }
-                    let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
-                        model.as_mut().quick_open_text_search_finished();
-                    });
-                }
-                Err(err) => {
-                    let message = err.to_string();
-                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                        model
-                            .as_mut()
-                            .quick_open_text_search_failed(QString::from(message.as_str()));
-                    });
-                }
-            }
-        });
-    }
-
     /// Task I: project-wide Class View tier — see `project_symbols`'s
     /// bridge doc comment for why this reuses `search`'s index handle and
     /// background-thread/per-match-signal shape instead of a new one.
@@ -2747,7 +3061,7 @@ impl ffi::SearchModel {
         let qt_thread = self.qt_thread();
         let slot = std::sync::Arc::clone(&self.index);
         std::thread::spawn(move || {
-            let guard = slot.lock().unwrap();
+            let guard = slot.read().unwrap();
             let Some(index) = guard.as_ref() else {
                 drop(guard);
                 let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
@@ -2792,66 +3106,15 @@ impl ffi::SearchModel {
         });
     }
 
-    /// Task J — go-to-symbol. See `symbol_search`'s bridge doc comment for
-    /// why this is a thin wrapper over the same `find_definitions` call
-    /// `project_symbols` above uses, just with a caller-supplied (non-empty)
-    /// query instead of `""`.
-    pub fn symbol_search(self: Pin<&mut Self>, query: &QString) {
-        let query = query.to_string();
-        let qt_thread = self.qt_thread();
-        let slot = std::sync::Arc::clone(&self.index);
-        std::thread::spawn(move || {
-            let guard = slot.lock().unwrap();
-            let Some(index) = guard.as_ref() else {
-                drop(guard);
-                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
-                    model
-                        .as_mut()
-                        .symbol_search_failed(QString::from("No project is open yet."));
-                });
-                return;
-            };
-            let result = index.find_definitions(&query);
-            drop(guard);
-            match result {
-                Ok(matches) => {
-                    for m in matches {
-                        // Same reasoning as project_symbols: nothing
-                        // structural to show for a defining occurrence with
-                        // no outline() kind.
-                        if m.kind.is_none() {
-                            continue;
-                        }
-                        let row = to_ffi_symbol_match(m);
-                        let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                            model.as_mut().symbol_search_result_found(row);
-                        });
-                    }
-                    let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
-                        model.as_mut().symbol_search_finished();
-                    });
-                }
-                Err(err) => {
-                    let message = err.to_string();
-                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                        model
-                            .as_mut()
-                            .symbol_search_failed(QString::from(message.as_str()));
-                    });
-                }
-            }
-        });
-    }
-
     /// Task J — find-usages: every occurrence of the exact name `name`,
     /// definitions and references alike. Same background-thread/streamed-
-    /// signal shape as `search`/`project_symbols`/`symbol_search` above.
+    /// signal shape as `search`/`project_symbols` above.
     pub fn find_usages(self: Pin<&mut Self>, name: &QString) {
         let name = name.to_string();
         let qt_thread = self.qt_thread();
         let slot = std::sync::Arc::clone(&self.index);
         std::thread::spawn(move || {
-            let guard = slot.lock().unwrap();
+            let guard = slot.read().unwrap();
             let Some(index) = guard.as_ref() else {
                 drop(guard);
                 let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
@@ -2887,44 +3150,6 @@ impl ffi::SearchModel {
         });
     }
 
-    pub fn reindex_file(self: Pin<&mut Self>, path: &QString) {
-        self.mutate_index(std::path::PathBuf::from(path.to_string()), |index, path| {
-            index.reindex_file(path)
-        });
-    }
-
-    /// Runs the single-file index update on a background thread: it
-    /// commits and reloads the tantivy reader, and would otherwise block
-    /// the UI thread on every save. Nothing is emitted on success — index
-    /// freshness is not something the user waits on — and a failure
-    /// reuses `indexFailed`, the signal the initial build already reports
-    /// through.
-    fn mutate_index(
-        self: Pin<&mut Self>,
-        path: std::path::PathBuf,
-        mutate: fn(
-            &mut index_core::TextIndex,
-            &std::path::Path,
-        ) -> Result<(), index_core::IndexError>,
-    ) {
-        let qt_thread = self.qt_thread();
-        let slot = std::sync::Arc::clone(&self.index);
-        std::thread::spawn(move || {
-            let mut guard = slot.lock().unwrap();
-            let Some(index) = guard.as_mut() else {
-                return;
-            };
-            let result = mutate(index, &path);
-            drop(guard);
-            if let Err(err) = result {
-                let message = err.to_string();
-                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                    model.as_mut().index_failed(QString::from(message.as_str()));
-                });
-            }
-        });
-    }
-
     pub fn resolve_declaration(
         self: Pin<&mut Self>,
         path: &QString,
@@ -2936,7 +3161,7 @@ impl ffi::SearchModel {
         let qt_thread = self.qt_thread();
         let slot = std::sync::Arc::clone(&self.index);
         std::thread::spawn(move || {
-            let guard = slot.lock().unwrap();
+            let guard = slot.read().unwrap();
             let Some(index) = guard.as_ref() else {
                 drop(guard);
                 let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
@@ -3000,7 +3225,7 @@ impl ffi::SearchModel {
         let qt_thread = self.qt_thread();
         let slot = std::sync::Arc::clone(&self.index);
         std::thread::spawn(move || {
-            let guard = slot.lock().unwrap();
+            let guard = slot.read().unwrap();
             let Some(index) = guard.as_ref() else {
                 drop(guard);
                 let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {

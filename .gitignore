@@ -3,3 +3,6 @@
 **/*.rs.bk
 *.pdb
 .claude/scheduled_tasks.lock
+
+# Project search index written by the IDE into whatever folder it opens.
+.ide-index/

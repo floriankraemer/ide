@@ -108,7 +108,7 @@ private:
     // position pair, or {-1, -1} when there is none. "Identifier-shaped"
     // is deliberately a spelling test (first character a letter or '_'),
     // not a resolution test: hovering must not cost an index query — see
-    // ADR-0010.
+    // ADR-0011.
     QPair<int, int> identifierAt(const QPoint &pos) const;
     void updateHoverSpan(const QPoint &pos, bool ctrlHeld);
     void clearHoverSpan();

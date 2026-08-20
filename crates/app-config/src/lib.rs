@@ -57,6 +57,11 @@ pub struct Settings {
     /// manipulation here, that's a separate task built on top of this crate.
     #[serde(default)]
     pub recent_projects: Vec<PathBuf>,
+    /// Most-recently-opened files, newest first — what Search Everywhere
+    /// shows before anything has been typed. Maintained by
+    /// [`Settings::push_recent_file`].
+    #[serde(default)]
+    pub recent_files: Vec<PathBuf>,
     #[serde(default)]
     pub window_geometry: WindowGeometry,
     /// Opaque persisted layout blob, analogous to `QMainWindow::saveState()`.
@@ -79,6 +84,10 @@ pub struct Settings {
 /// Cap on remembered recent projects — enough for a useful menu without
 /// growing unbounded.
 const MAX_RECENT_PROJECTS: usize = 10;
+
+/// Cap on remembered recent files. Larger than the project cap because this
+/// list is a search surface, not a menu.
+const MAX_RECENT_FILES: usize = 50;
 
 /// Theme name used when `Settings::theme` hasn't been set yet (T2).
 const DEFAULT_THEME: &str = "dark";
@@ -136,6 +145,14 @@ impl Settings {
         self.recent_projects.retain(|p| p != &path);
         self.recent_projects.insert(0, path);
         self.recent_projects.truncate(MAX_RECENT_PROJECTS);
+    }
+
+    /// Push `path` to the front of `recent_files`, deduping any existing
+    /// entry for it and capping the list at [`MAX_RECENT_FILES`].
+    pub fn push_recent_file(&mut self, path: PathBuf) {
+        self.recent_files.retain(|p| p != &path);
+        self.recent_files.insert(0, path);
+        self.recent_files.truncate(MAX_RECENT_FILES);
     }
 }
 
@@ -210,6 +227,7 @@ mod tests {
             editor_font_family: "Fira Code".to_string(),
             editor_colors: colors,
             recent_projects: vec![PathBuf::from("/home/user/project-a")],
+            recent_files: vec![PathBuf::from("/home/user/project-a/src/main.rs")],
             window_geometry: WindowGeometry {
                 x: 10,
                 y: 20,
@@ -344,5 +362,31 @@ mod tests {
 
         let result = load(dir.path());
         assert!(matches!(result, Err(ConfigError::Parse(_))));
+    }
+
+    #[test]
+    fn push_recent_file_dedupes_and_keeps_newest_first() {
+        let mut settings = Settings::default();
+        settings.push_recent_file(PathBuf::from("/a.rs"));
+        settings.push_recent_file(PathBuf::from("/b.rs"));
+        settings.push_recent_file(PathBuf::from("/a.rs"));
+
+        assert_eq!(
+            settings.recent_files,
+            vec![PathBuf::from("/a.rs"), PathBuf::from("/b.rs")]
+        );
+    }
+
+    #[test]
+    fn push_recent_file_caps_the_list() {
+        let mut settings = Settings::default();
+        for i in 0..MAX_RECENT_FILES + 10 {
+            settings.push_recent_file(PathBuf::from(format!("/f{i}.rs")));
+        }
+        assert_eq!(settings.recent_files.len(), MAX_RECENT_FILES);
+        assert_eq!(
+            settings.recent_files[0],
+            PathBuf::from(format!("/f{}.rs", MAX_RECENT_FILES + 9))
+        );
     }
 }
