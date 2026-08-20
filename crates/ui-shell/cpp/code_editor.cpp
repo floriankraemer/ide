@@ -36,8 +36,71 @@ CodeEditor::CodeEditor(QWidget *parent)
     connect(this, &CodeEditor::updateRequest, this, &CodeEditor::updateLineNumberArea);
     connect(this, &CodeEditor::cursorPositionChanged, this, &CodeEditor::highlightCurrentLine);
 
+    // Ctrl-hover feedback needs move events with no button held (N7), the
+    // same reason TerminalWidget enables tracking for its links.
+    setMouseTracking(true);
+
     updateLineNumberAreaWidth(0);
     highlightCurrentLine();
+}
+
+QPair<int, int> CodeEditor::identifierAt(const QPoint &pos) const
+{
+    QTextCursor cursor = cursorForPosition(pos);
+    cursor.select(QTextCursor::WordUnderCursor);
+    const QString word = cursor.selectedText();
+    if (word.isEmpty()) {
+        return {-1, -1};
+    }
+    const QChar first = word.at(0);
+    if (!first.isLetter() && first != QLatin1Char('_')) {
+        return {-1, -1};
+    }
+    return {cursor.selectionStart(), cursor.selectionEnd()};
+}
+
+void CodeEditor::updateHoverSpan(const QPoint &pos, bool ctrlHeld)
+{
+    const QPair<int, int> span = ctrlHeld ? identifierAt(pos) : QPair<int, int>{-1, -1};
+    if (span == hoverSpan_) {
+        return;
+    }
+    hoverSpan_ = span;
+    viewport()->setCursor(hoverSpan_.first >= 0 ? Qt::PointingHandCursor : Qt::IBeamCursor);
+    highlightCurrentLine();
+}
+
+void CodeEditor::clearHoverSpan()
+{
+    updateHoverSpan(QPoint(), false);
+}
+
+void CodeEditor::mouseMoveEvent(QMouseEvent *event)
+{
+    updateHoverSpan(event->pos(), event->modifiers().testFlag(Qt::ControlModifier));
+    QPlainTextEdit::mouseMoveEvent(event);
+}
+
+void CodeEditor::mousePressEvent(QMouseEvent *event)
+{
+    if (event->button() == Qt::LeftButton && event->modifiers().testFlag(Qt::ControlModifier)) {
+        const QPair<int, int> span = identifierAt(event->pos());
+        if (span.first >= 0) {
+            clearHoverSpan();
+            // Accepted before the base class runs, so a Ctrl+Click that
+            // navigates does not also drag out a selection.
+            event->accept();
+            emit declarationRequested(span.first);
+            return;
+        }
+    }
+    QPlainTextEdit::mousePressEvent(event);
+}
+
+void CodeEditor::leaveEvent(QEvent *event)
+{
+    clearHoverSpan();
+    QPlainTextEdit::leaveEvent(event);
 }
 
 void CodeEditor::setCurrentLineColor(const QString &hex)
@@ -82,6 +145,16 @@ void CodeEditor::highlightCurrentLine()
         match.cursor.setPosition(matchSelections_[i].first);
         match.cursor.setPosition(matchSelections_[i].second, QTextCursor::KeepAnchor);
         selections.append(match);
+    }
+
+    if (hoverSpan_.first >= 0) {
+        QTextEdit::ExtraSelection hover;
+        hover.format.setFontUnderline(true);
+        hover.format.setUnderlineStyle(QTextCharFormat::SingleUnderline);
+        hover.cursor = textCursor();
+        hover.cursor.setPosition(hoverSpan_.first);
+        hover.cursor.setPosition(hoverSpan_.second, QTextCursor::KeepAnchor);
+        selections.append(hover);
     }
 
     setExtraSelections(selections);

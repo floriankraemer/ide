@@ -130,6 +130,23 @@ pub struct SymbolNode {
     pub children: Vec<SymbolNode>,
 }
 
+/// One "subtype declares supertype" edge extracted by
+/// [`supertype_edges()`]: `type_name` is the declaring type (the class,
+/// struct, interface or `impl` target), `supertype_name` is one type it
+/// extends, implements, or -- in Rust -- one trait it implements.
+///
+/// A declaration listing several supertypes produces one edge per
+/// supertype. `type_start`/`type_end` are the byte range of the declaring
+/// type's *name token*, so a jump can land exactly on the identifier
+/// (the same convention [`SymbolNode`]'s `name_start` uses).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SupertypeEdge {
+    pub type_name: String,
+    pub supertype_name: String,
+    pub type_start: usize,
+    pub type_end: usize,
+}
+
 /// A `highlights.scm` query, compiled once per language and reused across
 /// calls. Grammar + query text are bundled into the binary via
 /// `include_str!`/`LANGUAGE` constants so highlighting works identically
@@ -389,6 +406,67 @@ fn tags_query_language_for(language: Language) -> Option<&'static QueryLanguage>
     }
 }
 
+fn rust_inherits_query_language() -> &'static QueryLanguage {
+    static RUST_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+        let query = Query::new(&grammar, include_str!("../queries/rust/inherits.scm"))
+            .expect("rust inherits.scm must compile against tree-sitter-rust's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &RUST_INHERITS
+}
+
+fn json_inherits_query_language() -> &'static QueryLanguage {
+    static JSON_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
+        let query = Query::new(&grammar, include_str!("../queries/json/inherits.scm"))
+            .expect("json inherits.scm must compile against tree-sitter-json's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &JSON_INHERITS
+}
+
+fn csharp_inherits_query_language() -> &'static QueryLanguage {
+    static CSHARP_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
+        let query = Query::new(&grammar, include_str!("../queries/csharp/inherits.scm"))
+            .expect("csharp inherits.scm must compile against tree-sitter-c-sharp's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &CSHARP_INHERITS
+}
+
+fn java_inherits_query_language() -> &'static QueryLanguage {
+    static JAVA_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+        let query = Query::new(&grammar, include_str!("../queries/java/inherits.scm"))
+            .expect("java inherits.scm must compile against tree-sitter-java's grammar");
+        QueryLanguage { grammar, query }
+    });
+    &JAVA_INHERITS
+}
+
+fn php_inherits_query_language() -> &'static QueryLanguage {
+    static PHP_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
+        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
+        let query = Query::new(&grammar, include_str!("../queries/php/inherits.scm"))
+            .expect("php inherits.scm must compile against tree-sitter-php's php_only grammar");
+        QueryLanguage { grammar, query }
+    });
+    &PHP_INHERITS
+}
+
+fn inherits_query_language_for(language: Language) -> Option<&'static QueryLanguage> {
+    match language {
+        Language::Rust => Some(rust_inherits_query_language()),
+        Language::Json => Some(json_inherits_query_language()),
+        Language::CSharp => Some(csharp_inherits_query_language()),
+        Language::Java => Some(java_inherits_query_language()),
+        Language::Php => Some(php_inherits_query_language()),
+        Language::PlainText => None,
+    }
+}
+
 /// Map a `tags.scm` `@definition.<kind>` capture name onto [`SymbolKind`]
 /// — the part after the dot is the kind name verbatim (lowercased).
 fn symbol_kind_for_capture(capture_name: &str) -> Option<SymbolKind> {
@@ -554,6 +632,63 @@ pub fn outline(language: Language, text: &str) -> Vec<SymbolNode> {
     }
 
     build_symbol_tree(raw, text)
+}
+
+/// Every "subtype declares supertype" edge in `text`, parsed as
+/// `language` -- the data behind Go to Implementation (which types declare
+/// this supertype?) and its inverse, Go to Interface. Stateless one-shot,
+/// same convention as [`outline`].
+///
+/// Backed by an `inherits.scm` per language (see `crates/syntax-core/
+/// queries/*/inherits.scm`) capturing the declaring type's name token as
+/// `@type` and one declared supertype's name token as `@supertype`. A
+/// declaration listing several supertypes matches the pattern once per
+/// supertype, so each pair arrives as its own edge with no extra work
+/// here. [`Language::PlainText`] (or a language with an empty
+/// `inherits.scm`, i.e. JSON) yields an empty vec.
+///
+/// Name-based like the rest of this crate (ADR-0008): an edge records the
+/// supertype's *written name*, not a resolved type -- `implements
+/// Comparable` and a same-named interface in another namespace are
+/// indistinguishable here by design.
+pub fn supertype_edges(language: Language, text: &str) -> Vec<SupertypeEdge> {
+    let Some(ql) = inherits_query_language_for(language) else {
+        return Vec::new();
+    };
+    let mut parser = Parser::new();
+    if parser.set_language(&ql.grammar).is_err() {
+        return Vec::new();
+    }
+    let Some(tree) = parser.parse(text, None) else {
+        return Vec::new();
+    };
+
+    let mut edges: Vec<SupertypeEdge> = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(&ql.query, tree.root_node(), text.as_bytes());
+    while let Some(m) = matches.next() {
+        let mut type_span: Option<(usize, usize)> = None;
+        let mut supertype_span: Option<(usize, usize)> = None;
+        for capture in m.captures {
+            match ql.query.capture_names()[capture.index as usize] {
+                "type" => type_span = Some((capture.node.start_byte(), capture.node.end_byte())),
+                "supertype" => {
+                    supertype_span = Some((capture.node.start_byte(), capture.node.end_byte()))
+                }
+                _ => {}
+            }
+        }
+        if let (Some((ts, te)), Some((ss, se))) = (type_span, supertype_span) {
+            edges.push(SupertypeEdge {
+                type_name: text[ts..te].to_string(),
+                supertype_name: text[ss..se].to_string(),
+                type_start: ts,
+                type_end: te,
+            });
+        }
+    }
+    edges.sort_by_key(|e| (e.type_start, e.supertype_name.clone()));
+    edges
 }
 
 /// Nests `raw` definitions by AST byte-range containment: a classic
@@ -1445,5 +1580,104 @@ mod tests {
         assert_eq!(greeter.children[0].kind, SymbolKind::Field);
         assert_eq!(greeter.children[1].kind, SymbolKind::Method);
         assert_eq!(greeter.children[2].kind, SymbolKind::Method);
+    }
+
+    // --- supertype edges (Go to Implementation / Go to Interface) ---
+
+    fn supertypes_of<'a>(edges: &'a [SupertypeEdge], type_name: &str) -> Vec<&'a str> {
+        let mut names: Vec<&str> = edges
+            .iter()
+            .filter(|e| e.type_name == type_name)
+            .map(|e| e.supertype_name.as_str())
+            .collect();
+        names.sort_unstable();
+        names
+    }
+
+    #[test]
+    fn rust_impl_trait_for_type_is_a_supertype_edge() {
+        let text = "trait Shape {}\nstruct Circle;\nimpl Shape for Circle {}\n";
+        let edges = supertype_edges(Language::Rust, text);
+        assert_eq!(supertypes_of(&edges, "Circle"), vec!["Shape"]);
+        let edge = edges
+            .iter()
+            .find(|e| e.type_name == "Circle")
+            .expect("expected a Circle edge");
+        assert_eq!(&text[edge.type_start..edge.type_end], "Circle");
+    }
+
+    #[test]
+    fn rust_inherent_impl_is_not_a_supertype_edge() {
+        let edges = supertype_edges(Language::Rust, "struct Circle;\nimpl Circle {}\n");
+        assert!(edges.is_empty());
+    }
+
+    #[test]
+    fn rust_supertrait_is_a_supertype_edge() {
+        let edges = supertype_edges(Language::Rust, "trait Shape: Drawable {}\n");
+        assert_eq!(supertypes_of(&edges, "Shape"), vec!["Drawable"]);
+    }
+
+    #[test]
+    fn java_extends_and_implements_are_separate_edges() {
+        let text = "class Circle extends Shape implements Drawable, Sized {}\n";
+        let edges = supertype_edges(Language::Java, text);
+        assert_eq!(
+            supertypes_of(&edges, "Circle"),
+            vec!["Drawable", "Shape", "Sized"]
+        );
+    }
+
+    #[test]
+    fn java_interface_extends_is_a_supertype_edge() {
+        let edges = supertype_edges(Language::Java, "interface Drawable extends Shape {}\n");
+        assert_eq!(supertypes_of(&edges, "Drawable"), vec!["Shape"]);
+    }
+
+    #[test]
+    fn csharp_base_list_entries_are_supertype_edges() {
+        let edges = supertype_edges(Language::CSharp, "class Circle : Shape, IDrawable {}\n");
+        assert_eq!(supertypes_of(&edges, "Circle"), vec!["IDrawable", "Shape"]);
+    }
+
+    #[test]
+    fn php_extends_and_implements_are_supertype_edges() {
+        let text = "<?php\nclass Circle extends Shape implements Drawable {}\n";
+        let edges = supertype_edges(Language::Php, text);
+        assert_eq!(supertypes_of(&edges, "Circle"), vec!["Drawable", "Shape"]);
+    }
+
+    #[test]
+    fn json_and_plain_text_have_no_supertype_edges() {
+        assert!(supertype_edges(Language::Json, "{\"a\": 1}").is_empty());
+        assert!(supertype_edges(Language::PlainText, "class A extends B {}").is_empty());
+    }
+
+    #[test]
+    fn rust_locals_cover_every_construct_the_outline_calls_a_definition() {
+        // Regression guard for a drift between rust/tags.scm and
+        // rust/locals.scm: a trait, an `impl` target and a struct field
+        // were definitions to the outline but not to
+        // `identifier_occurrences`, so nothing could navigate to them.
+        let text = "pub trait Shape {\n    fn area(&self) -> f64;\n}\n\npub struct Circle {\n    radius: f64,\n}\n\nimpl Shape for Circle {\n    fn area(&self) -> f64 {\n        self.radius\n    }\n}\n";
+        let occurrences = identifier_occurrences(Language::Rust, text);
+        let defined = |name: &str| {
+            occurrences
+                .iter()
+                .any(|o| o.name == name && o.is_definition)
+        };
+
+        assert!(defined("Shape"), "trait name is a definition");
+        assert!(defined("Circle"), "struct name is a definition");
+        assert!(defined("radius"), "struct field is a definition");
+
+        // And a field *use* is indexed as a reference, not skipped: before
+        // the fix `field_identifier` matched no pattern at all.
+        assert!(
+            occurrences
+                .iter()
+                .any(|o| o.name == "radius" && !o.is_definition),
+            "self.radius is a reference"
+        );
     }
 }

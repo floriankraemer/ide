@@ -36,7 +36,8 @@ graph TB
 
 ## Where logic may live
 
-- **Business rules and orchestration** (open rules, path construction, delete/rename → tab policy, watcher policy, dirty tracking): only in the Qt-free crates, normally `app-core`.
+- **Business rules and orchestration** (open rules, path construction, delete/rename → tab policy, watcher policy, dirty tracking, jump history): only in the Qt-free crates, normally `app-core`.
+- **Rules that need the project index** (which declaration a caret resolves to, ADR-0011's local-file-then-project ranking) live in `index-core`, not `app-core`: `app-core` may not depend on `index-core`, and the index itself is owned by `ui-shell`'s `SearchModel`. They are still Qt-free and unit-tested like any other rule.
 - **`bridge.rs` (adapter)**: translation only — QString/QModelIndex ↔ Rust types, session call, emit signal, refresh model. No domain state, no rules, no branching beyond type mapping.
 - **`cpp/` (view)**: widget construction, layout, menus, dialogs, signal wiring only. It may ask "what happened" and show the answer; it never decides "what should happen".
 

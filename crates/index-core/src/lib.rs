@@ -17,22 +17,28 @@
 //! exact line numbers and byte-offset match spans — real regex semantics,
 //! ripgrep-grade correctness, index-backed speed on large repos.
 //!
-//! # Two schemas, one index
+//! # Three schemas, one index
 //!
-//! One `TextIndex` carries two document shapes in the same tantivy
+//! One `TextIndex` carries three document shapes in the same tantivy
 //! `Schema`/on-disk index under `.ide-index/`, distinguished by a `doc_type`
-//! field (`"text"` vs `"symbol"`): the **text** schema above (`path` +
-//! `content`), and the **symbol/reference** schema (`sym_name`/`sym_kind`/
-//! `path`/`sym_line`/`sym_container`/`sym_is_definition`), fed by
+//! field (`"text"`, `"symbol"`, `"inherit"`): the **text** schema above
+//! (`path` + `content`); the **symbol/reference** schema (`sym_name`/
+//! `sym_kind`/`path`/`sym_line`/`sym_col`/`sym_container`/
+//! `sym_is_definition`), fed by
 //! `syntax_core::outline()` (definitions, with kind + container) and
 //! `syntax_core::identifier_occurrences()` (every occurrence, references
-//! included) — see [`TextIndex::find_definitions`]/[`find_usages`]. A single
+//! included) — see [`TextIndex::find_definitions`]/[`find_usages`]/
+//! [`TextIndex::resolve_declaration`]; and the **supertype-edge** schema
+//! (`inh_type`/`inh_supertype`), fed by `syntax_core::supertype_edges()`,
+//! behind [`TextIndex::find_implementations`]/[`find_supertypes`]. A single
 //! tantivy `Schema` can't hold two independently-typed document kinds, so
 //! this is the standard workaround: one shared schema, a discriminant field,
-//! queries filter on it. Kept in the same index (not a second co-located
-//! one) because tantivy's schema model makes this straightforward — no
-//! second `IndexWriter`/`IndexReader` pair, no second on-disk directory, one
-//! `build()`/`reindex_file()` walk populates both.
+//! queries filter on it. Kept in the same index (not co-located ones)
+//! because tantivy's schema model makes this straightforward — no extra
+//! `IndexWriter`/`IndexReader` pairs, no extra on-disk directories, one
+//! `build()`/`reindex_file()` walk populates all three. They also share the
+//! `path` term, so `delete_term(path)` drops every document a file
+//! produced, whatever its shape.
 //!
 //! Name-based, not type-resolved (ADR-0008): two unrelated `run()` methods
 //! in different classes both matching a usage search for `run` is expected
@@ -60,7 +66,8 @@ use tantivy::tokenizer::NgramTokenizer;
 use tantivy::{doc, Index, IndexReader, IndexWriter, Term};
 
 use syntax_core::{
-    identifier_occurrences, language_for_extension, outline, SymbolKind, SymbolNode,
+    identifier_occurrences, language_for_extension, outline, supertype_edges, SymbolKind,
+    SymbolNode,
 };
 
 /// Directory (relative to the project root) the tantivy index lives under.
@@ -164,7 +171,10 @@ struct Fields {
     sym_kind: tantivy::schema::Field,
     sym_container: tantivy::schema::Field,
     sym_line: tantivy::schema::Field,
+    sym_col: tantivy::schema::Field,
     sym_is_definition: tantivy::schema::Field,
+    inh_type: tantivy::schema::Field,
+    inh_supertype: tantivy::schema::Field,
     /// Text docs only: file modification time (seconds since the epoch) and
     /// byte length as of the last indexing pass. Together they are the
     /// change-detection key [`TextIndex::open_or_build`] uses to skip
@@ -174,9 +184,10 @@ struct Fields {
 }
 
 /// Discriminant values for the `doc_type` field — see the module doc's
-/// "Two schemas, one index" section.
+/// "Three schemas, one index" section.
 const DOC_TYPE_TEXT: &str = "text";
 const DOC_TYPE_SYMBOL: &str = "symbol";
+const DOC_TYPE_INHERIT: &str = "inherit";
 
 fn build_schema() -> (Schema, Fields) {
     let mut builder = Schema::builder();
@@ -202,7 +213,15 @@ fn build_schema() -> (Schema, Fields) {
     let sym_kind = builder.add_text_field("sym_kind", STRING | STORED);
     let sym_container = builder.add_text_field("sym_container", STRING | STORED);
     let sym_line = builder.add_u64_field("sym_line", INDEXED | STORED);
+    // Byte column within the line. Without it a jump can only land at
+    // column 0; Go to Declaration wants the caret *on* the identifier.
+    let sym_col = builder.add_u64_field("sym_col", INDEXED | STORED);
     let sym_is_definition = builder.add_u64_field("sym_is_definition", INDEXED | STORED);
+    // Supertype edges (`doc_type = "inherit"`): `inh_type` declares
+    // `inh_supertype`. They reuse the shared `path` term, so an existing
+    // `delete_term(path)` on reindex still wipes them in one call.
+    let inh_type = builder.add_text_field("inh_type", STRING | STORED);
+    let inh_supertype = builder.add_text_field("inh_supertype", STRING | STORED);
     let mtime_secs = builder.add_u64_field("mtime_secs", STORED);
     let size_bytes = builder.add_u64_field("size_bytes", STORED);
 
@@ -216,7 +235,10 @@ fn build_schema() -> (Schema, Fields) {
             sym_kind,
             sym_container,
             sym_line,
+            sym_col,
             sym_is_definition,
+            inh_type,
+            inh_supertype,
             mtime_secs,
             size_bytes,
         },
@@ -290,9 +312,38 @@ pub struct SymbolMatch {
     pub name: String,
     pub kind: Option<SymbolKind>,
     pub path: PathBuf,
+    /// 1-based, matching [`SearchMatch::line`].
     pub line: usize,
+    /// Byte offset of the name token within its line (0-based), so a jump
+    /// lands on the identifier rather than at the start of the line.
+    pub col: usize,
     pub is_definition: bool,
     pub container: Option<String>,
+}
+
+/// Which tier of [`TextIndex::resolve_declaration`] produced the
+/// candidates -- see that method's docs for why local-file candidates
+/// outrank project-wide ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResolutionTier {
+    /// Definitions of the same name in the file the caret is in.
+    LocalFile,
+    /// Definitions elsewhere in the project, name-matched.
+    Project,
+    /// Nothing found -- no identifier under the caret, or no definition
+    /// of it anywhere in the index.
+    None,
+}
+
+/// What [`TextIndex::resolve_declaration`] found: the identifier under the
+/// caret plus its candidate declaration sites, best first. `candidates` is
+/// empty exactly when `tier` is [`ResolutionTier::None`]; `name` is empty
+/// when the caret was not on an identifier at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolution {
+    pub name: String,
+    pub tier: ResolutionTier,
+    pub candidates: Vec<SymbolMatch>,
 }
 
 /// Flattened `outline()` row, keyed by the *name token's* byte range
@@ -322,13 +373,19 @@ fn flatten_outline<'a>(
     }
 }
 
-/// 1-based line number of byte offset `offset` within `text` (matches
-/// `grep-searcher`'s convention, as used by [`SearchMatch::line`]).
-fn line_number_at(text: &str, offset: usize) -> usize {
-    1 + text.as_bytes()[..offset.min(text.len())]
+/// 1-based line number (matching `grep-searcher`'s convention, as used by
+/// [`SearchMatch::line`]) and 0-based byte column of `offset` within
+/// `text`.
+fn line_and_col_at(text: &str, offset: usize) -> (usize, usize) {
+    let clamped = offset.min(text.len());
+    let before = &text.as_bytes()[..clamped];
+    let line = 1 + before.iter().filter(|&&b| b == b'\n').count();
+    let line_start = before
         .iter()
-        .filter(|&&b| b == b'\n')
-        .count()
+        .rposition(|&b| b == b'\n')
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    (line, clamped - line_start)
 }
 
 /// A tantivy-backed text index for one project root, with ripgrep-crate
@@ -984,6 +1041,230 @@ impl TextIndex {
         Ok(matches)
     }
 
+    /// Definition sites whose name is *exactly* `name`.
+    ///
+    /// Unlike [`find_definitions`](Self::find_definitions), which fetches
+    /// every definition doc in the index and substring-filters in Rust,
+    /// this narrows to the name inside tantivy -- the difference matters
+    /// on Go to Declaration, which runs per click on a project-sized
+    /// index rather than per keystroke on a short prefix.
+    pub fn find_definitions_exact(&self, name: &str) -> Result<Vec<SymbolMatch>, IndexError> {
+        let searcher = self.reader.searcher();
+        let query = BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                doc_type_query(self.fields.doc_type, DOC_TYPE_SYMBOL),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(self.fields.sym_name, name),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_u64(self.fields.sym_is_definition, 1),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ]);
+        let mut matches = self.collect_symbol_matches(&searcher, &query)?;
+        matches.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
+        Ok(matches)
+    }
+
+    /// Go to Declaration: where is the identifier at `byte_offset` in
+    /// `current_content` declared?
+    ///
+    /// Two tiers, cheapest and most precise first:
+    ///
+    /// 1. **Local file.** Definition-position occurrences of the same name
+    ///    in `current_content` itself, ranked nearest-preceding-first.
+    ///    This is what makes a local binding, a parameter, or a private
+    ///    method resolve correctly: an inner `let x` sits nearer the caret
+    ///    than an outer one, so shadowing falls out of the ordering
+    ///    instead of needing a scope graph. Local candidates win outright
+    ///    -- if the name is declared in this file, a same-named symbol in
+    ///    another file is not what the caret meant.
+    /// 2. **Project.** Otherwise, exact-name definitions from the index,
+    ///    excluding `current_path` (tier 1 already covered it).
+    ///
+    /// Name-based per ADR-0008: two unrelated `run()` methods are
+    /// indistinguishable, so tier 2 legitimately returns several
+    /// candidates and the caller is expected to let the user pick. This is
+    /// a documented boundary short of a language server, not an oversight.
+    ///
+    /// `current_content` is passed in rather than read from disk so an
+    /// unsaved buffer resolves against what the user is actually looking
+    /// at.
+    pub fn resolve_declaration(
+        &self,
+        current_path: &Path,
+        current_content: &str,
+        byte_offset: usize,
+    ) -> Result<Resolution, IndexError> {
+        let language = language_for_extension(
+            current_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or(""),
+        );
+        let occurrences = identifier_occurrences(language, current_content);
+        let Some(target) = occurrences
+            .iter()
+            .find(|o| byte_offset >= o.start && byte_offset < o.end)
+        else {
+            return Ok(Resolution {
+                name: String::new(),
+                tier: ResolutionTier::None,
+                candidates: Vec::new(),
+            });
+        };
+        let name = target.name.clone();
+
+        let roots = outline(language, current_content);
+        let mut flat: BTreeMap<(usize, usize), FlatSymbol<'_>> = BTreeMap::new();
+        flatten_outline(&roots, None, &mut flat);
+
+        let mut local: Vec<(usize, SymbolMatch)> = occurrences
+            .iter()
+            .filter(|o| o.is_definition && o.name == name)
+            .map(|o| {
+                let (line, col) = line_and_col_at(current_content, o.start);
+                let flat_symbol = flat.get(&(o.start, o.end));
+                (
+                    o.start,
+                    SymbolMatch {
+                        name: name.clone(),
+                        kind: flat_symbol.map(|f| f.kind),
+                        path: current_path.to_path_buf(),
+                        line,
+                        col,
+                        is_definition: true,
+                        container: flat_symbol.and_then(|f| f.container).map(str::to_string),
+                    },
+                )
+            })
+            .collect();
+
+        if !local.is_empty() {
+            // Nearest preceding declaration first (the innermost shadowing
+            // binding), then the nearest one *after* the caret -- a method
+            // called before its own declaration in the same class is
+            // ordinary in every language here.
+            local.sort_by_key(|(start, _)| {
+                if *start <= byte_offset {
+                    (0usize, byte_offset - *start)
+                } else {
+                    (1usize, *start - byte_offset)
+                }
+            });
+            return Ok(Resolution {
+                name,
+                tier: ResolutionTier::LocalFile,
+                candidates: local.into_iter().map(|(_, m)| m).collect(),
+            });
+        }
+
+        let current_key = current_path.to_string_lossy().into_owned();
+        let mut candidates = self.find_definitions_exact(&name)?;
+        candidates.retain(|m| m.path.to_string_lossy() != current_key);
+        let tier = if candidates.is_empty() {
+            ResolutionTier::None
+        } else {
+            ResolutionTier::Project
+        };
+        Ok(Resolution {
+            name,
+            tier,
+            candidates,
+        })
+    }
+
+    /// Go to Implementation: every type that declares `supertype` as a
+    /// base class, implemented interface, or (in Rust) an implemented
+    /// trait. Each result's `name` is the *implementing* type and its
+    /// `container` is `supertype`, so a result list reads
+    /// "Circle in Shape".
+    pub fn find_implementations(&self, supertype: &str) -> Result<Vec<SymbolMatch>, IndexError> {
+        self.inherit_matches(self.fields.inh_supertype, supertype, self.fields.inh_type)
+    }
+
+    /// Go to Interface: every supertype `type_name` declares. Each
+    /// result's `name` is the *supertype* and its `container` is
+    /// `type_name`.
+    ///
+    /// The location reported is where the edge was *declared* (the
+    /// subtype's own name token), not where the supertype is defined --
+    /// resolving that is [`resolve_declaration`](Self::resolve_declaration)'s
+    /// job, and chaining the two is the caller's choice.
+    pub fn find_supertypes(&self, type_name: &str) -> Result<Vec<SymbolMatch>, IndexError> {
+        self.inherit_matches(self.fields.inh_type, type_name, self.fields.inh_supertype)
+    }
+
+    /// Shared body of [`find_implementations`](Self::find_implementations)
+    /// and [`find_supertypes`](Self::find_supertypes): match `doc_type =
+    /// inherit` docs whose `match_field` is `value`, and report the
+    /// opposite end of the edge (`name_field`) as the result's name.
+    fn inherit_matches(
+        &self,
+        match_field: tantivy::schema::Field,
+        value: &str,
+        name_field: tantivy::schema::Field,
+    ) -> Result<Vec<SymbolMatch>, IndexError> {
+        let searcher = self.reader.searcher();
+        let query = BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                doc_type_query(self.fields.doc_type, DOC_TYPE_INHERIT),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(match_field, value),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ]);
+        let num_docs = searcher.num_docs() as usize;
+        if num_docs == 0 {
+            return Ok(Vec::new());
+        }
+        let top_docs = searcher.search(&query, &TopDocs::with_limit(num_docs))?;
+        let mut matches = Vec::with_capacity(top_docs.len());
+        for (_score, doc_address) in top_docs {
+            let retrieved: tantivy::TantivyDocument = searcher.doc(doc_address)?;
+            let get_str = |field| {
+                retrieved
+                    .get_first(field)
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            };
+            let get_u64 = |field| {
+                retrieved
+                    .get_first(field)
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(0) as usize
+            };
+            let (Some(name), Some(path)) = (get_str(name_field), get_str(self.fields.path)) else {
+                continue;
+            };
+            matches.push(SymbolMatch {
+                name,
+                kind: None,
+                path: PathBuf::from(path),
+                line: get_u64(self.fields.sym_line),
+                col: get_u64(self.fields.sym_col),
+                is_definition: true,
+                container: Some(value.to_string()),
+            });
+        }
+        matches.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
+        Ok(matches)
+    }
+
     fn collect_symbol_matches(
         &self,
         searcher: &tantivy::Searcher,
@@ -1013,6 +1294,10 @@ impl TextIndex {
                 .get_first(self.fields.sym_line)
                 .and_then(|v| v.as_u64())
                 .unwrap_or(0) as usize;
+            let col = retrieved
+                .get_first(self.fields.sym_col)
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0) as usize;
             let is_definition = retrieved
                 .get_first(self.fields.sym_is_definition)
                 .and_then(|v| v.as_u64())
@@ -1025,6 +1310,7 @@ impl TextIndex {
                 kind,
                 path: PathBuf::from(path),
                 line,
+                col,
                 is_definition,
                 container,
             });
@@ -1064,11 +1350,13 @@ fn index_symbols(
     flatten_outline(&roots, None, &mut flat);
 
     for occurrence in identifier_occurrences(language, content) {
+        let (line, col) = line_and_col_at(content, occurrence.start);
         let mut document = doc!(
             fields.path => path_key.to_string(),
             fields.doc_type => DOC_TYPE_SYMBOL,
             fields.sym_name => occurrence.name,
-            fields.sym_line => line_number_at(content, occurrence.start) as u64,
+            fields.sym_line => line as u64,
+            fields.sym_col => col as u64,
             fields.sym_is_definition => occurrence.is_definition as u64,
         );
         if let Some(flat_symbol) = flat.get(&(occurrence.start, occurrence.end)) {
@@ -1078,6 +1366,18 @@ fn index_symbols(
             }
         }
         writer.add_document(document)?;
+    }
+
+    for edge in supertype_edges(language, content) {
+        let (line, col) = line_and_col_at(content, edge.type_start);
+        writer.add_document(doc!(
+            fields.path => path_key.to_string(),
+            fields.doc_type => DOC_TYPE_INHERIT,
+            fields.inh_type => edge.type_name,
+            fields.inh_supertype => edge.supertype_name,
+            fields.sym_line => line as u64,
+            fields.sym_col => col as u64,
+        ))?;
     }
     Ok(())
 }
@@ -1591,6 +1891,234 @@ mod tests {
 
         assert_eq!(index.find_definitions("add").unwrap().len(), 0);
         assert_eq!(index.find_usages("add").unwrap().len(), 0);
+    }
+
+    // --- code navigation: columns, exact lookup, resolution, hierarchy ---
+
+    #[test]
+    fn a_definitions_column_points_at_the_name_token() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "fn add(x: i32) -> i32 { x }\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let defs = index.find_definitions_exact("add").unwrap();
+        assert_eq!(defs.len(), 1, "{defs:?}");
+        assert_eq!(defs[0].line, 1);
+        // "fn " is three bytes, so the name token starts at column 3.
+        assert_eq!(defs[0].col, 3);
+    }
+
+    #[test]
+    fn find_definitions_exact_is_not_substring() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "fn add(x: i32) -> i32 { x }\nfn add_all(v: i32) -> i32 { v }\n",
+        );
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        assert_eq!(index.find_definitions("add").unwrap().len(), 2);
+        let exact = index.find_definitions_exact("add").unwrap();
+        assert_eq!(exact.len(), 1, "{exact:?}");
+        assert_eq!(exact[0].name, "add");
+    }
+
+    #[test]
+    fn resolve_declaration_prefers_the_nearest_preceding_local_binding() {
+        let dir = tempfile::tempdir().unwrap();
+        // Two `value` bindings; the caret sits on the use after the second.
+        let content =
+            "fn outer() {\n    let value = 1;\n    {\n        let value = 2;\n        use_it(value);\n    }\n}\n";
+        let file = write(dir.path(), "src/lib.rs", content);
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let caret = content.rfind("value)").unwrap();
+        let resolution = index.resolve_declaration(&file, content, caret).unwrap();
+
+        assert_eq!(resolution.name, "value");
+        assert_eq!(resolution.tier, ResolutionTier::LocalFile);
+        // The inner shadowing binding is nearest, so it comes first.
+        assert_eq!(resolution.candidates[0].line, 4);
+        assert_eq!(resolution.candidates[0].path, file);
+    }
+
+    #[test]
+    fn resolve_declaration_falls_back_to_the_project_index() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/math.rs", "fn add(x: i32) -> i32 { x }\n");
+        let content = "fn main() {\n    add(1);\n}\n";
+        let file = write(dir.path(), "src/main.rs", content);
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let caret = content.find("add(1)").unwrap();
+        let resolution = index.resolve_declaration(&file, content, caret).unwrap();
+
+        assert_eq!(resolution.tier, ResolutionTier::Project);
+        assert_eq!(resolution.candidates.len(), 1, "{resolution:?}");
+        assert_eq!(
+            resolution.candidates[0].path,
+            dir.path().join("src/math.rs")
+        );
+        assert_eq!(resolution.candidates[0].kind, Some(SymbolKind::Function));
+    }
+
+    #[test]
+    fn resolve_declaration_returns_every_ambiguous_project_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/a.rs", "fn run(x: i32) -> i32 { x }\n");
+        write(dir.path(), "src/b.rs", "fn run(y: i32) -> i32 { y }\n");
+        let content = "fn main() {\n    run(1);\n}\n";
+        let file = write(dir.path(), "src/main.rs", content);
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let caret = content.find("run(1)").unwrap();
+        let resolution = index.resolve_declaration(&file, content, caret).unwrap();
+
+        assert_eq!(resolution.tier, ResolutionTier::Project);
+        assert_eq!(resolution.candidates.len(), 2, "{resolution:?}");
+    }
+
+    #[test]
+    fn resolve_declaration_on_a_caret_that_is_not_an_identifier_finds_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "fn add(x: i32) -> i32 { x }\n";
+        let file = write(dir.path(), "src/lib.rs", content);
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        // The caret sits on the `{`.
+        let caret = content.find('{').unwrap();
+        let resolution = index.resolve_declaration(&file, content, caret).unwrap();
+
+        assert_eq!(resolution.tier, ResolutionTier::None);
+        assert!(resolution.name.is_empty());
+        assert!(resolution.candidates.is_empty());
+    }
+
+    #[test]
+    fn resolve_declaration_reports_nothing_for_an_unknown_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "fn main() {\n    nowhere(1);\n}\n";
+        let file = write(dir.path(), "src/main.rs", content);
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let caret = content.find("nowhere").unwrap();
+        let resolution = index.resolve_declaration(&file, content, caret).unwrap();
+
+        assert_eq!(resolution.name, "nowhere");
+        assert_eq!(resolution.tier, ResolutionTier::None);
+        assert!(resolution.candidates.is_empty());
+    }
+
+    #[test]
+    fn resolve_declaration_uses_the_passed_buffer_not_the_file_on_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(dir.path(), "src/lib.rs", "fn stale() {}\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        // An unsaved buffer: the declaration exists only in memory.
+        let buffer = "fn fresh() {}\nfn caller() {\n    fresh();\n}\n";
+        let caret = buffer.rfind("fresh").unwrap();
+        let resolution = index.resolve_declaration(&file, buffer, caret).unwrap();
+
+        assert_eq!(resolution.tier, ResolutionTier::LocalFile);
+        assert_eq!(resolution.candidates[0].line, 1);
+    }
+
+    #[test]
+    fn find_implementations_lists_every_type_declaring_a_supertype() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/circle.rs",
+            "struct Circle;\nimpl Shape for Circle {}\n",
+        );
+        write(
+            dir.path(),
+            "src/square.rs",
+            "struct Square;\nimpl Shape for Square {}\n",
+        );
+        write(dir.path(), "src/other.rs", "struct Loose;\nimpl Loose {}\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let implementations = index.find_implementations("Shape").unwrap();
+        let mut names: Vec<&str> = implementations.iter().map(|m| m.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["Circle", "Square"]);
+        assert!(implementations
+            .iter()
+            .all(|m| m.container.as_deref() == Some("Shape")));
+        assert!(implementations.iter().all(|m| m.line == 2));
+    }
+
+    #[test]
+    fn find_supertypes_is_the_inverse_direction() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/Circle.java",
+            "class Circle extends Shape implements Drawable {}\n",
+        );
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let mut names: Vec<String> = index
+            .find_supertypes("Circle")
+            .unwrap()
+            .into_iter()
+            .map(|m| m.name)
+            .collect();
+        names.sort();
+        assert_eq!(names, vec!["Drawable", "Shape"]);
+    }
+
+    #[test]
+    fn supertype_edges_are_dropped_with_their_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(
+            dir.path(),
+            "src/circle.rs",
+            "struct Circle;\nimpl Shape for Circle {}\n",
+        );
+        let mut index = TextIndex::build(dir.path()).unwrap();
+        assert_eq!(index.find_implementations("Shape").unwrap().len(), 1);
+
+        index.remove_file(&file).unwrap();
+        assert!(index.find_implementations("Shape").unwrap().is_empty());
+    }
+
+    #[test]
+    fn find_usages_ignores_supertype_edge_documents() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/circle.rs",
+            "struct Circle;\nimpl Shape for Circle {}\n",
+        );
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        // `Circle` appears in a symbol doc twice (the struct definition and
+        // the impl target) — the extra `inherit` doc must not show up as a
+        // third usage.
+        let usages = index.find_usages("Circle").unwrap();
+        assert_eq!(usages.len(), 2, "{usages:?}");
+    }
+
+    #[test]
+    fn reindexing_the_index_directory_itself_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "fn add(x: i32) -> i32 { x }\n");
+        let mut index = TextIndex::build(dir.path()).unwrap();
+
+        // A watcher driving reindex_file sees the index's own commits as
+        // project changes; if those re-entered the writer, the callback
+        // would feed itself forever.
+        let own = dir.path().join(INDEX_DIR_NAME).join("meta.json");
+        assert!(own.exists(), "the index writes into its own directory");
+        index.reindex_file(&own).unwrap();
+        index.remove_file(&own).unwrap();
+
+        // And the real file's rows are untouched by that no-op.
+        assert_eq!(index.find_definitions_exact("add").unwrap().len(), 1);
     }
 
     #[test]

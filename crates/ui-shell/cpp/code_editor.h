@@ -73,9 +73,23 @@ public:
     // contract the editor background/foreground overrides use).
     void setCurrentLineColor(const QString &hex);
 
+signals:
+    // N7: Ctrl+Click landed on an identifier-shaped word. `position` is a
+    // document (UTF-16) position inside that word; converting it to the
+    // UTF-8 byte offset the index speaks, and deciding what the word
+    // resolves to, both happen outside this widget — it only reports the
+    // gesture.
+    void declarationRequested(int position);
+
 protected:
     void resizeEvent(QResizeEvent *event) override;
     void changeEvent(QEvent *event) override;
+    // N7: Ctrl-hover feedback and Ctrl+Click activation, mirroring
+    // TerminalWidget's clickable links (F4). Mouse tracking is on so a
+    // move with no button held still arrives here.
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mousePressEvent(QMouseEvent *event) override;
+    void leaveEvent(QEvent *event) override;
 
 private slots:
     void updateLineNumberAreaWidth(int newBlockCount);
@@ -90,6 +104,15 @@ private:
     // theme by default.
     QColor currentLineBandColor() const;
 
+    // The identifier-shaped word under `pos`, as a [start, end) document
+    // position pair, or {-1, -1} when there is none. "Identifier-shaped"
+    // is deliberately a spelling test (first character a letter or '_'),
+    // not a resolution test: hovering must not cost an index query — see
+    // ADR-0011.
+    QPair<int, int> identifierAt(const QPoint &pos) const;
+    void updateHoverSpan(const QPoint &pos, bool ctrlHeld);
+    void clearHoverSpan();
+
     bool foldStartingAt(int blockNumber, FoldRange *out) const;
     void toggleFold(int blockNumber);
     void setBlocksVisible(int fromBlockExclusive, int toBlockInclusive, bool visible);
@@ -100,6 +123,9 @@ private:
     QString currentLineColor_;
     QVector<FoldRange> foldRanges_;
     QVector<FoldRange> collapsedRanges_;
+    // The Ctrl-hovered word, as [start, end) document positions, or
+    // {-1, -1} for none. Pure view state, like the fold collapse state.
+    QPair<int, int> hoverSpan_{-1, -1};
 };
 
 // No Q_OBJECT: forwards paint events to CodeEditor, uses no signals/slots.
