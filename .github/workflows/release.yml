@@ -1,0 +1,58 @@
+name: Release
+
+# Cutting a release is tag-driven: push a v* tag and this builds the
+# distributable bundle, attaches it to a GitHub Release and publishes.
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  linux:
+    name: Linux bundle
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      # ui-shell's build script compiles the Qt Advanced Docking System
+      # sources, so the submodule has to be there.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: docker/setup-buildx-action@v3
+
+      # The linux-artifact stage exports nothing but the bundle directory
+      # (binary + its Qt runtime closure + launcher), so dist/ ends up
+      # containing exactly what ships.
+      - name: Build release bundle
+        run: |
+          docker buildx build \
+            --target linux-artifact \
+            -f docker/Dockerfile \
+            --output type=local,dest=dist/ \
+            --cache-from type=gha \
+            --cache-to type=gha,mode=max \
+            .
+
+      - name: Package tarball
+        id: package
+        run: |
+          set -eux
+          version="${GITHUB_REF_NAME}"
+          name="ide-${version}-linux-x86_64"
+          mv dist/ide-linux-x86_64 "$name"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eux
+          name="${{ steps.package.outputs.name }}"
+          gh release create "$GITHUB_REF_NAME" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            "$name.tar.gz" "$name.tar.gz.sha256"

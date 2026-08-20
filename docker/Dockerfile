@@ -65,12 +65,54 @@ COPY . /workspace
 RUN cargo build --release -p app
 
 # ---------------------------------------------------------------------------
-# linux-artifact: final stage whose entire filesystem is just the release
-# binary, so `docker buildx build --output type=local,dest=dist/` exports
-# only that file, landing at dist/ide-linux-x86_64.
+# linux-artifact-bundle: the release binary plus the shared-library closure
+# it needs, so the tarball runs on a machine with no Qt6 installed. Copies
+# every ldd dependency except the ones that must come from the host: glibc
+# and its companions (a bundled libc against a different loader breaks) and
+# libdrm/libgbm, which the host's GPU driver stack owns. libEGL/libGLX are
+# bundled — on Debian those are the vendor-neutral libglvnd dispatchers,
+# which find the real driver through the host's vendor config at runtime —
+# and so are the xcb libraries, which are protocol clients rather than
+# drivers and are the ones most often missing on a minimal system. Qt loads its platform plugin
+# dynamically (not via the import table), so libqxcb.so is copied in
+# explicitly and fed through the same closure walk.
+# ---------------------------------------------------------------------------
+FROM linux-artifact-builder AS linux-artifact-bundle
+
+RUN set -eux; \
+    mkdir -p /out/bin /out/lib /out/plugins/platforms; \
+    cp /workspace/target/release/app /out/bin/ide; \
+    QT_PLUGINS=/usr/lib/x86_64-linux-gnu/qt6/plugins; \
+    cp -L $QT_PLUGINS/platforms/libqxcb.so /out/plugins/platforms/; \
+    cp -rL $QT_PLUGINS/imageformats /out/plugins/; \
+    host_lib='^(ld-linux.*|libc|libm|libdl|libpthread|librt|libresolv|libnsl|libutil|libanl|libdrm|libgbm)\.'; \
+    while :; do \
+        before=$(ls /out/lib | wc -l); \
+        for obj in /out/bin/ide $(find /out/lib /out/plugins -name '*.so*'); do \
+            ldd "$obj" | awk '/=> \//{print $1 " " $3}'; \
+        done | sort -u | while read -r soname path; do \
+            if echo "$soname" | grep -Eq "$host_lib"; then continue; fi; \
+            if [ ! -e "/out/lib/$soname" ]; then cp -L "$path" "/out/lib/$soname"; fi; \
+        done; \
+        if [ "$before" = "$(ls /out/lib | wc -l)" ]; then break; fi; \
+    done; \
+    printf '%s\n' \
+        '#!/bin/sh' \
+        '# Launcher: point the dynamic loader and Qt at the bundled copies.' \
+        'here=$(dirname "$(readlink -f "$0")")' \
+        'export LD_LIBRARY_PATH="$here/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"' \
+        'export QT_PLUGIN_PATH="$here/plugins"' \
+        'exec "$here/bin/ide" "$@"' \
+        > /out/ide; \
+    chmod +x /out/ide
+
+# ---------------------------------------------------------------------------
+# linux-artifact: final stage whose entire filesystem is just the bundle, so
+# `docker buildx build --output type=local,dest=dist/` exports only that,
+# landing at dist/ide-linux-x86_64/ with ./ide as the entry point.
 # ---------------------------------------------------------------------------
 FROM scratch AS linux-artifact
-COPY --from=linux-artifact-builder /workspace/target/release/app /ide-linux-x86_64
+COPY --from=linux-artifact-bundle /out/ /ide-linux-x86_64/
 
 # ---------------------------------------------------------------------------
 # windows-builder: MXE's pre-built mingw-w64 + Qt6 cross toolchain

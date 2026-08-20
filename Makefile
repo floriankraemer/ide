@@ -25,7 +25,7 @@ lint: linux-image ## Run clippy + rustfmt check in Docker
 
 build: build-linux build-windows ## Build Linux and Windows artifacts
 
-build-linux: ## Export dist/ide-linux-x86_64
+build-linux: ## Export dist/ide-linux-x86_64/ (binary + bundled Qt runtime)
 	$(DOCKER) buildx build --target linux-artifact -f $(DOCKERFILE) \
 		--output type=local,dest=dist/ .
 
