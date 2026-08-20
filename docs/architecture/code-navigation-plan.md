@@ -11,11 +11,11 @@ A fresh session should read this table (and `git log`) before picking up work, p
 | N1 | done | `8d11fb8` |
 | N2 | done | `8d11fb8` |
 | N3 | done | `8d11fb8` |
-| N4 | done | `PENDING` |
-| N5 | done | `PENDING` |
-| N6 | done | `PENDING` |
-| N7 | done | `PENDING` |
-| N8 | done | `PENDING` |
+| N4 | done | `3f598d3` |
+| N5 | done | `3f598d3` |
+| N6 | done | `3f598d3` |
+| N7 | done | `3f598d3` |
+| N8 | done | `3f598d3` |
 | N9 | open | |
 
 ## Context
