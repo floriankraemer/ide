@@ -16,7 +16,7 @@ A fresh session should read this table (and `git log`) before picking up work, p
 | N6 | done | `3f598d3` |
 | N7 | done | `3f598d3` |
 | N8 | done | `3f598d3` |
-| N9 | open | |
+| N9 | done | `PENDING` |
 
 ## Context
 
@@ -93,6 +93,23 @@ New `Navigate` menu and `ActionDef`s, the ambiguity chooser, caret-driven Find U
 ### N9 — Docs
 
 ADR-0010, this plan doc, and the `layering.md`/`overview.md` sync.
+`overview.md` had drifted well past this task — it still described the MVP and listed five of the eleven crates — so it was brought back in line with the code rather than only patched where navigation touched it.
+
+## Fixed along the way
+
+Two defects surfaced during the end-to-end pass and are fixed here, because the feature is unusable without them:
+
+- **The watcher-driven re-index fed itself.**
+  The index lives at `<project_root>/.ide-index/`, inside the tree the watcher watches, so every commit looked like a project change, re-entered `reindex_file`, and committed again.
+  The index mutex was then permanently held and *every* query — Find in Files, Go to Symbol, Go to Declaration — hung on "Searching...".
+  `TextIndex::reindex_file`/`remove_file` now ignore paths inside their own index directory, guarded where the directory layout that causes it lives rather than in the caller.
+- **`rust/locals.scm` had drifted from `rust/tags.scm`.**
+  Traits, `impl` targets and struct fields were definitions to the outline but not to `identifier_occurrences`, so `is_definition` was never set for them: Go to Declaration on a trait name found nothing, Go to Symbol could not list a trait, and a struct field was not indexed even as a *reference* (a field is a `field_identifier`, a node kind neither catch-all covered).
+  The two queries are now in parity, with a regression test pinning it.
+
+## Polish
+
+Symbol rows carry a column now, so Go to Symbol and the Class View project tier land the caret on the identifier instead of at column 0 — previously only Go to Declaration did, which made jumps feel inconsistent depending on which one you used.
 
 ## Deferred, deliberately
 
@@ -102,3 +119,6 @@ ADR-0010, this plan doc, and the `layering.md`/`overview.md` sync.
   Worth doing — but it is a startup-time task, not a navigation one.
 - **Real tree-sitter scope queries** (`@local.scope`) replacing the local-tier heuristic — only worth it if the heuristic proves wrong in practice.
 - **Cross-file type/binding resolution** — an ADR-0008 non-goal, and in practice a language server.
+- **`.ide-index/` is visible in the project tree.**
+  The index directory sits inside the project root and the sidebar shows it like any other folder.
+  Hiding it means teaching `project-model`'s tree walk about a directory name that belongs to `index-core`, which the layering table does not allow it to depend on — so this needs a small decision (a configurable ignore list on the tree, most likely) rather than a quick filter.

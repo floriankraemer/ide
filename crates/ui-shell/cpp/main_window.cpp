@@ -1532,32 +1532,34 @@ private:
     // item and (when it has one) a per-container item nested under that —
     // `containerItems_` is keyed by `path + container` since two files can
     // each have their own same-named class.
-    void addProjectSymbol(const QString &path, quint32 line, FfiSymbolKind kind, const QString &name,
-                           const QString &container)
+    void addProjectSymbol(const FfiSymbolMatch &row)
     {
-        QTreeWidgetItem *fileItem = fileItems_.value(path, nullptr);
+        QTreeWidgetItem *fileItem = fileItems_.value(row.path, nullptr);
         if (!fileItem) {
-            fileItem = new QTreeWidgetItem(tree_, QStringList { QFileInfo(path).fileName() });
-            fileItems_.insert(path, fileItem);
+            fileItem = new QTreeWidgetItem(tree_, QStringList { QFileInfo(row.path).fileName() });
+            fileItems_.insert(row.path, fileItem);
         }
         QTreeWidgetItem *parent = fileItem;
-        if (!container.isEmpty()) {
-            const QString key = path + QChar(0x1f) + container;
+        if (!row.container.isEmpty()) {
+            const QString key = row.path + QChar(0x1f) + row.container;
             QTreeWidgetItem *containerItem = containerItems_.value(key, nullptr);
             if (!containerItem) {
-                containerItem = new QTreeWidgetItem(fileItem, QStringList { container });
+                containerItem = new QTreeWidgetItem(fileItem, QStringList { row.container });
                 containerItems_.insert(key, containerItem);
             }
             parent = containerItem;
         }
         auto *item = new QTreeWidgetItem(
-          parent, QStringList { name + QStringLiteral(" (") + symbolKindLabel(kind) + QStringLiteral(")") });
-        item->setData(0, Qt::UserRole, path);
-        item->setData(0, Qt::UserRole + 1, line);
+          parent,
+          QStringList { row.name + QStringLiteral(" (") + symbolKindLabel(row.kind)
+                        + QStringLiteral(")") });
+        item->setData(0, Qt::UserRole, row.path);
+        item->setData(0, Qt::UserRole + 1, row.line);
         // Task J: bare name for "Find Usages" — group nodes (file/container,
         // built above with QStringList-only constructors) never get this
         // role set, so the context menu naturally has nothing to offer them.
-        item->setData(0, Qt::UserRole + 2, name);
+        item->setData(0, Qt::UserRole + 2, row.name);
+        item->setData(0, Qt::UserRole + 3, row.column);
     }
 
     void onItemDoubleClicked(QTreeWidgetItem *item)
@@ -1572,7 +1574,9 @@ private:
             if (!pathData.isValid()) {
                 return;
             }
-            editorTabs_->openFileAtLine(pathData.toString(), item->data(0, Qt::UserRole + 1).toInt(), 0);
+            editorTabs_->openFileAtLine(pathData.toString(),
+                                         item->data(0, Qt::UserRole + 1).toInt(),
+                                         item->data(0, Qt::UserRole + 3).toInt());
         } else {
             editorTabs_->jumpToByteOffset(item->data(0, Qt::UserRole).toULongLong());
         }
@@ -1791,19 +1795,20 @@ private:
         searchModel_->quickOpenTextSearch(text);
     }
 
-    void addResult(const QString &path, quint32 line, FfiSymbolKind kind, const QString &name,
-                   const QString &container)
+    void addResult(const FfiSymbolMatch &row)
     {
-        const QString label = container.isEmpty()
+        const QString label = row.container.isEmpty()
           ? tr("%1 (%2) — %3:%4")
-              .arg(name, symbolKindLabel(kind), QFileInfo(path).fileName())
-              .arg(line)
+              .arg(row.name, symbolKindLabel(row.kind), QFileInfo(row.path).fileName())
+              .arg(row.line)
           : tr("%1.%2 (%3) — %4:%5")
-              .arg(container, name, symbolKindLabel(kind), QFileInfo(path).fileName())
-              .arg(line);
+              .arg(row.container, row.name, symbolKindLabel(row.kind),
+                    QFileInfo(row.path).fileName())
+              .arg(row.line);
         auto *item = new QListWidgetItem(label, resultsList_);
-        item->setData(Qt::UserRole, path);
-        item->setData(Qt::UserRole + 1, line);
+        item->setData(Qt::UserRole, row.path);
+        item->setData(Qt::UserRole + 1, row.line);
+        item->setData(Qt::UserRole + 2, row.column);
         if (resultsList_->count() == 1) {
             resultsList_->setCurrentRow(0);
         }
@@ -1851,7 +1856,11 @@ private:
             // The "Text matches" separator carries no data.
             return;
         }
-        editorTabs_->openFileAtLine(pathData.toString(), item->data(Qt::UserRole + 1).toInt(), 0);
+        // Symbol rows carry the name token's column; a text match has
+        // none, and its (invalid) variant converts to 0 — the start of the
+        // line, which is where a text hit belongs anyway.
+        editorTabs_->openFileAtLine(pathData.toString(), item->data(Qt::UserRole + 1).toInt(),
+                                     item->data(Qt::UserRole + 2).toInt());
         accept();
     }
 
@@ -1975,11 +1984,15 @@ private:
                                   : tr("No declaration found for \"%1\".").arg(name));
             return;
         }
-        if (candidates.size() == 1) {
+        // A local-file result is ranked, not merely listed: the first
+        // candidate is the innermost binding that shadows the caret, so
+        // offering a chooser would contradict the ranking that made it
+        // first. Only project-tier ambiguity is genuine — same name,
+        // unrelated symbols, nothing to prefer between them.
+        if (candidates.size() == 1 || tier == FfiResolutionTier::LocalFile) {
             jumpTo(candidates.first());
             return;
         }
-        Q_UNUSED(tier);
         chooseAmong(candidates, name);
     }
 

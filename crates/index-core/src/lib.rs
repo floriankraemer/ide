@@ -391,6 +391,20 @@ impl TextIndex {
         &self.root
     }
 
+    /// Is `path` inside this index's own `.ide-index/` directory?
+    ///
+    /// `build()` skips that directory when walking, and single-file
+    /// updates must ignore it too — for a much sharper reason. The index
+    /// lives *inside* the project root, so a caller driving
+    /// `reindex_file` from a filesystem watcher sees every commit this
+    /// index makes as a change to the project, re-enters `reindex_file`,
+    /// commits again, and never stops. Guarding here rather than in that
+    /// caller keeps the rule with the directory layout that causes it,
+    /// and protects any future caller for free.
+    fn is_own_index_path(&self, path: &Path) -> bool {
+        path.starts_with(self.root.join(INDEX_DIR_NAME))
+    }
+
     /// Re-index a single file: drops any existing entry for `path` — its
     /// text doc *and* every symbol/reference doc it produced, since they
     /// all share the `path` term — and re-adds it from disk if it
@@ -399,6 +413,9 @@ impl TextIndex {
     /// integration) pass the same path form used when the file was first
     /// indexed.
     pub fn reindex_file(&mut self, path: &Path) -> Result<(), IndexError> {
+        if self.is_own_index_path(path) {
+            return Ok(());
+        }
         let key = path.to_string_lossy().into_owned();
         self.writer
             .delete_term(Term::from_field_text(self.fields.path, &key));
@@ -481,6 +498,9 @@ impl TextIndex {
     /// text doc and every symbol/reference doc it produced, all keyed by
     /// the shared `path` term).
     pub fn remove_file(&mut self, path: &Path) -> Result<(), IndexError> {
+        if self.is_own_index_path(path) {
+            return Ok(());
+        }
         let key = path.to_string_lossy().into_owned();
         self.writer
             .delete_term(Term::from_field_text(self.fields.path, &key));
@@ -1574,5 +1594,23 @@ mod tests {
         // third usage.
         let usages = index.find_usages("Circle").unwrap();
         assert_eq!(usages.len(), 2, "{usages:?}");
+    }
+
+    #[test]
+    fn reindexing_the_index_directory_itself_is_a_no_op() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "fn add(x: i32) -> i32 { x }\n");
+        let mut index = TextIndex::build(dir.path()).unwrap();
+
+        // A watcher driving reindex_file sees the index's own commits as
+        // project changes; if those re-entered the writer, the callback
+        // would feed itself forever.
+        let own = dir.path().join(INDEX_DIR_NAME).join("meta.json");
+        assert!(own.exists(), "the index writes into its own directory");
+        index.reindex_file(&own).unwrap();
+        index.remove_file(&own).unwrap();
+
+        // And the real file's rows are untouched by that no-op.
+        assert_eq!(index.find_definitions_exact("add").unwrap().len(), 1);
     }
 }

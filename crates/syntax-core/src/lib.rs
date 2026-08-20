@@ -1652,4 +1652,32 @@ mod tests {
         assert!(supertype_edges(Language::Json, "{\"a\": 1}").is_empty());
         assert!(supertype_edges(Language::PlainText, "class A extends B {}").is_empty());
     }
+
+    #[test]
+    fn rust_locals_cover_every_construct_the_outline_calls_a_definition() {
+        // Regression guard for a drift between rust/tags.scm and
+        // rust/locals.scm: a trait, an `impl` target and a struct field
+        // were definitions to the outline but not to
+        // `identifier_occurrences`, so nothing could navigate to them.
+        let text = "pub trait Shape {\n    fn area(&self) -> f64;\n}\n\npub struct Circle {\n    radius: f64,\n}\n\nimpl Shape for Circle {\n    fn area(&self) -> f64 {\n        self.radius\n    }\n}\n";
+        let occurrences = identifier_occurrences(Language::Rust, text);
+        let defined = |name: &str| {
+            occurrences
+                .iter()
+                .any(|o| o.name == name && o.is_definition)
+        };
+
+        assert!(defined("Shape"), "trait name is a definition");
+        assert!(defined("Circle"), "struct name is a definition");
+        assert!(defined("radius"), "struct field is a definition");
+
+        // And a field *use* is indexed as a reference, not skipped: before
+        // the fix `field_identifier` matched no pattern at all.
+        assert!(
+            occurrences
+                .iter()
+                .any(|o| o.name == "radius" && !o.is_definition),
+            "self.radius is a reference"
+        );
+    }
 }

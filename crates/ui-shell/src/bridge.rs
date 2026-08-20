@@ -1068,18 +1068,13 @@ mod ffi {
         #[cxx_name = "projectSymbols"]
         fn project_symbols(self: Pin<&mut SearchModel>);
 
-        /// One project-wide symbol definition: `container` is empty when
-        /// the symbol has none (a top-level function, not a class member).
+        /// One project-wide symbol definition. Carries the same
+        /// `FfiSymbolMatch` row every other symbol signal does, so a jump
+        /// from Class View lands on the identifier rather than at column
+        /// 0 like it used to.
         #[qsignal]
         #[cxx_name = "projectSymbolFound"]
-        fn project_symbol_found(
-            self: Pin<&mut SearchModel>,
-            path: QString,
-            line: u32,
-            kind: FfiSymbolKind,
-            name: QString,
-            container: QString,
-        );
+        fn project_symbol_found(self: Pin<&mut SearchModel>, row: FfiSymbolMatch);
 
         /// Emitted once after the last `projectSymbolFound` of a
         /// `projectSymbols` call (including when there were zero symbols).
@@ -1103,20 +1098,14 @@ mod ffi {
         #[cxx_name = "symbolSearch"]
         fn symbol_search(self: Pin<&mut SearchModel>, query: &QString);
 
-        /// One go-to-symbol result: same shape as `projectSymbolFound`,
-        /// kept as a separate signal (rather than reusing that one) so the
-        /// quick-open dialog and the Class View project tier can listen
-        /// independently without filtering each other's emissions.
+        /// One go-to-symbol result: same row shape as
+        /// `projectSymbolFound`, kept as a separate signal (rather than
+        /// reusing that one) so the quick-open dialog and the Class View
+        /// project tier can listen independently without filtering each
+        /// other's emissions.
         #[qsignal]
         #[cxx_name = "symbolSearchResultFound"]
-        fn symbol_search_result_found(
-            self: Pin<&mut SearchModel>,
-            path: QString,
-            line: u32,
-            kind: FfiSymbolKind,
-            name: QString,
-            container: QString,
-        );
+        fn symbol_search_result_found(self: Pin<&mut SearchModel>, row: FfiSymbolMatch);
 
         /// Emitted once after the last `symbolSearchResultFound` of a
         /// `symbolSearch` call (including when there were zero results).
@@ -2779,16 +2768,12 @@ impl ffi::SearchModel {
                         // A definition `identifier_occurrences()` found but
                         // `outline()` didn't also capture (no `kind`) has
                         // nothing structural to show in a class tree.
-                        let Some(kind) = m.kind else { continue };
-                        let path = QString::from(m.path.to_string_lossy().as_ref());
-                        let line = m.line as u32;
-                        let name = QString::from(m.name.as_str());
-                        let container = QString::from(m.container.as_deref().unwrap_or(""));
-                        let ffi_kind = to_ffi_symbol_kind(kind);
+                        if m.kind.is_none() {
+                            continue;
+                        }
+                        let row = to_ffi_symbol_match(m);
                         let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                            model
-                                .as_mut()
-                                .project_symbol_found(path, line, ffi_kind, name, container);
+                            model.as_mut().project_symbol_found(row);
                         });
                     }
                     let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
@@ -2834,16 +2819,12 @@ impl ffi::SearchModel {
                         // Same reasoning as project_symbols: nothing
                         // structural to show for a defining occurrence with
                         // no outline() kind.
-                        let Some(kind) = m.kind else { continue };
-                        let path = QString::from(m.path.to_string_lossy().as_ref());
-                        let line = m.line as u32;
-                        let name = QString::from(m.name.as_str());
-                        let container = QString::from(m.container.as_deref().unwrap_or(""));
-                        let ffi_kind = to_ffi_symbol_kind(kind);
+                        if m.kind.is_none() {
+                            continue;
+                        }
+                        let row = to_ffi_symbol_match(m);
                         let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                            model
-                                .as_mut()
-                                .symbol_search_result_found(path, line, ffi_kind, name, container);
+                            model.as_mut().symbol_search_result_found(row);
                         });
                     }
                     let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
