@@ -8,9 +8,9 @@ A fresh session should read this table (and `git log`) before picking up work, p
 
 | Task | Status | Commit |
 |---|---|---|
-| N1 | done | `PENDING` |
-| N2 | done | `PENDING` |
-| N3 | done | `PENDING` |
+| N1 | done | `8d11fb8` |
+| N2 | done | `8d11fb8` |
+| N3 | done | `8d11fb8` |
 | N4 | open | |
 | N5 | open | |
 | N6 | open | |
