@@ -16,7 +16,7 @@ A fresh session should read this table (and `git log`) before picking up work, p
 | N6 | done | `3f598d3` |
 | N7 | done | `3f598d3` |
 | N8 | done | `3f598d3` |
-| N9 | done | `PENDING` |
+| N9 | done | `470c488` |
 
 ## Context
 
