@@ -10,16 +10,16 @@ The design decisions are recorded in [ADR 0010](decisions/0010-search-everywhere
 
 | Task | Status | Commit |
 |---|---|---|
-| T1 | done | `pending` |
-| T2 | done | `pending` |
-| T3 | done | `pending` |
-| T4 | done | `pending` |
-| T5 | done | `pending` |
-| T6 | done | `pending` |
-| T7 | done | `pending` |
-| T8 | done | `pending` |
-| T9 | done | `pending` |
-| T10 | done | `pending` |
+| T1 | done | `ced25e8` |
+| T2 | done | `ced25e8` |
+| T3 | done | `ced25e8` |
+| T4 | done | `ced25e8` |
+| T5 | done | `ced25e8` |
+| T6 | done | `ced25e8` |
+| T7 | done | `ced25e8` |
+| T8 | done | `ced25e8` |
+| T9 | done | `ced25e8` |
+| T10 | done | `ced25e8` |
 
 ## Context
 
