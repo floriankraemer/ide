@@ -1080,8 +1080,10 @@ impl TextIndex {
     ///
     /// Two tiers, cheapest and most precise first:
     ///
-    /// 1. **Local file.** Definition-position occurrences of the same name
-    ///    in `current_content` itself, ranked nearest-preceding-first.
+    /// 1. **Local file.** [`resolve_declaration_in_buffer`]: definition-
+    ///    position occurrences of the same name in `current_content`
+    ///    itself, ranked nearest-preceding-first. Index-free, so a caller
+    ///    without a built index can run that tier on its own.
     ///    This is what makes a local binding, a parameter, or a private
     ///    method resolve correctly: an inner `let x` sits nearer the caret
     ///    than an outer one, so shadowing falls out of the ordering
@@ -1105,68 +1107,13 @@ impl TextIndex {
         current_content: &str,
         byte_offset: usize,
     ) -> Result<Resolution, IndexError> {
-        let language = language_for_extension(
-            current_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or(""),
-        );
-        let occurrences = identifier_occurrences(language, current_content);
-        let Some(target) = occurrences
-            .iter()
-            .find(|o| byte_offset >= o.start && byte_offset < o.end)
-        else {
-            return Ok(Resolution {
-                name: String::new(),
-                tier: ResolutionTier::None,
-                candidates: Vec::new(),
-            });
-        };
-        let name = target.name.clone();
-
-        let roots = outline(language, current_content);
-        let mut flat: BTreeMap<(usize, usize), FlatSymbol<'_>> = BTreeMap::new();
-        flatten_outline(&roots, None, &mut flat);
-
-        let mut local: Vec<(usize, SymbolMatch)> = occurrences
-            .iter()
-            .filter(|o| o.is_definition && o.name == name)
-            .map(|o| {
-                let (line, col) = line_and_col_at(current_content, o.start);
-                let flat_symbol = flat.get(&(o.start, o.end));
-                (
-                    o.start,
-                    SymbolMatch {
-                        name: name.clone(),
-                        kind: flat_symbol.map(|f| f.kind),
-                        path: current_path.to_path_buf(),
-                        line,
-                        col,
-                        is_definition: true,
-                        container: flat_symbol.and_then(|f| f.container).map(str::to_string),
-                    },
-                )
-            })
-            .collect();
-
-        if !local.is_empty() {
-            // Nearest preceding declaration first (the innermost shadowing
-            // binding), then the nearest one *after* the caret -- a method
-            // called before its own declaration in the same class is
-            // ordinary in every language here.
-            local.sort_by_key(|(start, _)| {
-                if *start <= byte_offset {
-                    (0usize, byte_offset - *start)
-                } else {
-                    (1usize, *start - byte_offset)
-                }
-            });
-            return Ok(Resolution {
-                name,
-                tier: ResolutionTier::LocalFile,
-                candidates: local.into_iter().map(|(_, m)| m).collect(),
-            });
+        let local = resolve_declaration_in_buffer(current_path, current_content, byte_offset);
+        // Tier 1 answered (or there was nothing under the caret to answer
+        // about): the index has nothing to add.
+        if local.name.is_empty() || local.tier == ResolutionTier::LocalFile {
+            return Ok(local);
         }
+        let name = local.name;
 
         let current_key = current_path.to_string_lossy().into_owned();
         let mut candidates = self.find_definitions_exact(&name)?;
@@ -1380,6 +1327,95 @@ fn index_symbols(
         ))?;
     }
     Ok(())
+}
+
+/// Tier 1 of [`TextIndex::resolve_declaration`] on its own: declarations of
+/// the identifier at `byte_offset` found *inside `current_content` itself*,
+/// nearest-preceding-first.
+///
+/// Split out of the index because it needs no index: a local binding, a
+/// parameter or a same-file function resolves from the buffer alone. That is
+/// what lets Go to Declaration answer a Ctrl+Click before the project index
+/// has finished building, or with no project open at all (a lone file), where
+/// the alternative is the gesture doing nothing at all.
+///
+/// The returned tier is [`ResolutionTier::LocalFile`] when this file declares
+/// the name, and [`ResolutionTier::None`] otherwise -- with `name` still set,
+/// so a caller with an index can go on to search the project for it, and a
+/// caller without one can say *which* name it could not place. An empty
+/// `name` means the caret was not on an identifier.
+pub fn resolve_declaration_in_buffer(
+    current_path: &Path,
+    current_content: &str,
+    byte_offset: usize,
+) -> Resolution {
+    let language = language_for_extension(
+        current_path
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or(""),
+    );
+    let occurrences = identifier_occurrences(language, current_content);
+    let Some(target) = occurrences
+        .iter()
+        .find(|o| byte_offset >= o.start && byte_offset < o.end)
+    else {
+        return Resolution {
+            name: String::new(),
+            tier: ResolutionTier::None,
+            candidates: Vec::new(),
+        };
+    };
+    let name = target.name.clone();
+
+    let roots = outline(language, current_content);
+    let mut flat: BTreeMap<(usize, usize), FlatSymbol<'_>> = BTreeMap::new();
+    flatten_outline(&roots, None, &mut flat);
+
+    let mut local: Vec<(usize, SymbolMatch)> = occurrences
+        .iter()
+        .filter(|o| o.is_definition && o.name == name)
+        .map(|o| {
+            let (line, col) = line_and_col_at(current_content, o.start);
+            let flat_symbol = flat.get(&(o.start, o.end));
+            (
+                o.start,
+                SymbolMatch {
+                    name: name.clone(),
+                    kind: flat_symbol.map(|f| f.kind),
+                    path: current_path.to_path_buf(),
+                    line,
+                    col,
+                    is_definition: true,
+                    container: flat_symbol.and_then(|f| f.container).map(str::to_string),
+                },
+            )
+        })
+        .collect();
+
+    if local.is_empty() {
+        return Resolution {
+            name,
+            tier: ResolutionTier::None,
+            candidates: Vec::new(),
+        };
+    }
+
+    // Nearest preceding declaration first (the innermost shadowing binding),
+    // then the nearest one *after* the caret -- a method called before its own
+    // declaration in the same class is ordinary in every language here.
+    local.sort_by_key(|(start, _)| {
+        if *start <= byte_offset {
+            (0usize, byte_offset - *start)
+        } else {
+            (1usize, *start - byte_offset)
+        }
+    });
+    Resolution {
+        name,
+        tier: ResolutionTier::LocalFile,
+        candidates: local.into_iter().map(|(_, m)| m).collect(),
+    }
 }
 
 /// Project-relative, forward-slashed display form of `path` — what the file
@@ -1961,6 +1997,8 @@ mod tests {
             dir.path().join("src/math.rs")
         );
         assert_eq!(resolution.candidates[0].kind, Some(SymbolKind::Function));
+        assert_eq!(resolution.candidates[0].line, 1);
+        assert_eq!(resolution.candidates[0].col, 3, "{resolution:?}");
     }
 
     #[test]
@@ -2023,6 +2061,49 @@ mod tests {
 
         assert_eq!(resolution.tier, ResolutionTier::LocalFile);
         assert_eq!(resolution.candidates[0].line, 1);
+    }
+
+    #[test]
+    fn resolve_declaration_in_buffer_answers_a_same_file_declaration_without_an_index() {
+        let content = "fn helper() -> u32 {\n    1\n}\n\nfn main() {\n    helper();\n}\n";
+        let caret = content.rfind("helper").unwrap();
+
+        let resolution =
+            resolve_declaration_in_buffer(Path::new("/nowhere/main.rs"), content, caret);
+
+        assert_eq!(resolution.name, "helper");
+        assert_eq!(resolution.tier, ResolutionTier::LocalFile);
+        assert_eq!(resolution.candidates.len(), 1, "{resolution:?}");
+        assert_eq!(resolution.candidates[0].line, 1);
+        assert_eq!(resolution.candidates[0].col, 3);
+    }
+
+    #[test]
+    fn resolve_declaration_in_buffer_names_a_symbol_it_cannot_place() {
+        let content = "fn main() {\n    elsewhere();\n}\n";
+        let caret = content.find("elsewhere").unwrap();
+
+        let resolution =
+            resolve_declaration_in_buffer(Path::new("/nowhere/main.rs"), content, caret);
+
+        // Named but unplaced: an index-backed caller searches the project
+        // for it, an index-less one can say which name it could not find.
+        assert_eq!(resolution.name, "elsewhere");
+        assert_eq!(resolution.tier, ResolutionTier::None);
+        assert!(resolution.candidates.is_empty());
+    }
+
+    #[test]
+    fn resolve_declaration_in_buffer_finds_nothing_off_an_identifier() {
+        let content = "fn main() {\n    1 + 1;\n}\n";
+        let caret = content.find('+').unwrap();
+
+        let resolution =
+            resolve_declaration_in_buffer(Path::new("/nowhere/main.rs"), content, caret);
+
+        assert!(resolution.name.is_empty());
+        assert_eq!(resolution.tier, ResolutionTier::None);
+        assert!(resolution.candidates.is_empty());
     }
 
     #[test]
