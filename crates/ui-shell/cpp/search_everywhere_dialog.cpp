@@ -76,6 +76,15 @@ SearchEverywhereDialog::SearchEverywhereDialog(SearchModel *searchModel,
     connect(results_, &QListWidget::itemClicked, this, &SearchEverywhereDialog::activate);
 
     connect(searchModel_, &SearchModel::resultsBatch, this, &SearchEverywhereDialog::appendHits);
+    // Opening a folder starts an index build that outlasts the user's
+    // patience, so a query typed in that window comes back "still being
+    // built". Re-run it once the index lands instead of leaving that notice
+    // on screen until the user types again.
+    connect(searchModel_, &SearchModel::indexReady, this, [this]() {
+        if (isVisible()) {
+            runQuery();
+        }
+    });
     connect(searchModel_,
             &SearchModel::queryFailed,
             this,
