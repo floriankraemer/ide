@@ -190,6 +190,19 @@ QLineEdit, QPlainTextEdit {
 )");
 }
 
+ThemeColors colorsForTheme(const QString &themeName)
+{
+    // The same values the stylesheets above use for the window chrome.
+    if (themeName == QStringLiteral("light")) {
+        return ThemeColors{QColor(QStringLiteral("#ffffff")),
+                           QColor(QStringLiteral("#1a1a1a")),
+                           QColor(QStringLiteral("#4b6eaf"))};
+    }
+    return ThemeColors{QColor(QStringLiteral("#3c3f41")),
+                       QColor(QStringLiteral("#a9b7c6")),
+                       QColor(QStringLiteral("#4b6eaf"))};
+}
+
 QString styleSheetForTheme(const QString &themeName)
 {
     if (themeName == QStringLiteral("light")) {

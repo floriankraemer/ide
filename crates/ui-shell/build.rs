@@ -247,6 +247,7 @@ fn main() {
         .cpp_file("cpp/keymap_page.cpp")
         .cpp_file("cpp/search_results_panel.cpp")
         .cpp_file("cpp/search_everywhere_dialog.cpp")
+        .cpp_file("cpp/splash_screen.cpp")
         .cpp_file("cpp/theme.cpp")
         .cpp_file("cpp/syntax_highlighter.cpp")
         .cpp_file("cpp/terminal_widget.h")

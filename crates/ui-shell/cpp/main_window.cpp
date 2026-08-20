@@ -5,6 +5,7 @@
 #include "keymap_page.h"
 #include "search_everywhere_dialog.h"
 #include "search_results_panel.h"
+#include "splash_screen.h"
 #include "syntax_highlighter.h"
 #include "terminal_widget.h"
 #include "theme.h"
@@ -2305,20 +2306,23 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
 // Edit/Save actions are wired to the tabbed editor area; the rest remain
 // non-functional stubs for later tasks.
-QMainWindow *buildMainWindow()
+// `progress` is called once per startup stage (1-based, see
+// SplashScreen::StageCount) so the splash can show what is taking time. The
+// stages are the blocking steps below, in the order they already ran.
+QMainWindow *buildMainWindow(AppSettings *appSettings,
+                              const std::function<void(int, const QString &)> &progress)
 {
+    progress(1, QObject::tr("Loading settings..."));
+
     auto *window = new IdeMainWindow();
     window->setWindowTitle(QStringLiteral("IDE"));
 
-    auto *appSettings = new AppSettings(window);
+    // Created by run_app() before the splash so the persisted theme is known
+    // early enough to paint it; adopted by the window here as before.
+    appSettings->setParent(window);
     // Holds the Settings > Keymap page's draft between beginEdit() and
     // commit(); parented to the window so it outlives each dialog.
     auto *keymapEditor = new KeymapEditor(window);
-    // Live-switch mechanism (T2): re-applying setStyleSheet() at runtime is
-    // exactly how a future theme-picker (S1) switches without a restart —
-    // this call is that same path, just fired once at startup with the
-    // persisted theme instead of a freshly-picked one.
-    qApp->setStyleSheet(styleSheetForTheme(appSettings->themeName()));
 
     const FfiWindowGeometry savedGeometry = appSettings->windowGeometry();
     if (savedGeometry.width > 0 && savedGeometry.height > 0) {
@@ -2328,6 +2332,8 @@ QMainWindow *buildMainWindow()
     } else {
         window->resize(1024, 768);
     }
+
+    progress(2, QObject::tr("Starting services..."));
 
     auto *treeModel = new ProjectTreeModel(window);
     auto *docManager = new DocumentManager(window);
@@ -2341,6 +2347,7 @@ QMainWindow *buildMainWindow()
     // DocumentManager exists — the listener thread it spawns dispatches
     // every EditorCommand back onto this same QObject's Qt thread.
     docManager->startMcpServer();
+    progress(3, QObject::tr("Building workspace..."));
     const CentralWidgets central =
       buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession);
     EditorTabs *editorTabs = central.editorTabs;
@@ -2378,6 +2385,7 @@ QMainWindow *buildMainWindow()
     // below it) shares one instance instead of capturing a dangling
     // reference — the same std::make_shared trick the settings dialog's
     // colour pickers use.
+    progress(4, QObject::tr("Preparing menus..."));
     auto actions = std::make_shared<QHash<QString, QAction *>>();
 
     // The terminal's Copy/Paste are QActions on the terminal widget itself
@@ -2626,6 +2634,7 @@ QMainWindow *buildMainWindow()
     // US-1: relaunching the app reopens the last project automatically.
     // Reuses the same watcher-start path as "Open Folder...", so the tree
     // is live-refreshing from the moment it's populated.
+    progress(5, QObject::tr("Restoring project..."));
     treeModel->reopenLastProject();
 
     // Reopens the persisted editor split layout last: after the font/color
@@ -2633,6 +2642,7 @@ QMainWindow *buildMainWindow()
     // the project is back, so restored files show up under a live tree.
     // Files are addressed by absolute path and reopen even if they sit
     // outside the reopened project.
+    progress(6, QObject::tr("Restoring editors..."));
     editorTabs->restoreLayout(appSettings->editorLayout());
 
     return window;
@@ -2645,11 +2655,24 @@ int run_app()
     int argc = 0;
     QApplication app(argc, nullptr);
 
-    // buildMainWindow() applies the persisted theme (T2) once AppSettings
-    // exists; nothing is shown yet at this point, so there's no unstyled
-    // frame to flash.
-    QMainWindow *window = buildMainWindow();
+    // Parentless for now: the splash needs the persisted theme before any
+    // window exists, and buildMainWindow() adopts this object as soon as it
+    // has one.
+    auto *appSettings = new AppSettings(nullptr);
+    // Applying the theme (T2) before anything is shown means neither the
+    // splash nor the main window ever flashes an unstyled frame.
+    qApp->setStyleSheet(styleSheetForTheme(appSettings->themeName()));
+
+    SplashScreen splash(appSettings->themeName());
+    splash.show();
+
+    QMainWindow *window =
+      buildMainWindow(appSettings, [&splash](int step, const QString &text) {
+          splash.setStage(step, text);
+      });
     window->show();
+    // Closes the splash exactly when the main window is up — no timer, no gap.
+    splash.finish(window);
 
     return QApplication::exec();
 }
