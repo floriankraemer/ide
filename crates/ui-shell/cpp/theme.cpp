@@ -192,6 +192,143 @@ QLineEdit, QPlainTextEdit {
 )");
 }
 
+// Dark+ (default dark) as VS Code ships it: the same selector set as the two
+// sheets above — leaving one out would let that surface render in the
+// platform style instead of the theme — with VS Code's flatter chrome shape
+// (square borderless tabs marked by a top accent, thin flat scrollbars).
+QString vscodeDarkStyleSheet()
+{
+    return QStringLiteral(R"(
+QWidget {
+    background-color: #1e1e1e;
+    color: #d4d4d4;
+    selection-background-color: #264f78;
+    selection-color: #ffffff;
+}
+
+QMainWindow, QDialog {
+    background-color: #333333;
+}
+
+QMenuBar {
+    background-color: #3c3c3c;
+    color: #cccccc;
+}
+
+QMenuBar::item:selected {
+    background-color: #094771;
+}
+
+QMenu {
+    background-color: #252526;
+    color: #cccccc;
+    border: 1px solid #454545;
+}
+
+QMenu::item:selected {
+    background-color: #094771;
+    color: #ffffff;
+}
+
+QTreeView, QAbstractItemView {
+    background-color: #252526;
+    /* VS Code's lists don't stripe: matching the base color kills the
+       banding a QTreeView would otherwise draw with alternating rows on. */
+    alternate-background-color: #252526;
+    color: #cccccc;
+    border: none;
+}
+
+QTreeView::item:selected, QAbstractItemView::item:selected {
+    background-color: #094771;
+    color: #ffffff;
+}
+
+QTreeView::item:hover, QAbstractItemView::item:hover {
+    background-color: #2a2d2e;
+}
+
+QTabWidget::pane {
+    border: none;
+    background-color: #1e1e1e;
+}
+
+QTabBar::tab {
+    background-color: #2d2d2d;
+    color: #969696;
+    padding: 7px 12px;
+    border: none;
+    /* Reserved even when unselected, so selecting a tab shifts no label. */
+    border-top: 1px solid transparent;
+}
+
+QTabBar::tab:selected {
+    background-color: #1e1e1e;
+    color: #ffffff;
+    border-top: 1px solid #007acc;
+}
+
+QTabBar::tab:hover:!selected {
+    background-color: #1f1f1f;
+    color: #cccccc;
+}
+
+QSplitter::handle {
+    background-color: #2b2b2b;
+}
+
+QStatusBar {
+    background-color: #007acc;
+    color: #ffffff;
+}
+
+QStatusBar QLabel {
+    background-color: transparent;
+    color: #ffffff;
+}
+
+QScrollBar:vertical {
+    background: transparent;
+    border: none;
+    width: 14px;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    border: none;
+    height: 14px;
+}
+
+QScrollBar::handle {
+    background: #4f4f4f;
+    border: none;
+}
+
+QScrollBar::handle:hover {
+    background: #646464;
+}
+
+QScrollBar::add-line, QScrollBar::sub-line {
+    height: 0px;
+    width: 0px;
+}
+
+QScrollBar::add-page, QScrollBar::sub-page {
+    background: transparent;
+}
+
+QLineEdit, QPlainTextEdit {
+    background-color: #3c3c3c;
+    color: #cccccc;
+    border: 1px solid #3c3c3c;
+}
+
+QLineEdit:focus, QPlainTextEdit:focus {
+    border: 1px solid #007fd4;
+}
+)");
+}
+
 ThemeColors colorsForTheme(const QString &themeName)
 {
     // The same values the stylesheets above use for the window chrome.
@@ -199,6 +336,11 @@ ThemeColors colorsForTheme(const QString &themeName)
         return ThemeColors{QColor(QStringLiteral("#ffffff")),
                            QColor(QStringLiteral("#1a1a1a")),
                            QColor(QStringLiteral("#4b6eaf"))};
+    }
+    if (themeName == QStringLiteral("vscode-dark")) {
+        return ThemeColors{QColor(QStringLiteral("#1e1e1e")),
+                           QColor(QStringLiteral("#cccccc")),
+                           QColor(QStringLiteral("#007acc"))};
     }
     return ThemeColors{QColor(QStringLiteral("#3c3f41")),
                        QColor(QStringLiteral("#a9b7c6")),
@@ -209,6 +351,9 @@ QString styleSheetForTheme(const QString &themeName)
 {
     if (themeName == QStringLiteral("light")) {
         return lightStyleSheet();
+    }
+    if (themeName == QStringLiteral("vscode-dark")) {
+        return vscodeDarkStyleSheet();
     }
     return darculaStyleSheet();
 }
@@ -287,6 +432,51 @@ QPalette lightPalette()
     return palette;
 }
 
+QPalette vscodeDarkPalette()
+{
+    QPalette palette;
+    const QColor chrome(QStringLiteral("#333333"));
+    const QColor chromeText(QStringLiteral("#cccccc"));
+    const QColor editor(QStringLiteral("#1e1e1e"));
+    const QColor editorText(QStringLiteral("#d4d4d4"));
+
+    palette.setColor(QPalette::Window, chrome);
+    palette.setColor(QPalette::WindowText, chromeText);
+    // CodeEditor derives its gutter, current-line band and find-match tints
+    // from Base/Text, so the editor surface has to reach it through the
+    // palette and not only through the stylesheet.
+    palette.setColor(QPalette::Base, editor);
+    palette.setColor(QPalette::AlternateBase, QColor(QStringLiteral("#252526")));
+    palette.setColor(QPalette::Text, editorText);
+    palette.setColor(QPalette::Button, QColor(QStringLiteral("#3c3c3c")));
+    palette.setColor(QPalette::ButtonText, chromeText);
+    palette.setColor(QPalette::ToolTipBase, QColor(QStringLiteral("#252526")));
+    palette.setColor(QPalette::ToolTipText, chromeText);
+    palette.setColor(QPalette::Highlight, QColor(QStringLiteral("#264f78")));
+    palette.setColor(QPalette::HighlightedText, QColor(QStringLiteral("#ffffff")));
+    palette.setColor(QPalette::PlaceholderText, QColor(QStringLiteral("#6e7681")));
+
+    // Same ADS constraints as darculaPalette(): Light/Midlight/Mid feed the
+    // active dock tab's Window→Light gradient, its hover shade and the
+    // separators.
+    palette.setColor(QPalette::Light, QColor(QStringLiteral("#252526")));
+    palette.setColor(QPalette::Midlight, QColor(QStringLiteral("#2d2d2d")));
+    palette.setColor(QPalette::Mid, QColor(QStringLiteral("#3c3c3c")));
+    // Lighter than Window on purpose — ADS colors inactive dock-tab labels
+    // with palette(dark), which a literally dark Dark would make unreadable.
+    palette.setColor(QPalette::Dark, QColor(QStringLiteral("#969696")));
+    palette.setColor(QPalette::Shadow, QColor(QStringLiteral("#191919")));
+
+    palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(QStringLiteral("#6e6e6e")));
+    palette.setColor(QPalette::Disabled, QPalette::Text, QColor(QStringLiteral("#6e6e6e")));
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(QStringLiteral("#6e6e6e")));
+    return palette;
+}
+
+// Mirrors the fallback in styleSheetForTheme(): an unrecognized name is
+// Darcula, so that is what an un-applied theme reports too.
+QString activeTheme = QStringLiteral("dark");
+
 } // namespace
 
 QPalette paletteForTheme(const QString &themeName)
@@ -294,11 +484,20 @@ QPalette paletteForTheme(const QString &themeName)
     if (themeName == QStringLiteral("light")) {
         return lightPalette();
     }
+    if (themeName == QStringLiteral("vscode-dark")) {
+        return vscodeDarkPalette();
+    }
     return darculaPalette();
+}
+
+QString activeThemeName()
+{
+    return activeTheme;
 }
 
 void applyTheme(const QString &themeName)
 {
+    activeTheme = themeName;
     qApp->setPalette(paletteForTheme(themeName));
     // Re-setting the sheet after the palette forces Qt to re-resolve every
     // `palette(...)` reference in it, including the ones inside the dock
