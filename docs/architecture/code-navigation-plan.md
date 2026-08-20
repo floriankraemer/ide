@@ -11,11 +11,11 @@ A fresh session should read this table (and `git log`) before picking up work, p
 | N1 | done | `8d11fb8` |
 | N2 | done | `8d11fb8` |
 | N3 | done | `8d11fb8` |
-| N4 | open | |
-| N5 | open | |
-| N6 | open | |
-| N7 | open | |
-| N8 | open | |
+| N4 | done | `PENDING` |
+| N5 | done | `PENDING` |
+| N6 | done | `PENDING` |
+| N7 | done | `PENDING` |
+| N8 | done | `PENDING` |
 | N9 | open | |
 
 ## Context
@@ -67,7 +67,8 @@ New `find_definitions_exact(name)` narrows to the name inside tantivy instead of
 
 ### N4 — Fix the stale index
 
-`SearchModel::reindexFile`/`removeFile` invokables on a background thread, called after a successful save and from the project watcher path.
+A `SearchModel::reindexFile` invokable on a background thread, wired to the project watcher's `filesChangedExternally` — which fires for the app's own saves as well as outside edits, so one hook covers both rather than a second, parallel save-time path.
+A deletion needs no separate call: `TextIndex::reindex_file` drops the file's rows first and only re-adds them if the path is still readable, so no `removeFile` invokable was added.
 Without this the whole feature silently jumps to stale lines; it is a correctness prerequisite, not a nice-to-have.
 
 ### N5 — `app-core`: navigation history
@@ -78,7 +79,8 @@ A new `record` truncates the forward tail; positions in the same file within ±1
 ### N6 — `ui-shell` bridge
 
 `SearchModel::resolveDeclaration`, `findImplementations`, `findSupertypes` — background threads with the streaming signal trio the existing `usagesFound`/`usagesFinished`/`usagesFailed` uses.
-`DocumentManager` history invokables returning a typed `FfiLocation { found, path, line, col }` — a typed `found` flag, never a QString sentinel (ADR-0003).
+Rows cross the seam as one `FfiSymbolMatch` struct rather than eight positional signal parameters: the same row travels on three signals, and a list that long is easy to mis-order at the call site.
+`DocumentManager` history invokables returning a typed `FfiLocation { found, path, line, column }` — a typed `found` flag, never a QString sentinel (ADR-0003).
 
 ### N7 — `CodeEditor`: Ctrl-hover + Ctrl+Click
 

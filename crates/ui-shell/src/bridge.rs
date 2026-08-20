@@ -125,7 +125,11 @@ mod ffi {
     }
 
     /// Structural symbol kind (Task D), 1:1 with `syntax_core::SymbolKind`.
+    /// `Class` is only nominally the default — a row with no kind of its
+    /// own carries `has_kind == false` and this value is not read.
+    #[derive(Default)]
     enum FfiSymbolKind {
+        #[default]
         Class,
         Struct,
         Enum,
@@ -193,6 +197,53 @@ mod ffi {
         Simple,
         Word,
         Line,
+    }
+
+    /// One symbol row crossing the seam — a usage, an implementation, or
+    /// a declaration candidate — 1:1 with `index_core::SymbolMatch`.
+    ///
+    /// Carried as one struct rather than eight signal parameters: these
+    /// rows travel on three different signals, and a positional parameter
+    /// list that long is both easy to mis-order at the call site and past
+    /// what clippy will accept.
+    ///
+    /// `line` is 1-based; `column` is a byte offset within that line.
+    /// `has_kind` distinguishes "no kind recorded" from `Class`, since a
+    /// plain occurrence has no `tags.scm` entry of its own — a typed flag
+    /// rather than an overloaded kind value (ADR-0003). `container` is
+    /// empty when the symbol has none.
+    #[derive(Default)]
+    struct FfiSymbolMatch {
+        path: QString,
+        line: u32,
+        column: u32,
+        name: QString,
+        kind: FfiSymbolKind,
+        has_kind: bool,
+        is_definition: bool,
+        container: QString,
+    }
+
+    /// Which tier of `index_core::resolve_declaration` produced the
+    /// candidates (N2), 1:1 with `index_core::ResolutionTier`. The view
+    /// uses it only to phrase its status message — it never re-ranks.
+    enum FfiResolutionTier {
+        LocalFile,
+        Project,
+        None,
+    }
+
+    /// A place in the project to jump to, as `DocumentManager`'s
+    /// navigation-history invokables return it (N5). `found == false`
+    /// means "there is nowhere to go", at which point the other fields are
+    /// meaningless — a typed flag rather than an empty-`QString` sentinel
+    /// (ADR-0003), the same shape `FfiTerminalLink` uses.
+    #[derive(Default)]
+    struct FfiLocation {
+        found: bool,
+        path: QString,
+        line: u32,
+        column: u32,
     }
 
     /// `TerminalSession::linkAt`'s result. `found == false` means "no link
@@ -667,6 +718,37 @@ mod ffi {
             column: u32,
         );
 
+        /// Record where the caret is *before* a jump, so Back can return
+        /// here (N5). Called from the shared tail every jump in the app
+        /// funnels through, which is what gives Find in Files, Go to
+        /// Symbol, Class View and Go to Line their history for free.
+        #[qinvokable]
+        #[cxx_name = "recordJump"]
+        fn record_jump(self: Pin<&mut DocumentManager>, path: &QString, line: u32, column: u32);
+
+        /// Step back in the jump history. `found == false` means there is
+        /// nowhere further back to go.
+        #[qinvokable]
+        #[cxx_name = "jumpBack"]
+        fn jump_back(self: Pin<&mut DocumentManager>) -> FfiLocation;
+
+        /// Step forward in the jump history. `found == false` means there
+        /// is nowhere further forward to go.
+        #[qinvokable]
+        #[cxx_name = "jumpForward"]
+        fn jump_forward(self: Pin<&mut DocumentManager>) -> FfiLocation;
+
+        /// Whether Back/Forward have anywhere to go — the view enables or
+        /// disables its menu actions from these rather than tracking a
+        /// stack of its own.
+        #[qinvokable]
+        #[cxx_name = "canJumpBack"]
+        fn can_jump_back(self: &DocumentManager) -> bool;
+
+        #[qinvokable]
+        #[cxx_name = "canJumpForward"]
+        fn can_jump_forward(self: &DocumentManager) -> bool;
+
         /// Starts the MCP transport on a dedicated background thread (its
         /// own Tokio runtime, since `run_app()`'s Qt event loop isn't async)
         /// and the `EditorCommand` listener loop that marshals each command
@@ -1058,19 +1140,12 @@ mod ffi {
         #[cxx_name = "findUsages"]
         fn find_usages(self: Pin<&mut SearchModel>, name: &QString);
 
-        /// One usage: `is_definition` distinguishes the defining occurrence
-        /// from a reference; `container` is empty when the occurrence has
-        /// none.
+        /// One usage — or, from `findImplementations`/`findSupertypes`,
+        /// one hierarchy row. `is_definition` distinguishes the defining
+        /// occurrence from a reference.
         #[qsignal]
         #[cxx_name = "usagesFound"]
-        fn usages_found(
-            self: Pin<&mut SearchModel>,
-            path: QString,
-            line: u32,
-            name: QString,
-            is_definition: bool,
-            container: QString,
-        );
+        fn usages_found(self: Pin<&mut SearchModel>, row: FfiSymbolMatch);
 
         /// Emitted once after the last `usagesFound` of a `findUsages`
         /// call (including when there were zero usages).
@@ -1083,6 +1158,84 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "usagesFailed"]
         fn usages_failed(self: Pin<&mut SearchModel>, message: QString);
+
+        /// N4 — re-index one file after it changed on disk, so symbol
+        /// line numbers don't drift away from what the editor shows.
+        /// Wired to the project watcher's `filesChangedExternally`, which
+        /// fires for the app's own saves as well as outside edits — one
+        /// hook rather than a second, parallel save-time path.
+        ///
+        /// A deletion needs no separate call: `TextIndex::reindex_file`
+        /// deletes the file's rows first and only re-adds them if the
+        /// path is still readable. A no-op when no index has been built
+        /// yet; failures arrive on `indexFailed`, since there is no
+        /// per-file UI to report them to.
+        #[qinvokable]
+        #[cxx_name = "reindexFile"]
+        fn reindex_file(self: Pin<&mut SearchModel>, path: &QString);
+
+        /// N2 — Go to Declaration: where is the identifier at
+        /// `byte_offset` in `content` declared? `path` and `content`
+        /// describe the buffer the caret is in; passing the live text
+        /// rather than reading the file means an unsaved edit resolves
+        /// against what the user is actually looking at (the same shape
+        /// `saveTab(id, content)` and the find invokables use).
+        ///
+        /// Results stream as `declarationFound`, best candidate first,
+        /// then exactly one `declarationFinished` carrying which tier
+        /// answered. Several candidates is a legitimate outcome, not an
+        /// error: resolution is name-based (ADR-0008), so the view offers
+        /// the choice rather than guessing.
+        #[qinvokable]
+        #[cxx_name = "resolveDeclaration"]
+        fn resolve_declaration(
+            self: Pin<&mut SearchModel>,
+            path: &QString,
+            content: &QString,
+            byte_offset: usize,
+        );
+
+        /// One declaration candidate, best first.
+        #[qsignal]
+        #[cxx_name = "declarationFound"]
+        fn declaration_found(self: Pin<&mut SearchModel>, row: FfiSymbolMatch);
+
+        /// Emitted once after the last `declarationFound` of a
+        /// `resolveDeclaration` call, including when there were none —
+        /// `tier == None` with an empty `name` means the caret wasn't on
+        /// an identifier at all.
+        #[qsignal]
+        #[cxx_name = "declarationFinished"]
+        fn declaration_finished(
+            self: Pin<&mut SearchModel>,
+            tier: FfiResolutionTier,
+            name: QString,
+        );
+
+        /// Emitted instead of `declarationFinished` when the lookup
+        /// couldn't run at all (no index built yet).
+        #[qsignal]
+        #[cxx_name = "declarationFailed"]
+        fn declaration_failed(self: Pin<&mut SearchModel>, message: QString);
+
+        /// N3 — Go to Implementation: every type declaring `name` as a
+        /// base class, implemented interface, or (in Rust) an implemented
+        /// trait.
+        ///
+        /// Results arrive on the `usagesFound`/`usagesFinished`/
+        /// `usagesFailed` trio rather than a trio of their own: a list of
+        /// file:line locations is exactly what the Find Usages dock
+        /// already renders, and a second identical signal set would buy
+        /// nothing but a second set of connections to keep in sync.
+        #[qinvokable]
+        #[cxx_name = "findImplementations"]
+        fn find_implementations(self: Pin<&mut SearchModel>, name: &QString);
+
+        /// N3 — Go to Interface: every supertype `name` declares. Same
+        /// signals as `findImplementations`.
+        #[qinvokable]
+        #[cxx_name = "findSupertypes"]
+        fn find_supertypes(self: Pin<&mut SearchModel>, name: &QString);
     }
 
     // Enables `self.qt_thread()` on `SearchModel` for the background
@@ -1406,6 +1559,39 @@ fn flatten_symbol_tree(
             depth,
         });
         flatten_symbol_tree(&node.children, depth + 1, out);
+    }
+}
+
+fn to_ffi_location(location: Option<app_core::Location>) -> ffi::FfiLocation {
+    match location {
+        Some(location) => ffi::FfiLocation {
+            found: true,
+            path: QString::from(location.path.to_string_lossy().as_ref()),
+            line: location.line,
+            column: location.column,
+        },
+        None => ffi::FfiLocation::default(),
+    }
+}
+
+fn to_ffi_symbol_match(m: index_core::SymbolMatch) -> ffi::FfiSymbolMatch {
+    ffi::FfiSymbolMatch {
+        path: QString::from(m.path.to_string_lossy().as_ref()),
+        line: m.line as u32,
+        column: m.col as u32,
+        name: QString::from(m.name.as_str()),
+        has_kind: m.kind.is_some(),
+        kind: to_ffi_symbol_kind(m.kind.unwrap_or(syntax_core::SymbolKind::Class)),
+        is_definition: m.is_definition,
+        container: QString::from(m.container.as_deref().unwrap_or("")),
+    }
+}
+
+fn to_ffi_resolution_tier(tier: index_core::ResolutionTier) -> ffi::FfiResolutionTier {
+    match tier {
+        index_core::ResolutionTier::LocalFile => ffi::FfiResolutionTier::LocalFile,
+        index_core::ResolutionTier::Project => ffi::FfiResolutionTier::Project,
+        index_core::ResolutionTier::None => ffi::FfiResolutionTier::None,
     }
 }
 
@@ -2043,6 +2229,32 @@ impl ffi::DocumentManager {
         }
     }
 
+    pub fn record_jump(self: Pin<&mut Self>, path: &QString, line: u32, column: u32) {
+        self.session.borrow_mut().record_jump(
+            std::path::PathBuf::from(path.to_string()),
+            line,
+            column,
+        );
+    }
+
+    pub fn jump_back(self: Pin<&mut Self>) -> ffi::FfiLocation {
+        let location = self.session.borrow_mut().jump_back();
+        to_ffi_location(location)
+    }
+
+    pub fn jump_forward(self: Pin<&mut Self>) -> ffi::FfiLocation {
+        let location = self.session.borrow_mut().jump_forward();
+        to_ffi_location(location)
+    }
+
+    pub fn can_jump_back(&self) -> bool {
+        self.session.borrow().can_jump_back()
+    }
+
+    pub fn can_jump_forward(&self) -> bool {
+        self.session.borrow().can_jump_forward()
+    }
+
     pub fn set_cursor_position(self: Pin<&mut Self>, tab_id: u64, line: u32, column: u32) {
         self.session
             .borrow_mut()
@@ -2673,15 +2885,158 @@ impl ffi::SearchModel {
             match result {
                 Ok(matches) => {
                     for m in matches {
-                        let path = QString::from(m.path.to_string_lossy().as_ref());
-                        let line = m.line as u32;
-                        let name = QString::from(m.name.as_str());
-                        let is_definition = m.is_definition;
-                        let container = QString::from(m.container.as_deref().unwrap_or(""));
+                        let row = to_ffi_symbol_match(m);
                         let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                            model
-                                .as_mut()
-                                .usages_found(path, line, name, is_definition, container);
+                            model.as_mut().usages_found(row);
+                        });
+                    }
+                    let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                        model.as_mut().usages_finished();
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model
+                            .as_mut()
+                            .usages_failed(QString::from(message.as_str()));
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn reindex_file(self: Pin<&mut Self>, path: &QString) {
+        self.mutate_index(std::path::PathBuf::from(path.to_string()), |index, path| {
+            index.reindex_file(path)
+        });
+    }
+
+    /// Runs the single-file index update on a background thread: it
+    /// commits and reloads the tantivy reader, and would otherwise block
+    /// the UI thread on every save. Nothing is emitted on success — index
+    /// freshness is not something the user waits on — and a failure
+    /// reuses `indexFailed`, the signal the initial build already reports
+    /// through.
+    fn mutate_index(
+        self: Pin<&mut Self>,
+        path: std::path::PathBuf,
+        mutate: fn(
+            &mut index_core::TextIndex,
+            &std::path::Path,
+        ) -> Result<(), index_core::IndexError>,
+    ) {
+        let qt_thread = self.qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            let mut guard = slot.lock().unwrap();
+            let Some(index) = guard.as_mut() else {
+                return;
+            };
+            let result = mutate(index, &path);
+            drop(guard);
+            if let Err(err) = result {
+                let message = err.to_string();
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model.as_mut().index_failed(QString::from(message.as_str()));
+                });
+            }
+        });
+    }
+
+    pub fn resolve_declaration(
+        self: Pin<&mut Self>,
+        path: &QString,
+        content: &QString,
+        byte_offset: usize,
+    ) {
+        let path = std::path::PathBuf::from(path.to_string());
+        let content = content.to_string();
+        let qt_thread = self.qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            let guard = slot.lock().unwrap();
+            let Some(index) = guard.as_ref() else {
+                drop(guard);
+                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                    model
+                        .as_mut()
+                        .declaration_failed(QString::from("No project is open yet."));
+                });
+                return;
+            };
+            let result = index.resolve_declaration(&path, &content, byte_offset);
+            drop(guard);
+            match result {
+                Ok(resolution) => {
+                    for candidate in resolution.candidates {
+                        let row = to_ffi_symbol_match(candidate);
+                        let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                            model.as_mut().declaration_found(row);
+                        });
+                    }
+                    let tier = to_ffi_resolution_tier(resolution.tier);
+                    let name = QString::from(resolution.name.as_str());
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model.as_mut().declaration_finished(tier, name);
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model
+                            .as_mut()
+                            .declaration_failed(QString::from(message.as_str()));
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn find_implementations(self: Pin<&mut Self>, name: &QString) {
+        self.stream_usages(name.to_string(), |index, name| {
+            index.find_implementations(name)
+        });
+    }
+
+    pub fn find_supertypes(self: Pin<&mut Self>, name: &QString) {
+        self.stream_usages(name.to_string(), |index, name| index.find_supertypes(name));
+    }
+
+    /// Shared body of `find_implementations`/`find_supertypes` (N3): run
+    /// a name-keyed index query on a background thread and stream its
+    /// rows out on the `usagesFound` trio, which is what `find_usages`
+    /// itself does — see `findImplementations`' doc comment for why they
+    /// share one signal set rather than each getting their own.
+    fn stream_usages(
+        self: Pin<&mut Self>,
+        name: String,
+        query: fn(
+            &index_core::TextIndex,
+            &str,
+        ) -> Result<Vec<index_core::SymbolMatch>, index_core::IndexError>,
+    ) {
+        let qt_thread = self.qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            let guard = slot.lock().unwrap();
+            let Some(index) = guard.as_ref() else {
+                drop(guard);
+                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                    model
+                        .as_mut()
+                        .usages_failed(QString::from("No project is open yet."));
+                });
+                return;
+            };
+            let result = query(index, &name);
+            drop(guard);
+            match result {
+                Ok(matches) => {
+                    for m in matches {
+                        let row = to_ffi_symbol_match(m);
+                        let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                            model.as_mut().usages_found(row);
                         });
                     }
                     let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {

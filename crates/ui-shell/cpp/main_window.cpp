@@ -152,6 +152,10 @@ public:
         activeTabChanged_ = std::move(callback);
     }
 
+    // N7: a Ctrl+Click inside any editor. Same callback shape as above.
+    std::function<void(int)> declarationRequested_;
+    std::function<void()> navigationChanged_;
+
     // Opens `path`, or focuses its tab if already open (US-3). The session
     // decides whether the file may open (binary rejection, readability);
     // this only picks the dialog flavor by error code and shows the result.
@@ -175,20 +179,148 @@ public:
     // `index_core::SearchMatch` — treated as a character offset here,
     // which is exact for ASCII lines and only approximate on lines with
     // multi-byte UTF-8, since QTextCursor counts characters, not bytes.
+    //
+    // N5: this and `jumpWithinCurrentTab` are the two functions every jump
+    // in the app funnels through, so recording the pre-jump position here
+    // is what gives Find in Files, Go to Symbol, Class View, Go to Line
+    // and Go to Declaration their Back/Forward history at once.
     void openFileAtLine(const QString &path, int line, int column)
     {
+        recordCurrentPosition();
         openFile(path);
         auto *editor = currentEditor();
         if (!editor) {
             return;
         }
         moveCursorToLine(editor, line, column);
+        recordCurrentPosition();
+        navigationChanged();
+    }
+
+    // A jump that stays inside the tab already open, recorded the same way.
+    void jumpWithinCurrentTab(int line, int column)
+    {
+        auto *editor = currentEditor();
+        if (!editor) {
+            return;
+        }
+        recordCurrentPosition();
+        moveCursorToLine(editor, line, column);
+        recordCurrentPosition();
+        navigationChanged();
+    }
+
+    // N5: Navigate > Back / Forward. The session owns the stack and the
+    // rules; this only carries the answer to the editor.
+    void jumpBack() { applyHistoryLocation(docManager_->jumpBack()); }
+    void jumpForward() { applyHistoryLocation(docManager_->jumpForward()); }
+
+    bool canJumpBack() const { return docManager_->canJumpBack(); }
+    bool canJumpForward() const { return docManager_->canJumpForward(); }
+
+    // Lets the window re-enable its Back/Forward actions after a jump,
+    // without EditorTabs needing to be a Q_OBJECT.
+    void setNavigationChangedCallback(std::function<void()> callback)
+    {
+        navigationChanged_ = std::move(callback);
+    }
+
+    // N7/N2: the caret's position as a UTF-8 byte offset — what the index
+    // speaks. Also the shared conversion for a Ctrl+Click, whose
+    // document position arrives from CodeEditor.
+    quint64 byteOffsetAt(int documentPosition) const
+    {
+        auto *editor = currentEditor();
+        if (!editor) {
+            return 0;
+        }
+        return static_cast<quint64>(
+          editor->toPlainText().left(documentPosition).toUtf8().size());
+    }
+
+    // The word under the caret, used by the caret-driven Find Usages and
+    // the type-hierarchy jumps. Empty when no tab is open or the caret is
+    // not on a word.
+    QString wordUnderCursor() const
+    {
+        auto *editor = currentEditor();
+        if (!editor) {
+            return QString();
+        }
+        QTextCursor cursor = editor->textCursor();
+        cursor.select(QTextCursor::WordUnderCursor);
+        return cursor.selectedText();
+    }
+
+    QString currentPath() const { return docManager_->tabPath(currentTabId()); }
+
+    QString currentContent() const
+    {
+        auto *editor = currentEditor();
+        return editor ? editor->toPlainText() : QString();
+    }
+
+    // N2: ask the session to resolve whatever the caret sits on. The
+    // answer arrives asynchronously on SearchModel's declaration signals.
+    void requestDeclarationAtCaret()
+    {
+        auto *editor = currentEditor();
+        if (!editor || !declarationRequested_) {
+            return;
+        }
+        declarationRequested_(editor->textCursor().position());
+    }
+
+    void setDeclarationRequestedCallback(std::function<void(int)> callback)
+    {
+        declarationRequested_ = std::move(callback);
     }
 
     QPlainTextEdit *currentEditor() const
     {
         return activeGroup_ ? qobject_cast<QPlainTextEdit *>(activeGroup_->currentWidget())
                             : nullptr;
+    }
+
+    // N5: hand the caret's current file and line to the session's jump
+    // history. Whether that actually pushes an entry (or collapses into
+    // the previous one) is the session's rule, not this widget's.
+    void recordCurrentPosition()
+    {
+        auto *editor = currentEditor();
+        if (!editor) {
+            return;
+        }
+        const QString path = docManager_->tabPath(currentTabId());
+        if (path.isEmpty()) {
+            return;
+        }
+        const QTextCursor cursor = editor->textCursor();
+        docManager_->recordJump(path, static_cast<quint32>(cursor.blockNumber() + 1),
+                                 static_cast<quint32>(cursor.columnNumber()));
+    }
+
+    void applyHistoryLocation(const FfiLocation &location)
+    {
+        if (!location.found) {
+            return;
+        }
+        // Deliberately not openFileAtLine: walking the history must not
+        // record new entries, or Back would push the place it just left
+        // and the stack would never move.
+        openFile(location.path);
+        if (auto *editor = currentEditor()) {
+            moveCursorToLine(editor, static_cast<int>(location.line),
+                              static_cast<int>(location.column));
+        }
+        navigationChanged();
+    }
+
+    void navigationChanged()
+    {
+        if (navigationChanged_) {
+            navigationChanged_();
+        }
     }
 
     // The current editor's find bar, or nothing when no tab is open.
@@ -228,6 +360,7 @@ public:
         if (!editor) {
             return;
         }
+        recordCurrentPosition();
         const QByteArray utf8 = docManager_->tabContent(currentTabId()).toUtf8();
         const qsizetype clamped = qMin<qsizetype>(static_cast<qsizetype>(byteOffset), utf8.size());
         int line = 0;
@@ -239,6 +372,8 @@ public:
             }
         }
         moveCursorToLine(editor, line + 1, static_cast<int>(qMax<qsizetype>(0, clamped - lineStart)));
+        recordCurrentPosition();
+        navigationChanged();
     }
 
     // Edit > Find/Replace/Find Next/Find Previous. Each just forwards to
@@ -264,7 +399,7 @@ public:
                                                editor->textCursor().blockNumber() + 1, 1,
                                                editor->blockCount(), 1, &ok);
         if (ok) {
-            moveCursorToLine(editor, line, 0);
+            jumpWithinCurrentTab(line, 0);
         }
     }
 
@@ -839,6 +974,15 @@ private:
         // Find (F3): one bar per editor, floated over it, hidden until
         // Ctrl+F/Ctrl+R. Parented to the editor, so it dies with the tab.
         new FindBar(editor, docManager_);
+
+        // N7: Ctrl+Click on an identifier. The widget reports the gesture
+        // and its document position; everything about what that
+        // identifier *means* is decided outside the view.
+        connect(editor, &CodeEditor::declarationRequested, this, [this](int position) {
+            if (declarationRequested_) {
+                declarationRequested_(position);
+            }
+        });
 
         // L3: only the visible tab's cursor should move the status bar —
         // guards against a background tab's programmatic cursor change
@@ -1493,20 +1637,36 @@ public:
                 &FindUsagesPanel::openSelected);
         connect(searchModel_, &SearchModel::usagesFound, this, &FindUsagesPanel::addUsage);
         connect(searchModel_, &SearchModel::usagesFinished, this, [this]() {
-            statusLabel_->setText(tr("%1 usage(s).").arg(resultsList_->count()));
+            statusLabel_->setText(tr("%1 result(s).").arg(resultsList_->count()));
         });
         connect(searchModel_, &SearchModel::usagesFailed, this, [this](const QString &message) {
-            statusLabel_->setText(tr("Find usages failed: %1").arg(message));
+            statusLabel_->setText(tr("Search failed: %1").arg(message));
         });
     }
 
-    // Called from ClassViewPanel's "Find Usages" context-menu action (via
-    // main_window's wiring) with the symbol's exact name.
+    // Called from ClassViewPanel's "Find Usages" context-menu action and
+    // from Navigate > Find Usages (via main_window's wiring) with the
+    // symbol's exact name.
     void findUsages(const QString &name)
     {
-        resultsList_->clear();
-        statusLabel_->setText(tr("Searching usages of \"%1\"...").arg(name));
+        beginQuery(tr("Searching usages of \"%1\"...").arg(name));
         searchModel_->findUsages(name);
+    }
+
+    // N3: Navigate > Go to Implementation / Go to Interface. Both are
+    // lists of file:line locations, which is exactly what this dock
+    // already renders, so they stream in on the same signals rather than
+    // getting a near-identical panel of their own.
+    void findImplementations(const QString &name)
+    {
+        beginQuery(tr("Searching implementations of \"%1\"...").arg(name));
+        searchModel_->findImplementations(name);
+    }
+
+    void findSupertypes(const QString &name)
+    {
+        beginQuery(tr("Searching supertypes of \"%1\"...").arg(name));
+        searchModel_->findSupertypes(name);
     }
 
 private:
@@ -1514,20 +1674,25 @@ private:
     // by (path, line) — see `SearchModel::find_usages` — so consecutive
     // rows here already read as grouped by file with no extra tree
     // structure needed.
-    void addUsage(const QString &path, quint32 line, const QString &name, bool isDefinition,
-                  const QString &container)
+    void beginQuery(const QString &status)
     {
-        Q_UNUSED(name);
-        const QString kindLabel = isDefinition ? tr("def") : tr("ref");
-        const QString label = container.isEmpty()
-          ? tr("%1:%2 [%3]").arg(QFileInfo(path).fileName()).arg(line).arg(kindLabel)
+        resultsList_->clear();
+        statusLabel_->setText(status);
+    }
+
+    void addUsage(const FfiSymbolMatch &row)
+    {
+        const QString kindLabel = row.is_definition ? tr("def") : tr("ref");
+        const QString label = row.container.isEmpty()
+          ? tr("%1:%2 [%3]").arg(QFileInfo(row.path).fileName()).arg(row.line).arg(kindLabel)
           : tr("%1:%2 [%3] in %4")
-              .arg(QFileInfo(path).fileName())
-              .arg(line)
-              .arg(kindLabel, container);
+              .arg(QFileInfo(row.path).fileName())
+              .arg(row.line)
+              .arg(kindLabel, row.container);
         auto *item = new QListWidgetItem(label, resultsList_);
-        item->setData(Qt::UserRole, path);
-        item->setData(Qt::UserRole + 1, line);
+        item->setData(Qt::UserRole, row.path);
+        item->setData(Qt::UserRole + 1, row.line);
+        item->setData(Qt::UserRole + 2, row.column);
     }
 
     void openSelected(QListWidgetItem *item)
@@ -1536,7 +1701,8 @@ private:
             return;
         }
         editorTabs_->openFileAtLine(item->data(Qt::UserRole).toString(),
-                                     item->data(Qt::UserRole + 1).toInt(), 0);
+                                     item->data(Qt::UserRole + 1).toInt(),
+                                     item->data(Qt::UserRole + 2).toInt());
     }
 
     SearchModel *searchModel_;
@@ -1740,6 +1906,142 @@ private:
     EditorTabs *editorTabs_ = nullptr;
     AppSettings *appSettings_ = nullptr;
     ads::CDockManager *dockManager_ = nullptr;
+};
+
+// Go to Declaration (N2/N8): turns SearchModel's streamed resolution
+// results into either a jump or a chooser.
+//
+// The rule this class does *not* contain is which candidate is best —
+// `index_core::resolve_declaration` already ranked them and the first one
+// to arrive is the winner. All that is decided here is presentation: one
+// candidate jumps straight there, several offer the list (resolution is
+// name-based per ADR-0008, so ambiguity is a legitimate answer, not an
+// error), none reports why nothing happened.
+class DeclarationNavigator : public QObject
+{
+public:
+    DeclarationNavigator(SearchModel *searchModel, EditorTabs *editorTabs, QMainWindow *window)
+      : QObject(window)
+      , searchModel_(searchModel)
+      , editorTabs_(editorTabs)
+      , window_(window)
+    {
+        connect(searchModel_, &SearchModel::declarationFound, this,
+                [this](const FfiSymbolMatch &row) {
+                    candidates_.append(
+                      Candidate{row.path, row.line, row.column,
+                                 row.has_kind ? symbolKindLabel(row.kind) : QString(),
+                                 row.container});
+                });
+        connect(searchModel_, &SearchModel::declarationFinished, this,
+                &DeclarationNavigator::finish);
+        connect(searchModel_, &SearchModel::declarationFailed, this,
+                [this](const QString &message) {
+                    candidates_.clear();
+                    report(tr("Go to Declaration failed: %1").arg(message));
+                });
+    }
+
+    // Entry point for both the Ctrl+Click gesture and the menu action.
+    // `documentPosition` is a UTF-16 document position; the byte offset
+    // the index speaks is derived by EditorTabs, which owns the buffer.
+    void resolveAt(int documentPosition)
+    {
+        const QString path = editorTabs_->currentPath();
+        if (path.isEmpty()) {
+            return;
+        }
+        candidates_.clear();
+        searchModel_->resolveDeclaration(path, editorTabs_->currentContent(),
+                                          editorTabs_->byteOffsetAt(documentPosition));
+    }
+
+private:
+    struct Candidate
+    {
+        QString path;
+        quint32 line;
+        quint32 column;
+        QString kind;
+        QString container;
+    };
+
+    void finish(FfiResolutionTier tier, const QString &name)
+    {
+        const QList<Candidate> candidates = std::move(candidates_);
+        candidates_.clear();
+        if (candidates.isEmpty()) {
+            report(name.isEmpty() ? tr("No identifier under the caret.")
+                                  : tr("No declaration found for \"%1\".").arg(name));
+            return;
+        }
+        if (candidates.size() == 1) {
+            jumpTo(candidates.first());
+            return;
+        }
+        Q_UNUSED(tier);
+        chooseAmong(candidates, name);
+    }
+
+    void jumpTo(const Candidate &candidate)
+    {
+        editorTabs_->openFileAtLine(candidate.path, static_cast<int>(candidate.line),
+                                     static_cast<int>(candidate.column));
+    }
+
+    // Several same-named declarations: offer them at the caret rather than
+    // picking one. A popup menu (not a dialog) keeps the gesture as light
+    // as the click that started it.
+    void chooseAmong(const QList<Candidate> &candidates, const QString &name)
+    {
+        QMenu menu(window_);
+        menu.setTitle(tr("Declarations of \"%1\"").arg(name));
+        for (const Candidate &candidate : candidates) {
+            const QString file = QFileInfo(candidate.path).fileName();
+            QString label = tr("%1:%2").arg(file).arg(candidate.line);
+            if (!candidate.container.isEmpty()) {
+                label = tr("%1 in %2").arg(label, candidate.container);
+            }
+            if (!candidate.kind.isEmpty()) {
+                label = tr("%1 (%2)").arg(label, candidate.kind);
+            }
+            QAction *action = menu.addAction(label);
+            connect(action, &QAction::triggered, this,
+                    [this, candidate]() { jumpTo(candidate); });
+        }
+        menu.exec(QCursor::pos());
+    }
+
+    void report(const QString &message)
+    {
+        window_->statusBar()->showMessage(message, 4000);
+    }
+
+    static QString symbolKindLabel(FfiSymbolKind kind)
+    {
+        switch (kind) {
+        case FfiSymbolKind::Class:
+            return tr("class");
+        case FfiSymbolKind::Struct:
+            return tr("struct");
+        case FfiSymbolKind::Enum:
+            return tr("enum");
+        case FfiSymbolKind::Interface:
+            return tr("interface");
+        case FfiSymbolKind::Method:
+            return tr("method");
+        case FfiSymbolKind::Function:
+            return tr("function");
+        case FfiSymbolKind::Field:
+            return tr("field");
+        }
+        return QString();
+    }
+
+    SearchModel *searchModel_;
+    EditorTabs *editorTabs_;
+    QMainWindow *window_;
+    QList<Candidate> candidates_;
 };
 
 // File > Recent Projects (C2): rebuilds `menu` from `appSettings`'s
@@ -2111,6 +2413,17 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                       docManager,
                       [docManager](const QString &path) { docManager->checkExternalChange(path); });
 
+    // N4: the same watcher event keeps the symbol index in step with disk.
+    // It fires for the app's own saves as well as outside edits, so one
+    // hook covers both — and `reindexFile` handles a deletion too, since
+    // it drops the file's rows before deciding whether to re-add them.
+    // Without this the index froze at project-open time and every jump
+    // drifted onto a stale line after the first edit.
+    QObject::connect(treeModel,
+                      &ProjectTreeModel::filesChangedExternally,
+                      searchModel,
+                      [searchModel](const QString &path) { searchModel->reindexFile(path); });
+
     QObject::connect(docManager,
                       &DocumentManager::externalChangeDetected,
                       editorTabs,
@@ -2445,6 +2758,79 @@ QMainWindow *buildMainWindow()
     QObject::connect(goToLineAction, &QAction::triggered, window, [editorTabs]() {
         editorTabs->goToLine();
     });
+
+    // N8: code navigation. The Ctrl+Click gesture and every action below
+    // route through the one DeclarationNavigator, so there is a single
+    // place that turns a resolution result into a jump.
+    auto *navigator = new DeclarationNavigator(searchModel, editorTabs, window);
+    editorTabs->setDeclarationRequestedCallback(
+      [navigator](int position) { navigator->resolveAt(position); });
+
+    QMenu *navigateMenu = window->menuBar()->addMenu(QObject::tr("&Navigate"));
+    QAction *goToDeclarationAction =
+      registerAction(navigateMenu, QStringLiteral("navigate.goToDeclaration"),
+                      QObject::tr("Go to Declaration"), appSettings, *actions);
+    QObject::connect(goToDeclarationAction, &QAction::triggered, window,
+                      [editorTabs]() { editorTabs->requestDeclarationAtCaret(); });
+
+    QAction *findUsagesAction =
+      registerAction(navigateMenu, QStringLiteral("navigate.findUsages"),
+                      QObject::tr("Find Usages"), appSettings, *actions);
+    QObject::connect(findUsagesAction, &QAction::triggered, window, [central, editorTabs]() {
+        const QString name = editorTabs->wordUnderCursor();
+        if (name.isEmpty()) {
+            return;
+        }
+        central.findUsagesDock->toggleView(true);
+        central.findUsagesDock->raise();
+        central.findUsagesPanel->findUsages(name);
+    });
+
+    QAction *goToImplementationAction =
+      registerAction(navigateMenu, QStringLiteral("navigate.goToImplementation"),
+                      QObject::tr("Go to Implementation"), appSettings, *actions);
+    QObject::connect(goToImplementationAction, &QAction::triggered, window,
+                      [central, editorTabs]() {
+                          const QString name = editorTabs->wordUnderCursor();
+                          if (name.isEmpty()) {
+                              return;
+                          }
+                          central.findUsagesDock->toggleView(true);
+                          central.findUsagesDock->raise();
+                          central.findUsagesPanel->findImplementations(name);
+                      });
+
+    QAction *goToInterfaceAction =
+      registerAction(navigateMenu, QStringLiteral("navigate.goToInterface"),
+                      QObject::tr("Go to Interface"), appSettings, *actions);
+    QObject::connect(goToInterfaceAction, &QAction::triggered, window, [central, editorTabs]() {
+        const QString name = editorTabs->wordUnderCursor();
+        if (name.isEmpty()) {
+            return;
+        }
+        central.findUsagesDock->toggleView(true);
+        central.findUsagesDock->raise();
+        central.findUsagesPanel->findSupertypes(name);
+    });
+
+    navigateMenu->addSeparator();
+    QAction *backAction = registerAction(navigateMenu, QStringLiteral("navigate.back"),
+                                          QObject::tr("Back"), appSettings, *actions);
+    QObject::connect(backAction, &QAction::triggered, window,
+                      [editorTabs]() { editorTabs->jumpBack(); });
+    QAction *forwardAction = registerAction(navigateMenu, QStringLiteral("navigate.forward"),
+                                             QObject::tr("Forward"), appSettings, *actions);
+    QObject::connect(forwardAction, &QAction::triggered, window,
+                      [editorTabs]() { editorTabs->jumpForward(); });
+
+    // Enabled state comes from the session's stack, not from a second copy
+    // kept here. Applied once now and again after every jump.
+    auto refreshNavigationActions = [editorTabs, backAction, forwardAction]() {
+        backAction->setEnabled(editorTabs->canJumpBack());
+        forwardAction->setEnabled(editorTabs->canJumpForward());
+    };
+    editorTabs->setNavigationChangedCallback(refreshNavigationActions);
+    refreshNavigationActions();
 
     QObject::connect(undoAction, &QAction::triggered, window, [editorTabs]() {
         if (auto *editor = editorTabs->currentEditor()) {

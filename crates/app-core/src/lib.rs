@@ -157,6 +157,96 @@ pub fn resolve_config_dir() -> PathBuf {
 /// open-document table, with `Result`-returning command methods as the
 /// command layer. The UI adapter holds exactly one of these and translates
 /// slots into calls on it.
+/// One place in the project a jump can return to: a file plus a 1-based
+/// line and 0-based column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Location {
+    pub path: PathBuf,
+    pub line: u32,
+    pub column: u32,
+}
+
+/// How many entries the back/forward stack keeps. Old enough entries stop
+/// being useful long before memory is a concern; the cap exists so a long
+/// session can't grow the stack without bound.
+const NAVIGATION_HISTORY_CAP: usize = 64;
+
+/// Back/forward jump history, JetBrains-style.
+///
+/// The rules that make it feel right, rather than merely correct:
+///
+/// - Recording a jump truncates whatever was ahead of the cursor, the same
+///   way a browser drops the forward stack once you navigate somewhere new.
+/// - Positions that are effectively the same place collapse instead of
+///   pushing a new entry: same file, within [`SAME_PLACE_LINES`] lines of
+///   the current top. Without this, scrolling around one function would
+///   fill the stack with near-identical entries and "back" would appear to
+///   do nothing several times in a row.
+/// - [`back`](Self::back) returns the entry *before* the current one and
+///   moves the cursor onto it, so repeated calls walk backwards; `forward`
+///   is its mirror.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct NavigationHistory {
+    entries: Vec<Location>,
+    /// Index of the entry the caret is considered to be on. `None` when
+    /// the history is empty.
+    cursor: Option<usize>,
+}
+
+/// Two positions in the same file this close together are treated as the
+/// same place — see [`NavigationHistory`].
+const SAME_PLACE_LINES: u32 = 1;
+
+impl NavigationHistory {
+    /// Record `location` as the current place, dropping any forward
+    /// entries. A location that is effectively where we already are
+    /// updates the top entry in place instead of pushing.
+    pub fn record(&mut self, location: Location) {
+        if let Some(cursor) = self.cursor {
+            if same_place(&self.entries[cursor], &location) {
+                self.entries[cursor] = location;
+                self.entries.truncate(cursor + 1);
+                return;
+            }
+            self.entries.truncate(cursor + 1);
+        }
+        self.entries.push(location);
+        if self.entries.len() > NAVIGATION_HISTORY_CAP {
+            self.entries.remove(0);
+        }
+        self.cursor = Some(self.entries.len() - 1);
+    }
+
+    /// The entry before the current one, if any, moving the cursor onto it.
+    pub fn back(&mut self) -> Option<Location> {
+        let cursor = self.cursor?;
+        let previous = cursor.checked_sub(1)?;
+        self.cursor = Some(previous);
+        Some(self.entries[previous].clone())
+    }
+
+    /// The entry after the current one, if any, moving the cursor onto it.
+    pub fn forward(&mut self) -> Option<Location> {
+        let cursor = self.cursor?;
+        let next = cursor + 1;
+        let entry = self.entries.get(next)?.clone();
+        self.cursor = Some(next);
+        Some(entry)
+    }
+
+    pub fn can_go_back(&self) -> bool {
+        self.cursor.is_some_and(|c| c > 0)
+    }
+
+    pub fn can_go_forward(&self) -> bool {
+        self.cursor.is_some_and(|c| c + 1 < self.entries.len())
+    }
+}
+
+fn same_place(a: &Location, b: &Location) -> bool {
+    a.path == b.path && a.line.abs_diff(b.line) <= SAME_PLACE_LINES
+}
+
 pub struct AppSession {
     project: ProjectSession,
     /// Open documents in opening order. A `Vec` scan instead of a map:
@@ -176,6 +266,10 @@ pub struct AppSession {
     /// cursor (M4's `get_cursor_position` MCP tool — nothing here computes
     /// a cursor position, it only remembers what the view last reported).
     cursor_positions: HashMap<TabId, (u32, u32)>,
+    /// Back/forward jump history across every file (not per tab): a jump
+    /// that opened another file has to be walkable back to where it came
+    /// from.
+    navigation: NavigationHistory,
 }
 
 impl Default for AppSession {
@@ -198,6 +292,7 @@ impl AppSession {
             next_tab_id: 1,
             active: None,
             suppressed_changes: HashMap::new(),
+            navigation: NavigationHistory::default(),
             config_dir,
             cursor_positions: HashMap::new(),
         }
@@ -430,6 +525,32 @@ impl AppSession {
     /// reported (MCP's `get_cursor_position` tool, M4).
     pub fn cursor_position(&self, id: TabId) -> Option<(u32, u32)> {
         self.cursor_positions.get(&id).copied()
+    }
+
+    /// Record where the caret is *before* a jump, so back can return here.
+    /// Called by the view from the shared tail every jump funnels through,
+    /// which is what gives Find in Files, Go to Symbol, Class View and Go
+    /// to Line their history for free.
+    pub fn record_jump(&mut self, path: PathBuf, line: u32, column: u32) {
+        self.navigation.record(Location { path, line, column });
+    }
+
+    /// Step back in the jump history, or `None` at the oldest entry.
+    pub fn jump_back(&mut self) -> Option<Location> {
+        self.navigation.back()
+    }
+
+    /// Step forward in the jump history, or `None` at the newest entry.
+    pub fn jump_forward(&mut self) -> Option<Location> {
+        self.navigation.forward()
+    }
+
+    pub fn can_jump_back(&self) -> bool {
+        self.navigation.can_go_back()
+    }
+
+    pub fn can_jump_forward(&self) -> bool {
+        self.navigation.can_go_forward()
     }
 
     /// The tab's backing file extension (no leading dot, lowercased), used
@@ -1045,5 +1166,113 @@ mod tests {
         let mut third = AppSession::with_config_dir(empty_config.path().to_path_buf());
         assert!(!third.reopen_last_project());
         assert!(third.project().is_none());
+    }
+
+    // --- navigation history (N5) ---
+
+    fn at(path: &str, line: u32) -> Location {
+        Location {
+            path: PathBuf::from(path),
+            line,
+            column: 0,
+        }
+    }
+
+    #[test]
+    fn history_walks_back_and_forward_through_recorded_jumps() {
+        let mut history = NavigationHistory::default();
+        history.record(at("a.rs", 10));
+        history.record(at("b.rs", 20));
+        history.record(at("c.rs", 30));
+
+        assert_eq!(history.back(), Some(at("b.rs", 20)));
+        assert_eq!(history.back(), Some(at("a.rs", 10)));
+        assert_eq!(history.back(), None, "at the oldest entry");
+        assert_eq!(history.forward(), Some(at("b.rs", 20)));
+        assert_eq!(history.forward(), Some(at("c.rs", 30)));
+        assert_eq!(history.forward(), None, "at the newest entry");
+    }
+
+    #[test]
+    fn recording_a_jump_drops_the_forward_tail() {
+        let mut history = NavigationHistory::default();
+        history.record(at("a.rs", 10));
+        history.record(at("b.rs", 20));
+        history.back();
+
+        history.record(at("c.rs", 30));
+
+        assert!(!history.can_go_forward(), "b.rs was ahead and is gone");
+        assert_eq!(history.back(), Some(at("a.rs", 10)));
+    }
+
+    #[test]
+    fn nearby_positions_in_one_file_collapse_instead_of_stacking() {
+        let mut history = NavigationHistory::default();
+        history.record(at("a.rs", 10));
+        history.record(at("a.rs", 11));
+        history.record(at("a.rs", 10));
+
+        assert!(
+            !history.can_go_back(),
+            "three near-identical positions are one entry"
+        );
+        // The collapsed entry holds the most recent position.
+        history.record(at("b.rs", 1));
+        history.back();
+        assert_eq!(history.forward(), Some(at("b.rs", 1)));
+    }
+
+    #[test]
+    fn a_distant_position_in_the_same_file_is_its_own_entry() {
+        let mut history = NavigationHistory::default();
+        history.record(at("a.rs", 10));
+        history.record(at("a.rs", 200));
+
+        assert_eq!(history.back(), Some(at("a.rs", 10)));
+    }
+
+    #[test]
+    fn history_is_capped_and_drops_the_oldest_entries() {
+        let mut history = NavigationHistory::default();
+        for line in 0..(NAVIGATION_HISTORY_CAP as u32 + 10) {
+            // Spaced beyond SAME_PLACE_LINES so nothing collapses.
+            history.record(at("a.rs", line * 10));
+        }
+        let mut walked = 1;
+        while history.back().is_some() {
+            walked += 1;
+        }
+        assert_eq!(walked, NAVIGATION_HISTORY_CAP);
+    }
+
+    #[test]
+    fn an_empty_history_goes_nowhere() {
+        let mut history = NavigationHistory::default();
+        assert!(!history.can_go_back());
+        assert!(!history.can_go_forward());
+        assert_eq!(history.back(), None);
+        assert_eq!(history.forward(), None);
+    }
+
+    #[test]
+    fn session_exposes_the_history_as_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = AppSession::with_config_dir(dir.path().to_path_buf());
+
+        assert!(!session.can_jump_back());
+        session.record_jump(PathBuf::from("a.rs"), 1, 0);
+        session.record_jump(PathBuf::from("b.rs"), 2, 4);
+
+        assert!(session.can_jump_back());
+        assert_eq!(
+            session.jump_back(),
+            Some(Location {
+                path: PathBuf::from("a.rs"),
+                line: 1,
+                column: 0
+            })
+        );
+        assert!(session.can_jump_forward());
     }
 }

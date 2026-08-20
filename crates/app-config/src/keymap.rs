@@ -138,6 +138,47 @@ pub const ACTIONS: &[ActionDef] = &[
         category: "View",
         default_shortcut: "Ctrl+G",
     },
+    // Code navigation (N8). Defaults follow JetBrains, the closest
+    // reference for these gestures: Ctrl+B for the declaration a
+    // Ctrl+Click also reaches, Alt+F7 for usages, Ctrl+Alt+B/Ctrl+Alt+U
+    // for the two directions of the type hierarchy, and Ctrl+Alt+Left /
+    // Ctrl+Alt+Right for the jump history.
+    ActionDef {
+        id: "navigate.goToDeclaration",
+        label: "Go to Declaration",
+        category: "Navigate",
+        default_shortcut: "Ctrl+B",
+    },
+    ActionDef {
+        id: "navigate.findUsages",
+        label: "Find Usages",
+        category: "Navigate",
+        default_shortcut: "Alt+F7",
+    },
+    ActionDef {
+        id: "navigate.goToImplementation",
+        label: "Go to Implementation",
+        category: "Navigate",
+        default_shortcut: "Ctrl+Alt+B",
+    },
+    ActionDef {
+        id: "navigate.goToInterface",
+        label: "Go to Interface",
+        category: "Navigate",
+        default_shortcut: "Ctrl+Alt+U",
+    },
+    ActionDef {
+        id: "navigate.back",
+        label: "Back",
+        category: "Navigate",
+        default_shortcut: "Ctrl+Alt+Left",
+    },
+    ActionDef {
+        id: "navigate.forward",
+        label: "Forward",
+        category: "Navigate",
+        default_shortcut: "Ctrl+Alt+Right",
+    },
     // Terminal copy/paste deliberately avoid Ctrl+C/Ctrl+V: in a terminal
     // those belong to the shell (Ctrl+C is SIGINT), so the conventional
     // Ctrl+Shift pair is the default here.
