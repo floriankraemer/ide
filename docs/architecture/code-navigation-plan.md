@@ -106,6 +106,10 @@ Two defects surfaced during the end-to-end pass and are fixed here, because the 
 - **`rust/locals.scm` had drifted from `rust/tags.scm`.**
   Traits, `impl` targets and struct fields were definitions to the outline but not to `identifier_occurrences`, so `is_definition` was never set for them: Go to Declaration on a trait name found nothing, Go to Symbol could not list a trait, and a struct field was not indexed even as a *reference* (a field is a `field_identifier`, a node kind neither catch-all covered).
   The two queries are now in parity, with a regression test pinning it.
+- **Go to Declaration needed a project index it does not actually use for the local tier.**
+  `SearchModel::resolveDeclaration` refused outright with "No project is open yet." whenever the index slot was empty — no project open, a lone file, or a project whose index is still building.
+  The local tier reads nothing but the buffer, so a Ctrl+Click on a same-file declaration silently did nothing in all three cases.
+  Tier 1 is now `index_core::resolve_declaration_in_buffer`, a free function the adapter can call without an index.
 
 ## Polish
 

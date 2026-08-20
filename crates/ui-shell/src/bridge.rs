@@ -1229,8 +1229,11 @@ mod ffi {
             name: QString,
         );
 
-        /// Emitted instead of `declarationFinished` when the lookup
-        /// couldn't run at all (no index built yet).
+        /// Emitted instead of `declarationFinished` when the lookup itself
+        /// failed (an unreadable index). A missing index is *not* such a
+        /// failure: the local tier resolves from the buffer alone, so a
+        /// declaration in the file the caret is in still answers with no
+        /// project open and while one is still being indexed.
         #[qsignal]
         #[cxx_name = "declarationFailed"]
         fn declaration_failed(self: Pin<&mut SearchModel>, message: QString);
@@ -3167,15 +3170,18 @@ impl ffi::SearchModel {
         let slot = std::sync::Arc::clone(&self.index);
         std::thread::spawn(move || {
             let guard = slot.read().unwrap();
-            let Some(index) = guard.ready() else {
-                let reason = guard.unavailable_reason().unwrap_or_default();
-                drop(guard);
-                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                    model.as_mut().declaration_failed(QString::from(reason.as_str()));
-                });
-                return;
+            // Without a ready index (no project open, or one still building)
+            // the buffer alone still answers a same-file declaration, which is
+            // the majority of what a Ctrl+Click asks about — far better than
+            // refusing the gesture outright.
+            let result = match guard.ready() {
+                Some(index) => index.resolve_declaration(&path, &content, byte_offset),
+                None => Ok(index_core::resolve_declaration_in_buffer(
+                    &path,
+                    &content,
+                    byte_offset,
+                )),
             };
-            let result = index.resolve_declaration(&path, &content, byte_offset);
             drop(guard);
             match result {
                 Ok(resolution) => {
