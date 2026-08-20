@@ -1788,7 +1788,7 @@ void populateRecentProjectsMenu(QMenu *menu, AppSettings *appSettings, ProjectTr
 
 // Settings dialog (S1: category list + stacked detail pane; S2: font +
 // editor colors on the Editor page). Every control applies live as it's
-// changed (theme via qApp->setStyleSheet(), font/colors via `editorTabs`) so
+// changed (theme via applyTheme(), font/colors via `editorTabs`) so
 // the effect is visible immediately; OK persists that already-applied state
 // through `appSettings`, Cancel restores exactly what was active when the
 // dialog opened. Modal and blocking, so every lambda below capturing
@@ -1849,7 +1849,7 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     pages->addWidget(appearancePage);
 
     QObject::connect(themeCombo, &QComboBox::currentIndexChanged, &dialog, [themeCombo]() {
-        qApp->setStyleSheet(styleSheetForTheme(themeCombo->currentData().toString()));
+        applyTheme(themeCombo->currentData().toString());
     });
 
     auto *editorPage = new QWidget(&dialog);
@@ -1957,7 +1957,7 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
         keymapEditor->commit();
         applyKeymap(actions, appSettings);
     } else {
-        qApp->setStyleSheet(styleSheetForTheme(originalTheme));
+        applyTheme(originalTheme);
         editorTabs->setEditorFont(QFont(originalFont.family, static_cast<int>(originalFont.size)));
         editorTabs->setEditorColors(originalColors.background, originalColors.foreground,
                                      originalColors.current_line);
@@ -2675,7 +2675,7 @@ int run_app()
     auto *appSettings = new AppSettings(nullptr);
     // Applying the theme (T2) before anything is shown means neither the
     // splash nor the main window ever flashes an unstyled frame.
-    qApp->setStyleSheet(styleSheetForTheme(appSettings->themeName()));
+    applyTheme(appSettings->themeName());
 
     SplashScreen splash(appSettings->themeName());
     splash.show();

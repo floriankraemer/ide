@@ -1,5 +1,7 @@
 #include "theme.h"
 
+#include <QApplication>
+
 namespace ui_shell {
 
 // Embedded as a compile-time string constant rather than a .qrc/rcc
@@ -209,6 +211,99 @@ QString styleSheetForTheme(const QString &themeName)
         return lightStyleSheet();
     }
     return darculaStyleSheet();
+}
+
+namespace {
+
+QPalette darculaPalette()
+{
+    QPalette palette;
+    const QColor window(QStringLiteral("#3c3f41"));
+    const QColor text(QStringLiteral("#a9b7c6"));
+    const QColor base(QStringLiteral("#2b2b2b"));
+
+    palette.setColor(QPalette::Window, window);
+    palette.setColor(QPalette::WindowText, text);
+    palette.setColor(QPalette::Base, base);
+    palette.setColor(QPalette::AlternateBase, QColor(QStringLiteral("#313335")));
+    palette.setColor(QPalette::Text, text);
+    palette.setColor(QPalette::Button, window);
+    palette.setColor(QPalette::ButtonText, text);
+    palette.setColor(QPalette::ToolTipBase, window);
+    palette.setColor(QPalette::ToolTipText, text);
+    palette.setColor(QPalette::Highlight, QColor(QStringLiteral("#214283")));
+    palette.setColor(QPalette::HighlightedText, QColor(QStringLiteral("#ffffff")));
+    palette.setColor(QPalette::PlaceholderText, QColor(QStringLiteral("#7a7a7a")));
+
+    // ADS paints the active dock tab as a Window→Light gradient and the
+    // selected-tab body as Light, so Light has to read as "one step up from
+    // the chrome", not as literal white. Midlight and Mid fill the same role
+    // for its hover and separator shades.
+    palette.setColor(QPalette::Light, QColor(QStringLiteral("#4e5254")));
+    palette.setColor(QPalette::Midlight, QColor(QStringLiteral("#454749")));
+    palette.setColor(QPalette::Mid, QColor(QStringLiteral("#5e6060")));
+    // Deliberately *lighter* than Window rather than darker: ADS colors the
+    // inactive dock tab label with palette(dark), so a literally dark Dark
+    // would leave those labels unreadable on the dark chrome. It doubles as
+    // the splitter/side-bar separator shade, where a mid grey also reads
+    // correctly.
+    palette.setColor(QPalette::Dark, QColor(QStringLiteral("#8a9199")));
+    palette.setColor(QPalette::Shadow, QColor(QStringLiteral("#1e1e1e")));
+
+    palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(QStringLiteral("#6a6a6a")));
+    palette.setColor(QPalette::Disabled, QPalette::Text, QColor(QStringLiteral("#6a6a6a")));
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(QStringLiteral("#6a6a6a")));
+    return palette;
+}
+
+QPalette lightPalette()
+{
+    QPalette palette;
+    const QColor window(QStringLiteral("#f2f2f2"));
+    const QColor text(QStringLiteral("#1a1a1a"));
+
+    palette.setColor(QPalette::Window, window);
+    palette.setColor(QPalette::WindowText, text);
+    palette.setColor(QPalette::Base, QColor(QStringLiteral("#ffffff")));
+    palette.setColor(QPalette::AlternateBase, QColor(QStringLiteral("#f5f5f5")));
+    palette.setColor(QPalette::Text, text);
+    palette.setColor(QPalette::Button, QColor(QStringLiteral("#eeeeee")));
+    palette.setColor(QPalette::ButtonText, text);
+    palette.setColor(QPalette::ToolTipBase, QColor(QStringLiteral("#ffffff")));
+    palette.setColor(QPalette::ToolTipText, text);
+    palette.setColor(QPalette::Highlight, QColor(QStringLiteral("#90caf9")));
+    palette.setColor(QPalette::HighlightedText, QColor(QStringLiteral("#000000")));
+    palette.setColor(QPalette::PlaceholderText, QColor(QStringLiteral("#8a8a8a")));
+
+    palette.setColor(QPalette::Light, QColor(QStringLiteral("#ffffff")));
+    palette.setColor(QPalette::Midlight, QColor(QStringLiteral("#f7f7f7")));
+    palette.setColor(QPalette::Mid, QColor(QStringLiteral("#c0c0c0")));
+    palette.setColor(QPalette::Dark, QColor(QStringLiteral("#6b6b6b")));
+    palette.setColor(QPalette::Shadow, QColor(QStringLiteral("#9e9e9e")));
+
+    palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(QStringLiteral("#a0a0a0")));
+    palette.setColor(QPalette::Disabled, QPalette::Text, QColor(QStringLiteral("#a0a0a0")));
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(QStringLiteral("#a0a0a0")));
+    return palette;
+}
+
+} // namespace
+
+QPalette paletteForTheme(const QString &themeName)
+{
+    if (themeName == QStringLiteral("light")) {
+        return lightPalette();
+    }
+    return darculaPalette();
+}
+
+void applyTheme(const QString &themeName)
+{
+    qApp->setPalette(paletteForTheme(themeName));
+    // Re-setting the sheet after the palette forces Qt to re-resolve every
+    // `palette(...)` reference in it, including the ones inside the dock
+    // manager's own sheet.
+    qApp->setStyleSheet(styleSheetForTheme(themeName));
 }
 
 } // namespace ui_shell
