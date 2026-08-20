@@ -3023,7 +3023,9 @@ impl ffi::SearchModel {
                 let reason = reason.unwrap_or_default();
                 drop(guard);
                 let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                    model.as_mut().replace_failed(QString::from(reason.as_str()));
+                    model
+                        .as_mut()
+                        .replace_failed(QString::from(reason.as_str()));
                 });
                 return;
             };
@@ -3076,7 +3078,9 @@ impl ffi::SearchModel {
                 let reason = guard.unavailable_reason().unwrap_or_default();
                 drop(guard);
                 let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                    model.as_mut().project_symbols_failed(QString::from(reason.as_str()));
+                    model
+                        .as_mut()
+                        .project_symbols_failed(QString::from(reason.as_str()));
                 });
                 return;
             };
