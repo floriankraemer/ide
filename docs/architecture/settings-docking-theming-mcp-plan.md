@@ -49,9 +49,9 @@ per `CLAUDE.md`.
 | K1 | done | `7443b01` (`cargo test -p app-config`) |
 | K2 | done | `7443b01` (clippy/fmt clean; driven end to end under Xvfb — conflict prompt, live menu update, relaunch persistence, Reset All, Cancel-discards all confirmed by screenshot) |
 | K3 | done | `7443b01` (Xvfb: prefilled dialog, centred jump, clamped range, jump into a collapsed fold expands it — confirmed by screenshot) |
-| M6 | done | (see M8) |
-| M7 | done | (see M8) |
-| M8 | done | `bfae94f` (`cargo test` green on every Qt-free crate: `app-config`, `app-core`, `index-core`, `mcp-server`; Qt-leakage gate clean on `mcp-server` and `index-core`. **Not verified:** the Qt build and every UI-side change — no Qt toolchain and no display in this environment, and Docker was explicitly out of scope for this change) |
+| M6 | done | `6d365cd` (shipped together with M7/M8 — see M8's row for what was and was not verified) |
+| M7 | done | `6d365cd` (see M8) |
+| M8 | done | `6d365cd` (`cargo test` green on every Qt-free crate: `app-config`, `app-core`, `index-core`, `mcp-server`; Qt-leakage gate clean on `mcp-server` and `index-core`. **Not verified:** the Qt build and every UI-side change — no Qt toolchain and no display in this environment, and Docker was explicitly out of scope for this change) |
 
 ## Context
 
