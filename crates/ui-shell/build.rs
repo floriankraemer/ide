@@ -245,6 +245,8 @@ fn main() {
         .cpp_file("cpp/find_bar.h")
         .cpp_file("cpp/find_bar.cpp")
         .cpp_file("cpp/keymap_page.cpp")
+        .cpp_file("cpp/search_results_panel.cpp")
+        .cpp_file("cpp/search_everywhere_dialog.cpp")
         .cpp_file("cpp/theme.cpp")
         .cpp_file("cpp/syntax_highlighter.cpp")
         .cpp_file("cpp/terminal_widget.h")
