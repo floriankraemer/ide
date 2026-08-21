@@ -76,6 +76,45 @@ const INDEX_DIR_NAME: &str = ".ide-index";
 /// Ngram size used for the `content` field's tokenizer — see module docs.
 const NGRAM_SIZE: usize = 3;
 
+/// Heap tantivy may use before it flushes a segment.
+const WRITER_HEAP_BYTES: usize = 50_000_000;
+
+/// How long to keep retrying the writer lock before reporting it busy. An
+/// instance that has just been closed still holds the lock for as long as
+/// its `IndexWriter` needs to flush and drop, so "reopen the project right
+/// after quitting the other window" should wait rather than fail.
+const WRITER_LOCK_RETRIES: u32 = 10;
+const WRITER_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
+
+/// Acquire the index directory's single writer lock, retrying briefly (see
+/// [`WRITER_LOCK_RETRIES`]) before reporting it as held by someone else.
+///
+/// Tantivy allows exactly one `IndexWriter` per directory, enforced with an
+/// OS lock on `.tantivy-writer.lock`, so a second IDE instance pointed at
+/// the same project cannot index it. That is reported as
+/// [`IndexError::Locked`] — never as a reason to rebuild, since rebuilding
+/// deletes the very files the live writer is using.
+fn acquire_writer(index: &Index, root: &Path) -> Result<IndexWriter, IndexError> {
+    let mut attempts = 0;
+    loop {
+        match index.writer(WRITER_HEAP_BYTES) {
+            Ok(writer) => return Ok(writer),
+            Err(e @ tantivy::TantivyError::LockFailure(_, _)) => {
+                if attempts >= WRITER_LOCK_RETRIES {
+                    return Err(IndexError::Locked(format!(
+                        "another IDE instance is already indexing {} \
+                         (close it, then reopen the project): {e}",
+                        root.display()
+                    )));
+                }
+                attempts += 1;
+                std::thread::sleep(WRITER_LOCK_RETRY_DELAY);
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+}
+
 /// Typed error crossing this crate's API (ADR-0003's typed-error
 /// convention, applied ahead of this crate ever reaching an FFI seam).
 #[derive(Debug)]
@@ -83,6 +122,11 @@ pub enum IndexError {
     Io(String),
     Tantivy(String),
     Query(String),
+    /// Another `IndexWriter` — another IDE instance, or a previous one that
+    /// has not exited — holds the on-disk index lock. Distinct from
+    /// [`IndexError::Tantivy`] because it must never be answered by
+    /// rebuilding: that would delete an index a live writer is still using.
+    Locked(String),
 }
 
 impl fmt::Display for IndexError {
@@ -91,6 +135,7 @@ impl fmt::Display for IndexError {
             IndexError::Io(msg) => write!(f, "index I/O error: {msg}"),
             IndexError::Tantivy(msg) => write!(f, "tantivy error: {msg}"),
             IndexError::Query(msg) => write!(f, "invalid search query: {msg}"),
+            IndexError::Locked(msg) => write!(f, "index is locked: {msg}"),
         }
     }
 }
@@ -99,7 +144,10 @@ impl std::error::Error for IndexError {}
 
 impl From<tantivy::TantivyError> for IndexError {
     fn from(e: tantivy::TantivyError) -> Self {
-        IndexError::Tantivy(e.to_string())
+        match e {
+            tantivy::TantivyError::LockFailure(_, _) => IndexError::Locked(e.to_string()),
+            _ => IndexError::Tantivy(e.to_string()),
+        }
     }
 }
 
@@ -400,7 +448,11 @@ pub enum IndexSlot {
     #[default]
     NoProject,
     /// A project is open and its index is being built or brought up to date.
-    Building,
+    /// Carries the root being built so a second `open` for the same project
+    /// can be recognised as a duplicate rather than started twice (two
+    /// `IndexWriter`s on one directory is exactly the `LockBusy` failure
+    /// this state exists to prevent).
+    Building(PathBuf),
     /// Ready to answer queries.
     Ready(Box<TextIndex>),
     /// A project is open but its index could not be built.
@@ -432,7 +484,7 @@ impl IndexSlot {
         match self {
             IndexSlot::Ready(_) => None,
             IndexSlot::NoProject => Some("No project is open yet.".to_string()),
-            IndexSlot::Building => {
+            IndexSlot::Building(_) => {
                 Some("The project index is still being built — try again in a moment.".to_string())
             }
             IndexSlot::Failed(message) => {
@@ -521,7 +573,7 @@ impl TextIndex {
             NgramTokenizer::new(NGRAM_SIZE, NGRAM_SIZE, false)?,
         );
 
-        let writer: IndexWriter = index.writer(50_000_000)?;
+        let writer = acquire_writer(&index, project_root)?;
         let reader = index.reader()?;
         let mut this = Self {
             root: project_root.to_path_buf(),
@@ -550,6 +602,11 @@ impl TextIndex {
                 index.sync_from_disk(&stamps)?;
                 Ok(index)
             }
+            // A busy lock is never answered by rebuilding: `build` wipes the
+            // index directory, which would pull the files out from under the
+            // writer that holds the lock and leave two writers disagreeing
+            // about `meta.json`.
+            Err(err @ IndexError::Locked(_)) => Err(err),
             Err(_) => Self::build(project_root),
         }
     }
@@ -567,7 +624,7 @@ impl TextIndex {
             "ngram3",
             NgramTokenizer::new(NGRAM_SIZE, NGRAM_SIZE, false)?,
         );
-        let writer: IndexWriter = index.writer(50_000_000)?;
+        let writer = acquire_writer(&index, project_root)?;
         let reader = index.reader()?;
         Ok(Self {
             root: project_root.to_path_buf(),
@@ -1555,7 +1612,9 @@ mod tests {
 
     #[test]
     fn a_project_whose_index_is_still_building_is_not_reported_as_no_project() {
-        let building = IndexSlot::Building.unavailable_reason().unwrap();
+        let building = IndexSlot::Building(PathBuf::from("/p"))
+            .unavailable_reason()
+            .unwrap();
         assert!(building.contains("still being built"), "{building}");
         assert_ne!(
             building,
@@ -1584,8 +1643,10 @@ mod tests {
     #[test]
     fn only_a_ready_slot_hands_out_the_index() {
         assert!(IndexSlot::default().ready().is_none());
-        assert!(IndexSlot::Building.ready().is_none());
-        assert!(IndexSlot::Building.ready_mut().is_none());
+        assert!(IndexSlot::Building(PathBuf::from("/p")).ready().is_none());
+        assert!(IndexSlot::Building(PathBuf::from("/p"))
+            .ready_mut()
+            .is_none());
         assert!(IndexSlot::Failed("x".to_string()).ready().is_none());
     }
 
@@ -1711,6 +1772,24 @@ mod tests {
             .is_empty());
         assert_eq!(index.search("fresh marker", false, true).unwrap().len(), 1);
         assert_eq!(index.indexed_file_count(), 3);
+    }
+
+    #[test]
+    fn open_or_build_reports_a_busy_lock_and_leaves_the_live_index_intact() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.txt", "needle\n");
+        // Stands in for the other IDE instance: one live writer on the
+        // directory, held for the whole test.
+        let live = TextIndex::open_or_build(dir.path()).unwrap();
+
+        let Err(err) = TextIndex::open_or_build(dir.path()) else {
+            panic!("a second writer on one index directory must not succeed");
+        };
+        assert!(
+            matches!(err, IndexError::Locked(_)),
+            "a held writer lock must be reported as such, got {err:?}"
+        );
+        assert_eq!(live.search("needle", false, true).unwrap().len(), 1);
     }
 
     #[test]
