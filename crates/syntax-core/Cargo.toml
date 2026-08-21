@@ -4,16 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tree-sitter = "0.24"
-tree-sitter-rust = "0.23"
-tree-sitter-json = "0.24"
-# Pinned below tree-sitter-c-sharp's/tree-sitter-php's latest crates.io
-# releases: those ship grammars built at ABI 15, newer than what
-# tree-sitter 0.24's runtime accepts (ABI 13..=14, see
-# TREE_SITTER_LANGUAGE_VERSION in tree-sitter's api.h). 0.21.3/0.23.11 are
-# the newest versions confirmed to load against tree-sitter 0.24 (verified
-# with `Parser::set_language` at grammar-selection time, Task B).
-tree-sitter-c-sharp = "0.21.3"
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24.2"
+tree-sitter-json = "0.24.8"
+tree-sitter-c-sharp = "0.23.5"
 tree-sitter-java = "0.23.5"
-tree-sitter-php = "0.23.11"
+tree-sitter-php = "0.24.2"
 streaming-iterator = "0.1"

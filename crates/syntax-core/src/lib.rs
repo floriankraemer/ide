@@ -178,11 +178,7 @@ fn json_query_language() -> &'static QueryLanguage {
 
 fn csharp_query_language() -> &'static QueryLanguage {
     static CSHARP: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        // Pinned to 0.21.3, not `LANGUAGE`/`.into()` like the other
-        // grammars: see the version-pin comment on the `tree-sitter-c-sharp`
-        // dependency in Cargo.toml. This older release's binding exposes a
-        // `language()` fn returning `tree_sitter::Language` directly.
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
+        let grammar: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
         let query = Query::new(&grammar, include_str!("../queries/csharp/highlights.scm"))
             .expect("csharp highlights.scm must compile against tree-sitter-c-sharp's grammar");
         QueryLanguage { grammar, query }
@@ -245,7 +241,7 @@ fn json_locals_query_language() -> &'static QueryLanguage {
 
 fn csharp_locals_query_language() -> &'static QueryLanguage {
     static CSHARP_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
+        let grammar: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
         let query = Query::new(&grammar, include_str!("../queries/csharp/locals.scm"))
             .expect("csharp locals.scm must compile against tree-sitter-c-sharp's grammar");
         QueryLanguage { grammar, query }
@@ -306,7 +302,7 @@ fn json_folds_query_language() -> &'static QueryLanguage {
 
 fn csharp_folds_query_language() -> &'static QueryLanguage {
     static CSHARP_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
+        let grammar: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
         let query = Query::new(&grammar, include_str!("../queries/csharp/folds.scm"))
             .expect("csharp folds.scm must compile against tree-sitter-c-sharp's grammar");
         QueryLanguage { grammar, query }
@@ -367,7 +363,7 @@ fn json_tags_query_language() -> &'static QueryLanguage {
 
 fn csharp_tags_query_language() -> &'static QueryLanguage {
     static CSHARP_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
+        let grammar: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
         let query = Query::new(&grammar, include_str!("../queries/csharp/tags.scm"))
             .expect("csharp tags.scm must compile against tree-sitter-c-sharp's grammar");
         QueryLanguage { grammar, query }
@@ -428,7 +424,7 @@ fn json_inherits_query_language() -> &'static QueryLanguage {
 
 fn csharp_inherits_query_language() -> &'static QueryLanguage {
     static CSHARP_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
+        let grammar: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
         let query = Query::new(&grammar, include_str!("../queries/csharp/inherits.scm"))
             .expect("csharp inherits.scm must compile against tree-sitter-c-sharp's grammar");
         QueryLanguage { grammar, query }

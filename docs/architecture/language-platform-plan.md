@@ -11,7 +11,7 @@ per `CLAUDE.md`.
 |---|---|---|
 | X1 | open | |
 | X2 | open | |
-| P1 | open | |
+| P1 | done | pending |
 | R1 | open | |
 | R2 | open | |
 | R3 | open | |
