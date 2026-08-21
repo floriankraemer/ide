@@ -163,20 +163,20 @@ ByteEdit diffByteRanges(const QByteArray &oldBytes, const QByteArray &newBytes)
                       static_cast<std::size_t>(newEnd) };
 }
 
-rust::Box<SyntaxHighlighterHandle> makeHighlighter(const QString &extension)
+rust::Box<SyntaxHighlighterHandle> makeHighlighter(const QString &fileName)
 {
-    const QByteArray extBytes = extension.toUtf8();
+    const QByteArray nameBytes = fileName.toUtf8();
     return new_syntax_highlighter(
-      rust::Str(extBytes.constData(), static_cast<std::size_t>(extBytes.size())));
+      rust::Str(nameBytes.constData(), static_cast<std::size_t>(nameBytes.size())));
 }
 
 } // namespace
 
-SyntaxHighlighter::SyntaxHighlighter(QTextDocument *document, QString fileExtension,
+SyntaxHighlighter::SyntaxHighlighter(QTextDocument *document, QString fileName,
                                       CodeEditor *editor)
   : QSyntaxHighlighter(document)
-  , fileExtension_(std::move(fileExtension))
-  , highlighter_(makeHighlighter(fileExtension_))
+  , fileName_(std::move(fileName))
+  , highlighter_(makeHighlighter(fileName_))
   , editor_(editor)
 {
 }

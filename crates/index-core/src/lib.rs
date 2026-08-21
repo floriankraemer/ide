@@ -66,8 +66,7 @@ use tantivy::tokenizer::NgramTokenizer;
 use tantivy::{doc, Index, IndexReader, IndexWriter, Term};
 
 use syntax_core::{
-    identifier_occurrences, language_for_extension, outline, supertype_edges, SymbolKind,
-    SymbolNode,
+    identifier_occurrences, language_for_path, outline, supertype_edges, SymbolKind, SymbolNode,
 };
 
 /// Directory (relative to the project root) the tantivy index lives under.
@@ -1445,11 +1444,7 @@ fn index_symbols(
     path_key: &str,
     content: &str,
 ) -> Result<(), IndexError> {
-    let extension = Path::new(path_key)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-    let language = language_for_extension(extension);
+    let language = language_for_path(Path::new(path_key));
 
     let roots = outline(language, content);
     let mut flat: BTreeMap<(usize, usize), FlatSymbol<'_>> = BTreeMap::new();
@@ -1508,12 +1503,7 @@ pub fn resolve_declaration_in_buffer(
     current_content: &str,
     byte_offset: usize,
 ) -> Resolution {
-    let language = language_for_extension(
-        current_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or(""),
-    );
+    let language = language_for_path(current_path);
     let occurrences = identifier_occurrences(language, current_content);
     let Some(target) = occurrences
         .iter()

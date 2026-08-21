@@ -688,14 +688,15 @@ mod ffi {
         #[cxx_name = "tabContent"]
         fn tab_content(self: &DocumentManager, tab_id: u64) -> QString;
 
-        /// The tab's backing file extension (no leading dot, lowercased),
+        /// The tab's backing file name (`"main.rs"`, `"Dockerfile"`),
         /// empty when there is none — used to pick a highlighting language
-        /// (Y2).
+        /// (Y2). File name, not extension: extensionless languages are
+        /// matched by whole name in the language registry.
         #[qinvokable]
-        #[cxx_name = "tabExtension"]
-        fn tab_extension(self: &DocumentManager, tab_id: u64) -> QString;
+        #[cxx_name = "tabFileName"]
+        fn tab_file_name(self: &DocumentManager, tab_id: u64) -> QString;
 
-        /// Human-readable language name for the tab's extension (L3's
+        /// Human-readable language name for the tab's file (L3's
         /// status bar), e.g. "Rust", "JSON", "Plain Text".
         #[qinvokable]
         #[cxx_name = "tabLanguageName"]
@@ -705,7 +706,7 @@ mod ffi {
         /// (`syntax_core::outline()` on its current content, language-
         /// picked the same way `tabLanguageName` picks a display name),
         /// pre-order-flattened per `FfiSymbolNode`'s doc comment. Pull-
-        /// based like `tabContent`/`tabExtension` rather than a push
+        /// based like `tabContent`/`tabFileName` rather than a push
         /// signal — the view calls this once on tab open and again after
         /// each successful save (not per keystroke; see the plan doc's
         /// Task D — a project-wide-scope panel doesn't need live updates).
@@ -1463,6 +1464,7 @@ mod ffi {
 
 use core::pin::Pin;
 use std::cell::RefCell;
+use std::path::Path;
 use std::rc::Rc;
 
 use app_core::{AppError, AppSession, TabId};
@@ -1512,8 +1514,8 @@ fn to_ffi_result(result: Result<(), AppError>) -> FfiResult {
 /// by the C++ `SyntaxHighlighter` as a `rust::Box`.
 pub struct SyntaxHighlighterHandle(syntax_core::Highlighter);
 
-fn new_syntax_highlighter(extension: &str) -> Box<SyntaxHighlighterHandle> {
-    let language = syntax_core::language_for_extension(extension);
+fn new_syntax_highlighter(file_name: &str) -> Box<SyntaxHighlighterHandle> {
+    let language = syntax_core::language_for_path(Path::new(file_name));
     Box::new(SyntaxHighlighterHandle(syntax_core::Highlighter::new(
         language,
     )))
@@ -2327,29 +2329,29 @@ impl ffi::DocumentManager {
             .unwrap_or_default()
     }
 
-    pub fn tab_extension(&self, tab_id: u64) -> QString {
+    pub fn tab_file_name(&self, tab_id: u64) -> QString {
         self.session
             .borrow()
-            .tab_extension(TabId::from_raw(tab_id))
-            .map(|ext| QString::from(ext.as_str()))
+            .tab_file_name(TabId::from_raw(tab_id))
+            .map(|name| QString::from(name.as_str()))
             .unwrap_or_default()
     }
 
     pub fn tab_language_name(&self, tab_id: u64) -> QString {
-        let extension = self
+        let file_name = self
             .session
             .borrow()
-            .tab_extension(TabId::from_raw(tab_id))
+            .tab_file_name(TabId::from_raw(tab_id))
             .unwrap_or_default();
-        let language = syntax_core::language_for_extension(&extension);
+        let language = syntax_core::language_for_path(Path::new(&file_name));
         QString::from(syntax_core::language_name(language))
     }
 
     pub fn tab_outline(&self, tab_id: u64) -> Vec<ffi::FfiSymbolNode> {
         let session = self.session.borrow();
         let tab_id = TabId::from_raw(tab_id);
-        let extension = session.tab_extension(tab_id).unwrap_or_default();
-        let language = syntax_core::language_for_extension(&extension);
+        let file_name = session.tab_file_name(tab_id).unwrap_or_default();
+        let language = syntax_core::language_for_path(Path::new(&file_name));
         let Some(content) = session.tab_content(tab_id) else {
             return Vec::new();
         };

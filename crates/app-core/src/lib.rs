@@ -563,14 +563,15 @@ impl AppSession {
         self.navigation.can_go_forward()
     }
 
-    /// The tab's backing file extension (no leading dot, lowercased), used
-    /// to pick a highlighting language (Y2). `None` for an extensionless
-    /// file — the view treats that the same as an unrecognized extension.
-    pub fn tab_extension(&self, id: TabId) -> Option<String> {
+    /// The tab's backing file name (`"main.rs"`, `"Dockerfile"`), used to
+    /// pick a highlighting language (Y2). File *name*, not extension:
+    /// `Dockerfile`/`Makefile` have no extension, and the language
+    /// registry matches on either.
+    pub fn tab_file_name(&self, id: TabId) -> Option<String> {
         self.doc(id)?
             .path()
-            .extension()
-            .map(|ext| ext.to_string_lossy().to_lowercase())
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
     }
 
     /// The tab's display title: the file name, plus a "(deleted)" suffix
@@ -964,20 +965,23 @@ mod tests {
     }
 
     #[test]
-    fn tab_extension_is_lowercased_and_none_when_absent() {
+    fn tab_file_name_is_the_backing_files_name() {
         let (project_dir, _config, mut session) = session_with_project();
         let rust_tab = session
             .open_file(&project_dir.path().join("a.txt"))
             .unwrap();
-        assert_eq!(session.tab_extension(rust_tab.id).as_deref(), Some("txt"));
+        assert_eq!(session.tab_file_name(rust_tab.id).as_deref(), Some("a.txt"));
 
         fs::write(project_dir.path().join("no_ext"), "x").unwrap();
         let no_ext_tab = session
             .open_file(&project_dir.path().join("no_ext"))
             .unwrap();
-        assert_eq!(session.tab_extension(no_ext_tab.id), None);
+        assert_eq!(
+            session.tab_file_name(no_ext_tab.id).as_deref(),
+            Some("no_ext")
+        );
 
-        assert_eq!(session.tab_extension(TabId::from_raw(999)), None);
+        assert_eq!(session.tab_file_name(TabId::from_raw(999)), None);
     }
 
     #[test]

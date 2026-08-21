@@ -991,12 +991,12 @@ private:
         editor->setFont(editorFont_);
         applyEditorAppearance(editor);
         // Y2: self-parents to editor->document(), no manual lifetime
-        // management needed. PlainText (unrecognized/no extension) yields
+        // management needed. Plain text (a file no language claims) yields
         // no spans from the incremental highlighter, so this is a
         // harmless no-op then. `editor` (Task C) lets it push fold ranges
         // to the gutter on the same revision-change hook that already
         // drives highlighting.
-        new SyntaxHighlighter(editor->document(), docManager_->tabExtension(tabId), editor);
+        new SyntaxHighlighter(editor->document(), docManager_->tabFileName(tabId), editor);
         // Find (F3): one bar per editor, floated over it, hidden until
         // Ctrl+F/Ctrl+R. Parented to the editor, so it dies with the tab.
         new FindBar(editor, docManager_);

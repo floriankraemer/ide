@@ -4,49 +4,17 @@
 //! wraps [`highlight`] behind a `QSyntaxHighlighter` adapter later. This
 //! crate only classifies bytes of already-loaded text into spans.
 
-use std::sync::LazyLock;
+mod registry;
+
+use std::sync::Arc;
 
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 
-/// Languages this crate can highlight. Rust/JSON from the original
-/// syntax-highlighting-foundation plan, plus C#/Java/PHP (Task B), plus a
-/// no-op fallback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Language {
-    Rust,
-    Json,
-    CSharp,
-    Java,
-    Php,
-    PlainText,
-}
-
-/// Map a file extension (no leading dot, e.g. `"rs"`, as returned by
-/// `Path::extension()`) to the [`Language`] used to highlight it. Anything
-/// unrecognized falls back to `PlainText`.
-pub fn language_for_extension(extension: &str) -> Language {
-    match extension {
-        "rs" => Language::Rust,
-        "json" => Language::Json,
-        "cs" => Language::CSharp,
-        "java" => Language::Java,
-        "php" => Language::Php,
-        _ => Language::PlainText,
-    }
-}
-
-/// Human-readable name for `language` (status bar, L3).
-pub fn language_name(language: Language) -> &'static str {
-    match language {
-        Language::Rust => "Rust",
-        Language::Json => "JSON",
-        Language::CSharp => "C#",
-        Language::Java => "Java",
-        Language::Php => "PHP",
-        Language::PlainText => "Plain Text",
-    }
-}
+pub use registry::{
+    language_by_id, language_for_path, language_name, registry, CompiledLanguage, Language,
+    LanguageDef, LanguageRegistry, QuerySet, BUILTIN_LANGUAGES,
+};
 
 /// Coarse token categories, kept to what tree-sitter's stock Rust/JSON
 /// grammars naturally distinguish — not a general-purpose taxonomy.
@@ -147,322 +115,6 @@ pub struct SupertypeEdge {
     pub type_end: usize,
 }
 
-/// A `highlights.scm` query, compiled once per language and reused across
-/// calls. Grammar + query text are bundled into the binary via
-/// `include_str!`/`LANGUAGE` constants so highlighting works identically
-/// under `cargo test` and in the packaged app — no runtime file loading.
-struct QueryLanguage {
-    grammar: tree_sitter::Language,
-    query: Query,
-}
-
-fn rust_query_language() -> &'static QueryLanguage {
-    static RUST: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/rust/highlights.scm"))
-            .expect("rust highlights.scm must compile against tree-sitter-rust's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &RUST
-}
-
-fn json_query_language() -> &'static QueryLanguage {
-    static JSON: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/json/highlights.scm"))
-            .expect("json highlights.scm must compile against tree-sitter-json's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JSON
-}
-
-fn csharp_query_language() -> &'static QueryLanguage {
-    static CSHARP: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/csharp/highlights.scm"))
-            .expect("csharp highlights.scm must compile against tree-sitter-c-sharp's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &CSHARP
-}
-
-fn java_query_language() -> &'static QueryLanguage {
-    static JAVA: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/java/highlights.scm"))
-            .expect("java highlights.scm must compile against tree-sitter-java's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JAVA
-}
-
-fn php_query_language() -> &'static QueryLanguage {
-    static PHP: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        // `php_only` (body-only grammar), not `LANGUAGE_PHP` (embedded
-        // HTML) — v1 design decision, see the plan doc.
-        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
-        let query = Query::new(&grammar, include_str!("../queries/php/highlights.scm"))
-            .expect("php highlights.scm must compile against tree-sitter-php's php_only grammar");
-        QueryLanguage { grammar, query }
-    });
-    &PHP
-}
-
-fn query_language_for(language: Language) -> Option<&'static QueryLanguage> {
-    match language {
-        Language::Rust => Some(rust_query_language()),
-        Language::Json => Some(json_query_language()),
-        Language::CSharp => Some(csharp_query_language()),
-        Language::Java => Some(java_query_language()),
-        Language::Php => Some(php_query_language()),
-        Language::PlainText => None,
-    }
-}
-
-fn rust_locals_query_language() -> &'static QueryLanguage {
-    static RUST_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/rust/locals.scm"))
-            .expect("rust locals.scm must compile against tree-sitter-rust's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &RUST_LOCALS
-}
-
-fn json_locals_query_language() -> &'static QueryLanguage {
-    static JSON_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/json/locals.scm"))
-            .expect("json locals.scm must compile against tree-sitter-json's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JSON_LOCALS
-}
-
-fn csharp_locals_query_language() -> &'static QueryLanguage {
-    static CSHARP_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/csharp/locals.scm"))
-            .expect("csharp locals.scm must compile against tree-sitter-c-sharp's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &CSHARP_LOCALS
-}
-
-fn java_locals_query_language() -> &'static QueryLanguage {
-    static JAVA_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/java/locals.scm"))
-            .expect("java locals.scm must compile against tree-sitter-java's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JAVA_LOCALS
-}
-
-fn php_locals_query_language() -> &'static QueryLanguage {
-    static PHP_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
-        let query = Query::new(&grammar, include_str!("../queries/php/locals.scm"))
-            .expect("php locals.scm must compile against tree-sitter-php's php_only grammar");
-        QueryLanguage { grammar, query }
-    });
-    &PHP_LOCALS
-}
-
-fn locals_query_language_for(language: Language) -> Option<&'static QueryLanguage> {
-    match language {
-        Language::Rust => Some(rust_locals_query_language()),
-        Language::Json => Some(json_locals_query_language()),
-        Language::CSharp => Some(csharp_locals_query_language()),
-        Language::Java => Some(java_locals_query_language()),
-        Language::Php => Some(php_locals_query_language()),
-        Language::PlainText => None,
-    }
-}
-
-fn rust_folds_query_language() -> &'static QueryLanguage {
-    static RUST_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/rust/folds.scm"))
-            .expect("rust folds.scm must compile against tree-sitter-rust's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &RUST_FOLDS
-}
-
-fn json_folds_query_language() -> &'static QueryLanguage {
-    static JSON_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/json/folds.scm"))
-            .expect("json folds.scm must compile against tree-sitter-json's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JSON_FOLDS
-}
-
-fn csharp_folds_query_language() -> &'static QueryLanguage {
-    static CSHARP_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/csharp/folds.scm"))
-            .expect("csharp folds.scm must compile against tree-sitter-c-sharp's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &CSHARP_FOLDS
-}
-
-fn java_folds_query_language() -> &'static QueryLanguage {
-    static JAVA_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/java/folds.scm"))
-            .expect("java folds.scm must compile against tree-sitter-java's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JAVA_FOLDS
-}
-
-fn php_folds_query_language() -> &'static QueryLanguage {
-    static PHP_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
-        let query = Query::new(&grammar, include_str!("../queries/php/folds.scm"))
-            .expect("php folds.scm must compile against tree-sitter-php's php_only grammar");
-        QueryLanguage { grammar, query }
-    });
-    &PHP_FOLDS
-}
-
-fn folds_query_language_for(language: Language) -> Option<&'static QueryLanguage> {
-    match language {
-        Language::Rust => Some(rust_folds_query_language()),
-        Language::Json => Some(json_folds_query_language()),
-        Language::CSharp => Some(csharp_folds_query_language()),
-        Language::Java => Some(java_folds_query_language()),
-        Language::Php => Some(php_folds_query_language()),
-        Language::PlainText => None,
-    }
-}
-
-fn rust_tags_query_language() -> &'static QueryLanguage {
-    static RUST_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/rust/tags.scm"))
-            .expect("rust tags.scm must compile against tree-sitter-rust's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &RUST_TAGS
-}
-
-fn json_tags_query_language() -> &'static QueryLanguage {
-    static JSON_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/json/tags.scm"))
-            .expect("json tags.scm must compile against tree-sitter-json's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JSON_TAGS
-}
-
-fn csharp_tags_query_language() -> &'static QueryLanguage {
-    static CSHARP_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/csharp/tags.scm"))
-            .expect("csharp tags.scm must compile against tree-sitter-c-sharp's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &CSHARP_TAGS
-}
-
-fn java_tags_query_language() -> &'static QueryLanguage {
-    static JAVA_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/java/tags.scm"))
-            .expect("java tags.scm must compile against tree-sitter-java's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JAVA_TAGS
-}
-
-fn php_tags_query_language() -> &'static QueryLanguage {
-    static PHP_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
-        let query = Query::new(&grammar, include_str!("../queries/php/tags.scm"))
-            .expect("php tags.scm must compile against tree-sitter-php's php_only grammar");
-        QueryLanguage { grammar, query }
-    });
-    &PHP_TAGS
-}
-
-fn tags_query_language_for(language: Language) -> Option<&'static QueryLanguage> {
-    match language {
-        Language::Rust => Some(rust_tags_query_language()),
-        Language::Json => Some(json_tags_query_language()),
-        Language::CSharp => Some(csharp_tags_query_language()),
-        Language::Java => Some(java_tags_query_language()),
-        Language::Php => Some(php_tags_query_language()),
-        Language::PlainText => None,
-    }
-}
-
-fn rust_inherits_query_language() -> &'static QueryLanguage {
-    static RUST_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/rust/inherits.scm"))
-            .expect("rust inherits.scm must compile against tree-sitter-rust's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &RUST_INHERITS
-}
-
-fn json_inherits_query_language() -> &'static QueryLanguage {
-    static JSON_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/json/inherits.scm"))
-            .expect("json inherits.scm must compile against tree-sitter-json's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JSON_INHERITS
-}
-
-fn csharp_inherits_query_language() -> &'static QueryLanguage {
-    static CSHARP_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/csharp/inherits.scm"))
-            .expect("csharp inherits.scm must compile against tree-sitter-c-sharp's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &CSHARP_INHERITS
-}
-
-fn java_inherits_query_language() -> &'static QueryLanguage {
-    static JAVA_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/java/inherits.scm"))
-            .expect("java inherits.scm must compile against tree-sitter-java's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JAVA_INHERITS
-}
-
-fn php_inherits_query_language() -> &'static QueryLanguage {
-    static PHP_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
-        let query = Query::new(&grammar, include_str!("../queries/php/inherits.scm"))
-            .expect("php inherits.scm must compile against tree-sitter-php's php_only grammar");
-        QueryLanguage { grammar, query }
-    });
-    &PHP_INHERITS
-}
-
-fn inherits_query_language_for(language: Language) -> Option<&'static QueryLanguage> {
-    match language {
-        Language::Rust => Some(rust_inherits_query_language()),
-        Language::Json => Some(json_inherits_query_language()),
-        Language::CSharp => Some(csharp_inherits_query_language()),
-        Language::Java => Some(java_inherits_query_language()),
-        Language::Php => Some(php_inherits_query_language()),
-        Language::PlainText => None,
-    }
-}
-
 /// Map a `tags.scm` `@definition.<kind>` capture name onto [`SymbolKind`]
 /// — the part after the dot is the kind name verbatim (lowercased).
 fn symbol_kind_for_capture(capture_name: &str) -> Option<SymbolKind> {
@@ -494,6 +146,15 @@ fn token_kind_for_capture(capture_name: &str) -> Option<TokenKind> {
     }
 }
 
+/// One-shot full parse of `text` with `grammar`, for the stateless
+/// extraction entry points. `Highlighter` keeps its own persistent tree
+/// instead.
+fn parse_once(grammar: &tree_sitter::Language, text: &str) -> Option<tree_sitter::Tree> {
+    let mut parser = Parser::new();
+    parser.set_language(grammar).ok()?;
+    parser.parse(text, None)
+}
+
 /// Highlight `text` as `language`, returning spans in document order.
 ///
 /// Stateless one-shot convenience wrapper for tests/simple callers: builds
@@ -519,27 +180,26 @@ pub fn highlight(language: Language, text: &str) -> Vec<HighlightSpan> {
 /// `rust/locals.scm`), so captures are folded by node byte-range with OR:
 /// each identifier node appears exactly once in the result, with
 /// `is_definition` true if any capture on it was `@definition`.
-/// [`Language::PlainText`] (or a language with no `locals.scm`) yields an
+/// [`Language::PLAIN_TEXT`] (or a language with no `locals.scm`) yields an
 /// empty vec.
 pub fn identifier_occurrences(language: Language, text: &str) -> Vec<Occurrence> {
-    let Some(ql) = locals_query_language_for(language) else {
+    let Some(compiled) = registry::compiled(language) else {
         return Vec::new();
     };
-    let mut parser = Parser::new();
-    if parser.set_language(&ql.grammar).is_err() {
-        return Vec::new();
-    }
-    let Some(tree) = parser.parse(text, None) else {
+    let (Some(query), Some(tree)) = (
+        compiled.locals.as_ref(),
+        parse_once(&compiled.grammar, text),
+    ) else {
         return Vec::new();
     };
 
     let mut by_range: std::collections::BTreeMap<(usize, usize), bool> =
         std::collections::BTreeMap::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&ql.query, tree.root_node(), text.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
     while let Some(m) = matches.next() {
         for capture in m.captures {
-            let capture_name = ql.query.capture_names()[capture.index as usize];
+            let capture_name = query.capture_names()[capture.index as usize];
             let is_definition = match capture_name {
                 "definition" => true,
                 "reference" => false,
@@ -588,28 +248,25 @@ struct RawSymbol {
 /// byte-range containment rather than from an explicit parent capture —
 /// simpler to get right than threading parent pointers through every
 /// query, and correct by construction since a tree-sitter node's range
-/// always fully contains its descendants' ranges. [`Language::PlainText`]
+/// always fully contains its descendants' ranges. [`Language::PLAIN_TEXT`]
 /// (or a language with an empty `tags.scm`, i.e. JSON) yields an empty vec.
 pub fn outline(language: Language, text: &str) -> Vec<SymbolNode> {
-    let Some(ql) = tags_query_language_for(language) else {
+    let Some(compiled) = registry::compiled(language) else {
         return Vec::new();
     };
-    let mut parser = Parser::new();
-    if parser.set_language(&ql.grammar).is_err() {
-        return Vec::new();
-    }
-    let Some(tree) = parser.parse(text, None) else {
+    let (Some(query), Some(tree)) = (compiled.tags.as_ref(), parse_once(&compiled.grammar, text))
+    else {
         return Vec::new();
     };
 
     let mut raw: Vec<RawSymbol> = Vec::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&ql.query, tree.root_node(), text.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
     while let Some(m) = matches.next() {
         let mut definition: Option<(SymbolKind, usize, usize)> = None;
         let mut name: Option<(usize, usize)> = None;
         for capture in m.captures {
-            let capture_name = ql.query.capture_names()[capture.index as usize];
+            let capture_name = query.capture_names()[capture.index as usize];
             if capture_name == "name" {
                 name = Some((capture.node.start_byte(), capture.node.end_byte()));
             } else if let Some(kind) = symbol_kind_for_capture(capture_name) {
@@ -640,7 +297,7 @@ pub fn outline(language: Language, text: &str) -> Vec<SymbolNode> {
 /// `@type` and one declared supertype's name token as `@supertype`. A
 /// declaration listing several supertypes matches the pattern once per
 /// supertype, so each pair arrives as its own edge with no extra work
-/// here. [`Language::PlainText`] (or a language with an empty
+/// here. [`Language::PLAIN_TEXT`] (or a language with an empty
 /// `inherits.scm`, i.e. JSON) yields an empty vec.
 ///
 /// Name-based like the rest of this crate (ADR-0008): an edge records the
@@ -648,25 +305,24 @@ pub fn outline(language: Language, text: &str) -> Vec<SymbolNode> {
 /// Comparable` and a same-named interface in another namespace are
 /// indistinguishable here by design.
 pub fn supertype_edges(language: Language, text: &str) -> Vec<SupertypeEdge> {
-    let Some(ql) = inherits_query_language_for(language) else {
+    let Some(compiled) = registry::compiled(language) else {
         return Vec::new();
     };
-    let mut parser = Parser::new();
-    if parser.set_language(&ql.grammar).is_err() {
-        return Vec::new();
-    }
-    let Some(tree) = parser.parse(text, None) else {
+    let (Some(query), Some(tree)) = (
+        compiled.inherits.as_ref(),
+        parse_once(&compiled.grammar, text),
+    ) else {
         return Vec::new();
     };
 
     let mut edges: Vec<SupertypeEdge> = Vec::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&ql.query, tree.root_node(), text.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
     while let Some(m) = matches.next() {
         let mut type_span: Option<(usize, usize)> = None;
         let mut supertype_span: Option<(usize, usize)> = None;
         for capture in m.captures {
-            match ql.query.capture_names()[capture.index as usize] {
+            match query.capture_names()[capture.index as usize] {
                 "type" => type_span = Some((capture.node.start_byte(), capture.node.end_byte())),
                 "supertype" => {
                     supertype_span = Some((capture.node.start_byte(), capture.node.end_byte()))
@@ -736,13 +392,13 @@ fn build_symbol_tree(mut raw: Vec<RawSymbol>, text: &str) -> Vec<SymbolNode> {
     roots
 }
 
-fn spans_from_tree(ql: &QueryLanguage, tree: &tree_sitter::Tree, text: &str) -> Vec<HighlightSpan> {
+fn spans_from_tree(query: &Query, tree: &tree_sitter::Tree, text: &str) -> Vec<HighlightSpan> {
     let mut spans = Vec::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&ql.query, tree.root_node(), text.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
     while let Some(m) = matches.next() {
         for capture in m.captures {
-            let capture_name = ql.query.capture_names()[capture.index as usize];
+            let capture_name = query.capture_names()[capture.index as usize];
             if let Some(kind) = token_kind_for_capture(capture_name) {
                 spans.push(HighlightSpan {
                     start: capture.node.start_byte(),
@@ -784,11 +440,13 @@ fn point_at(text: &str, offset: usize) -> tree_sitter::Point {
 /// parse on every change (upgrade over the v1 ceiling documented on
 /// [`highlight`]'s predecessor — decision A6/A1).
 ///
-/// [`Language::PlainText`] is a valid, cheap no-op: `set_text`/`edit` just
+/// [`Language::PLAIN_TEXT`] is a valid, cheap no-op: `set_text`/`edit` just
 /// track the text and return no spans, so callers don't need to special
 /// case unrecognized extensions.
 pub struct Highlighter {
-    language: Language,
+    /// Held as an `Arc`, not looked up per call: a registry reload must
+    /// not invalidate an open editor's grammar mid-session.
+    compiled: Option<Arc<CompiledLanguage>>,
     parser: Option<Parser>,
     tree: Option<tree_sitter::Tree>,
     text: String,
@@ -796,16 +454,17 @@ pub struct Highlighter {
 
 impl Highlighter {
     /// Create a highlighter for `language`. Cheap: the query/grammar are
-    /// process-wide statics (see [`query_language_for`]), so this only
+    /// process-wide, compiled once and shared behind an `Arc`, so this only
     /// allocates a `Parser` and an empty text buffer.
     pub fn new(language: Language) -> Self {
-        let parser = query_language_for(language).and_then(|ql| {
+        let compiled = registry::compiled(language);
+        let parser = compiled.as_ref().and_then(|compiled| {
             let mut parser = Parser::new();
-            parser.set_language(&ql.grammar).ok()?;
+            parser.set_language(&compiled.grammar).ok()?;
             Some(parser)
         });
         Self {
-            language,
+            compiled,
             parser,
             tree: None,
             text: String::new(),
@@ -853,7 +512,7 @@ impl Highlighter {
     }
 
     fn reparse(&mut self) -> Vec<HighlightSpan> {
-        let Some(ql) = query_language_for(self.language) else {
+        let Some(query) = self.compiled.as_ref().and_then(|c| c.highlights.as_ref()) else {
             return Vec::new();
         };
         let Some(parser) = self.parser.as_mut() else {
@@ -862,7 +521,7 @@ impl Highlighter {
         let Some(new_tree) = parser.parse(&self.text, self.tree.as_ref()) else {
             return Vec::new();
         };
-        let spans = spans_from_tree(ql, &new_tree, &self.text);
+        let spans = spans_from_tree(query, &new_tree, &self.text);
         self.tree = Some(new_tree);
         spans
     }
@@ -870,19 +529,21 @@ impl Highlighter {
     /// Foldable regions (Task C) in document order, from the current
     /// incremental tree — i.e. whatever `set_text`/`edit` last left behind.
     /// Does not reparse: call after `set_text`/`edit`, not instead of it.
-    /// Empty for [`Language::PlainText`], a language with no `folds.scm`,
+    /// Empty for [`Language::PLAIN_TEXT`], a language with no `folds.scm`,
     /// or before the first `set_text`/`edit` call.
     pub fn fold_ranges(&self) -> Vec<FoldRange> {
-        let (Some(ql), Some(tree)) = (folds_query_language_for(self.language), self.tree.as_ref())
-        else {
+        let (Some(query), Some(tree)) = (
+            self.compiled.as_ref().and_then(|c| c.folds.as_ref()),
+            self.tree.as_ref(),
+        ) else {
             return Vec::new();
         };
         let mut ranges = Vec::new();
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&ql.query, tree.root_node(), self.text.as_bytes());
+        let mut matches = cursor.matches(query, tree.root_node(), self.text.as_bytes());
         while let Some(m) = matches.next() {
             for capture in m.captures {
-                let capture_name = ql.query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 if capture_name == "fold" {
                     ranges.push(FoldRange {
                         start: capture.node.start_byte(),
@@ -899,7 +560,28 @@ impl Highlighter {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
+
+    fn lang(id: &str) -> Language {
+        language_by_id(id).expect("catalog language")
+    }
+    fn rust() -> Language {
+        lang("rust")
+    }
+    fn json() -> Language {
+        lang("json")
+    }
+    fn csharp() -> Language {
+        lang("csharp")
+    }
+    fn java() -> Language {
+        lang("java")
+    }
+    fn php() -> Language {
+        lang("php")
+    }
 
     fn find(spans: &[HighlightSpan], kind: TokenKind) -> Option<&HighlightSpan> {
         spans.iter().find(|s| s.kind == kind)
@@ -907,34 +589,34 @@ mod tests {
 
     #[test]
     fn extension_maps_to_language() {
-        assert_eq!(language_for_extension("rs"), Language::Rust);
-        assert_eq!(language_for_extension("json"), Language::Json);
-        assert_eq!(language_for_extension("cs"), Language::CSharp);
-        assert_eq!(language_for_extension("java"), Language::Java);
-        assert_eq!(language_for_extension("php"), Language::Php);
-        assert_eq!(language_for_extension("txt"), Language::PlainText);
-        assert_eq!(language_for_extension(""), Language::PlainText);
+        assert_eq!(language_for_path(Path::new("a.rs")), rust());
+        assert_eq!(language_for_path(Path::new("a.json")), json());
+        assert_eq!(language_for_path(Path::new("a.cs")), csharp());
+        assert_eq!(language_for_path(Path::new("a.java")), java());
+        assert_eq!(language_for_path(Path::new("a.php")), php());
+        assert_eq!(language_for_path(Path::new("a.txt")), Language::PLAIN_TEXT);
+        assert_eq!(language_for_path(Path::new("a")), Language::PLAIN_TEXT);
     }
 
     #[test]
     fn language_name_covers_every_language() {
-        assert_eq!(language_name(Language::Rust), "Rust");
-        assert_eq!(language_name(Language::Json), "JSON");
-        assert_eq!(language_name(Language::CSharp), "C#");
-        assert_eq!(language_name(Language::Java), "Java");
-        assert_eq!(language_name(Language::Php), "PHP");
-        assert_eq!(language_name(Language::PlainText), "Plain Text");
+        assert_eq!(language_name(rust()), "Rust");
+        assert_eq!(language_name(json()), "JSON");
+        assert_eq!(language_name(csharp()), "C#");
+        assert_eq!(language_name(java()), "Java");
+        assert_eq!(language_name(php()), "PHP");
+        assert_eq!(language_name(Language::PLAIN_TEXT), "Plain Text");
     }
 
     #[test]
     fn plain_text_yields_no_spans() {
-        assert!(highlight(Language::PlainText, "fn foo() {}").is_empty());
+        assert!(highlight(Language::PLAIN_TEXT, "fn foo() {}").is_empty());
     }
 
     #[test]
     fn rust_fn_keyword_is_highlighted() {
         let text = "fn foo() {}";
-        let spans = highlight(Language::Rust, text);
+        let spans = highlight(rust(), text);
         let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
         assert_eq!(&text[span.start..span.end], "fn");
     }
@@ -942,7 +624,7 @@ mod tests {
     #[test]
     fn rust_function_name_is_highlighted() {
         let text = "fn foo() {}";
-        let spans = highlight(Language::Rust, text);
+        let spans = highlight(rust(), text);
         let span = find(&spans, TokenKind::Function).expect("expected a Function span");
         assert_eq!(&text[span.start..span.end], "foo");
     }
@@ -950,7 +632,7 @@ mod tests {
     #[test]
     fn rust_string_literal_is_highlighted() {
         let text = "fn foo() { let s = \"hi\"; }";
-        let spans = highlight(Language::Rust, text);
+        let spans = highlight(rust(), text);
         let span = find(&spans, TokenKind::String).expect("expected a String span");
         assert_eq!(&text[span.start..span.end], "\"hi\"");
     }
@@ -958,7 +640,7 @@ mod tests {
     #[test]
     fn rust_comment_is_highlighted() {
         let text = "fn foo() { // hello\n}";
-        let spans = highlight(Language::Rust, text);
+        let spans = highlight(rust(), text);
         let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
         assert!(&text[span.start..span.end].starts_with("// hello"));
     }
@@ -966,7 +648,7 @@ mod tests {
     #[test]
     fn rust_number_is_highlighted() {
         let text = "fn foo() { let x = 42; }";
-        let spans = highlight(Language::Rust, text);
+        let spans = highlight(rust(), text);
         let span = find(&spans, TokenKind::Number).expect("expected a Number span");
         assert_eq!(&text[span.start..span.end], "42");
     }
@@ -974,7 +656,7 @@ mod tests {
     #[test]
     fn rust_type_is_highlighted() {
         let text = "fn foo() { let x: i32 = 42; }";
-        let spans = highlight(Language::Rust, text);
+        let spans = highlight(rust(), text);
         let span = find(&spans, TokenKind::Type).expect("expected a Type span");
         assert_eq!(&text[span.start..span.end], "i32");
     }
@@ -982,7 +664,7 @@ mod tests {
     #[test]
     fn json_string_key_is_highlighted() {
         let text = "{\"key\": \"value\"}";
-        let spans = highlight(Language::Json, text);
+        let spans = highlight(json(), text);
         let span = find(&spans, TokenKind::String).expect("expected a String span");
         assert_eq!(&text[span.start..span.end], "\"key\"");
     }
@@ -990,7 +672,7 @@ mod tests {
     #[test]
     fn json_number_is_highlighted() {
         let text = "{\"n\": 42}";
-        let spans = highlight(Language::Json, text);
+        let spans = highlight(json(), text);
         let span = find(&spans, TokenKind::Number).expect("expected a Number span");
         assert_eq!(&text[span.start..span.end], "42");
     }
@@ -998,7 +680,7 @@ mod tests {
     #[test]
     fn json_boolean_is_highlighted_as_keyword() {
         let text = "{\"b\": true}";
-        let spans = highlight(Language::Json, text);
+        let spans = highlight(json(), text);
         let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
         assert_eq!(&text[span.start..span.end], "true");
     }
@@ -1006,7 +688,7 @@ mod tests {
     #[test]
     fn spans_are_within_text_bounds() {
         let text = "fn foo() { let x: i32 = 42; \"s\"; }";
-        for span in highlight(Language::Rust, text) {
+        for span in highlight(rust(), text) {
             assert!(span.start <= span.end);
             assert!(span.end <= text.len());
         }
@@ -1019,11 +701,11 @@ mod tests {
         let old_text = "fn foo() { let x = 42; }";
         let new_text = "fn foo() { let xy = 42; }";
 
-        let mut incremental = Highlighter::new(Language::Rust);
+        let mut incremental = Highlighter::new(rust());
         incremental.set_text(old_text);
         let incremental_spans = incremental.edit(new_text, 16, 16, 17);
 
-        let fresh_spans = highlight(Language::Rust, new_text);
+        let fresh_spans = highlight(rust(), new_text);
 
         assert_eq!(incremental_spans, fresh_spans_sorted(fresh_spans.clone()));
         // The number literal, well away from the edit, is still classified
@@ -1044,7 +726,7 @@ mod tests {
         let old_text = "fn foo() { let s = \"hi\"; let n = 1; }";
         let new_text = "fn foo() { let s = \"hxi\"; let n = 1; }";
 
-        let mut highlighter = Highlighter::new(Language::Rust);
+        let mut highlighter = Highlighter::new(rust());
         highlighter.set_text(old_text);
         // Byte 21 is right after the opening quote + "h": edit "i" -> "xi".
         let spans = highlighter.edit(new_text, 21, 21, 22);
@@ -1064,20 +746,20 @@ mod tests {
 
     #[test]
     fn highlighter_handles_plain_text_as_a_no_op() {
-        let mut highlighter = Highlighter::new(Language::PlainText);
+        let mut highlighter = Highlighter::new(Language::PLAIN_TEXT);
         assert!(highlighter.set_text("hello").is_empty());
         assert!(highlighter.edit("hello world", 5, 5, 11).is_empty());
     }
 
     #[test]
     fn plain_text_has_no_identifier_occurrences() {
-        assert!(identifier_occurrences(Language::PlainText, "fn foo() {}").is_empty());
+        assert!(identifier_occurrences(Language::PLAIN_TEXT, "fn foo() {}").is_empty());
     }
 
     #[test]
     fn rust_function_and_parameter_are_definitions_used_twice_in_body() {
         let text = "fn add(x: i32) -> i32 { x + x }";
-        let occurrences = identifier_occurrences(Language::Rust, text);
+        let occurrences = identifier_occurrences(rust(), text);
 
         let by_name = |name: &str| -> Vec<&Occurrence> {
             occurrences.iter().filter(|o| o.name == name).collect()
@@ -1117,7 +799,7 @@ mod tests {
     #[test]
     fn rust_struct_name_is_a_definition() {
         let text = "struct Point { x: i32 }";
-        let occurrences = identifier_occurrences(Language::Rust, text);
+        let occurrences = identifier_occurrences(rust(), text);
         let point = occurrences
             .iter()
             .find(|o| o.name == "Point")
@@ -1132,28 +814,28 @@ mod tests {
 
     #[test]
     fn csharp_class_keyword_is_highlighted() {
-        let spans = highlight(Language::CSharp, CSHARP_SNIPPET);
+        let spans = highlight(csharp(), CSHARP_SNIPPET);
         let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
         assert_eq!(&CSHARP_SNIPPET[span.start..span.end], "class");
     }
 
     #[test]
     fn csharp_string_literal_is_highlighted() {
-        let spans = highlight(Language::CSharp, CSHARP_SNIPPET);
+        let spans = highlight(csharp(), CSHARP_SNIPPET);
         let span = find(&spans, TokenKind::String).expect("expected a String span");
         assert_eq!(&CSHARP_SNIPPET[span.start..span.end], "\"Hello, \"");
     }
 
     #[test]
     fn csharp_comment_is_highlighted() {
-        let spans = highlight(Language::CSharp, CSHARP_SNIPPET);
+        let spans = highlight(csharp(), CSHARP_SNIPPET);
         let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
         assert!(&CSHARP_SNIPPET[span.start..span.end].starts_with("// say hi"));
     }
 
     #[test]
     fn csharp_class_name_is_highlighted_as_type() {
-        let spans = highlight(Language::CSharp, CSHARP_SNIPPET);
+        let spans = highlight(csharp(), CSHARP_SNIPPET);
         let type_span = spans
             .iter()
             .find(|s| s.kind == TokenKind::Type && &CSHARP_SNIPPET[s.start..s.end] == "Greeter");
@@ -1165,7 +847,7 @@ mod tests {
 
     #[test]
     fn csharp_method_definition_is_recognized() {
-        let occurrences = identifier_occurrences(Language::CSharp, CSHARP_SNIPPET);
+        let occurrences = identifier_occurrences(csharp(), CSHARP_SNIPPET);
         let greet = occurrences
             .iter()
             .find(|o| o.name == "Greet")
@@ -1176,7 +858,7 @@ mod tests {
     #[test]
     fn csharp_parameter_used_twice_is_one_definition_and_one_reference() {
         let text = "class C { void M(string name) { name = name; } }";
-        let occurrences = identifier_occurrences(Language::CSharp, text);
+        let occurrences = identifier_occurrences(csharp(), text);
         let names: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "name").collect();
         assert_eq!(names.len(), 3, "1 definition + 2 references: {names:?}");
         assert_eq!(names.iter().filter(|o| o.is_definition).count(), 1);
@@ -1189,28 +871,28 @@ mod tests {
 
     #[test]
     fn java_class_keyword_is_highlighted() {
-        let spans = highlight(Language::Java, JAVA_SNIPPET);
+        let spans = highlight(java(), JAVA_SNIPPET);
         let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
         assert_eq!(&JAVA_SNIPPET[span.start..span.end], "public");
     }
 
     #[test]
     fn java_string_literal_is_highlighted() {
-        let spans = highlight(Language::Java, JAVA_SNIPPET);
+        let spans = highlight(java(), JAVA_SNIPPET);
         let span = find(&spans, TokenKind::String).expect("expected a String span");
         assert_eq!(&JAVA_SNIPPET[span.start..span.end], "\"Hello, \"");
     }
 
     #[test]
     fn java_comment_is_highlighted() {
-        let spans = highlight(Language::Java, JAVA_SNIPPET);
+        let spans = highlight(java(), JAVA_SNIPPET);
         let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
         assert!(&JAVA_SNIPPET[span.start..span.end].starts_with("// say hi"));
     }
 
     #[test]
     fn java_class_name_is_highlighted_as_type() {
-        let spans = highlight(Language::Java, JAVA_SNIPPET);
+        let spans = highlight(java(), JAVA_SNIPPET);
         let type_span = spans
             .iter()
             .find(|s| s.kind == TokenKind::Type && &JAVA_SNIPPET[s.start..s.end] == "Greeter");
@@ -1222,7 +904,7 @@ mod tests {
 
     #[test]
     fn java_method_definition_is_recognized() {
-        let occurrences = identifier_occurrences(Language::Java, JAVA_SNIPPET);
+        let occurrences = identifier_occurrences(java(), JAVA_SNIPPET);
         let greet = occurrences
             .iter()
             .find(|o| o.name == "greet")
@@ -1233,7 +915,7 @@ mod tests {
     #[test]
     fn java_parameter_used_twice_is_one_definition_and_one_reference() {
         let text = "class C { void m(String name) { name = name; } }";
-        let occurrences = identifier_occurrences(Language::Java, text);
+        let occurrences = identifier_occurrences(java(), text);
         let names: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "name").collect();
         assert_eq!(names.len(), 3, "1 definition + 2 references: {names:?}");
         assert_eq!(names.iter().filter(|o| o.is_definition).count(), 1);
@@ -1246,28 +928,28 @@ mod tests {
 
     #[test]
     fn php_class_keyword_is_highlighted() {
-        let spans = highlight(Language::Php, PHP_SNIPPET);
+        let spans = highlight(php(), PHP_SNIPPET);
         let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
         assert_eq!(&PHP_SNIPPET[span.start..span.end], "class");
     }
 
     #[test]
     fn php_string_literal_is_highlighted() {
-        let spans = highlight(Language::Php, PHP_SNIPPET);
+        let spans = highlight(php(), PHP_SNIPPET);
         let span = find(&spans, TokenKind::String).expect("expected a String span");
         assert_eq!(&PHP_SNIPPET[span.start..span.end], "\"Hello, \"");
     }
 
     #[test]
     fn php_comment_is_highlighted() {
-        let spans = highlight(Language::Php, PHP_SNIPPET);
+        let spans = highlight(php(), PHP_SNIPPET);
         let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
         assert!(&PHP_SNIPPET[span.start..span.end].starts_with("// say hi"));
     }
 
     #[test]
     fn php_class_name_is_highlighted_as_type() {
-        let spans = highlight(Language::Php, PHP_SNIPPET);
+        let spans = highlight(php(), PHP_SNIPPET);
         let type_span = spans
             .iter()
             .find(|s| s.kind == TokenKind::Type && &PHP_SNIPPET[s.start..s.end] == "Greeter");
@@ -1279,7 +961,7 @@ mod tests {
 
     #[test]
     fn php_method_definition_is_recognized() {
-        let occurrences = identifier_occurrences(Language::Php, PHP_SNIPPET);
+        let occurrences = identifier_occurrences(php(), PHP_SNIPPET);
         let greet = occurrences
             .iter()
             .find(|o| o.name == "greet")
@@ -1290,7 +972,7 @@ mod tests {
     #[test]
     fn php_parameter_used_twice_is_one_definition_and_one_reference() {
         let text = "function add($x) { return $x + $x; }";
-        let occurrences = identifier_occurrences(Language::Php, text);
+        let occurrences = identifier_occurrences(php(), text);
         let names: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "$x").collect();
         assert_eq!(names.len(), 3, "1 definition + 2 references: {names:?}");
         assert_eq!(names.iter().filter(|o| o.is_definition).count(), 1);
@@ -1301,20 +983,20 @@ mod tests {
 
     #[test]
     fn plain_text_has_no_fold_ranges() {
-        let mut highlighter = Highlighter::new(Language::PlainText);
+        let mut highlighter = Highlighter::new(Language::PLAIN_TEXT);
         highlighter.set_text("hello");
         assert!(highlighter.fold_ranges().is_empty());
     }
 
     #[test]
     fn fold_ranges_are_empty_before_any_parse() {
-        assert!(Highlighter::new(Language::Rust).fold_ranges().is_empty());
+        assert!(Highlighter::new(rust()).fold_ranges().is_empty());
     }
 
     #[test]
     fn rust_function_body_is_foldable() {
         let text = "fn add(x: i32, y: i32) -> i32 {\n    x + y\n}";
-        let mut highlighter = Highlighter::new(Language::Rust);
+        let mut highlighter = Highlighter::new(rust());
         highlighter.set_text(text);
         let ranges = highlighter.fold_ranges();
         let body = ranges
@@ -1327,7 +1009,7 @@ mod tests {
     #[test]
     fn rust_struct_body_is_foldable() {
         let text = "struct Point {\n    x: i32,\n    y: i32,\n}";
-        let mut highlighter = Highlighter::new(Language::Rust);
+        let mut highlighter = Highlighter::new(rust());
         highlighter.set_text(text);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1341,7 +1023,7 @@ mod tests {
     #[test]
     fn json_object_is_foldable() {
         let text = "{\"a\": 1, \"b\": [1, 2, 3]}";
-        let mut highlighter = Highlighter::new(Language::Json);
+        let mut highlighter = Highlighter::new(json());
         highlighter.set_text(text);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1356,7 +1038,7 @@ mod tests {
 
     #[test]
     fn csharp_method_body_is_foldable() {
-        let mut highlighter = Highlighter::new(Language::CSharp);
+        let mut highlighter = Highlighter::new(csharp());
         highlighter.set_text(CSHARP_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1369,7 +1051,7 @@ mod tests {
 
     #[test]
     fn csharp_class_body_is_foldable() {
-        let mut highlighter = Highlighter::new(Language::CSharp);
+        let mut highlighter = Highlighter::new(csharp());
         highlighter.set_text(CSHARP_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1383,7 +1065,7 @@ mod tests {
 
     #[test]
     fn java_method_body_is_foldable() {
-        let mut highlighter = Highlighter::new(Language::Java);
+        let mut highlighter = Highlighter::new(java());
         highlighter.set_text(JAVA_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1396,7 +1078,7 @@ mod tests {
 
     #[test]
     fn java_class_body_is_foldable() {
-        let mut highlighter = Highlighter::new(Language::Java);
+        let mut highlighter = Highlighter::new(java());
         highlighter.set_text(JAVA_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1410,7 +1092,7 @@ mod tests {
 
     #[test]
     fn php_method_body_is_foldable() {
-        let mut highlighter = Highlighter::new(Language::Php);
+        let mut highlighter = Highlighter::new(php());
         highlighter.set_text(PHP_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1423,7 +1105,7 @@ mod tests {
 
     #[test]
     fn php_class_body_is_foldable() {
-        let mut highlighter = Highlighter::new(Language::Php);
+        let mut highlighter = Highlighter::new(php());
         highlighter.set_text(PHP_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1440,7 +1122,7 @@ mod tests {
         let old_text = "fn foo() {\n    1\n}";
         let new_text = "fn foo() {\n    1 + 2\n}";
 
-        let mut highlighter = Highlighter::new(Language::Rust);
+        let mut highlighter = Highlighter::new(rust());
         highlighter.set_text(old_text);
         // Insert " + 2" right after "1" (byte offset 15..15 -> 15..19).
         highlighter.edit(new_text, 15, 15, 19);
@@ -1457,7 +1139,7 @@ mod tests {
     #[test]
     fn json_object_keys_are_references_not_definitions() {
         let text = "{\"key\": \"value\", \"other\": 1}";
-        let occurrences = identifier_occurrences(Language::Json, text);
+        let occurrences = identifier_occurrences(json(), text);
 
         assert!(
             occurrences.iter().all(|o| !o.is_definition),
@@ -1471,19 +1153,19 @@ mod tests {
 
     #[test]
     fn plain_text_has_no_outline() {
-        assert!(outline(Language::PlainText, "anything").is_empty());
+        assert!(outline(Language::PLAIN_TEXT, "anything").is_empty());
     }
 
     #[test]
     fn json_has_no_outline() {
         let text = "{\"key\": \"value\", \"nested\": {\"a\": 1}}";
-        assert!(outline(Language::Json, text).is_empty());
+        assert!(outline(json(), text).is_empty());
     }
 
     #[test]
     fn rust_outline_nests_fields_under_struct_and_methods_under_impl() {
         let text = "struct Point {\n    x: i32,\n    y: i32,\n}\n\nimpl Point {\n    fn new() -> Point { Point { x: 0, y: 0 } }\n    fn dist(&self) -> f64 { 0.0 }\n}\n";
-        let roots = outline(Language::Rust, text);
+        let roots = outline(rust(), text);
 
         let point_struct = roots
             .iter()
@@ -1525,7 +1207,7 @@ mod tests {
 
     #[test]
     fn csharp_outline_nests_methods_under_class() {
-        let occurrences = outline(Language::CSharp, CSHARP_SNIPPET);
+        let occurrences = outline(csharp(), CSHARP_SNIPPET);
         let greeter = occurrences
             .iter()
             .find(|s| s.kind == SymbolKind::Class && s.name == "Greeter")
@@ -1540,7 +1222,7 @@ mod tests {
     #[test]
     fn csharp_outline_captures_auto_properties_as_fields() {
         const SNIPPET: &str = "class Person {\n    public string Name { get; set; }\n}\n";
-        let roots = outline(Language::CSharp, SNIPPET);
+        let roots = outline(csharp(), SNIPPET);
         let person = roots
             .iter()
             .find(|s| s.kind == SymbolKind::Class && s.name == "Person")
@@ -1552,7 +1234,7 @@ mod tests {
 
     #[test]
     fn java_outline_nests_methods_under_class() {
-        let roots = outline(Language::Java, JAVA_SNIPPET);
+        let roots = outline(java(), JAVA_SNIPPET);
         let greeter = roots
             .iter()
             .find(|s| s.kind == SymbolKind::Class && s.name == "Greeter")
@@ -1566,7 +1248,7 @@ mod tests {
 
     #[test]
     fn php_outline_nests_methods_under_class() {
-        let roots = outline(Language::Php, PHP_SNIPPET);
+        let roots = outline(php(), PHP_SNIPPET);
         let greeter = roots
             .iter()
             .find(|s| s.kind == SymbolKind::Class && s.name == "Greeter")
@@ -1593,7 +1275,7 @@ mod tests {
     #[test]
     fn rust_impl_trait_for_type_is_a_supertype_edge() {
         let text = "trait Shape {}\nstruct Circle;\nimpl Shape for Circle {}\n";
-        let edges = supertype_edges(Language::Rust, text);
+        let edges = supertype_edges(rust(), text);
         assert_eq!(supertypes_of(&edges, "Circle"), vec!["Shape"]);
         let edge = edges
             .iter()
@@ -1604,20 +1286,20 @@ mod tests {
 
     #[test]
     fn rust_inherent_impl_is_not_a_supertype_edge() {
-        let edges = supertype_edges(Language::Rust, "struct Circle;\nimpl Circle {}\n");
+        let edges = supertype_edges(rust(), "struct Circle;\nimpl Circle {}\n");
         assert!(edges.is_empty());
     }
 
     #[test]
     fn rust_supertrait_is_a_supertype_edge() {
-        let edges = supertype_edges(Language::Rust, "trait Shape: Drawable {}\n");
+        let edges = supertype_edges(rust(), "trait Shape: Drawable {}\n");
         assert_eq!(supertypes_of(&edges, "Shape"), vec!["Drawable"]);
     }
 
     #[test]
     fn java_extends_and_implements_are_separate_edges() {
         let text = "class Circle extends Shape implements Drawable, Sized {}\n";
-        let edges = supertype_edges(Language::Java, text);
+        let edges = supertype_edges(java(), text);
         assert_eq!(
             supertypes_of(&edges, "Circle"),
             vec!["Drawable", "Shape", "Sized"]
@@ -1626,27 +1308,27 @@ mod tests {
 
     #[test]
     fn java_interface_extends_is_a_supertype_edge() {
-        let edges = supertype_edges(Language::Java, "interface Drawable extends Shape {}\n");
+        let edges = supertype_edges(java(), "interface Drawable extends Shape {}\n");
         assert_eq!(supertypes_of(&edges, "Drawable"), vec!["Shape"]);
     }
 
     #[test]
     fn csharp_base_list_entries_are_supertype_edges() {
-        let edges = supertype_edges(Language::CSharp, "class Circle : Shape, IDrawable {}\n");
+        let edges = supertype_edges(csharp(), "class Circle : Shape, IDrawable {}\n");
         assert_eq!(supertypes_of(&edges, "Circle"), vec!["IDrawable", "Shape"]);
     }
 
     #[test]
     fn php_extends_and_implements_are_supertype_edges() {
         let text = "<?php\nclass Circle extends Shape implements Drawable {}\n";
-        let edges = supertype_edges(Language::Php, text);
+        let edges = supertype_edges(php(), text);
         assert_eq!(supertypes_of(&edges, "Circle"), vec!["Drawable", "Shape"]);
     }
 
     #[test]
     fn json_and_plain_text_have_no_supertype_edges() {
-        assert!(supertype_edges(Language::Json, "{\"a\": 1}").is_empty());
-        assert!(supertype_edges(Language::PlainText, "class A extends B {}").is_empty());
+        assert!(supertype_edges(json(), "{\"a\": 1}").is_empty());
+        assert!(supertype_edges(Language::PLAIN_TEXT, "class A extends B {}").is_empty());
     }
 
     #[test]
@@ -1656,7 +1338,7 @@ mod tests {
         // were definitions to the outline but not to
         // `identifier_occurrences`, so nothing could navigate to them.
         let text = "pub trait Shape {\n    fn area(&self) -> f64;\n}\n\npub struct Circle {\n    radius: f64,\n}\n\nimpl Shape for Circle {\n    fn area(&self) -> f64 {\n        self.radius\n    }\n}\n";
-        let occurrences = identifier_occurrences(Language::Rust, text);
+        let occurrences = identifier_occurrences(rust(), text);
         let defined = |name: &str| {
             occurrences
                 .iter()

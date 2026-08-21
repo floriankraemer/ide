@@ -37,13 +37,13 @@ public:
     // the just-updated tree (no second parse) and pushed to the editor's
     // gutter via CodeEditor::setFoldRanges. Null is a valid no-op for
     // callers that don't need folding (e.g. tests).
-    SyntaxHighlighter(QTextDocument *document, QString fileExtension, CodeEditor *editor = nullptr);
+    SyntaxHighlighter(QTextDocument *document, QString fileName, CodeEditor *editor = nullptr);
 
 protected:
     void highlightBlock(const QString &text) override;
 
 private:
-    QString fileExtension_;
+    QString fileName_;
     rust::Box<SyntaxHighlighterHandle> highlighter_;
     CodeEditor *editor_;
     bool hasParsedOnce_ = false;
