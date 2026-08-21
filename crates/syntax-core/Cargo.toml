@@ -22,6 +22,12 @@ tree-sitter-javascript = "0.25"
 tree-sitter-bash = "0.25.1"
 tree-sitter-yaml = "0.7.2"
 tree-sitter-toml-ng = "0.7.0"
+# Markup tranche (R4d). tree-sitter-md ships two grammars: the block
+# grammar and the inline one it injects into its own `(inline)` nodes.
+tree-sitter-md = "0.5.3"
+tree-sitter-html = "0.23.2"
+tree-sitter-css = "0.25"
+tree-sitter-xml = "0.7"
 streaming-iterator = "0.1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

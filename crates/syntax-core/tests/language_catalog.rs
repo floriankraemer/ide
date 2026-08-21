@@ -141,6 +141,18 @@ fn every_language_highlights_its_sample() {
     }
 }
 
+/// Whether any *other* catalog row's `injections.scm` names `id` as an
+/// injected language — the only way a language with no extension and no
+/// filename can be reached.
+fn injected_by_another_language(id: &str) -> bool {
+    let needle = format!("\"{id}\"");
+    catalog_languages()
+        .into_iter()
+        .filter(|l| l.id() != id)
+        .filter_map(|l| l.def()?.queries.injections)
+        .any(|source| source.contains(&needle))
+}
+
 /// Every declared extension and filename must resolve back to a language
 /// that declares it, and every language must be reachable by at least one
 /// of its own patterns.
@@ -156,11 +168,20 @@ fn declared_patterns_resolve_back_to_a_claimant() {
     for language in catalog_languages() {
         let def = language.def().expect("filtered to catalog rows");
         let id = def.id;
-        assert!(
-            !def.extensions.is_empty() || !def.filenames.is_empty(),
-            "language `{id}` declares neither an extension nor a filename, \
-             so no file can ever open as it"
-        );
+        if def.extensions.is_empty() && def.filenames.is_empty() {
+            // An injection-only language (`markdown_inline`) is legal and
+            // deliberately unreachable by path — no file is written in it.
+            // What makes that different from a row whose patterns were
+            // simply forgotten is that some *other* language's
+            // `injections.scm` names it, so it is still reachable.
+            assert!(
+                injected_by_another_language(id),
+                "language `{id}` declares neither an extension nor a filename \
+                 and no other language's injections.scm injects `{id}`, so \
+                 nothing can ever open as it"
+            );
+            continue;
+        }
 
         let mut reachable = false;
         let mut check =
@@ -233,4 +254,93 @@ fn extensions_are_normalized_and_unique_within_a_language() {
             "language `{id}` repeats an extension"
         );
     }
+}
+
+// ---- injections (I1, exercised for real by R4d) ---------------------
+
+/// The one span covering `needle`'s first byte in `text`, highlighted as
+/// `language`, asserted to carry `scope` (or a descendant of it, matching
+/// `produces_scope`'s hierarchical rule).
+fn assert_scope_at(language: Language, text: &str, needle: &str, scope: &str) {
+    let offset = text.find(needle).unwrap_or_else(|| {
+        panic!(
+            "fixture for `{}` no longer contains {needle:?}",
+            language.id()
+        )
+    });
+    let spans = highlight(language, text);
+    let found: Vec<&str> = spans
+        .iter()
+        .filter(|s| s.start <= offset && offset < s.end)
+        .map(|s| s.scope.name())
+        .collect();
+    assert!(
+        found
+            .iter()
+            .any(|name| *name == scope || name.starts_with(&format!("{scope}."))),
+        "language `{}`: expected a `{scope}` span over {needle:?}, got {found:?} — \
+         the injection is not reaching the injected language's queries",
+        language.id()
+    );
+}
+
+fn language(id: &str) -> Language {
+    registry()
+        .language_by_id(id)
+        .unwrap_or_else(|| panic!("no catalog row with id `{id}`"))
+}
+
+fn sample(id: &str) -> String {
+    std::fs::read_to_string(queries_dir(id).join("sample.txt")).expect("fixture exists")
+}
+
+/// An injected region is coloured by the *injected* language's queries,
+/// not the host's.
+///
+/// `every_language_highlights_its_sample` above only checks that the three
+/// required scopes appear somewhere, which a host language could satisfy
+/// on its own. This pins the thing R4d exists for: each assertion below
+/// names a scope the *host* grammar has no pattern for at all, so it can
+/// only have come from the injected tree.
+#[test]
+fn injected_regions_are_highlighted_as_the_injected_language() {
+    // Markdown has no `@keyword` and no `@string` pattern whatsoever; both
+    // come from the fenced Rust block in its fixture.
+    let markdown = language("markdown");
+    let md = sample("markdown");
+    assert_scope_at(markdown, &md, "const GREETING", "keyword");
+    assert_scope_at(markdown, &md, "\"hello\"", "string");
+
+    // HTML captures neither JavaScript keywords nor CSS property names.
+    let html = language("html");
+    let page = sample("html");
+    assert_scope_at(html, &page, "const greeting", "keyword");
+    assert_scope_at(html, &page, "color: #222", "property");
+    // …and the host's own captures still work outside the injected regions.
+    assert_scope_at(html, &page, "lang=", "attribute");
+}
+
+/// A fence tagged with a common alias (` ```rs `) resolves to the language
+/// it means. Predicates are not evaluated during span extraction, so this
+/// cannot be done in `injections.scm`; `canonical_injection_language` in
+/// lib.rs does it once for every injected name.
+#[test]
+fn a_fence_tagged_with_an_alias_resolves_to_the_registry_language() {
+    let text = "```rs\nconst X: u8 = 1;\n```\n";
+    assert_scope_at(language("markdown"), text, "const", "keyword");
+}
+
+/// R4d switched the `php` row from the body-only grammar to the one that
+/// parses a whole template file, now that there is an `html` row to hand
+/// the markup to. This is what that buys: the HTML around `<?php … ?>` is
+/// highlighted as HTML instead of being one uncoloured blob.
+#[test]
+fn php_markup_outside_the_tags_is_highlighted_as_html() {
+    let text = "<p class=\"note\">hi</p>\n<?php echo $name; ?>\n";
+    let php = language("php");
+    assert_scope_at(php, text, "class=", "attribute");
+    // `note`, not `"note"`: HTML's `(attribute_value)` is the text
+    // between the quotes, and the quotes themselves are not captured.
+    assert_scope_at(php, text, "note", "string");
+    assert_scope_at(php, text, "echo", "keyword");
 }

@@ -1,0 +1,9 @@
+# Harness fixture (X1)
+
+Markdown has no keyword, string or comment of its own; all three come from
+the injected Rust block below, which is the point of the markup tranche.
+
+```rust
+// a comment
+const GREETING: &str = "hello";
+```
