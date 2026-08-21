@@ -50,6 +50,24 @@ pub static SCOPES: &[&str] = &[
     "function.method",
     "keyword",
     "label",
+    "markup",
+    "markup.bold",
+    "markup.heading",
+    "markup.heading.1",
+    "markup.heading.2",
+    "markup.heading.3",
+    "markup.heading.4",
+    "markup.heading.5",
+    "markup.heading.6",
+    "markup.italic",
+    "markup.link",
+    "markup.link.label",
+    "markup.link.url",
+    "markup.list",
+    "markup.quote",
+    "markup.raw",
+    "markup.raw.block",
+    "markup.strikethrough",
     "module",
     "number",
     "number.float",
@@ -606,6 +624,15 @@ fn pattern_is_guarded_by_an_unevaluated_predicate(query: &Query, pattern: usize)
     !query.property_predicates(pattern).is_empty() || !query.general_predicates(pattern).is_empty()
 }
 
+/// Document order for a highlight stream: by `start`, and on a tie the
+/// wider span first. The view applies formats in stream order, so the
+/// narrower — more specific — span has to come last to stay visible: an
+/// `@markup.heading` over `# Title` must not repaint the `#` its own
+/// `@punctuation.special` claimed.
+fn sort_spans(spans: &mut [HighlightSpan]) {
+    spans.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+}
+
 /// `capture_scopes` is the query's capture index -> [`Scope`] table,
 /// resolved once when the query was compiled — the per-span hot path only
 /// indexes it.
@@ -644,7 +671,15 @@ fn spans_from_tree(
             }
         }
     }
-    spans.sort_by_key(|(span, pattern)| (span.start, span.end, *pattern));
+    // Widest first on a tie, so the narrower — more specific — span is
+    // applied last and stays visible; among spans over the *same* node,
+    // the earlier pattern wins.
+    spans.sort_by(|(a, ap), (b, bp)| {
+        a.start
+            .cmp(&b.start)
+            .then(b.end.cmp(&a.end))
+            .then(ap.cmp(bp))
+    });
     spans.dedup_by_key(|(span, _)| (span.start, span.end));
     spans.into_iter().map(|(span, _)| span).collect()
 }
@@ -672,10 +707,21 @@ struct InjectionRegion {
 }
 
 impl InjectionRegion {
-    fn covers(&self, span: &HighlightSpan) -> bool {
+    /// True when the injected region *contains* `span` — the host span has
+    /// nothing left to say about those bytes, so it is dropped in favour of
+    /// the injected language's own spans.
+    ///
+    /// Containment rather than mere overlap, because a host span can
+    /// legitimately *enclose* an injected region: Markdown hands every run
+    /// of prose to the inline grammar, so a heading, a list item or a fenced
+    /// block always encloses an injection, and dropping on overlap left the
+    /// whole markup family unpaintable. An enclosing span is sorted before
+    /// the spans inside it (see [`spans_with_injections`]), so the injected
+    /// language still wins on the bytes it claims.
+    fn contains(&self, span: &HighlightSpan) -> bool {
         self.ranges
             .iter()
-            .any(|r| span.start < r.end_byte && span.end > r.start_byte)
+            .any(|r| span.start >= r.start_byte && span.end <= r.end_byte)
     }
 }
 
@@ -799,10 +845,16 @@ fn injection_regions(query: &Query, tree: &tree_sitter::Tree, text: &str) -> Vec
 /// The sort is a contract, not a convenience: the view binary-searches
 /// this stream by `start` (`syntax_highlighter.cpp`), so an out-of-order
 /// span silently mis-colours the document rather than failing loudly.
+/// Ties on `start` are ordered widest-first, because the view applies
+/// formats in stream order and the narrower, more specific span has to be
+/// the one that ends up visible.
 ///
-/// Injected spans win: a host span overlapping an injected region is
-/// dropped before the injected spans are merged in, so `<script>`'s JS is
-/// coloured as JS and not left under whatever the host grammar made of it.
+/// Injected spans win: a host span *inside* an injected region is dropped
+/// before the injected spans are merged in, so `<script>`'s JS is coloured
+/// as JS and not left under whatever the host grammar made of it. A host
+/// span that *encloses* an injected region survives (a Markdown heading
+/// encloses the inline run it is made of) and is sorted first, so the view
+/// paints it and then paints the injected spans over it.
 ///
 /// `resolve` maps an injected language name onto a compiled language. It
 /// is a parameter rather than a direct registry call so the recursion can
@@ -825,7 +877,7 @@ fn spans_with_injections(
     if regions.is_empty() {
         return spans;
     }
-    spans.retain(|span| !regions.iter().any(|region| region.covers(span)));
+    spans.retain(|span| !regions.iter().any(|region| region.contains(span)));
     for region in regions {
         let Some(inner) = resolve(&region.language) else {
             continue;
@@ -850,7 +902,7 @@ fn spans_with_injections(
             resolve,
         ));
     }
-    spans.sort_by_key(|span| (span.start, span.end));
+    sort_spans(&mut spans);
     spans
 }
 
@@ -1101,6 +1153,22 @@ mod tests {
     }
 
     #[test]
+    fn markdown_markup_captures_resolve_to_the_markup_family() {
+        let source = "# Title\n\nA [label](https://example.com) and *emphasis*.\n";
+        let spans = highlight(lang("markdown"), source);
+        let text_of = |name: &str| {
+            spans
+                .iter()
+                .find(|span| span.scope.name() == name)
+                .map(|span| &source[span.start..span.end])
+        };
+        assert_eq!(text_of("markup.heading.1"), Some("# Title\n"));
+        assert_eq!(text_of("markup.link.label"), Some("label"));
+        assert_eq!(text_of("markup.link.url"), Some("https://example.com"));
+        assert_eq!(text_of("markup.italic"), Some("*emphasis*"));
+    }
+
+    #[test]
     fn an_unknown_capture_falls_back_up_its_dotted_path() {
         // Exact hit.
         assert_eq!(scope("function.method").name(), "function.method");
@@ -1247,7 +1315,7 @@ mod tests {
     }
 
     fn fresh_spans_sorted(mut spans: Vec<HighlightSpan>) -> Vec<HighlightSpan> {
-        spans.sort_by_key(|span| (span.start, span.end));
+        sort_spans(&mut spans);
         spans
     }
 
@@ -1969,13 +2037,25 @@ mod tests {
             scopes_at(&spans, text, "string").contains(&"\"k\""),
             "JSON key not highlighted as a JSON string"
         );
-        // The host's own `@string` over the whole raw string is gone: the
-        // injected language owns that range.
+        // The host's own `@string` *encloses* the injected region (it takes
+        // in the `r#"` delimiters), so it is kept — and sorted ahead of the
+        // spans it encloses, which is what lets the view paint JSON over
+        // it. A host span sitting *inside* the region is what gets dropped.
+        let host_string = spans
+            .iter()
+            .position(|span| {
+                span.scope.name() == "string" && text[span.start..span.end].starts_with("r#\"")
+            })
+            .expect("the enclosing host string span is kept");
+        let injected = spans
+            .iter()
+            .position(|span| {
+                span.scope.name() == "keyword" && &text[span.start..span.end] == "true"
+            })
+            .expect("the injected JSON keyword");
         assert!(
-            !scopes_at(&spans, text, "string")
-                .iter()
-                .any(|t| t.starts_with("r#\"")),
-            "host span survived inside an injected region"
+            host_string < injected,
+            "the enclosing host span must be painted before the spans inside it"
         );
         // The host still highlights everything outside the region.
         assert!(scopes_at(&spans, text, "keyword").contains(&"const"));

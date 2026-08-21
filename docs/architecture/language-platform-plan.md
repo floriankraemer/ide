@@ -148,12 +148,13 @@ reasoning intact.
   restored across fourteen languages.
   The rest of the patterns each tranche dropped are still absent and can now
   be ported back file by file, guards and all.
-- **`SCOPES` has no `markup` family.** ([#18](https://github.com/floriankraemer/ide/issues/18))
-  Markdown headings, links, emphasis and code spans are captured upstream as
-  `@markup.heading`, `@markup.link` and so on, which resolve to nothing here,
-  so a Markdown file shows only its fenced code and inline HTML coloured.
-  Adding the family touches `SCOPES`, every theme table and the view's format
-  table, so it is its own change rather than a markup-tranche edit.
+- **Markup emphasis has no strikethrough attribute.** ([#18](https://github.com/floriankraemer/ide/issues/18))
+  `SCOPES` now carries the `markup` family, so Markdown headings, links,
+  emphasis, lists, quotes and code spans are coloured by every built-in theme.
+  `markup.strikethrough` is themed with a muted colour rather than a struck
+  font, because `ScopeStyle` only carries bold/italic/underline and adding a
+  fourth flag would touch the FFI struct, the C++ format table and the syntax
+  colours page at once.
 - **The X1 harness can be satisfied by a descendant scope.** ([#17](https://github.com/floriankraemer/ide/issues/17))
   `produces_scope` counts a `string.escape` span as satisfying `string`,
   which is right for fallback but means a language that has *lost* its
