@@ -4,7 +4,8 @@
 
 Proposed.
 Implemented as task L1 of [the language platform plan](../language-platform-plan.md), with the stub server it is tested against as task X2 (both commit `0554341`).
-The feature tasks this foundation exists for — diagnostics (L2), hover (L3), go-to-definition (L4), completion (L5) and the settings page (L6) — are still open, and nothing in `ui-shell` talks to `lsp-core` yet.
+Diagnostics (L2) landed on top of it: `ui-shell`'s `LanguageService` QObject owns the manager on a worker thread and drains its events onto the Qt thread, and `app-config` gained the `[[language_server]]` table.
+The remaining feature tasks — hover (L3), go-to-definition (L4), completion (L5) and the settings page (L6) — are still open.
 
 ## Context
 
@@ -84,8 +85,8 @@ Nothing in the catalog is installed by us — a missing executable simply means 
 - Negative / accepted: document sync is full-text (`contentChanges: [{ text }]`), not incremental. Simple and always correct; if a large file proves slow, incremental sync is the documented upgrade and needs no change to anything above the manager.
 - Negative / accepted: server-to-client requests are answered with JSON-RPC `-32601` (method not found). `workspace/configuration` and `client/registerCapability` are the two that matter in practice, and both are deferred to the feature tasks that need them — a server blocks until it is answered, so answering honestly now is better than either hanging or lying.
 - Negative / accepted: server `stderr` is `Stdio::null()`. Servers are chatty on it and nothing reads it, and a full pipe would deadlock the child — but it also means a server that explains its startup failure only on stderr fails silently. Capturing it into a log view is a follow-up for L6, where server status is already surfaced.
-- Deferred: the `[[language_server]]` settings block belongs in `app-config` alongside the keymap and syntax colors, and is not built yet. `ServerOverride` is the shape it deserializes into, so the config crate gains a table and no new dependency, and `lsp-core` stays unaware of where the overrides came from.
-- Deferred: nothing starts a server yet. Which languages are started, and when (project open, first file of that language opened), is L2's decision.
+- Done in L2: `app_config::LanguageServerSetting` is the `[[language_server]]` table, mirroring `ServerOverride` field for field rather than depending on this crate, so the config crate still has no new dependency and `lsp-core` stays unaware of where the overrides came from.
+- Done in L2: servers start lazily, on the first opened file of a language that has an enabled entry — not at app launch, which would spawn a dozen processes for a project that uses one language. `catalog::language_id_for_path` is the extension-to-language-id table that decision needs, deliberately separate from `syntax-core`'s grammar detection because these are the identifiers the protocol defines.
 
 ## Related
 
