@@ -22,11 +22,12 @@ graph TB
 |-------|---------------|-------------------|
 | `editor-core` | (std, ropey, regex) | **No** |
 | `project-model` | (std, notify) | **No** |
-| `syntax-core` | (std, tree-sitter, tree-sitter-rust, tree-sitter-json) | **No** |
+| `syntax-core` | (std, tree-sitter, tree-sitter-rust, tree-sitter-json, tree-sitter-c-sharp, tree-sitter-java, tree-sitter-php, streaming-iterator) | **No** |
 | `app-config` | (std, dirs, serde, toml, nucleo-matcher) | **No** |
 | `mcp-server` | `index-core`, `editor-core` (+ std, serde, serde_json, tokio, axum) | **No** |
 | `pty-core` | (std, portable-pty) | **No** |
 | `terminal-core` | (std, alacritty_terminal) | **No** |
+| `lsp-core` | (std, lsp-types, serde, serde_json) | **No** |
 | `index-core` | `syntax-core`, `editor-core` (+ std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore, nucleo-matcher) | **No** |
 | `app-core` | `editor-core`, `project-model` | **No** |
 | `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `syntax-core`, `mcp-server`, `index-core`, `pty-core`, `terminal-core` | Yes (adapter + view live here) |
@@ -73,6 +74,8 @@ cargo tree -p app-config -e normal | grep -i qt     # must be empty
 cargo tree -p index-core -e normal | grep -i qt     # must be empty
 cargo tree -p index-core -e normal | grep -i tokio  # must be empty
 cargo tree -p mcp-server -e normal | grep -i qt     # must be empty
+cargo tree -p lsp-core -e normal | grep -i qt       # must be empty
+cargo tree -p lsp-core -e normal | grep -i tokio    # must be empty
 ```
 
 ## Known debt at time of writing
