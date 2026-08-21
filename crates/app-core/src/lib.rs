@@ -485,6 +485,16 @@ impl AppSession {
         self.doc(id).map(|d| d.content())
     }
 
+    /// The live buffer content for `path` if it is open in a tab, including
+    /// unsaved edits; `None` when no tab holds that path. MCP's
+    /// `resolve_declaration` tool needs this: `index_core` resolves a
+    /// declaration against the *current* text at an offset, and reading the
+    /// file from disk would silently resolve against a stale version of a
+    /// buffer the user is still typing in.
+    pub fn content_for_path(&self, path: &Path) -> Option<String> {
+        self.tab_content(self.find_tab_by_path(path)?)
+    }
+
     /// Snapshot of every open tab's id and display title, in opening order
     /// (MCP's `list_open_buffers` tool, M3/M4).
     pub fn open_tabs(&self) -> Vec<(TabId, String)> {
@@ -968,6 +978,31 @@ mod tests {
         assert_eq!(session.tab_extension(no_ext_tab.id), None);
 
         assert_eq!(session.tab_extension(TabId::from_raw(999)), None);
+    }
+
+    #[test]
+    fn content_for_path_returns_unsaved_buffer_text() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let path = project_dir.path().join("a.txt");
+        let tab = session.open_file(&path).unwrap();
+
+        session.edit_tab(tab.id, "alpha edited").unwrap();
+
+        // The buffer, not the file: disk still says "alpha".
+        assert_eq!(fs::read_to_string(&path).unwrap(), "alpha");
+        assert_eq!(
+            session.content_for_path(&path).as_deref(),
+            Some("alpha edited")
+        );
+    }
+
+    #[test]
+    fn content_for_path_is_none_for_a_file_that_is_not_open() {
+        let (project_dir, _config, session) = session_with_project();
+
+        assert!(session
+            .content_for_path(&project_dir.path().join("b.txt"))
+            .is_none());
     }
 
     #[test]

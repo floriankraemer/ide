@@ -442,6 +442,54 @@ impl IndexSlot {
     }
 }
 
+/// Turns "these matched spans, this pattern, this replacement" into the
+/// concrete per-span replacement text [`TextIndex::replace_in_files`]
+/// applies. Callers hand in the spans a search produced; a span whose line
+/// no longer holds it (the file changed since) is dropped, and
+/// `replace_in_files` then counts that file as skipped rather than
+/// rewriting the wrong bytes.
+///
+/// The expansion runs `editor_core::replacements` over just the matched
+/// slice, so a regex `$1` refers to the capture inside that match — the same
+/// engine the in-editor Replace uses, not a second implementation.
+pub fn resolve_replacements(
+    edits: &[(PathBuf, usize, usize, usize)],
+    pattern: &str,
+    replacement: &str,
+    opts: editor_core::SearchOptions,
+) -> Result<Vec<FileReplacement>, String> {
+    let mut out = Vec::with_capacity(edits.len());
+    let mut cached: Option<(&Path, Vec<String>)> = None;
+    for (path, line, start, end) in edits {
+        if cached.as_ref().is_none_or(|(p, _)| *p != path.as_path()) {
+            let content = fs::read_to_string(path).map_err(|e| e.to_string())?;
+            cached = Some((path.as_path(), content.lines().map(str::to_owned).collect()));
+        }
+        let lines = &cached.as_ref().expect("just populated").1;
+        let Some(matched) = lines
+            .get(line.wrapping_sub(1))
+            .and_then(|l| l.get(*start..*end))
+        else {
+            // The file changed since the search; `replace_in_files` counts
+            // this file as skipped rather than rewriting the wrong span.
+            continue;
+        };
+        let expanded = editor_core::replacements(matched, pattern, replacement, opts)
+            .map_err(|e| e.to_string())?;
+        let Some(first) = expanded.into_iter().next() else {
+            continue;
+        };
+        out.push(FileReplacement {
+            path: path.clone(),
+            line: *line,
+            start: *start,
+            end: *end,
+            text: first.text,
+        });
+    }
+    Ok(out)
+}
+
 /// A tantivy-backed text index for one project root, with ripgrep-crate
 /// verification on top (see module docs for the two-stage design).
 pub struct TextIndex {
@@ -1687,6 +1735,52 @@ mod tests {
         let hits = index.find_definitions_ranked("openfile", 10).unwrap();
         assert_eq!(hits[0].name, "open_file");
         assert_eq!(index.find_definitions_ranked("", 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn resolve_replacements_expands_captures_against_the_matched_slice() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.rs");
+        fs::write(&file, "let alpha = 1;\nlet beta = 2;\n").unwrap();
+
+        let resolved = resolve_replacements(
+            &[(file.clone(), 1, 4, 9)],
+            "al(pha)",
+            "om$1",
+            editor_core::SearchOptions {
+                regex: true,
+                case_sensitive: true,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(resolved[0].text, "ompha");
+        assert_eq!(
+            (resolved[0].line, resolved[0].start, resolved[0].end),
+            (1, 4, 9)
+        );
+    }
+
+    #[test]
+    fn resolve_replacements_drops_a_span_the_file_no_longer_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("a.rs");
+        fs::write(&file, "short\n").unwrap();
+
+        // Span points past the end of the (since-shortened) line.
+        let resolved = resolve_replacements(
+            &[(file, 1, 40, 45)],
+            "alpha",
+            "omega",
+            editor_core::SearchOptions {
+                regex: false,
+                case_sensitive: true,
+            },
+        )
+        .unwrap();
+
+        assert!(resolved.is_empty());
     }
 
     #[test]

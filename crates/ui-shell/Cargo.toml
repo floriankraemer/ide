@@ -13,7 +13,7 @@ index-core = { path = "../index-core" }
 pty-core = { path = "../pty-core" }
 terminal-core = { path = "../terminal-core" }
 mcp-server = { path = "../mcp-server" }
-tokio = { version = "1", features = ["rt-multi-thread"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 cxx = "1"
 cxx-qt = "0.9"
 cxx-qt-lib = "0.9"

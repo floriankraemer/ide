@@ -48,6 +48,19 @@ pub struct Settings {
     pub editor_font_size: u32,
     #[serde(default)]
     pub editor_font_family: String,
+    /// Whether the MCP server listens at all. `None` means "never chosen",
+    /// which resolves to [`DEFAULT_MCP_ENABLED`] — a bare `bool` would make
+    /// the derived `Default` say "off" and silently disable the server for
+    /// everyone whose `settings.toml` predates this field.
+    /// Read through [`Settings::mcp_enabled_or_default`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp_enabled: Option<bool>,
+    /// TCP port the MCP server binds on `127.0.0.1`. `0` means "let the OS
+    /// assign one" (ADR-0004's multi-instance property); any other value is
+    /// bound exactly, and a bind failure is reported rather than silently
+    /// falling back.
+    #[serde(default)]
+    pub mcp_port: u16,
     /// Color name (e.g. "background", "foreground") to hex string (e.g.
     /// "#1e1e1e"). Kept intentionally simple — a richer color model is the
     /// Editor settings category's job, not this crate's.
@@ -97,6 +110,11 @@ const DEFAULT_THEME: &str = "dark";
 const DEFAULT_EDITOR_FONT_FAMILY: &str = "Monospace";
 const DEFAULT_EDITOR_FONT_SIZE: u32 = 11;
 
+/// The MCP server is on unless the user turns it off: the IDE's whole point
+/// of having one is that an agent can attach to a running instance without
+/// the human first hunting for a switch.
+const DEFAULT_MCP_ENABLED: bool = true;
+
 impl Settings {
     /// The active theme name, defaulting to [`DEFAULT_THEME`] when unset —
     /// so the view never has to special-case an empty string itself.
@@ -126,6 +144,12 @@ impl Settings {
         } else {
             self.editor_font_size
         }
+    }
+
+    /// Whether the MCP server should listen, defaulting to
+    /// [`DEFAULT_MCP_ENABLED`] when the user has never chosen.
+    pub fn mcp_enabled_or_default(&self) -> bool {
+        self.mcp_enabled.unwrap_or(DEFAULT_MCP_ENABLED)
     }
 
     /// The keyboard shortcuts in force, defaults included — the view asks
@@ -215,6 +239,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mcp_defaults_to_enabled_on_an_os_assigned_port() {
+        let settings = Settings::default();
+        assert!(settings.mcp_enabled_or_default());
+        assert_eq!(settings.mcp_port, 0);
+    }
+
+    #[test]
+    fn mcp_can_be_turned_off_and_pinned_to_a_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            mcp_enabled: Some(false),
+            mcp_port: 7337,
+            ..Settings::default()
+        };
+
+        save(dir.path(), &settings).unwrap();
+        let loaded = load(dir.path()).unwrap();
+
+        assert!(!loaded.mcp_enabled_or_default());
+        assert_eq!(loaded.mcp_port, 7337);
+    }
+
+    #[test]
+    fn settings_file_without_mcp_keys_keeps_the_server_enabled() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(SETTINGS_FILE), "theme = \"light\"\n").unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+
+        assert_eq!(loaded.theme_name(), "light");
+        assert!(loaded.mcp_enabled_or_default());
+        assert_eq!(loaded.mcp_port, 0);
+    }
+
+    #[test]
     fn round_trips_non_default_settings() {
         let dir = tempfile::tempdir().unwrap();
 
@@ -225,6 +284,8 @@ mod tests {
             theme: "dark".to_string(),
             editor_font_size: 14,
             editor_font_family: "Fira Code".to_string(),
+            mcp_enabled: Some(true),
+            mcp_port: 7337,
             editor_colors: colors,
             recent_projects: vec![PathBuf::from("/home/user/project-a")],
             recent_files: vec![PathBuf::from("/home/user/project-a/src/main.rs")],
