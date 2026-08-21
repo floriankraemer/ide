@@ -1,9 +1,10 @@
 ; F# highlights.scm — adapted from tree-sitter-fsharp 0.3.11's own
 ; queries/highlights.scm (MIT, https://github.com/ionide/tree-sitter-fsharp).
-; Eleven upstream patterns guarded by `#match?`/`#eq?` predicates were
-; dropped: this crate's highlighter does not evaluate predicates (see
-; queries/go/highlights.scm), so an unevaluated guard ships unguarded and
-; paints every identifier it can reach.
+; Eleven upstream patterns guarded by `#match?`/`#eq?` predicates are
+; still absent: not because this crate leaves predicates unevaluated (it
+; does not — see queries/go/highlights.scm) but because they have not been
+; ported back. The naming-conventions block at the end of this file is the
+; part that has.
 ;
 ; The queries are written against the implementation grammar
 ; (`LANGUAGE_FSHARP`); the crate's second grammar, for `.fsi` signature
@@ -407,3 +408,19 @@
   (identifier)+ @variable.member
   .
   (identifier)))
+
+; --- Naming conventions -----------------------------------------------
+;
+; Guarded by `#match?` text predicates, which `QueryCursor::matches` does
+; evaluate (see `spans_from_tree`). They sit last on purpose: captures on
+; the same node resolve first-pattern-wins, so every specific pattern
+; above still beats these catch-alls.
+
+; SCREAMING_CASE is a constant. Two characters minimum, so a bare
+; `T` stays a type rather than becoming a constant.
+((identifier) @constant
+  (#match? @constant "^[A-Z][A-Z0-9_]+$"))
+
+; CamelCase is a type.
+((identifier) @type
+  (#match? @type "^[A-Z]"))

@@ -9,7 +9,9 @@
 ;
 ; Adapted from tree-sitter-c and tree-sitter-cpp (MIT, Copyright (c) 2014
 ; Max Brunsfeld), minus the `#match?` and catch-all `(identifier)`
-; patterns — this crate does not evaluate text predicates.
+; patterns — not because text predicates go unevaluated (they are
+; evaluated, see queries/go/highlights.scm) but because they have not been
+; ported back, apart from the naming-conventions block at the end.
 
 ; --- inlined from queries/c/highlights.scm -------------------------------
 
@@ -88,3 +90,19 @@
   "namespace" "new" "noexcept" "override" "private" "protected" "public"
   "requires" "template" "throw" "try" "typename" "using" "virtual"
 ] @keyword
+
+; --- Naming conventions -----------------------------------------------
+;
+; Guarded by `#match?` text predicates, which `QueryCursor::matches` does
+; evaluate (see `spans_from_tree`). They sit last on purpose: captures on
+; the same node resolve first-pattern-wins, so every specific pattern
+; above still beats these catch-alls.
+
+; SCREAMING_CASE is a constant. Two characters minimum, so a bare
+; `T` stays a type rather than becoming a constant.
+((identifier) @constant
+  (#match? @constant "^[A-Z][A-Z0-9_]+$"))
+
+; CamelCase is a type.
+((identifier) @type
+  (#match? @type "^[A-Z]"))

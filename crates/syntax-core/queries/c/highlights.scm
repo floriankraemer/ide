@@ -1,12 +1,15 @@
 ; C highlights.scm — adapted from tree-sitter-c's own
 ; queries/highlights.scm (MIT, Copyright (c) 2014 Max Brunsfeld).
 ;
-; Departures from upstream: the catch-all `(identifier) @variable` and the
-; `#match?`-driven SCREAMING_CASE -> @constant pattern are dropped (this
-; crate does not evaluate text predicates, and a catch-all would emit a
-; span under every more specific capture), and upstream's `@delimiter` is
-; spelled `@punctuation.delimiter`, which is the name this crate's scope
-; taxonomy knows.
+; Departures from upstream: the `#match?`-driven SCREAMING_CASE ->
+; @constant pattern lives in the naming-conventions block at the end of
+; this file, where first-pattern-wins keeps it from overriding anything
+; more specific (text predicates are evaluated — see
+; queries/go/highlights.scm); the catch-all `(identifier) @variable` is
+; still absent, though placing it last would now cost nothing, because
+; nobody has ported it back; and upstream's `@delimiter` is spelled
+; `@punctuation.delimiter`, which is the name this crate's scope taxonomy
+; knows.
 
 (comment) @comment
 
@@ -57,3 +60,15 @@
   "."
   ";"
 ] @punctuation.delimiter
+
+; --- Naming conventions -----------------------------------------------
+;
+; Guarded by `#match?` text predicates, which `QueryCursor::matches` does
+; evaluate (see `spans_from_tree`). They sit last on purpose: captures on
+; the same node resolve first-pattern-wins, so every specific pattern
+; above still beats these catch-alls.
+
+; SCREAMING_CASE is a constant. Two characters minimum, so a bare
+; `T` stays a type rather than becoming a constant.
+((identifier) @constant
+  (#match? @constant "^[A-Z][A-Z0-9_]+$"))

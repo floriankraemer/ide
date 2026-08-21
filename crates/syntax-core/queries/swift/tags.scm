@@ -3,9 +3,10 @@
 ;
 ; `class`, `struct`, `enum`, `actor` and `extension` share one
 ; `class_declaration` node in this grammar, distinguished by its
-; `declaration_kind` token — matched literally here, since this crate does
-; not evaluate `#eq?` predicates. `extension` and `actor` have no
-; `SymbolKind` and are deliberately not extracted.
+; `declaration_kind` token — matched literally here rather than with an
+; `#eq?` predicate, which would work just as well (predicates are
+; evaluated, see queries/go/highlights.scm) but buys nothing. `extension`
+; and `actor` have no `SymbolKind` and are deliberately not extracted.
 
 (class_declaration declaration_kind: "class" name: (type_identifier) @name) @definition.class
 (class_declaration declaration_kind: "struct" name: (type_identifier) @name) @definition.struct

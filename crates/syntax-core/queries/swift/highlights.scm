@@ -1,13 +1,14 @@
 ; Swift highlights.scm — adapted from tree-sitter-swift 0.7.3's own
 ; queries/highlights.scm (MIT, https://github.com/alex-pinkus/tree-sitter-swift).
-; Two classes of upstream pattern were dropped:
+; Two classes of upstream pattern are still absent:
 ;
-;   * four guarded by `#match?`/`#any-of?` predicates — this crate's
-;     highlighter does not evaluate predicates (see
-;     queries/go/highlights.scm);
-;   * the catch-all `(simple_identifier) @variable` — span extraction has
-;     no first-wins dedup, so a catch-all stacks a span underneath every
-;     specific capture instead of losing to it.
+;   * four guarded by `#match?`/`#any-of?` predicates — those are
+;     evaluated (see queries/go/highlights.scm), so they would work as
+;     written; nobody has ported them back;
+;   * the catch-all `(simple_identifier) @variable` — span extraction
+;     resolves same-node captures first-pattern-wins now, so a catch-all
+;     placed last would lose to every specific capture instead of stacking
+;     a span underneath it; it has simply not been ported back.
 
 [
   "."
@@ -330,3 +331,19 @@
     "<"
     ">"
   ] @punctuation.bracket)
+
+; --- Naming conventions -----------------------------------------------
+;
+; Guarded by `#match?` text predicates, which `QueryCursor::matches` does
+; evaluate (see `spans_from_tree`). They sit last on purpose: captures on
+; the same node resolve first-pattern-wins, so every specific pattern
+; above still beats these catch-alls.
+
+; SCREAMING_CASE is a constant. Two characters minimum, so a bare
+; `T` stays a type rather than becoming a constant.
+((simple_identifier) @constant
+  (#match? @constant "^[A-Z][A-Z0-9_]+$"))
+
+; CamelCase is a type.
+((simple_identifier) @type
+  (#match? @type "^[A-Z]"))

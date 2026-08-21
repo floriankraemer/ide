@@ -2,11 +2,13 @@
 ; own queries/highlights.scm (MIT, https://github.com/wharflab/tree-sitter-containerfile,
 ; derived from camdencheek/tree-sitter-dockerfile, MIT (c) 2021 Camden Cheek).
 ;
-; Two systematic changes, the same ones go/highlights.scm documents:
+; Two systematic differences from upstream; go/highlights.scm documents
+; the predicate rules they follow:
 ;
-;   * the `((variable) @constant (#match? ...))` pattern is dropped, because
-;     `spans_from_tree` does not evaluate predicates and the guard would
-;     ship unevaluated, painting every expansion as a constant;
+;   * the `((variable) @constant (#match? ...))` pattern is still absent —
+;     `#match?` is evaluated (see queries/go/highlights.scm), so it would
+;     work as written and only paint the expansions it names; it has just
+;     not been ported back;
 ;   * the decorative `@spell` capture on `(comment)` is dropped, and
 ;     `@label` on heredoc markers becomes `@string.special` — the standard
 ;     name in `syntax_core::SCOPES` for a delimiter that belongs to a

@@ -134,17 +134,20 @@ left rather than fixed in place.
 They are recorded here so the next session can pick them up with the
 reasoning intact.
 
-- **Query predicates are not evaluated.** ([#16](https://github.com/floriankraemer/ide/issues/16))
-  `spans_from_tree` runs `QueryCursor::matches` without checking `#match?`,
-  `#eq?`, `#any-of?` or `#is-not?`.
-  Every tranche therefore had to *drop* upstream patterns guarded by them —
-  Ruby's `#is-not? local` rule alone would have painted every identifier as a
-  method call.
-  The cost is real: CamelCase-is-a-type and SCREAMING_CASE-is-a-constant
-  conventions are simply absent.
-  Implementing predicate evaluation would let most of those patterns be
-  restored, and is the single largest available improvement to highlighting
-  quality.
+- **Query predicates.** ([#16](https://github.com/floriankraemer/ide/issues/16), closed)
+  Text predicates *are* evaluated — `QueryCursor::matches` filters on `#eq?`,
+  `#match?`, `#any-of?` and their negated and `#any-*` variants, which is what
+  the tranches had assumed it did not do.
+  What was actually missing was the safety net around the predicates it
+  cannot evaluate, and a precedence rule.
+  Both now exist: a pattern carrying a property predicate (`#is-not? local`)
+  or a general predicate (nvim-treesitter's `#lua-match?`) is dropped whole
+  rather than shipped unguarded, and captures on the same node resolve
+  first-pattern-wins.
+  The CamelCase-is-a-type and SCREAMING_CASE-is-a-constant conventions are
+  restored across fourteen languages.
+  The rest of the patterns each tranche dropped are still absent and can now
+  be ported back file by file, guards and all.
 - **`SCOPES` has no `markup` family.** ([#18](https://github.com/floriankraemer/ide/issues/18))
   Markdown headings, links, emphasis and code spans are captured upstream as
   `@markup.heading`, `@markup.link` and so on, which resolve to nothing here,

@@ -2,14 +2,18 @@
 ; queries/highlights.scm (MIT,
 ; https://github.com/tree-sitter-grammars/tree-sitter-lua).
 ;
-; Three systematic changes, the same ones go/highlights.scm documents:
+; Three systematic differences from upstream; go/highlights.scm documents
+; the predicate rules they follow:
 ;
-;   * the catch-all `(identifier) @variable` is dropped — span extraction
-;     has no first-wins dedup, so it would stack a second span under every
-;     function name, field and parameter;
-;   * every pattern guarded by `#eq?`, `#match?` or `#any-of?` is dropped,
-;     because `spans_from_tree` does not evaluate predicates — the upstream
-;     builtin-function list would otherwise paint every call;
+;   * the catch-all `(identifier) @variable` is still absent — span
+;     extraction resolves same-node captures first-pattern-wins now, so a
+;     catch-all placed last would lose to every function name, field and
+;     parameter instead of stacking under them; it has simply not been
+;     ported back;
+;   * the patterns guarded by `#eq?`, `#match?` or `#any-of?` are also
+;     still absent, not because those predicates go unevaluated (they are
+;     evaluated, see `spans_from_tree`) but because the upstream
+;     builtin-function list has not been ported back yet;
 ;   * Neovim-flavoured capture names are rewritten to the standard ones in
 ;     `syntax_core::SCOPES` (`@conditional`/`@repeat` -> `@keyword`,
 ;     `@field` -> `@variable.member`, `@parameter` -> `@variable.parameter`,
@@ -202,3 +206,19 @@
 (string) @string
 
 (escape_sequence) @string.escape
+
+; --- Naming conventions -----------------------------------------------
+;
+; Guarded by `#match?` text predicates, which `QueryCursor::matches` does
+; evaluate (see `spans_from_tree`). They sit last on purpose: captures on
+; the same node resolve first-pattern-wins, so every specific pattern
+; above still beats these catch-alls.
+
+; SCREAMING_CASE is a constant. Two characters minimum, so a bare
+; `T` stays a type rather than becoming a constant.
+((identifier) @constant
+  (#match? @constant "^[A-Z][A-Z0-9_]+$"))
+
+; CamelCase is a type.
+((identifier) @type
+  (#match? @type "^[A-Z]"))

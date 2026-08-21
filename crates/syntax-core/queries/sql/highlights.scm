@@ -1,12 +1,14 @@
 ; SQL highlights.scm — adapted from tree-sitter-sequel 0.3.11's own
 ; queries/highlights.scm (MIT, https://github.com/derekstride/tree-sitter-sql).
 ;
-; Two systematic changes, the same ones go/highlights.scm documents:
+; Two systematic differences from upstream; go/highlights.scm documents
+; the predicate rules they follow:
 ;
-;   * every pattern guarded by a `#match?` predicate is dropped, because
-;     `spans_from_tree` does not evaluate predicates — the `@number` and
-;     `@float` patterns upstream layers over `(literal)` would otherwise
-;     paint every literal, string ones included;
+;   * every pattern guarded by a `#match?` predicate is still absent —
+;     not because predicates are unevaluated (they are, see
+;     queries/go/highlights.scm) but because the `@number` and `@float`
+;     patterns upstream layers over `(literal)` have not been ported back
+;     yet;
 ;   * Neovim-flavoured capture names are rewritten to the standard ones in
 ;     `syntax_core::SCOPES` (`@field` -> `@variable.member`, `@parameter` ->
 ;     `@variable.parameter`, `@conditional`/`@storageclass`/`@type.qualifier`

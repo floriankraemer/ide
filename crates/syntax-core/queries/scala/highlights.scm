@@ -1,10 +1,11 @@
 ; Scala highlights.scm — adapted from tree-sitter-scala 0.26.2's own
 ; queries/highlights.scm (MIT, https://github.com/tree-sitter/tree-sitter-scala).
 ; Ten upstream patterns guarded by `#match?`/`#eq?`/`#any-of?` predicates
-; were dropped: this crate's highlighter does not evaluate predicates (see
-; queries/go/highlights.scm), and upstream uses them for the "identifier
-; starting with a capital letter is a type" heuristic, which unguarded
-; would paint every identifier as a type.
+; are still absent: not because this crate leaves predicates unevaluated
+; (it does not — see queries/go/highlights.scm) but because nobody has
+; ported them back. Upstream uses them for the "identifier starting with a
+; capital letter is a type" heuristic, which the naming-conventions block
+; at the end of this file covers.
 
 ; CREDITS @stumash (stuart.mashaal@gmail.com)
 
@@ -259,3 +260,19 @@
 (xml_comment) @spell @comment
 (xml_cdata) @string
 (xml_processing_instruction) @keyword.directive
+
+; --- Naming conventions -----------------------------------------------
+;
+; Guarded by `#match?` text predicates, which `QueryCursor::matches` does
+; evaluate (see `spans_from_tree`). They sit last on purpose: captures on
+; the same node resolve first-pattern-wins, so every specific pattern
+; above still beats these catch-alls.
+
+; SCREAMING_CASE is a constant. Two characters minimum, so a bare
+; `T` stays a type rather than becoming a constant.
+((identifier) @constant
+  (#match? @constant "^[A-Z][A-Z0-9_]+$"))
+
+; CamelCase is a type.
+((identifier) @type
+  (#match? @type "^[A-Z]"))

@@ -1,12 +1,16 @@
 ; Zig highlights.scm — adapted from tree-sitter-zig 1.1.2's own
 ; queries/highlights.scm (MIT, https://github.com/tree-sitter-grammars/tree-sitter-zig).
-; Two classes of upstream pattern were dropped:
+; Two classes of upstream pattern are still absent:
 ;
-;   * five guarded by `#lua-match?`/`#eq?` predicates — this crate's
-;     highlighter does not evaluate predicates (see queries/go/highlights.scm);
-;   * the catch-all `(identifier) @variable` — span extraction has no
-;     first-wins dedup, so a catch-all stacks a span underneath every
-;     specific capture instead of losing to it.
+;   * five guarded by `#lua-match?`/`#eq?` predicates. The `#eq?` ones are
+;     evaluated (see queries/go/highlights.scm) and have just not been
+;     ported back; `#lua-match?` is a general predicate tree-sitter does
+;     not know, so `spans_from_tree` drops the whole pattern — pasting one
+;     of those in would leave it inert rather than unguarded;
+;   * the catch-all `(identifier) @variable` — same-node captures resolve
+;     first-pattern-wins now, so a catch-all placed last would lose to
+;     every specific capture instead of stacking a span underneath it; it
+;     has simply not been ported back.
 
 ; Variables
 
@@ -281,3 +285,19 @@
 ; Comments
 
 (comment) @comment @spell
+
+; --- Naming conventions -----------------------------------------------
+;
+; Guarded by `#match?` text predicates, which `QueryCursor::matches` does
+; evaluate (see `spans_from_tree`). They sit last on purpose: captures on
+; the same node resolve first-pattern-wins, so every specific pattern
+; above still beats these catch-alls.
+
+; SCREAMING_CASE is a constant. Two characters minimum, so a bare
+; `T` stays a type rather than becoming a constant.
+((identifier) @constant
+  (#match? @constant "^[A-Z][A-Z0-9_]+$"))
+
+; CamelCase is a type.
+((identifier) @type
+  (#match? @type "^[A-Z]"))

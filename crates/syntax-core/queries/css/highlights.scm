@@ -2,17 +2,15 @@
 ; `queries/highlights.scm` (MIT,
 ; https://github.com/tree-sitter/tree-sitter-css).
 ;
-; Two upstream patterns are dropped, for the reasons the earlier tranches
-; recorded in bash/highlights.scm and go/highlights.scm:
+; Two upstream patterns are still absent:
 ;
 ;   ((property_name) @variable (#match? @variable "^--"))
 ;   ((plain_value)   @variable (#match? @variable "^--"))
 ;
-; span extraction does not evaluate predicates, so these would ship
-; unguarded and paint *every* property name and every plain value as a
-; variable, stacking a `@variable` span under the `@property` one that
-; follows. Custom properties therefore highlight as ordinary properties
-; and values, which is wrong only in shade, not in kind.
+; `#match?` is evaluated (see queries/go/highlights.scm), so both would
+; match only the custom properties they name; nobody has ported them back
+; yet. Until then custom properties highlight as ordinary properties and
+; values, which is wrong only in shade, not in kind.
 ;
 ; At-rules are the one thing CSS has that reads as a keyword — `@media`,
 ; `@import`, `!important` — so there is no `no-scopes.txt` here.
