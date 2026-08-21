@@ -2841,7 +2841,16 @@ impl ffi::SearchModel {
         // Marked as building *before* the worker starts, so a query fired in
         // the seconds-to-minutes window between Open Folder and `indexReady`
         // is answered with "still building" rather than "no project open".
-        *slot.write().unwrap() = index_core::IndexSlot::Building;
+        {
+            let mut current = slot.write().unwrap();
+            // A second open for the project already being indexed would race
+            // its own worker for tantivy's one-writer-per-directory lock and
+            // fail with `LockBusy`; the build in flight is the one to wait for.
+            if matches!(&*current, index_core::IndexSlot::Building(building) if building == &root) {
+                return;
+            }
+            *current = index_core::IndexSlot::Building(root.clone());
+        }
         std::thread::spawn(move || match index_core::TextIndex::open_or_build(&root) {
             Ok(index) => {
                 *slot.write().unwrap() = index_core::IndexSlot::Ready(Box::new(index));
