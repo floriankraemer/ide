@@ -4,6 +4,7 @@
 #include "find_bar.h"
 #include "keymap_page.h"
 #include "search_everywhere_dialog.h"
+#include "problems_panel.h"
 #include "search_results_panel.h"
 #include "splash_screen.h"
 #include "syntax_highlighter.h"
@@ -21,7 +22,10 @@
 #include <QElapsedTimer>
 #include <QKeyEvent>
 #include <QSet>
+#include <QTextBlock>
 #include <QTimer>
+#include <QToolButton>
+#include <QVector>
 #include <QTreeWidget>
 #include <QColor>
 #include <QColorDialog>
@@ -122,8 +126,10 @@ void moveCursorToLine(QPlainTextEdit *editor, int line, int column)
 class EditorTabs : public QObject
 {
 public:
-    EditorTabs(DocumentManager *docManager, QSplitter *root, QWidget *window)
+    EditorTabs(DocumentManager *docManager, LanguageService *languageService, QSplitter *root,
+                QWidget *window)
       : docManager_(docManager)
+      , languageService_(languageService)
       , root_(root)
       , window_(window)
     {
@@ -334,6 +340,52 @@ public:
         }
     }
 
+    // Task L2: repaint every open editor's squiggles from whatever the
+    // language servers have published. Called on the service's
+    // diagnosticsChanged signal — the store is the single source, so no
+    // per-editor bookkeeping of "which diagnostics are mine" exists here.
+    void applyDiagnostics()
+    {
+        forEachEditor([this](QPlainTextEdit *editor) {
+            auto *codeEditor = qobject_cast<CodeEditor *>(editor);
+            const QString path = editor->property("lspPath").toString();
+            if (!codeEditor) {
+                return;
+            }
+            QVector<DiagnosticSpan> spans;
+            if (!path.isEmpty()) {
+                const QTextDocument *document = editor->document();
+                for (const FfiDiagnostic &row : languageService_->diagnosticsForFile(path)) {
+                    // LSP line/character are UTF-16 code units, which is what
+                    // QTextBlock/QTextCursor count too — so this is arithmetic,
+                    // not a re-encoding (contrast SyntaxHighlighter, which has
+                    // to map tree-sitter's UTF-8 byte offsets).
+                    const QTextBlock startBlock =
+                      document->findBlockByNumber(static_cast<int>(row.line) - 1);
+                    if (!startBlock.isValid()) {
+                        continue;
+                    }
+                    const QTextBlock endBlock =
+                      document->findBlockByNumber(static_cast<int>(row.end_line) - 1);
+                    const int start =
+                      startBlock.position()
+                      + qMin(static_cast<int>(row.column), startBlock.length() - 1);
+                    int end = start;
+                    if (endBlock.isValid()) {
+                        end = endBlock.position()
+                              + qMin(static_cast<int>(row.end_column), endBlock.length() - 1);
+                    }
+                    if (end <= start) {
+                        // A zero-width range still has to be visible.
+                        end = qMin(start + 1, startBlock.position() + startBlock.length() - 1);
+                    }
+                    spans.append(DiagnosticSpan{start, end, severityColor(row.severity)});
+                }
+            }
+            codeEditor->setDiagnosticSpans(spans);
+        });
+    }
+
     // The current editor's find bar, or nothing when no tab is open.
     void withFindBar(const std::function<void(FindBar *)> &action)
     {
@@ -448,6 +500,14 @@ public:
             QMessageBox::critical(window_, tr("Cannot save file"), result.message);
             return;
         }
+        // The tab now backs a different file: the server has to be told about
+        // both halves of that move.
+        const QString previous = editor->property("lspPath").toString();
+        if (!previous.isEmpty()) {
+            languageService_->documentClosed(previous);
+        }
+        editor->setProperty("lspPath", path);
+        languageService_->documentOpened(path, editor->toPlainText());
         editor->document()->setModified(false);
         renderTabText(activeGroup_, index, docManager_->tabTitle(tabId), false);
     }
@@ -900,6 +960,12 @@ private:
             return false;
         }
         editor->document()->setModified(false);
+        const QString path = editor->property("lspPath").toString();
+        if (!path.isEmpty()) {
+            // Servers that only re-analyse on save (and linters behind them)
+            // need this; the buffer itself already went across as didChange.
+            languageService_->documentSaved(path);
+        }
         return true;
     }
 
@@ -1034,7 +1100,31 @@ private:
                 docManager_,
                 [this, tabId](bool modified) { docManager_->setTabModified(tabId, modified); });
 
+        // Task L2: tell the language server about the document, and keep it
+        // told. The path rides on the widget (like `tabId`) so a close can
+        // still name the document after the session has forgotten the tab.
+        const QString path = docManager_->tabPath(tabId);
+        editor->setProperty("lspPath", path);
+        if (!path.isEmpty()) {
+            languageService_->documentOpened(path, editor->toPlainText());
+        }
+        // didChange is full-text (ADR-0016), so it is debounced rather than
+        // sent per keystroke — the delay is a view-side rate limit, not a
+        // rule about when a server should re-analyse.
+        auto *changeTimer = new QTimer(editor);
+        changeTimer->setSingleShot(true);
+        changeTimer->setInterval(300);
+        connect(changeTimer, &QTimer::timeout, this, [this, editor]() {
+            const QString current = editor->property("lspPath").toString();
+            if (!current.isEmpty()) {
+                languageService_->documentChanged(current, editor->toPlainText());
+            }
+        });
+        connect(editor->document(), &QTextDocument::contentsChanged, changeTimer,
+                 qOverload<>(&QTimer::start));
+
         group->addTab(editor, title);
+        applyDiagnostics();
     }
 
     void onTabClosed(quint64 tabId)
@@ -1044,6 +1134,10 @@ private:
             return;
         }
         QWidget *widget = loc.group->widget(loc.index);
+        const QString path = widget->property("lspPath").toString();
+        if (!path.isEmpty()) {
+            languageService_->documentClosed(path);
+        }
         loc.group->removeTab(loc.index);
         delete widget;
         if (loc.group->count() == 0) {
@@ -1178,6 +1272,7 @@ private:
     }
 
     DocumentManager *docManager_;
+    LanguageService *languageService_;
     QSplitter *root_;
     QWidget *window_;
     QList<QTabWidget *> groups_;
@@ -2070,11 +2165,14 @@ struct CentralWidgets
     FindUsagesPanel *findUsagesPanel;
     ads::CDockWidget *findUsagesDock;
     SearchEverywhereDialog *searchEverywhereDialog;
+    ProblemsPanel *problemsPanel;
+    ads::CDockWidget *problemsDock;
 };
 
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
                                    DocumentManager *docManager, AppSettings *appSettings,
-                                   SearchModel *searchModel, TerminalSession *terminalSession)
+                                   SearchModel *searchModel, TerminalSession *terminalSession,
+                                   LanguageService *languageService)
 {
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
@@ -2100,7 +2198,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     treeDock->setWidget(treeView);
     dockManager->addDockWidget(ads::LeftDockWidgetArea, treeDock, editorArea);
 
-    auto *editorTabs = new EditorTabs(docManager, editorRoot, window);
+    auto *editorTabs = new EditorTabs(docManager, languageService, editorRoot, window);
 
     // Task H: bottom dock panel, matching where JetBrains/VS-style IDEs
     // dock their Find in Files results. Reuses the one EditorTabs instance
@@ -2157,6 +2255,24 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // conventional spot for an embedded shell in JetBrains/VS-style IDEs.
     // The widget itself only starts the PTY once it's actually shown/sized
     // (TerminalWidget::showEvent/resizeEvent), not eagerly here.
+    // Task L2: the Problems panel, tabbed into the same bottom area as Find
+    // in Files and Find Usages — the same "list of locations" shape, fed by
+    // the language servers instead of a query.
+    auto *problemsPanel = new ProblemsPanel(languageService, openAt, dockManager);
+    auto *problemsDock = new ads::CDockWidget(dockManager, QObject::tr("Problems"));
+    problemsDock->setWidget(problemsPanel);
+    dockManager->addDockWidget(ads::CenterDockWidgetArea, problemsDock, bottomArea);
+    // Hidden until there is something to show (or the View menu asks): it
+    // opens itself once per session, the first time a diagnostic arrives.
+    problemsDock->toggleView(false);
+    problemsPanel->setFirstDiagnosticCallback([problemsDock]() {
+        problemsDock->toggleView(true);
+    });
+    // The squiggles and the panel read the same store, so one signal drives
+    // both.
+    QObject::connect(languageService, &LanguageService::diagnosticsChanged, editorTabs,
+                      [editorTabs]() { editorTabs->applyDiagnostics(); });
+
     auto *terminalWidget = new TerminalWidget(terminalSession, appSettings, dockManager);
     auto *terminalDock = new ads::CDockWidget(dockManager, QObject::tr("Terminal"));
     terminalDock->setWidget(terminalWidget);
@@ -2174,8 +2290,10 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                       [classViewPanel, editorTabs](quint64, const QString &) {
                           classViewPanel->refresh(editorTabs->currentTabId());
                       });
-    editorTabs->setActiveTabChangedCallback([classViewPanel, editorTabs]() {
+    editorTabs->setActiveTabChangedCallback([classViewPanel, editorTabs, problemsPanel]() {
         classViewPanel->refresh(editorTabs->currentTabId());
+        // The current file's group sorts to the top of the Problems panel.
+        problemsPanel->setCurrentFile(editorTabs->currentPath());
     });
     QObject::connect(docManager, &DocumentManager::tabModifiedChanged, classViewPanel,
                       [classViewPanel, editorTabs](quint64 tabId, bool modified) {
@@ -2192,6 +2310,16 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                       &ProjectTreeModel::projectOpened,
                       searchModel,
                       [searchModel](const QString &rootPath) { searchModel->openIndex(rootPath); });
+
+    // Same project-open lifecycle event for the language servers: the root is
+    // what `initialize` reports, and re-opening a project must not leave the
+    // previous one's servers running.
+    QObject::connect(treeModel,
+                      &ProjectTreeModel::projectOpened,
+                      languageService,
+                      [languageService](const QString &rootPath) {
+                          languageService->openProject(rootPath);
+                      });
 
     // Initial bottom-panel height: without it the area is sized from the
     // terminal's tiny size hint (~60px), which is unusable for every panel
@@ -2396,7 +2524,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     return CentralWidgets{editorTabs,      dockManager,    searchResultsPanel,
                            searchResultsDock, classViewPanel, classViewDock,
                            terminalDock,    terminalWidget, findUsagesPanel,
-                           findUsagesDock,  searchEverywhereDialog};
+                           findUsagesDock,  searchEverywhereDialog,
+                           problemsPanel,   problemsDock};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -2439,6 +2568,10 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // establish above. The shell isn't spawned yet (TerminalSession::start
     // hasn't been called) until TerminalWidget knows its own pixel size.
     auto *terminalSession = new TerminalSession(window);
+    // Task L2: one language-server adapter per window, alongside the other
+    // per-window QObjects. It launches nothing until a project is opened and
+    // a file of a configured language is opened in it.
+    auto *languageService = new LanguageService(window);
     // One MCP server per process, brought up right after the shared
     // DocumentManager exists — the listener thread it spawns dispatches
     // every EditorCommand back onto this same QObject's Qt thread. Whether
@@ -2459,7 +2592,8 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     docManager->applyMcpSettings();
     progress(3, QObject::tr("Building workspace..."));
     const CentralWidgets central =
-      buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession);
+      buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession,
+                          languageService);
     EditorTabs *editorTabs = central.editorTabs;
     window->setEditorTabs(editorTabs);
     window->setAppSettings(appSettings);
@@ -2482,6 +2616,34 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     auto *languageLabel = new QLabel(statusBar);
     auto *positionLabel = new QLabel(statusBar);
     auto *encodingLabel = new QLabel(QStringLiteral("UTF-8"), statusBar);
+    // Task L2: a compact problem counter, coloured by the worst severity
+    // present and empty when there is nothing wrong. A button rather than a
+    // label because clicking it opens the Problems dock.
+    auto *problemsButton = new QToolButton(statusBar);
+    problemsButton->setAutoRaise(true);
+    problemsButton->setVisible(false);
+    QObject::connect(problemsButton, &QToolButton::clicked, window, [central]() {
+        central.problemsDock->toggleView(true);
+        central.problemsDock->raise();
+        central.problemsPanel->focusTree();
+    });
+    const auto updateProblemsButton = [problemsButton, languageService]() {
+        const FfiDiagnosticCounts counts = languageService->diagnosticCounts();
+        const bool any = counts.errors > 0 || counts.warnings > 0;
+        problemsButton->setVisible(any);
+        if (!any) {
+            return;
+        }
+        problemsButton->setText(QObject::tr("%1 errors, %2 warnings")
+                                   .arg(counts.errors)
+                                   .arg(counts.warnings));
+        const QColor color = severityColor(counts.errors > 0 ? FfiSeverity::Error
+                                                             : FfiSeverity::Warning);
+        problemsButton->setStyleSheet(QStringLiteral("color: %1;").arg(color.name()));
+    };
+    QObject::connect(languageService, &LanguageService::diagnosticsChanged, window,
+                      updateProblemsButton);
+    statusBar->addPermanentWidget(problemsButton);
     statusBar->addPermanentWidget(languageLabel);
     statusBar->addPermanentWidget(positionLabel);
     statusBar->addPermanentWidget(encodingLabel);
@@ -2592,6 +2754,13 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QObject::connect(classViewAction, &QAction::triggered, window, [central]() {
         central.classViewDock->toggleView(true);
         central.classViewDock->raise();
+    });
+    QAction *problemsAction = registerAction(viewMenu, QStringLiteral("view.problems"),
+                                             QObject::tr("Problems"), appSettings, *actions);
+    QObject::connect(problemsAction, &QAction::triggered, window, [central]() {
+        central.problemsDock->toggleView(true);
+        central.problemsDock->raise();
+        central.problemsPanel->focusTree();
     });
     QAction *terminalAction = registerAction(viewMenu, QStringLiteral("view.terminal"),
                                              QObject::tr("Terminal"), appSettings, *actions);

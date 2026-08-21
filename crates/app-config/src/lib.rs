@@ -39,6 +39,30 @@ pub struct WindowGeometry {
     pub height: u32,
 }
 
+/// One `[[language_server]]` entry: what the user says about the language
+/// server for one language id.
+///
+/// Every field but `language_id` is optional, so `enabled = false` alone
+/// switches a shipped server off without wiping its command. This mirrors
+/// `lsp_core::ServerOverride` field for field but is declared here so the
+/// config crate keeps no dependency on the LSP client (ADR-0016) — `ui-shell`
+/// maps one to the other at the seam.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct LanguageServerSetting {
+    /// LSP language id, e.g. `"rust"`. The key both the shipped catalog and
+    /// this table are keyed by.
+    #[serde(default)]
+    pub language_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+}
+
 /// Structured application settings, round-tripped to `settings.toml` in the
 /// config directory. Every field is `#[serde(default)]` so old or partially
 /// written settings files still parse.
@@ -112,6 +136,11 @@ pub struct Settings {
     /// resolution in `syntax-core` — this crate only stores them.
     #[serde(default)]
     pub syntax_colors_by_language: LanguageScopeStyles,
+    /// Per-language language-server overrides, written as `[[language_server]]`
+    /// blocks. Layered over the shipped catalog by `lsp_core::resolve_servers`;
+    /// this crate only stores them.
+    #[serde(default, rename = "language_server")]
+    pub language_servers: Vec<LanguageServerSetting>,
 }
 
 /// Cap on remembered recent projects — enough for a useful menu without
@@ -340,6 +369,11 @@ mod tests {
                     ScopeStyle::Color("#ffc66d".to_string()),
                 )]),
             )]),
+            language_servers: vec![LanguageServerSetting {
+                language_id: "rust".to_string(),
+                command: Some("/opt/rust-analyzer".to_string()),
+                ..LanguageServerSetting::default()
+            }],
         };
 
         save(dir.path(), &settings).unwrap();
@@ -608,5 +642,43 @@ mod tests {
             loaded.syntax_colors_by_language["rust"]["macro"].fg(),
             Some("#bbb529")
         );
+    }
+
+    #[test]
+    fn language_server_overrides_round_trip_as_array_of_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            language_servers: vec![
+                LanguageServerSetting {
+                    language_id: "rust".into(),
+                    command: Some("/opt/ra".into()),
+                    args: Some(vec!["--log".into()]),
+                    ..LanguageServerSetting::default()
+                },
+                LanguageServerSetting {
+                    language_id: "go".into(),
+                    enabled: Some(false),
+                    ..LanguageServerSetting::default()
+                },
+            ],
+            ..Settings::default()
+        };
+
+        save(dir.path(), &settings).unwrap();
+        let toml = fs::read_to_string(dir.path().join(SETTINGS_FILE)).unwrap();
+        assert!(toml.contains("[[language_server]]"), "{toml}");
+
+        let loaded = load(dir.path()).unwrap();
+        assert_eq!(loaded.language_servers, settings.language_servers);
+        // Unset fields stay unset rather than being written as empty strings,
+        // so "only disable it" cannot silently wipe the shipped command.
+        assert!(loaded.language_servers[1].command.is_none());
+    }
+
+    #[test]
+    fn a_settings_file_without_language_servers_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(SETTINGS_FILE), "theme = \"light\"\n").unwrap();
+        assert!(load(dir.path()).unwrap().language_servers.is_empty());
     }
 }

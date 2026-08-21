@@ -130,6 +130,12 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "Ctrl+`",
     },
     ActionDef {
+        id: "view.problems",
+        label: "Problems",
+        category: "View",
+        default_shortcut: "Ctrl+Alt+P",
+    },
+    ActionDef {
         id: "view.searchEverywhere",
         label: "Search Everywhere...",
         category: "View",

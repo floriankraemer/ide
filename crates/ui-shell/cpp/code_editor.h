@@ -35,6 +35,19 @@ struct FoldRange
     }
 };
 
+
+// One diagnostic's underline, view-local: [start, end) document (UTF-16)
+// positions plus the colour its severity gets. Converted from the FFI's
+// line/character pairs by whoever owns the mapping (main_window.cpp), so this
+// widget stays decoupled from the cxx-qt-generated header — same arrangement
+// as FoldRange above.
+struct DiagnosticSpan
+{
+    int start;
+    int end;
+    QColor color;
+};
+
 // Line-number gutter (Qt's classic Code Editor Example pattern). Q_OBJECT is
 // required here for the block-count/scroll signals below to reach private
 // slots — this is the crate's first hand-written (non-cxx-qt-generated)
@@ -67,6 +80,20 @@ public:
     // them (editor_core::search does) nor tracks which one is current
     // beyond `currentMatch`, an index into `matches` or -1 for none.
     void setMatchSelections(const QVector<QPair<int, int>> &matches, int currentMatch);
+
+
+    // Task L2: the diagnostic squiggles for this editor's file.
+    //
+    // Deliberately an extra-selection layer rather than formats pushed into
+    // SyntaxHighlighter: a QSyntaxHighlighter owns the character formats of
+    // every block it touches and rewrites them on each rehighlight, so a
+    // diagnostic underline living there would be erased by the next keystroke
+    // (or would have to be merged into every token format, coupling the two).
+    // Extra selections are composited on top of the highlighter's formats by
+    // QPlainTextEdit itself, arrive and disappear asynchronously with the
+    // server, and cost no reparse — which is exactly the lifetime a
+    // diagnostic has.
+    void setDiagnosticSpans(const QVector<DiagnosticSpan> &spans);
 
     // S2: explicit override for the current-line band, "#rrggbb" or empty
     // for "derive it from the editor palette" (the same empty-means-theme
@@ -123,6 +150,7 @@ private:
     QString currentLineColor_;
     QVector<FoldRange> foldRanges_;
     QVector<FoldRange> collapsedRanges_;
+    QVector<DiagnosticSpan> diagnosticSpans_;
     // The Ctrl-hovered word, as [start, end) document positions, or
     // {-1, -1} for none. Pure view state, like the fold collapse state.
     QPair<int, int> hoverSpan_{-1, -1};

@@ -296,6 +296,51 @@ mod ffi {
         end_col: u32,
     }
 
+    /// Severity of one diagnostic, 1:1 with `lsp_core::Severity` — the
+    /// worst-first order is the domain's, not the view's.
+    enum FfiSeverity {
+        Error,
+        Warning,
+        Information,
+        Hint,
+    }
+
+    /// One row of the Problems panel / one squiggle, 1:1 with
+    /// `lsp_core::DiagnosticRow`. `line` is 1-based and `column` 0-based,
+    /// both counted in UTF-16 code units — which is what LSP speaks and what
+    /// `QTextBlock`/`QTextCursor` count, so the view needs no conversion
+    /// table (unlike `FfiHighlightSpan`'s UTF-8 byte offsets).
+    struct FfiDiagnostic {
+        path: QString,
+        line: u32,
+        column: u32,
+        end_line: u32,
+        end_column: u32,
+        severity: FfiSeverity,
+        message: QString,
+        source: QString,
+    }
+
+    /// How many diagnostics of each severity exist right now, 1:1 with
+    /// `lsp_core::DiagnosticCounts` — for the status-bar counter and the
+    /// Problems panel's filter buttons.
+    struct FfiDiagnosticCounts {
+        errors: u32,
+        warnings: u32,
+        infos: u32,
+        hints: u32,
+    }
+
+    /// What just happened to one language server. The view turns this into
+    /// wording; nothing here decides whether or when to restart (that is
+    /// `LspManager`'s job, ADR-0016).
+    enum FfiServerState {
+        Starting,
+        Ready,
+        Exited,
+        Failed,
+    }
+
     extern "Rust" {
         /// Opaque per-editor incremental highlighter handle (Y2/A1):
         /// wraps a `syntax_core::Highlighter`, which keeps a persistent
@@ -1453,6 +1498,110 @@ mod ffi {
     // reader thread to marshal `gridUpdated` back, same pattern as
     // `SearchModel`/`DocumentManager` above.
     impl cxx_qt::Threading for TerminalSession {}
+
+    extern "RustQt" {
+        /// Language-server adapter (Task L2): owns one `lsp_core::LspManager`
+        /// (on a worker thread) and the `DiagnosticStore` the panel and the
+        /// editor read.
+        ///
+        /// Translation only, per `docs/architecture/layering.md`: every rule
+        /// — which server serves a language, when one is restarted, which
+        /// rows exist in which order, how severities rank — lives in
+        /// `lsp-core` or `app-config`. What is left here is a worker thread
+        /// (so a blocking `initialize` handshake never freezes the UI) and a
+        /// listener thread draining `Receiver<LspEvent>` through
+        /// `CxxQtThread::queue()`, the same shape `SearchModel` and
+        /// `TerminalSession` already use (ADR-0004, ADR-0007).
+        #[qobject]
+        type LanguageService = super::LanguageServiceRust;
+
+        /// Point the language servers at a project root and (re)load the
+        /// `[[language_server]]` settings. Stops whatever was running for the
+        /// previous project. No server is launched here — that happens
+        /// lazily, on the first file of a language (see `documentOpened`),
+        /// because launching every catalog server at startup would spawn a
+        /// dozen processes for a project that uses one language.
+        #[qinvokable]
+        #[cxx_name = "openProject"]
+        fn open_project(self: Pin<&mut LanguageService>, root_path: &QString);
+
+        /// A tab was opened: start that language's server if this is the
+        /// first file of its kind, then send `didOpen`. A file whose language
+        /// has no configured, enabled server is silently ignored — the
+        /// panel's empty state says so.
+        #[qinvokable]
+        #[cxx_name = "documentOpened"]
+        fn document_opened(self: Pin<&mut LanguageService>, path: &QString, text: &QString);
+
+        /// The buffer changed (`didChange`, full-text sync). Cheap enough to
+        /// call on a debounce from the view; the version counter is the
+        /// manager's.
+        #[qinvokable]
+        #[cxx_name = "documentChanged"]
+        fn document_changed(self: Pin<&mut LanguageService>, path: &QString, text: &QString);
+
+        /// The buffer was written to disk (`didSave`).
+        #[qinvokable]
+        #[cxx_name = "documentSaved"]
+        fn document_saved(self: Pin<&mut LanguageService>, path: &QString);
+
+        /// The tab was closed (`didClose`); its diagnostics stop being shown.
+        #[qinvokable]
+        #[cxx_name = "documentClosed"]
+        fn document_closed(self: Pin<&mut LanguageService>, path: &QString);
+
+        /// Every known diagnostic, grouped by file and ordered within it.
+        #[qinvokable]
+        fn diagnostics(self: &LanguageService) -> Vec<FfiDiagnostic>;
+
+        /// Just one file's diagnostics — what an editor underlines.
+        #[qinvokable]
+        #[cxx_name = "diagnosticsForFile"]
+        fn diagnostics_for_file(self: &LanguageService, path: &QString) -> Vec<FfiDiagnostic>;
+
+        /// Counts per severity, for the status bar and the filter buttons.
+        #[qinvokable]
+        #[cxx_name = "diagnosticCounts"]
+        fn diagnostic_counts(self: &LanguageService) -> FfiDiagnosticCounts;
+
+        /// Whether a server is configured, enabled and started for this
+        /// file's language — the difference between "no problems" and "no
+        /// language server", which is the panel's empty state.
+        #[qinvokable]
+        #[cxx_name = "hasServerForFile"]
+        fn has_server_for_file(self: &LanguageService, path: &QString) -> bool;
+
+        /// The configured server's display name for this file's language, or
+        /// empty when there is none — the "Waiting for rust-analyzer..." wording.
+        #[qinvokable]
+        #[cxx_name = "serverNameForFile"]
+        fn server_name_for_file(self: &LanguageService, path: &QString) -> QString;
+
+        /// Emitted on the Qt thread after the store changed: a server
+        /// published, or a document was closed. The view re-reads whatever it
+        /// displays rather than being handed a delta.
+        #[qsignal]
+        #[cxx_name = "diagnosticsChanged"]
+        fn diagnostics_changed(self: Pin<&mut LanguageService>);
+
+        /// A server started, became ready, died or gave up. Non-modal by
+        /// contract: a crashing server must never raise a dialog, because the
+        /// restart backoff would make the application unusable.
+        #[qsignal]
+        #[cxx_name = "serverStateChanged"]
+        fn server_state_changed(
+            self: Pin<&mut LanguageService>,
+            language_id: QString,
+            name: QString,
+            state: FfiServerState,
+            detail: QString,
+            retry_ms: u32,
+        );
+    }
+
+    // Enables `self.qt_thread()` on `LanguageService` for the LSP listener
+    // thread's one cross-thread hop, same pattern as `SearchModel` above.
+    impl cxx_qt::Threading for LanguageService {}
 
     unsafe extern "C++" {
         include!("main_window.h");
@@ -3693,6 +3842,314 @@ impl ffi::TerminalSession {
                 start_col: 0,
                 end_col: 0,
             },
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Language servers (Task L2)
+// ---------------------------------------------------------------------------
+
+/// One unit of work for the LSP worker thread.
+///
+/// The worker exists because `LspManager::start` blocks until the server has
+/// answered `initialize` — a real server can take a second or two — and the
+/// UI thread must not wait for that. Running *every* call through the same
+/// queue (not just `start`) is what keeps ordering honest: a `didChange`
+/// queued while the server is still starting is still delivered after the
+/// `didOpen` that preceded it.
+type LspJob = Box<dyn FnOnce(&lsp_core::LspManager) + Send>;
+
+/// Rust side of the `LanguageService` QObject: a handle to the worker, the
+/// resolved server table, and the diagnostics currently published. No rules —
+/// see the bridge declaration above.
+#[derive(Default)]
+pub struct LanguageServiceRust {
+    /// `None` before a project is open; dropping the sender is what stops the
+    /// previous project's servers.
+    jobs: RefCell<Option<std::sync::mpsc::Sender<LspJob>>>,
+    /// `lsp_core::resolve_servers` applied to the user's settings, resolved
+    /// once per project open.
+    configs: RefCell<Vec<lsp_core::ServerConfig>>,
+    /// Language ids whose server has been asked to start, so the first file of
+    /// a language starts it and later ones don't re-queue a launch.
+    started: RefCell<std::collections::HashSet<String>>,
+    /// Open document path -> language id, so a change/save/close for a file we
+    /// never opened against a server is dropped rather than sent.
+    open_docs: RefCell<std::collections::HashMap<String, String>>,
+    store: RefCell<lsp_core::DiagnosticStore>,
+}
+
+fn to_ffi_severity(severity: lsp_core::Severity) -> ffi::FfiSeverity {
+    match severity {
+        lsp_core::Severity::Error => ffi::FfiSeverity::Error,
+        lsp_core::Severity::Warning => ffi::FfiSeverity::Warning,
+        lsp_core::Severity::Information => ffi::FfiSeverity::Information,
+        lsp_core::Severity::Hint => ffi::FfiSeverity::Hint,
+    }
+}
+
+fn to_ffi_diagnostic(row: lsp_core::DiagnosticRow) -> ffi::FfiDiagnostic {
+    ffi::FfiDiagnostic {
+        path: QString::from(row.path.as_str()),
+        line: row.line,
+        column: row.column,
+        end_line: row.end_line,
+        end_column: row.end_column,
+        severity: to_ffi_severity(row.severity),
+        message: QString::from(row.message.as_str()),
+        source: QString::from(row.source.as_str()),
+    }
+}
+
+impl ffi::LanguageService {
+    pub fn open_project(mut self: Pin<&mut Self>, root_path: &QString) {
+        let root = root_path.to_string();
+        if root.is_empty() {
+            return;
+        }
+
+        // Dropping the previous sender ends that worker's loop, which shuts
+        // its servers down — no separate stop path to keep in sync.
+        self.jobs.borrow_mut().take();
+        self.started.borrow_mut().clear();
+        self.open_docs.borrow_mut().clear();
+        self.store.borrow_mut().clear();
+
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        let overrides: Vec<lsp_core::ServerOverride> = settings
+            .language_servers
+            .iter()
+            .map(|entry| lsp_core::ServerOverride {
+                language_id: entry.language_id.clone(),
+                name: entry.name.clone(),
+                command: entry.command.clone(),
+                args: entry.args.clone(),
+                enabled: entry.enabled,
+            })
+            .collect();
+        *self.configs.borrow_mut() = lsp_core::resolve_servers(&overrides);
+
+        let (manager, events) = lsp_core::LspManager::new(lsp_core::uri_from_path(&root));
+        let (jobs, rx) = std::sync::mpsc::channel::<LspJob>();
+        std::thread::spawn(move || {
+            for job in rx {
+                job(&manager);
+            }
+            // The sender was dropped: the project closed or the app is going
+            // away, so the child processes must not outlive it.
+            manager.stop_all();
+        });
+
+        let qt_thread = self.as_mut().qt_thread();
+        std::thread::spawn(move || {
+            for event in events {
+                let _ = qt_thread.queue(move |service: Pin<&mut Self>| service.apply_event(event));
+            }
+        });
+
+        *self.jobs.borrow_mut() = Some(jobs);
+        self.as_mut().diagnostics_changed();
+    }
+
+    pub fn document_opened(mut self: Pin<&mut Self>, path: &QString, text: &QString) {
+        let path = path.to_string();
+        let Some(config) = self.config_for_path(&path) else {
+            return;
+        };
+        let language_id = config.language_id.clone();
+        let uri = lsp_core::uri_from_path(&path);
+        let text = text.to_string();
+        self.open_docs
+            .borrow_mut()
+            .insert(path, language_id.clone());
+
+        if self.started.borrow_mut().insert(language_id.clone()) {
+            self.as_mut().start_server(config);
+        }
+        let language = language_id.clone();
+        self.push_job(move |manager| {
+            let _ = manager.did_open(&uri, &language, &text);
+        });
+    }
+
+    pub fn document_changed(self: Pin<&mut Self>, path: &QString, text: &QString) {
+        let path = path.to_string();
+        if !self.open_docs.borrow().contains_key(&path) {
+            return;
+        }
+        let uri = lsp_core::uri_from_path(&path);
+        let text = text.to_string();
+        self.push_job(move |manager| {
+            let _ = manager.did_change(&uri, &text);
+        });
+    }
+
+    pub fn document_saved(self: Pin<&mut Self>, path: &QString) {
+        let path = path.to_string();
+        if !self.open_docs.borrow().contains_key(&path) {
+            return;
+        }
+        let uri = lsp_core::uri_from_path(&path);
+        self.push_job(move |manager| {
+            let _ = manager.did_save(&uri);
+        });
+    }
+
+    pub fn document_closed(mut self: Pin<&mut Self>, path: &QString) {
+        let path = path.to_string();
+        if self.open_docs.borrow_mut().remove(&path).is_none() {
+            return;
+        }
+        let uri = lsp_core::uri_from_path(&path);
+        self.store.borrow_mut().remove(&uri);
+        let closed = uri.clone();
+        self.push_job(move |manager| {
+            let _ = manager.did_close(&closed);
+        });
+        self.as_mut().diagnostics_changed();
+    }
+
+    pub fn diagnostics(&self) -> Vec<ffi::FfiDiagnostic> {
+        self.store
+            .borrow()
+            .rows()
+            .into_iter()
+            .map(to_ffi_diagnostic)
+            .collect()
+    }
+
+    pub fn diagnostics_for_file(&self, path: &QString) -> Vec<ffi::FfiDiagnostic> {
+        let uri = lsp_core::uri_from_path(&path.to_string());
+        self.store
+            .borrow()
+            .rows_for_uri(&uri)
+            .into_iter()
+            .map(to_ffi_diagnostic)
+            .collect()
+    }
+
+    pub fn diagnostic_counts(&self) -> ffi::FfiDiagnosticCounts {
+        let counts = self.store.borrow().counts();
+        ffi::FfiDiagnosticCounts {
+            errors: counts.errors as u32,
+            warnings: counts.warnings as u32,
+            infos: counts.infos as u32,
+            hints: counts.hints as u32,
+        }
+    }
+
+    pub fn has_server_for_file(&self, path: &QString) -> bool {
+        self.config_for_path(&path.to_string()).is_some()
+    }
+
+    pub fn server_name_for_file(&self, path: &QString) -> QString {
+        match self.config_for_path(&path.to_string()) {
+            Some(config) => QString::from(config.name.as_str()),
+            None => QString::default(),
+        }
+    }
+
+    /// The enabled server for this path's language, if the catalog plus the
+    /// user's settings name one. Both halves of that answer are `lsp-core`'s.
+    fn config_for_path(&self, path: &str) -> Option<lsp_core::ServerConfig> {
+        let language_id = lsp_core::language_id_for_path(Path::new(path))?;
+        lsp_core::enabled_server(&self.configs.borrow(), language_id).cloned()
+    }
+
+    fn push_job(&self, job: impl FnOnce(&lsp_core::LspManager) + Send + 'static) {
+        if let Some(jobs) = self.jobs.borrow().as_ref() {
+            let _ = jobs.send(Box::new(job));
+        }
+    }
+
+    /// Queue the (blocking) launch of one server and report its outcome.
+    /// A launch that fails frees the language again, so opening another file
+    /// of it retries rather than staying silently dead for the session.
+    fn start_server(mut self: Pin<&mut Self>, config: lsp_core::ServerConfig) {
+        let language_id = config.language_id.clone();
+        let name = config.name.clone();
+        let qt_thread = self.as_mut().qt_thread();
+        self.as_mut().server_state_changed(
+            QString::from(language_id.as_str()),
+            QString::from(name.as_str()),
+            ffi::FfiServerState::Starting,
+            QString::default(),
+            0,
+        );
+        self.push_job(move |manager| {
+            if let Err(err) = manager.start(&config) {
+                let message = err.to_string();
+                let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                    service.started.borrow_mut().remove(&language_id);
+                    service.as_mut().server_state_changed(
+                        QString::from(language_id.as_str()),
+                        QString::from(name.as_str()),
+                        ffi::FfiServerState::Failed,
+                        QString::from(message.as_str()),
+                        0,
+                    );
+                });
+            }
+        });
+    }
+
+    /// The listener thread's one hop onto the Qt thread: an `LspEvent` becomes
+    /// either a store update or a status signal, and nothing else.
+    fn apply_event(mut self: Pin<&mut Self>, event: lsp_core::LspEvent) {
+        let name_of = |language_id: &str| {
+            self.configs
+                .borrow()
+                .iter()
+                .find(|c| c.language_id == language_id)
+                .map(|c| c.name.clone())
+                .unwrap_or_else(|| language_id.to_string())
+        };
+        match event {
+            lsp_core::LspEvent::Diagnostics {
+                uri, diagnostics, ..
+            } => {
+                self.store.borrow_mut().replace(&uri, diagnostics);
+                self.as_mut().diagnostics_changed();
+            }
+            lsp_core::LspEvent::ServerReady { language_id, .. } => {
+                let name = name_of(&language_id);
+                self.as_mut().server_state_changed(
+                    QString::from(language_id.as_str()),
+                    QString::from(name.as_str()),
+                    ffi::FfiServerState::Ready,
+                    QString::default(),
+                    0,
+                );
+            }
+            lsp_core::LspEvent::ServerExited {
+                language_id,
+                retry_in,
+                ..
+            } => {
+                let name = name_of(&language_id);
+                self.as_mut().server_state_changed(
+                    QString::from(language_id.as_str()),
+                    QString::from(name.as_str()),
+                    ffi::FfiServerState::Exited,
+                    QString::default(),
+                    retry_in.as_millis().min(u128::from(u32::MAX)) as u32,
+                );
+            }
+            lsp_core::LspEvent::ServerFailed {
+                language_id,
+                message,
+            } => {
+                let name = name_of(&language_id);
+                self.as_mut().server_state_changed(
+                    QString::from(language_id.as_str()),
+                    QString::from(name.as_str()),
+                    ffi::FfiServerState::Failed,
+                    QString::from(message.as_str()),
+                    0,
+                );
+            }
+            lsp_core::LspEvent::Notification { .. } => {}
         }
     }
 }

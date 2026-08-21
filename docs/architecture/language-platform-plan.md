@@ -31,7 +31,7 @@ per `CLAUDE.md`.
 | G2 | open | |
 | G3 | open | |
 | L1 | done | `0554341` |
-| L2 | open | |
+| L2 | done | pending |
 | L3 | open | |
 | L4 | open | |
 | L5 | open | |

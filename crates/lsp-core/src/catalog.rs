@@ -66,6 +66,20 @@ pub const SERVERS: &[ServerDef] = &[
         command: "typescript-language-server",
         args: &["--stdio"],
     },
+    // The JSX dialects are separate LSP language ids, but the same server
+    // handles all four — it keys JSX parsing off the id it is told.
+    ServerDef {
+        language_id: "typescriptreact",
+        name: "TypeScript Language Server",
+        command: "typescript-language-server",
+        args: &["--stdio"],
+    },
+    ServerDef {
+        language_id: "javascriptreact",
+        name: "TypeScript Language Server",
+        command: "typescript-language-server",
+        args: &["--stdio"],
+    },
     ServerDef {
         language_id: "json",
         name: "JSON Language Server",
@@ -194,6 +208,68 @@ fn apply(cfg: &mut ServerConfig, ov: &ServerOverride) {
     }
 }
 
+/// Which of the resolved servers, if any, may serve `language_id`.
+///
+/// "May" is the rule: a disabled entry stays in `resolve_servers`' output so
+/// a settings page can list it, and this is the single place that decides
+/// callers must not launch it.
+pub fn enabled_server<'a>(
+    resolved: &'a [ServerConfig],
+    language_id: &str,
+) -> Option<&'a ServerConfig> {
+    resolved
+        .iter()
+        .find(|c| c.language_id == language_id && c.enabled)
+}
+
+/// File extension -> LSP language id, for deciding which server (if any) a
+/// newly opened file belongs to.
+///
+/// Deliberately its own table rather than a reuse of `syntax-core`'s
+/// language detection: these are the identifiers the *protocol* defines
+/// (`textDocument/didOpen`'s `languageId`), servers key their behaviour off
+/// them, and they are not the editor's tree-sitter grammar names. Only
+/// languages the catalog above knows about are listed — an extension with no
+/// entry simply has no server.
+const EXTENSIONS: &[(&str, &str)] = &[
+    ("rs", "rust"),
+    ("py", "python"),
+    ("pyi", "python"),
+    ("go", "go"),
+    ("c", "c"),
+    ("h", "c"),
+    ("cc", "cpp"),
+    ("cpp", "cpp"),
+    ("cxx", "cpp"),
+    ("hpp", "cpp"),
+    ("hh", "cpp"),
+    ("ts", "typescript"),
+    // `typescriptreact`/`javascriptreact`, not `typescript`/`javascript`:
+    // these are the identifiers the LSP specification defines for JSX
+    // dialects, and servers key JSX parsing off them.
+    ("tsx", "typescriptreact"),
+    ("js", "javascript"),
+    ("jsx", "javascriptreact"),
+    ("mjs", "javascript"),
+    ("json", "json"),
+    ("yaml", "yaml"),
+    ("yml", "yaml"),
+    ("sh", "bash"),
+    ("bash", "bash"),
+    ("lua", "lua"),
+    ("php", "php"),
+    ("cs", "csharp"),
+];
+
+/// The LSP language id for a file path, by extension (case-insensitive).
+pub fn language_id_for_path(path: &std::path::Path) -> Option<&'static str> {
+    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
+    EXTENSIONS
+        .iter()
+        .find(|(ext, _)| *ext == extension)
+        .map(|(_, language_id)| *language_id)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -278,5 +354,39 @@ mod tests {
             ..Default::default()
         }]);
         assert!(resolved.iter().all(|c| c.language_id != "zig"));
+    }
+
+    #[test]
+    fn a_disabled_server_is_never_offered_for_launch() {
+        let resolved = resolve_servers(&[ServerOverride {
+            language_id: "rust".into(),
+            enabled: Some(false),
+            ..Default::default()
+        }]);
+        assert!(enabled_server(&resolved, "rust").is_none());
+        assert_eq!(enabled_server(&resolved, "go").unwrap().command, "gopls");
+        assert!(enabled_server(&resolved, "brainfuck").is_none());
+    }
+
+    #[test]
+    fn language_ids_come_from_the_extension_case_insensitively() {
+        use std::path::Path;
+        assert_eq!(language_id_for_path(Path::new("/p/main.rs")), Some("rust"));
+        assert_eq!(
+            language_id_for_path(Path::new("/p/App.TSX")),
+            Some("typescriptreact")
+        );
+        assert_eq!(language_id_for_path(Path::new("/p/README.md")), None);
+        assert_eq!(language_id_for_path(Path::new("/p/Makefile")), None);
+    }
+
+    #[test]
+    fn every_mapped_extension_names_a_catalog_language() {
+        for (ext, language_id) in EXTENSIONS {
+            assert!(
+                default_server(language_id).is_some(),
+                "{ext} maps to unknown language {language_id}"
+            );
+        }
     }
 }

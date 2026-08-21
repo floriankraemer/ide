@@ -10,10 +10,15 @@
 //! ```
 
 pub mod catalog;
+pub mod diagnostics;
 pub mod framing;
 pub mod manager;
 
 pub use catalog::{
-    default_server, resolve_servers, ServerConfig, ServerDef, ServerOverride, SERVERS,
+    default_server, enabled_server, language_id_for_path, resolve_servers, ServerConfig, ServerDef,
+    ServerOverride, SERVERS,
+};
+pub use diagnostics::{
+    path_from_uri, uri_from_path, DiagnosticCounts, DiagnosticRow, DiagnosticStore, Severity,
 };
 pub use manager::{LspError, LspEvent, LspManager, DEFAULT_REQUEST_TIMEOUT};

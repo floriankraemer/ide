@@ -124,6 +124,13 @@ void CodeEditor::setMatchSelections(const QVector<QPair<int, int>> &matches, int
     highlightCurrentLine();
 }
 
+void CodeEditor::setDiagnosticSpans(const QVector<DiagnosticSpan> &spans)
+{
+    diagnosticSpans_ = spans;
+    // Same one place every other extra selection is (re)applied from.
+    highlightCurrentLine();
+}
+
 void CodeEditor::highlightCurrentLine()
 {
     QList<QTextEdit::ExtraSelection> selections;
@@ -155,6 +162,16 @@ void CodeEditor::highlightCurrentLine()
         hover.cursor.setPosition(hoverSpan_.first);
         hover.cursor.setPosition(hoverSpan_.second, QTextCursor::KeepAnchor);
         selections.append(hover);
+    }
+
+    for (const DiagnosticSpan &span : diagnosticSpans_) {
+        QTextEdit::ExtraSelection diagnostic;
+        diagnostic.format.setUnderlineStyle(QTextCharFormat::SpellCheckUnderline);
+        diagnostic.format.setUnderlineColor(span.color);
+        diagnostic.cursor = textCursor();
+        diagnostic.cursor.setPosition(span.start);
+        diagnostic.cursor.setPosition(span.end, QTextCursor::KeepAnchor);
+        selections.append(diagnostic);
     }
 
     setExtraSelections(selections);

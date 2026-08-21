@@ -235,3 +235,48 @@ fn a_server_that_dies_mid_session_is_respawned() {
         .expect("the respawned server answers");
     assert_eq!(echoed["tag"], "after-respawn");
 }
+
+/// The whole L2 path minus Qt: a real child server publishes diagnostics,
+/// the event lands in the store the adapter keeps, and the store yields the
+/// rows the Problems panel renders.
+#[test]
+fn published_diagnostics_become_problem_rows() {
+    use lsp_core::diagnostics::{DiagnosticCounts, DiagnosticStore, Severity};
+    use lsp_core::uri_from_path;
+
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+
+    let uri = uri_from_path("/workspace/a b.stub");
+    manager.did_open(&uri, LANG, "hello\n").expect("didOpen");
+
+    let mut store = DiagnosticStore::new();
+    let (published_uri, diagnostics) = wait_for(&rx, "diagnostics", |e| match e {
+        LspEvent::Diagnostics {
+            uri, diagnostics, ..
+        } => Some((uri.clone(), diagnostics.clone())),
+        _ => None,
+    });
+    store.replace(&published_uri, diagnostics);
+
+    let rows = store.rows();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].path, "/workspace/a b.stub");
+    assert_eq!(rows[0].line, 1);
+    assert_eq!(rows[0].column, 0);
+    assert_eq!(rows[0].severity, Severity::Error);
+    assert_eq!(rows[0].message, "canned diagnostic");
+    assert_eq!(rows[0].source, "stub_server");
+    assert_eq!(
+        store.counts(),
+        DiagnosticCounts {
+            errors: 1,
+            ..DiagnosticCounts::default()
+        }
+    );
+
+    // Closing the document is what drops its rows from the panel.
+    manager.did_close(&uri).expect("didClose");
+    store.remove(&uri);
+    assert!(store.rows().is_empty());
+}
