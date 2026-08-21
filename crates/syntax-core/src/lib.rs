@@ -260,6 +260,7 @@ pub fn identifier_occurrences(language: Language, text: &str) -> Vec<Occurrence>
 /// [`identifier_occurrences`]'s body against an already-parsed tree, so
 /// [`analyze_file`] can reuse one parse across all three extractions.
 fn occurrences_from_tree(query: &Query, tree: &tree_sitter::Tree, text: &str) -> Vec<Occurrence> {
+    count_query_walk();
     let mut by_range: std::collections::BTreeMap<(usize, usize), bool> =
         std::collections::BTreeMap::new();
     let mut cursor = QueryCursor::new();
@@ -331,6 +332,7 @@ pub fn outline(language: Language, text: &str) -> Vec<SymbolNode> {
 /// [`outline`]'s body against an already-parsed tree, so [`analyze_file`]
 /// can reuse one parse across all three extractions.
 fn outline_from_tree(query: &Query, tree: &tree_sitter::Tree, text: &str) -> Vec<SymbolNode> {
+    count_query_walk();
     let mut raw: Vec<RawSymbol> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
@@ -396,6 +398,7 @@ fn supertype_edges_from_tree(
     tree: &tree_sitter::Tree,
     text: &str,
 ) -> Vec<SupertypeEdge> {
+    count_query_walk();
     let mut edges: Vec<SupertypeEdge> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
@@ -424,6 +427,77 @@ fn supertype_edges_from_tree(
     edges
 }
 
+/// How many extraction query walks this process has run, for tests that
+/// need to assert *which* work a code path did rather than how long it
+/// took (see index-core's go-to-definition early-out). A relaxed counter
+/// bumped once per query walk — not per match — so it costs nothing on
+/// the hot paths it measures.
+#[doc(hidden)]
+pub static QUERY_WALKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn count_query_walk() {
+    QUERY_WALKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// One parsed buffer whose extraction queries the caller drives
+/// individually — parse once, then ask for outline / occurrences /
+/// supertype edges only as each is actually needed.
+///
+/// [`analyze_file`] is the "I need all three" shorthand over this. Prefer
+/// the handle wherever a cheap query can decide that the expensive ones
+/// are pointless: go-to-definition looks at [`Self::occurrences`] first
+/// and, if the caret is not on an identifier, returns without ever
+/// running the `tags` walk. Each query walk costs roughly as much as the
+/// parse itself, so skipping one is not a micro-optimisation.
+pub struct ParsedFile<'text> {
+    compiled: Arc<CompiledLanguage>,
+    tree: tree_sitter::Tree,
+    text: &'text str,
+}
+
+impl<'text> ParsedFile<'text> {
+    /// Parse `text` as `language`. `None` when the language has no grammar
+    /// (plain text, a query that would not compile) or the parse fails —
+    /// the same conditions under which the one-shot entry points return
+    /// empty results.
+    pub fn parse(language: Language, text: &'text str) -> Option<Self> {
+        let compiled = registry::compiled(language)?;
+        let tree = parse_once(&compiled.grammar, text)?;
+        Some(Self {
+            compiled,
+            tree,
+            text,
+        })
+    }
+
+    /// Same result as [`outline`], without re-parsing.
+    pub fn outline(&self) -> Vec<SymbolNode> {
+        self.compiled
+            .tags
+            .as_ref()
+            .map(|q| outline_from_tree(q, &self.tree, self.text))
+            .unwrap_or_default()
+    }
+
+    /// Same result as [`identifier_occurrences`], without re-parsing.
+    pub fn occurrences(&self) -> Vec<Occurrence> {
+        self.compiled
+            .locals
+            .as_ref()
+            .map(|q| occurrences_from_tree(q, &self.tree, self.text))
+            .unwrap_or_default()
+    }
+
+    /// Same result as [`supertype_edges`], without re-parsing.
+    pub fn supertype_edges(&self) -> Vec<SupertypeEdge> {
+        self.compiled
+            .inherits
+            .as_ref()
+            .map(|q| supertype_edges_from_tree(q, &self.tree, self.text))
+            .unwrap_or_default()
+    }
+}
+
 /// Everything [`index-core`](../index_core/index.html) extracts from one
 /// file, from a single parse: what [`outline`],
 /// [`identifier_occurrences`] and [`supertype_edges`] each return, but
@@ -441,34 +515,17 @@ pub struct FileAnalysis {
 /// absent for the language, and all three are empty when the language has
 /// no grammar or the parse fails, matching the individual entry points.
 pub fn analyze_file(language: Language, text: &str) -> FileAnalysis {
-    let empty = || FileAnalysis {
-        outline: Vec::new(),
-        occurrences: Vec::new(),
-        supertype_edges: Vec::new(),
+    let Some(parsed) = ParsedFile::parse(language, text) else {
+        return FileAnalysis {
+            outline: Vec::new(),
+            occurrences: Vec::new(),
+            supertype_edges: Vec::new(),
+        };
     };
-    let Some(compiled) = registry::compiled(language) else {
-        return empty();
-    };
-    let Some(tree) = parse_once(&compiled.grammar, text) else {
-        return empty();
-    };
-
     FileAnalysis {
-        outline: compiled
-            .tags
-            .as_ref()
-            .map(|q| outline_from_tree(q, &tree, text))
-            .unwrap_or_default(),
-        occurrences: compiled
-            .locals
-            .as_ref()
-            .map(|q| occurrences_from_tree(q, &tree, text))
-            .unwrap_or_default(),
-        supertype_edges: compiled
-            .inherits
-            .as_ref()
-            .map(|q| supertype_edges_from_tree(q, &tree, text))
-            .unwrap_or_default(),
+        outline: parsed.outline(),
+        occurrences: parsed.occurrences(),
+        supertype_edges: parsed.supertype_edges(),
     }
 }
 
