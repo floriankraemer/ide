@@ -56,17 +56,14 @@ impl ServerRow {
 
 /// The LSP language id for one of the editor's own language ids.
 ///
-/// Almost always the same string — the two vocabularies were kept aligned
-/// deliberately — so this is a short list of the places they diverge rather
-/// than a full table.
-pub fn lsp_language_id(editor_language_id: &str) -> &str {
-    match editor_language_id {
-        // The protocol's identifier for the JSX dialect of TypeScript;
-        // servers key JSX parsing off it.
-        "tsx" => "typescriptreact",
-        other => other,
-    }
-}
+/// Re-exported from `lsp-core` rather than reimplemented. What the protocol
+/// calls a language is `lsp-core`'s business (ADR-0018), and this page must
+/// emit the *same* string the runtime later looks a server up by: the page
+/// writes the config key, `config_for_path` reads it, and a divergence
+/// between two copies would mean a server the user configured and saw
+/// enabled never starts, silently — which is exactly the failure ADR-0018
+/// removed one layer down.
+pub use lsp_core::lsp_language_id;
 
 /// The page's draft: one row per language, committed on OK.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -343,5 +340,39 @@ mod tests {
         assert_eq!(lsp_language_id("tsx"), "typescriptreact");
         assert_eq!(lsp_language_id("rust"), "rust");
         assert_eq!(lsp_language_id("csharp"), "csharp");
+    }
+
+    /// Guards the *class* of bug, not one instance of it.
+    ///
+    /// This page writes a server's config key using `lsp_language_id`, and
+    /// the runtime later reads that key back through the same function on
+    /// its way to `config_for_path`. While there is one implementation the
+    /// two agree by construction. There used to be two — this crate had its
+    /// own `match` beside `lsp-core`'s table — and they agreed only because
+    /// both happened to map `tsx` and pass everything else through. The next
+    /// divergence added to one and not the other would have meant a server
+    /// the user configured, saved, and saw enabled simply never starting.
+    ///
+    /// So this asserts the property that matters: every id the page can emit
+    /// round-trips to exactly what the runtime will look up, for every
+    /// language in the catalog. A second mapping reintroduced anywhere makes
+    /// it fail as soon as the two disagree about any catalog language.
+    #[test]
+    fn every_page_row_id_round_trips_to_what_the_runtime_looks_up() {
+        for language in syntax_core::registry().languages() {
+            let Some(def) = language.def() else {
+                continue; // plain text has no id worth mapping
+            };
+            let from_page = lsp_language_id(def.id());
+            let from_runtime = lsp_core::lsp_language_id(def.id());
+            assert_eq!(
+                from_page,
+                from_runtime,
+                "`{}` maps to `{from_page}` on the settings page but \
+                 `{from_runtime}` in the runtime; a server configured here \
+                 would never start",
+                def.id()
+            );
+        }
     }
 }
