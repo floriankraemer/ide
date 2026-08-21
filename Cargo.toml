@@ -9,6 +9,7 @@ members = [
     "crates/pty-core",
     "crates/terminal-core",
     "crates/index-core",
+    "crates/lsp-core",
     "crates/app-core",
     "crates/ui-shell",
     "crates/app",

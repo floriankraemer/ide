@@ -10,8 +10,8 @@ per `CLAUDE.md`.
 | Task | Status | Commit |
 |---|---|---|
 | X1 | open | |
-| X2 | open | |
-| P1 | done | pending |
+| X2 | done | pending |
+| P1 | done | `faa1a00` |
 | R1 | open | |
 | R2 | open | |
 | R3 | open | |
@@ -30,7 +30,7 @@ per `CLAUDE.md`.
 | G1b | open | |
 | G2 | open | |
 | G3 | open | |
-| L1 | open | |
+| L1 | done | pending |
 | L2 | open | |
 | L3 | open | |
 | L4 | open | |
