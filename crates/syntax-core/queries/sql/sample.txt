@@ -1,0 +1,9 @@
+-- Active accounts and how much they have spent so far.
+CREATE VIEW active_customers AS
+SELECT c.id,
+       c.name,
+       SUM(o.total) AS spent
+FROM customers AS c
+JOIN orders AS o ON o.customer_id = c.id
+WHERE c.status = 'active'
+GROUP BY c.id, c.name;

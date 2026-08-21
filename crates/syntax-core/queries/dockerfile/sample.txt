@@ -1,0 +1,10 @@
+# Build the app, used as the highlighting fixture.
+FROM rust:1.83-slim AS builder
+ARG PROFILE=release
+WORKDIR /src
+COPY . .
+RUN cargo build --profile "$PROFILE"
+
+FROM debian:bookworm-slim
+COPY --from=builder /src/target/release/app /usr/local/bin/app
+ENTRYPOINT ["app"]

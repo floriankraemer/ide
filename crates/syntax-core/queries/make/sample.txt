@@ -1,0 +1,19 @@
+# Build the project, used as the highlighting fixture.
+CFLAGS := -Wall -Werror
+SOURCES := $(wildcard src/*.c)
+
+ifeq ($(DEBUG),1)
+CFLAGS += -g
+endif
+
+export CFLAGS
+
+.PHONY: all clean
+
+all: app
+
+app: $(SOURCES)
+	$(CC) $(CFLAGS) -o "app" $(SOURCES)
+
+clean:
+	rm -f app

@@ -115,11 +115,94 @@ FROM scratch AS linux-artifact
 COPY --from=linux-artifact-bundle /out/ /ide-linux-x86_64/
 
 # ---------------------------------------------------------------------------
-# windows-builder: MXE's pre-built mingw-w64 + Qt6 cross toolchain
-# (image built out-of-band, see docs/architecture/mvp-implementation-plan.md)
-# plus rustup, for cross-compiling to x86_64-pc-windows-gnu.
+# mxe-base: MXE's mingw-w64 + Qt6 cross toolchain, built from a pinned
+# upstream commit into /opt/mxe.
+#
+# This replaces a hand-built, out-of-band `mxe-spike-snapshot:2` image that
+# existed only on one developer's machine and was lost to a `docker prune`.
+# Building it here costs several hours once, then lives in the layer cache.
+#
+# Only `qt6-qtbase` is built (Core/Gui/Widgets + the qwindows platform
+# plugin) because that is all `crates/ui-shell/build.rs` asks for; the `qt6`
+# meta-package would additionally compile multimedia, webview, declarative
+# and friends for no gain.
 # ---------------------------------------------------------------------------
-FROM mxe-spike-snapshot:2 AS windows-builder
+FROM debian:bookworm-slim AS mxe-base
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Bump deliberately. The bundled DLL list in windows-artifact-bundle pins ICU
+# sonames (icudt78 etc.) that track MXE's icu4c version, so re-check that
+# closure whenever this moves.
+ARG MXE_COMMIT=fb9a1a22906e2b0ba37602c562b3335c91a73b13
+
+# Package list per https://mxe.cc/#requirements (Debian/Ubuntu), plus
+# python3-yaml, which mesa's meson build requires but the MXE list omits.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        autoconf \
+        automake \
+        autopoint \
+        bash \
+        bison \
+        bzip2 \
+        ca-certificates \
+        flex \
+        g++ \
+        g++-multilib \
+        gettext \
+        git \
+        gperf \
+        intltool \
+        libc6-dev-i386 \
+        libclang-dev \
+        libgdk-pixbuf2.0-dev \
+        libgl-dev \
+        libltdl-dev \
+        libpcre2-dev \
+        libssl-dev \
+        libtool-bin \
+        libxml-parser-perl \
+        lzip \
+        make \
+        openssl \
+        p7zip-full \
+        patch \
+        perl \
+        python3 \
+        python3-mako \
+        python3-packaging \
+        python3-pkg-resources \
+        python3-setuptools \
+        python3-yaml \
+        python-is-python3 \
+        ruby \
+        sed \
+        sqlite3 \
+        unzip \
+        wget \
+        xz-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN git clone https://github.com/mxe/mxe.git /opt/mxe \
+    && git -C /opt/mxe checkout "${MXE_COMMIT}"
+
+# MXE_QT6_ID defaults to `qt6`, so this installs into
+# /opt/mxe/usr/x86_64-w64-mingw32.shared/qt6 — the prefix windows-builder and
+# windows-artifact-bundle below reference.
+# The cache mount holds MXE's downloaded source tarballs (~GBs). It keeps a
+# retried build from re-downloading everything, and — since cache mounts are
+# not part of the layer — keeps them out of the image for free.
+RUN --mount=type=cache,target=/opt/mxe/pkg,sharing=locked \
+    --mount=type=cache,target=/root/.ccache,sharing=locked \
+    make -C /opt/mxe qt6-qtbase \
+        MXE_TARGETS=x86_64-w64-mingw32.shared \
+        JOBS="$(nproc)"
+
+# ---------------------------------------------------------------------------
+# windows-builder: mxe-base plus rustup, for cross-compiling to
+# x86_64-pc-windows-gnu.
+# ---------------------------------------------------------------------------
+FROM mxe-base AS windows-builder
 
 ENV DEBIAN_FRONTEND=noninteractive \
     RUSTUP_HOME=/usr/local/rustup \
