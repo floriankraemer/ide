@@ -17,8 +17,8 @@ pub mod servers;
 pub mod syntax_colors;
 
 pub use languages::{
-    explain, scan_manifests, LanguageAction, LanguageRow, LanguageSource, LanguageStatus,
-    ManifestInfo, Problem,
+    explain, scan_manifests, toggle, LanguageAction, LanguageRow, LanguageSource, LanguageStatus,
+    LanguageToggle, ManifestInfo, Problem,
 };
 pub use servers::{lsp_language_id, ServerDraft, ServerRow, ServerRowStatus};
 pub use syntax_colors::{

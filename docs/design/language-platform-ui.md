@@ -186,8 +186,10 @@ No "Changes apply immediately" hint — the user sees them apply immediately.
 | The highlighting query does not match this grammar.                   |
 | Line 14: no node type named "proc_declaration".                       |
 | /home/you/.config/ide/languages/odin/highlights.scm                   |
-|                        [ Open File ]  [ Reload ]  [ Disable Language ]|
 +----------------------------------------------------------------------+
+[ Disable Language ]                        [ Open File ]  [ Reload ]
+
+Languages are read from /home/you/.config/ide/languages
 ```
 
 A `QTreeWidget` again, grouped by source, with a details pane below that is populated only when the selected language has something to say.
@@ -208,7 +210,7 @@ This is the strongest "say nothing" call in the document and it should not be so
 | `Grammar error` | `severity.error` | The grammar failed to load: missing symbol, bad ABI, unreadable file. |
 | `Query error` | `severity.error` | The grammar loaded but a `.scm` query would not compile. |
 | `Version mismatch` | `severity.error` | Grammar ABI outside the supported range. |
-| `Disabled` | `status.muted` | Turned off by the user. Its details pane says so and offers `Enable Language`. |
+| `Disabled` | `status.muted` | Turned off by the user. Its details pane says so, and the strip's toggle reads `Enable Language`. |
 | `Disabled after crash` | `severity.warning` | Auto-quarantined by the crash marker (plan G1b). |
 
 `Not loaded` — "compiled in but its grammar is unavailable in this build" — was specified here and is **not implemented, because it cannot happen**.
@@ -234,28 +236,49 @@ It is mapped to one of a small fixed set of causes at the seam, and each cause g
 | Cause | Sentence | Actions offered |
 |---|---|---|
 | Query will not compile | `The highlighting query does not match this grammar.` plus `Line N: <detail>.` | Open File, Reload |
-| Missing entry symbol | `This library does not export a tree-sitter grammar. Expected a function named tree_sitter_odin.` | Reload, Disable Language |
-| ABI mismatch | `This grammar was built for tree-sitter ABI 12; this build supports 13 to 15. Rebuild it against a newer tree-sitter.` | Reload, Disable Language |
+| Missing entry symbol | `This library does not export a tree-sitter grammar. Expected a function named tree_sitter_odin.` | Reload, Open Folder |
+| ABI mismatch | `This grammar was built for tree-sitter ABI 12; this build supports 13 to 15. Rebuild it against a newer tree-sitter.` | Reload, Open Folder |
 | Malformed manifest | `language.toml could not be read.` plus `Line N: <detail>.` | Open File, Reload |
 | File unreadable or missing | `The file could not be opened.` plus the OS message. | Reload |
-| Crash quarantine | `This grammar crashed the editor on <date>, so it was disabled automatically. Re-enable it if you have since rebuilt or replaced it.` | Enable Language, Open Folder |
+| Crash quarantine | `This grammar crashed the editor on <date>, so it was disabled automatically. Re-enable it if you have since rebuilt or replaced it.` | Open Folder |
 
 Every sentence names the file, the expected thing, or the version — never `error: parse failed`.
 The exact underlying string is not thrown away; it goes to the log, and the details pane is what the user reads.
 
 `Open File` opens the offending file in the editor behind the dialog, which is the only genuinely actionable button for a query or manifest error, and it is the reason this page is worth building rather than printing a startup warning.
 
-### 3.4 The crash quarantine
+Turning a language on or off is *not* one of these per-cause actions, and no longer appears in this pane; it lives in the strip described in 3.4, which reaches every row rather than only the two error causes that used to carry it.
+
+### 3.4 Turning a language off, and back on
+
+A single toggle sits at the left of the page's bottom control strip, the same shape the Keymap page's strip uses, and it acts on the selected row.
+
+It is one button, not two, and its caption follows the selection: `Disable Language` for a row that is currently on, `Enable Language` for a row showing `Disabled` or `Disabled after crash`.
+A control that says `Disable Language` while pointing at a language that is already off would be lying about what pressing it does, so which caption a row gets is decided in `settings-model` alongside the row's status rather than in the widget.
+With no row selected the button stays in place, greyed: the strip is part of the page, not something that appears once you have earned it.
+
+The strip, rather than a per-row control, is the deliberate choice here.
+An `Enabled` column or a per-row checkbox is exactly what 3.2 forbids — it would put a mark on all thirty healthy rows and train the eye off the one column that has to catch it.
+A selection-driven strip adds no per-row chrome at all, and it reaches the healthy majority, which the details pane never could: before this, a language that had simply loaded correctly offered no way to turn it off short of hand-editing `settings.toml`.
+
+Disabling asks nothing.
+It is reversible from the same button, it takes effect immediately — files of that language already open drop to plain text without the dialog closing — and a language that is off says so once, in its Status cell, with no checkmark added anywhere else.
+Re-enabling asks nothing either, with one exception, which is 3.5.
+
+A disabled healthy language gets the same muted `Disabled` status and the same details pane as a disabled broken one: `This language is turned off. Files it would claim open as plain text.`
+The pane says what being off means for the user's files; the strip is what changes it back.
+
+### 3.5 The crash quarantine
 
 A grammar that crashed on a previous launch appears with `Disabled after crash` in `severity.warning`, and it is the one status that is a warning rather than an error, because the current session is fine.
-Its details pane states the date and offers `Enable Language`, which clears the marker.
-Re-enabling shows a confirming `QMessageBox::warning`: `Vala crashed the editor on 2026-08-14. Enable it again?` with Yes/Cancel defaulting to Cancel.
+Its details pane states the date, and the strip's toggle reads `Enable Language`, which clears the marker as well as the user's disable — one button for both causes, because a user looking at `Disabled after crash` and a user looking at `Disabled` are pressing the same thing for the same reason.
+Re-enabling *this* row, and only this row, shows a confirming `QMessageBox::warning`: `Vala crashed the editor on 2026-08-14. Enable it again?` with Yes/Cancel defaulting to Cancel.
 That confirmation is warranted — this is the one setting in the dialog that can take the app down.
 
 The status bar also carries a compact indicator when any language is in an error or quarantine state (`2 language problems`), clickable, opening Settings on this page, per plan task G3.
 When nothing is wrong the status bar shows nothing at all.
 
-### 3.5 Adding a language
+### 3.6 Adding a language
 
 `Add Language...` opens a small modal with two paths, because the plan ships two mechanisms (G1a data overlay, G1b foreign dylib) and pretending they are one thing would lie about what the user is choosing.
 
@@ -282,7 +305,7 @@ The add dialog never reports the outcome itself; a modal that says "added succes
 The security note under the library option is plain text in the default foreground, not a red warning box.
 It states a fact the user needs before choosing, and shouting it would just get it tuned out.
 
-### 3.6 Restart to apply
+### 3.7 Restart to apply
 
 Plan task G2 delivers live reload with `Arc`-held compiled languages, so the normal case requires no restart and this page must not say otherwise.
 
@@ -294,9 +317,9 @@ It renders as an inline strip at the bottom of the page above the button box, in
 It is not a modal, it does not block OK, and it disappears when the condition no longer holds.
 `Restart Now` prompts to save modified documents through the existing path before restarting.
 
-### 3.7 Keyboard and focus
+### 3.8 Keyboard and focus
 
-Tab order: filter checkbox → `Add Language...` → tree → details pane action buttons in the order they are shown → restart strip's button if present → dialog button box.
+Tab order: filter checkbox → `Add Language...` → tree → the strip's enable/disable toggle → details pane action buttons in the order they are shown → restart strip's button if present → dialog button box.
 
 Up/Down moves between languages and skips group headers.
 Enter on a selected row with an `Open File` action performs it, since that is the row's primary action; on a healthy row Enter does nothing.
@@ -304,9 +327,10 @@ Enter on a selected row with an `Open File` action performs it, since that is th
 
 The details pane is a focusable, read-only, selectable text area so a keyboard user can select and copy the message and the path.
 
-### 3.8 Where this page says nothing
+### 3.9 Where this page says nothing
 
 No status text on healthy languages.
+No `Enabled` column and no per-row checkbox: whether a language is on is said once, by the Status cell of the rows that are off.
 No group header for a source with no languages.
 No details pane when the selected language has nothing to report — the pane collapses rather than showing `No problems.`
 No version, grammar hash or file-size columns; nobody opens this page to learn those.

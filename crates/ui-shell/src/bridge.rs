@@ -1897,9 +1897,16 @@ mod ffi {
         marker: QString,
         open_file: bool,
         reload: bool,
-        enable: bool,
-        disable: bool,
         open_folder: bool,
+    }
+
+    /// The Languages page's bottom-strip toggle, for the selected row.
+    /// Both its caption and whether it can be pressed are decided in Rust.
+    struct FfiLanguageToggle {
+        label: QString,
+        enabled: bool,
+        /// What to pass to `setDisabled` when pressed.
+        disable: bool,
     }
 
     /// The configuration half of a Language Servers row's status; the live
@@ -2014,6 +2021,12 @@ mod ffi {
         /// language has nothing to report, and the pane collapses.
         #[qinvokable]
         fn problem(self: &LanguageCatalog, id: &QString) -> FfiLanguageProblem;
+
+        /// What the bottom strip's toggle says for `id`, and what pressing
+        /// it does. An id nothing matches — no selection — comes back as a
+        /// greyed `Disable Language`.
+        #[qinvokable]
+        fn toggle(self: &LanguageCatalog, id: &QString) -> FfiLanguageToggle;
 
         /// Turn one language off or back on: persist the choice, clear the
         /// crash marker if a quarantine is what turned it off, and rebuild
@@ -5211,9 +5224,18 @@ impl ffi::LanguageCatalog {
             marker: QString::from(problem.marker.as_str()),
             open_file: offers(settings_model::LanguageAction::OpenFile),
             reload: offers(settings_model::LanguageAction::Reload),
-            enable: offers(settings_model::LanguageAction::EnableLanguage),
-            disable: offers(settings_model::LanguageAction::DisableLanguage),
             open_folder: offers(settings_model::LanguageAction::OpenFolder),
+        }
+    }
+
+    pub fn toggle(&self, id: &QString) -> ffi::FfiLanguageToggle {
+        let id = id.to_string();
+        let rows = self.rows.borrow();
+        let toggle = settings_model::languages::toggle(rows.iter().find(|row| row.id == id));
+        ffi::FfiLanguageToggle {
+            label: QString::from(toggle.label),
+            enabled: toggle.enabled,
+            disable: toggle.disable,
         }
     }
 

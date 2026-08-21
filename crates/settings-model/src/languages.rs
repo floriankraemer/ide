@@ -457,6 +457,51 @@ fn quarantine_confirmation(id: &str, marker: &Path) -> String {
     }
 }
 
+/// The Languages page's one selection-driven control: the bottom strip's
+/// toggle. Its label follows the selected row, because a control that says
+/// `Disable Language` while pointing at a language that is already off is
+/// lying about what pressing it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LanguageToggle {
+    /// The button's caption.
+    pub label: &'static str,
+    /// False when nothing is selected: the strip acts on a row, so with no
+    /// row it is greyed rather than hidden — the control is still there,
+    /// it just has nothing to act on yet.
+    pub enabled: bool,
+    /// What to pass to "set disabled" when pressed.
+    pub disable: bool,
+}
+
+/// What the strip's toggle says and does for the selected row, or for no
+/// selection at all.
+///
+/// Driven by the row's *status*, not by the per-cause action lists: whether
+/// a language is off right now is one fact, and every language can be
+/// turned off — including the ~30 healthy ones that never carry a problem.
+pub fn toggle(row: Option<&LanguageRow>) -> LanguageToggle {
+    let Some(row) = row else {
+        return LanguageToggle {
+            label: "Disable Language",
+            enabled: false,
+            disable: true,
+        };
+    };
+    let off = matches!(
+        row.status,
+        LanguageStatus::Disabled | LanguageStatus::DisabledAfterCrash
+    );
+    LanguageToggle {
+        label: if off {
+            "Enable Language"
+        } else {
+            "Disable Language"
+        },
+        enabled: true,
+        disable: !off,
+    }
+}
+
 /// Delete a crash marker, so the next load tries the grammar again.
 pub fn clear_quarantine(marker: &Path) -> io::Result<()> {
     fs::remove_file(marker)
@@ -610,6 +655,45 @@ fn date_of(time: SystemTime) -> Option<String> {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    fn row(status: LanguageStatus) -> LanguageRow {
+        LanguageRow {
+            id: "rust".into(),
+            name: "Rust".into(),
+            matches: "*.rs".into(),
+            source: LanguageSource::BuiltIn,
+            status,
+            problem: None,
+        }
+    }
+
+    #[test]
+    fn the_strip_toggle_follows_the_selected_row() {
+        // Nothing selected: the control stays, greyed.
+        let none = toggle(None);
+        assert_eq!(none.label, "Disable Language");
+        assert!(!none.enabled);
+
+        // A healthy language — the ~30 rows that carry no problem at all —
+        // is the case the details pane could never reach.
+        let healthy = toggle(Some(&row(LanguageStatus::Ok)));
+        assert_eq!(healthy.label, "Disable Language");
+        assert!(healthy.enabled);
+        assert!(healthy.disable);
+
+        // A broken but still-enabled language can be turned off too.
+        assert_eq!(
+            toggle(Some(&row(LanguageStatus::QueryError))).label,
+            "Disable Language"
+        );
+
+        for off in [LanguageStatus::Disabled, LanguageStatus::DisabledAfterCrash] {
+            let toggle = toggle(Some(&row(off)));
+            assert_eq!(toggle.label, "Enable Language");
+            assert!(toggle.enabled);
+            assert!(!toggle.disable);
+        }
+    }
 
     fn error(id: &str, kind: LoadErrorKind) -> LanguageLoadError {
         LanguageLoadError {

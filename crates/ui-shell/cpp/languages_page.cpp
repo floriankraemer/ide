@@ -24,6 +24,8 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
+#include <memory>
+
 namespace ui_shell {
 
 namespace {
@@ -260,17 +262,19 @@ QWidget *buildLanguagesPage(QWidget *parent,
     details->setVisible(false);
     layout->addWidget(details);
 
+    // The strip's own control, always present, acting on the selected row.
+    // It carries both directions: a language the user turned off is switched
+    // back on from the same button that turned it off, and the caption says
+    // which way it goes. The per-problem buttons keep to the right.
+    auto *toggleButton = new QPushButton(page);
     auto *openFileButton = new QPushButton(QObject::tr("Open File"), page);
     auto *reloadProblemButton = new QPushButton(QObject::tr("Reload"), page);
-    auto *enableButton = new QPushButton(QObject::tr("Enable Language"), page);
-    auto *disableButton = new QPushButton(QObject::tr("Disable Language"), page);
     auto *openFolderButton = new QPushButton(QObject::tr("Open Folder"), page);
     auto *actionsRow = new QHBoxLayout();
+    actionsRow->addWidget(toggleButton);
     actionsRow->addStretch(1);
     actionsRow->addWidget(openFileButton);
     actionsRow->addWidget(reloadProblemButton);
-    actionsRow->addWidget(enableButton);
-    actionsRow->addWidget(disableButton);
     actionsRow->addWidget(openFolderButton);
     layout->addLayout(actionsRow);
 
@@ -284,14 +288,19 @@ QWidget *buildLanguagesPage(QWidget *parent,
     // without re-deriving it from the widgets.
     auto current = std::make_shared<FfiLanguageProblem>();
 
+    // Which way the toggle currently goes, so the click handler acts on the
+    // same decision the caption showed.
+    auto toggleState = std::make_shared<FfiLanguageToggle>();
+
     auto showProblem = [=](const QString &id) {
         *current = catalog->problem(id);
+        *toggleState = catalog->toggle(id);
+        toggleButton->setText(toggleState->label);
+        toggleButton->setEnabled(toggleState->enabled);
         const bool hasProblem = !current->sentence.isEmpty();
         details->setVisible(hasProblem);
         openFileButton->setVisible(hasProblem && current->open_file);
         reloadProblemButton->setVisible(hasProblem && current->reload);
-        enableButton->setVisible(hasProblem && current->enable);
-        disableButton->setVisible(hasProblem && current->disable);
         openFolderButton->setVisible(hasProblem && current->open_folder);
         if (!hasProblem) {
             details->clear();
@@ -343,10 +352,14 @@ QWidget *buildLanguagesPage(QWidget *parent,
     // Whether re-enabling needs confirming, and what it asks, is decided in
     // Rust: re-arming a grammar that already crashed the editor is the one
     // setting in this dialog that can take the application down, and a plain
-    // user disable is not.
-    QObject::connect(enableButton, &QPushButton::clicked, page, [=]() {
+    // user disable is not. Turning a language off needs no confirmation and
+    // gets no "Enabled" checkmark anywhere — it is reversible from this same
+    // button, and a healthy row keeps an empty Status cell so the one row
+    // that failed still catches the eye.
+    QObject::connect(toggleButton, &QPushButton::clicked, page, [=]() {
         const QString id = selectedId(tree);
-        if (!current->confirm.isEmpty()) {
+        const bool disable = toggleState->disable;
+        if (!disable && !current->confirm.isEmpty()) {
             const auto answer =
               QMessageBox::warning(page, QObject::tr("Enable Language"), current->confirm,
                                    QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
@@ -354,25 +367,12 @@ QWidget *buildLanguagesPage(QWidget *parent,
                 return;
             }
         }
-        const FfiResult result = catalog->setDisabled(id, false);
+        const FfiResult result = catalog->setDisabled(id, disable);
         if (result.code != 0) {
-            QMessageBox::critical(page, QObject::tr("Cannot enable language"), result.message);
-            return;
-        }
-        refresh(id);
-        if (languagesChanged) {
-            languagesChanged();
-        }
-    });
-
-    // No confirmation and no "Enabled" checkmark anywhere: turning a
-    // language off is reversible, and a healthy row keeps an empty Status
-    // cell so the one row that failed still catches the eye.
-    QObject::connect(disableButton, &QPushButton::clicked, page, [=]() {
-        const QString id = selectedId(tree);
-        const FfiResult result = catalog->setDisabled(id, true);
-        if (result.code != 0) {
-            QMessageBox::critical(page, QObject::tr("Cannot disable language"), result.message);
+            QMessageBox::critical(page,
+                                  disable ? QObject::tr("Cannot disable language")
+                                          : QObject::tr("Cannot enable language"),
+                                  result.message);
             return;
         }
         refresh(id);
