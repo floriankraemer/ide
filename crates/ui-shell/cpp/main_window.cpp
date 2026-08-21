@@ -617,6 +617,20 @@ public:
         });
     }
 
+    // A language was turned off or back on, so which language each open
+    // file resolves to may have changed — and that is bound when the
+    // highlighter is built, not on every repaint. Asking each one to
+    // re-resolve is cheaper than tearing tabs down and rebuilding them.
+    void reloadHighlighterLanguages()
+    {
+        forEachEditor([](QPlainTextEdit *editor) {
+            if (auto *highlighter = editor->document()->findChild<SyntaxHighlighter *>()) {
+                highlighter->reloadLanguage();
+                highlighter->rehighlight();
+            }
+        });
+    }
+
     // Token colors are resolved by syntax_core::theme from the active
     // theme (and the user's syntax colours) and then cached per
     // highlighter, and a QSyntaxHighlighter only re-runs when its document
@@ -2237,11 +2251,13 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     // Languages needs no draft: nothing on it is a setting. Adding a
     // language, clearing a quarantine and reloading all take effect when
     // pressed, which is why the page offers no OK-shaped promise.
-    pages->addWidget(buildLanguagesPage(&dialog, languageCatalog,
-                                         [&dialog, editorTabs](const QString &path) {
-                                             editorTabs->openFileAtLine(path, 1, 1);
-                                             dialog.accept();
-                                         }));
+    pages->addWidget(buildLanguagesPage(
+      &dialog, languageCatalog,
+      [&dialog, editorTabs](const QString &path) {
+          editorTabs->openFileAtLine(path, 1, 1);
+          dialog.accept();
+      },
+      [editorTabs]() { editorTabs->reloadHighlighterLanguages(); }));
 
     // Language Servers commits on OK, like Keymap and MCP: starting and
     // stopping a server on every keystroke in a command field is not a
@@ -3149,6 +3165,10 @@ int run_app()
     // Applying the theme (T2) before anything is shown means neither the
     // splash nor the main window ever flashes an unstyled frame.
     applyTheme(appSettings->themeName());
+    // Build the language registry from what the config directory holds and
+    // which languages the user turned off, before the first file can be
+    // opened — otherwise a disabled language would come back every restart.
+    appSettings->reloadLanguages();
 
     SplashScreen splash(appSettings->themeName());
     splash.show();

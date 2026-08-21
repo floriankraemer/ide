@@ -20,8 +20,13 @@ namespace ui_shell {
 //
 // `openFile` opens a path in the editor behind the dialog — the one
 // genuinely actionable button for a broken query or manifest.
+//
+// `languagesChanged` is called after a language is turned off or back on,
+// so the editors behind the dialog re-resolve their language instead of
+// waiting for a restart.
 QWidget *buildLanguagesPage(QWidget *parent,
                             LanguageCatalog *catalog,
-                            std::function<void(const QString &)> openFile);
+                            std::function<void(const QString &)> openFile,
+                            std::function<void()> languagesChanged);
 
 } // namespace ui_shell

@@ -646,6 +646,11 @@ fn capture_scopes(query: Option<&Query>) -> Vec<Option<Scope>> {
 struct Entry {
     /// `None` only for the reserved plain-text slot.
     def: Option<Def>,
+    /// Turned off by the user (`Settings::disabled_languages`). The entry
+    /// stays in the registry so it can still be enumerated and re-enabled;
+    /// it is skipped by everything that *resolves* a language, so its files
+    /// open as plain text.
+    disabled: bool,
     compiled: OnceLock<Result<Arc<CompiledLanguage>, String>>,
 }
 
@@ -658,7 +663,7 @@ pub struct LanguageRegistry {
 
 impl LanguageRegistry {
     fn new(builtins: &'static [LanguageDef]) -> Self {
-        Self::with_runtime(builtins, &[])
+        Self::with_runtime(builtins, &[], &[])
     }
 
     /// The catalog with `runtime` entries layered over it by id — the
@@ -670,9 +675,14 @@ impl LanguageRegistry {
     /// any collision against a builtin. Runtime entries are produced by
     /// [`crate::runtime::load`], which has already rejected anything that
     /// does not parse or compile.
+    /// `disabled` names the ids the user turned off. They are kept as
+    /// entries — [`LanguageRegistry::languages`] still yields them, which is
+    /// the only way the settings page can offer to switch one back on — but
+    /// no lookup resolves to one.
     pub fn with_runtime(
         builtins: &'static [LanguageDef],
         runtime: &[Arc<OwnedLanguageDef>],
+        disabled: &[String],
     ) -> Self {
         let mut defs: Vec<Def> = builtins.iter().map(Def::Builtin).collect();
         for entry in runtime {
@@ -684,9 +694,11 @@ impl LanguageRegistry {
         }
         let mut entries = vec![Entry {
             def: None,
+            disabled: false,
             compiled: OnceLock::new(),
         }];
         entries.extend(defs.into_iter().map(|def| Entry {
+            disabled: disabled.iter().any(|id| id == def.id()),
             def: Some(def),
             compiled: OnceLock::new(),
         }));
@@ -705,13 +717,15 @@ impl LanguageRegistry {
         (0..self.entries.len() as u16).map(Language).collect()
     }
 
+    /// Look one up by id — `None` for an unknown id *and* for a disabled
+    /// one: a disabled language must not highlight anything.
     pub fn language_by_id(&self, id: &str) -> Option<Language> {
         if id == "plaintext" {
             return Some(Language::PLAIN_TEXT);
         }
         self.entries
             .iter()
-            .position(|e| e.def.as_ref().is_some_and(|d| d.id() == id))
+            .position(|e| !e.disabled && e.def.as_ref().is_some_and(|d| d.id() == id))
             .map(|index| Language(index as u16))
     }
 
@@ -751,6 +765,7 @@ impl LanguageRegistry {
             self.entries
                 .iter()
                 .enumerate()
+                .filter(|(_, e)| !e.disabled)
                 .filter_map(|(i, e)| Some((i, e.def.as_ref()?)))
         };
         let by_name = |name: &str| {
@@ -817,8 +832,9 @@ pub fn language_by_id(id: &str) -> Option<Language> {
 }
 
 /// Re-scan `<config_dir>/languages` and swap in a registry built from the
-/// builtins plus what it finds (G2). Returns the load errors so the UI can
-/// show them; an empty vec means everything on disk loaded.
+/// builtins plus what it finds (G2), minus the ids in `disabled`. Returns
+/// the load errors so the UI can show them; an empty vec means everything
+/// on disk loaded.
 ///
 /// `config_dir` is a parameter, not resolved here: `syntax-core` has no
 /// `dirs` dependency and does not get one — the caller owns "where config
@@ -829,11 +845,12 @@ pub fn language_by_id(id: &str) -> Option<Language> {
 /// blocks a parse for longer than the pointer swap. Live `Highlighter`s
 /// hold an `Arc<CompiledLanguage>` and keep parsing with the grammar they
 /// were built with; anything opened afterwards sees the new registry.
-pub fn reload(config_dir: &Path) -> Vec<crate::runtime::LanguageLoadError> {
+pub fn reload(config_dir: &Path, disabled: &[String]) -> Vec<crate::runtime::LanguageLoadError> {
     let loaded = crate::runtime::load(config_dir, BUILTIN_LANGUAGES);
     let rebuilt = Arc::new(LanguageRegistry::with_runtime(
         BUILTIN_LANGUAGES,
         &loaded.entries,
+        disabled,
     ));
     *REGISTRY.write().expect("language registry lock poisoned") = rebuilt;
     loaded.errors
@@ -948,6 +965,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn a_disabled_language_does_not_resolve_but_is_still_listed() {
+        let make = LanguageDef {
+            id: "make",
+            name: "Makefile",
+            extensions: &["mk"],
+            filenames: &["Makefile"],
+            grammar: || tree_sitter_rust::LANGUAGE.into(),
+            queries: QuerySet::default(),
+        };
+        let catalog: &'static [LanguageDef] = Box::leak(Box::new([make]));
+        let registry = LanguageRegistry::with_runtime(catalog, &[], &["make".to_string()]);
+
+        // Neither of its claims resolves: its files are plain text now.
+        assert_eq!(
+            registry.language_for_path(Path::new("build.mk")),
+            Language::PLAIN_TEXT
+        );
+        assert_eq!(
+            registry.language_for_path(Path::new("/p/Makefile")),
+            Language::PLAIN_TEXT
+        );
+        assert_eq!(registry.language_by_id("make"), None);
+
+        // But it is still there to be listed and switched back on — a
+        // language dropped from the registry could never be re-enabled.
+        let listed: Vec<String> = registry
+            .languages()
+            .into_iter()
+            .filter_map(|language| registry.def(language).map(|def| def.id().to_string()))
+            .collect();
+        assert_eq!(listed, vec!["make".to_string()]);
+
+        let enabled = LanguageRegistry::with_runtime(catalog, &[], &[]);
+        assert_eq!(
+            id_in(&enabled, enabled.language_for_path(Path::new("build.mk"))),
+            "make"
+        );
+    }
+
     /// G2, in one test on purpose: [`reload`] swaps the *process-wide*
     /// registry, so splitting these into separate `#[test]` functions
     /// would let them race each other inside the shared test binary.
@@ -980,7 +1037,7 @@ mod tests {
         // 1. A language that did not exist at startup is picked up.
         manifest("grammar = \"json\"\nextensions = [\"g2t\"]\n");
         highlights("(string) @string\n");
-        assert_eq!(reload(config.path()), Vec::new());
+        assert_eq!(reload(config.path(), &[]), Vec::new());
         assert_eq!(language_for_path(Path::new("x.g2t")).id(), "g2test");
         let span_count = |language| {
             let mut h = Highlighter::new(language);
@@ -992,7 +1049,7 @@ mod tests {
         // 2. Editing a query file and reloading picks the edit up — same
         //    id, different spans, no restart.
         highlights("(number) @number\n");
-        assert_eq!(reload(config.path()), Vec::new());
+        assert_eq!(reload(config.path(), &[]), Vec::new());
         let with_numbers = span_count(language_by_id("g2test").expect("g2test"));
         assert!(with_numbers > 0 && with_numbers != with_strings);
 
@@ -1013,7 +1070,7 @@ mod tests {
         let broken = config.path().join("languages").join("g2broken");
         fs::create_dir_all(&broken).unwrap();
         fs::write(broken.join("language.toml"), "this is not toml =\n").unwrap();
-        let errors = reload(config.path());
+        let errors = reload(config.path(), &[]);
         assert_eq!(errors.len(), 1, "{errors:?}");
         assert_eq!(errors[0].id, "g2broken");
         assert!(matches!(
@@ -1030,7 +1087,7 @@ mod tests {
             let path = config.path();
             scope.spawn(move || {
                 for _ in 0..20 {
-                    reload(path);
+                    reload(path, &[]);
                 }
             });
             let rust = language_by_id("rust").expect("rust");
@@ -1042,7 +1099,7 @@ mod tests {
 
         // Leave the global registry as we found it.
         let empty = tempfile::tempdir().unwrap();
-        assert_eq!(reload(empty.path()), Vec::new());
+        assert_eq!(reload(empty.path(), &[]), Vec::new());
         assert!(language_by_id("g2test").is_none());
     }
 
@@ -1092,6 +1149,7 @@ mod tests {
             let registry = Arc::new(LanguageRegistry::with_runtime(
                 BUILTIN_LANGUAGES,
                 &loaded.entries,
+                &[],
             ));
             let language = registry.language_by_id("freed").expect("freed");
             // What an editor open across the reload holds on to.

@@ -11,6 +11,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
+use app_config::Settings;
 use serde::Deserialize;
 use syntax_core::runtime::{LanguageLoadError, LoadErrorKind};
 use syntax_core::Def;
@@ -42,6 +43,8 @@ pub enum LanguageStatus {
     GrammarError,
     QueryError,
     VersionMismatch,
+    /// Turned off by the user, and therefore not resolving any file.
+    Disabled,
     DisabledAfterCrash,
 }
 
@@ -53,6 +56,7 @@ impl LanguageStatus {
             LanguageStatus::GrammarError => "Grammar error",
             LanguageStatus::QueryError => "Query error",
             LanguageStatus::VersionMismatch => "Version mismatch",
+            LanguageStatus::Disabled => "Disabled",
             LanguageStatus::DisabledAfterCrash => "Disabled after crash",
         }
     }
@@ -65,8 +69,11 @@ pub enum LanguageAction {
     OpenFile,
     /// Re-scan the config directory.
     Reload,
-    /// Delete the crash marker so the grammar is tried again.
+    /// Turn the language back on: clear the user's disable, or delete the
+    /// crash marker that quarantined it.
     EnableLanguage,
+    /// Turn the language off, so nothing it claims is highlighted with it.
+    DisableLanguage,
     /// Show the language's directory.
     OpenFolder,
 }
@@ -84,6 +91,11 @@ pub struct Problem {
     /// The path, so it can be selected and copied.
     pub path: String,
     pub actions: Vec<LanguageAction>,
+    /// What to ask before `EnableLanguage` goes ahead, already written out;
+    /// empty when the action needs no confirmation. Re-enabling a grammar
+    /// that took the editor down is the one setting worth a modal, and
+    /// deciding that is a rule, not a view choice.
+    pub confirm: String,
     /// The crash marker to delete for `EnableLanguage`; empty otherwise.
     pub marker: String,
 }
@@ -184,11 +196,17 @@ pub fn scan_manifests(config_dir: &Path) -> Vec<ManifestInfo> {
 /// A built-in whose id an overlay entry claims is listed once, under the
 /// overlay — it *is* the language now, and showing both would invite the
 /// user to edit the one that is not in effect.
+///
+/// `disabled` are the ids the user turned off. They are still listed —
+/// that is the only place the user can switch one back on — and their
+/// status wins over whatever else the row would have said, because the
+/// disable is the thing they can act on.
 pub fn rows(
     builtins: &[CatalogEntry],
     overlay: &[CatalogEntry],
     errors: &[LanguageLoadError],
     manifests: &[ManifestInfo],
+    disabled: &[String],
 ) -> Vec<LanguageRow> {
     let source_of = |id: &str| {
         manifests
@@ -227,7 +245,29 @@ pub fn rows(
         }
     }));
 
+    for row in &mut rows {
+        if disabled.contains(&row.id) {
+            row.status = LanguageStatus::Disabled;
+            row.problem = Some(disabled_problem());
+        }
+    }
+
     rows
+}
+
+/// The details pane for a language the user turned off: what that means for
+/// their files, and the one button that undoes it.
+fn disabled_problem() -> Problem {
+    Problem {
+        artifact: String::new(),
+        sentence: "This language is turned off. Files it would claim open as plain text."
+            .to_string(),
+        detail: String::new(),
+        path: String::new(),
+        actions: vec![LanguageAction::EnableLanguage],
+        confirm: String::new(),
+        marker: String::new(),
+    }
 }
 
 fn healthy(entry: &CatalogEntry, source: LanguageSource) -> LanguageRow {
@@ -265,6 +305,7 @@ pub fn explain(error: &LanguageLoadError) -> Problem {
             detail: query_detail(message),
             path: in_dir(file),
             actions: vec![LanguageAction::OpenFile, LanguageAction::Reload],
+            confirm: String::new(),
             marker: String::new(),
         },
         LoadErrorKind::MissingSymbol(symbol) => Problem {
@@ -275,7 +316,12 @@ pub fn explain(error: &LanguageLoadError) -> Problem {
             ),
             detail: String::new(),
             path: dir,
-            actions: vec![LanguageAction::Reload, LanguageAction::OpenFolder],
+            actions: vec![
+                LanguageAction::Reload,
+                LanguageAction::DisableLanguage,
+                LanguageAction::OpenFolder,
+            ],
+            confirm: String::new(),
             marker: String::new(),
         },
         LoadErrorKind::IncompatibleAbi(abi) => Problem {
@@ -287,7 +333,12 @@ pub fn explain(error: &LanguageLoadError) -> Problem {
             ),
             detail: String::new(),
             path: dir,
-            actions: vec![LanguageAction::Reload, LanguageAction::OpenFolder],
+            actions: vec![
+                LanguageAction::Reload,
+                LanguageAction::DisableLanguage,
+                LanguageAction::OpenFolder,
+            ],
+            confirm: String::new(),
             marker: String::new(),
         },
         LoadErrorKind::MalformedManifest(message) => Problem {
@@ -296,6 +347,7 @@ pub fn explain(error: &LanguageLoadError) -> Problem {
             detail: sentence(message),
             path: in_dir(MANIFEST_FILE),
             actions: vec![LanguageAction::OpenFile, LanguageAction::Reload],
+            confirm: String::new(),
             marker: String::new(),
         },
         LoadErrorKind::Unreadable { file, message } => Problem {
@@ -304,6 +356,7 @@ pub fn explain(error: &LanguageLoadError) -> Problem {
             detail: sentence(message),
             path: file.clone(),
             actions: vec![LanguageAction::Reload],
+            confirm: String::new(),
             marker: String::new(),
         },
         LoadErrorKind::LibraryUnloadable { file, message } => Problem {
@@ -312,6 +365,7 @@ pub fn explain(error: &LanguageLoadError) -> Problem {
             detail: sentence(message),
             path: file.clone(),
             actions: vec![LanguageAction::Reload, LanguageAction::OpenFolder],
+            confirm: String::new(),
             marker: String::new(),
         },
         LoadErrorKind::UnknownGrammar(name) => Problem {
@@ -323,6 +377,7 @@ pub fn explain(error: &LanguageLoadError) -> Problem {
             detail: String::new(),
             path: in_dir(MANIFEST_FILE),
             actions: vec![LanguageAction::OpenFile, LanguageAction::Reload],
+            confirm: String::new(),
             marker: String::new(),
         },
         LoadErrorKind::MissingGrammar => Problem {
@@ -333,6 +388,7 @@ pub fn explain(error: &LanguageLoadError) -> Problem {
             detail: String::new(),
             path: in_dir(MANIFEST_FILE),
             actions: vec![LanguageAction::OpenFile, LanguageAction::Reload],
+            confirm: String::new(),
             marker: String::new(),
         },
         LoadErrorKind::DuplicateId => Problem {
@@ -345,6 +401,7 @@ pub fn explain(error: &LanguageLoadError) -> Problem {
             detail: String::new(),
             path: in_dir(MANIFEST_FILE),
             actions: vec![LanguageAction::OpenFile, LanguageAction::Reload],
+            confirm: String::new(),
             marker: String::new(),
         },
         LoadErrorKind::TooManyGrammars => Problem {
@@ -355,6 +412,7 @@ pub fn explain(error: &LanguageLoadError) -> Problem {
             detail: String::new(),
             path: dir,
             actions: vec![LanguageAction::OpenFolder],
+            confirm: String::new(),
             marker: String::new(),
         },
         LoadErrorKind::Quarantined { marker } => Problem {
@@ -363,6 +421,7 @@ pub fn explain(error: &LanguageLoadError) -> Problem {
             detail: String::new(),
             path: dir,
             actions: vec![LanguageAction::EnableLanguage, LanguageAction::OpenFolder],
+            confirm: quarantine_confirmation(&error.id, marker),
             marker: marker.display().to_string(),
         },
     }
@@ -384,9 +443,37 @@ fn quarantine_sentence(marker: &Path) -> String {
     )
 }
 
+/// What `Enable Language` asks before it re-arms a grammar that already
+/// took the editor down once. The date comes from the marker, so the
+/// question names the crash the user is being asked to forgive.
+fn quarantine_confirmation(id: &str, marker: &Path) -> String {
+    let when = fs::metadata(marker)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(date_of);
+    match when {
+        Some(date) => format!("{id} crashed the editor on {date}. Enable it again?"),
+        None => format!("{id} crashed the editor while loading. Enable it again?"),
+    }
+}
+
 /// Delete a crash marker, so the next load tries the grammar again.
 pub fn clear_quarantine(marker: &Path) -> io::Result<()> {
     fs::remove_file(marker)
+}
+
+/// Everything "enable this language" means: clear the user's disable, and
+/// delete the crash marker too when a quarantine is what turned it off.
+/// One button, both causes — a user looking at `Disabled after crash` and a
+/// user looking at `Disabled` are pressing the same thing for the same
+/// reason, and making them find two different buttons would be the page
+/// leaking its own bookkeeping.
+pub fn enable(settings: &mut Settings, row: &LanguageRow) -> io::Result<()> {
+    settings.set_language_disabled(&row.id, false);
+    match row.problem.as_ref().map_or("", |problem| &problem.marker) {
+        "" => Ok(()),
+        marker => clear_quarantine(Path::new(marker)),
+    }
 }
 
 /// Copy a folder of tree-sitter queries into the config directory, under
@@ -643,6 +730,11 @@ mod tests {
         ));
         assert!(problem.sentence.contains("crashed the editor on 20"));
         assert!(problem.actions.contains(&LanguageAction::EnableLanguage));
+        // Re-arming it is the one setting in the dialog that can take the
+        // app down, so it is the one that asks first — and the question
+        // names the crash rather than being invented by the view.
+        assert!(problem.confirm.contains("odin"), "{}", problem.confirm);
+        assert!(problem.confirm.ends_with("Enable it again?"));
         assert_eq!(problem.marker, marker.display().to_string());
 
         clear_quarantine(&marker).expect("cleared");
@@ -688,6 +780,7 @@ mod tests {
             &[entry("rust")],
             &[],
             &manifests,
+            &[],
         );
         assert_eq!(rows.len(), 2);
         let rust: Vec<&LanguageRow> = rows.iter().filter(|r| r.id == "rust").collect();
@@ -708,12 +801,110 @@ mod tests {
             &[],
             &[error("vala", LoadErrorKind::MissingGrammar)],
             &manifests,
+            &[],
         );
         let vala = rows.iter().find(|r| r.id == "vala").expect("row");
         assert_eq!(vala.source, LanguageSource::Library);
         assert_eq!(vala.status, LanguageStatus::GrammarError);
         assert!(vala.problem.is_some());
         assert!(rows[0].problem.is_none());
+    }
+
+    #[test]
+    fn enabling_clears_both_the_user_disable_and_the_crash_marker() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("vala");
+        fs::write(&marker, "").expect("marker");
+
+        let quarantined = LanguageRow {
+            id: "vala".into(),
+            name: "vala".into(),
+            matches: String::new(),
+            source: LanguageSource::Library,
+            status: LanguageStatus::DisabledAfterCrash,
+            problem: Some(explain(&error(
+                "vala",
+                LoadErrorKind::Quarantined {
+                    marker: marker.clone(),
+                },
+            ))),
+        };
+        let mut settings = Settings::default();
+        settings.set_language_disabled("vala", true);
+
+        enable(&mut settings, &quarantined).expect("enabled");
+
+        assert!(!settings.is_language_disabled("vala"));
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn enabling_a_language_that_never_crashed_touches_no_marker() {
+        let mut settings = Settings::default();
+        settings.set_language_disabled("json", true);
+        let row = LanguageRow {
+            id: "json".into(),
+            name: "JSON".into(),
+            matches: "*.json".into(),
+            source: LanguageSource::BuiltIn,
+            status: LanguageStatus::Disabled,
+            problem: Some(disabled_problem()),
+        };
+
+        enable(&mut settings, &row).expect("enabled");
+        assert!(settings.disabled_languages.is_empty());
+    }
+
+    #[test]
+    fn a_disabled_language_is_still_listed_with_a_way_back_on() {
+        let rows = rows(
+            &[entry("rust"), entry("json")],
+            &[],
+            &[],
+            &[],
+            &["json".to_string()],
+        );
+        let json = rows.iter().find(|r| r.id == "json").expect("row");
+        assert_eq!(json.status, LanguageStatus::Disabled);
+        assert_eq!(json.status.text(), "Disabled");
+        let problem = json
+            .problem
+            .as_ref()
+            .expect("a disabled row explains itself");
+        assert!(problem.actions.contains(&LanguageAction::EnableLanguage));
+        // No modal for a plain user disable — only re-arming a crashed
+        // grammar is worth asking about.
+        assert!(problem.confirm.is_empty());
+
+        // The healthy majority is untouched, and says nothing.
+        let rust = rows.iter().find(|r| r.id == "rust").expect("row");
+        assert_eq!(rust.status, LanguageStatus::Ok);
+        assert_eq!(rust.status.text(), "");
+        assert!(rust.problem.is_none());
+    }
+
+    #[test]
+    fn the_causes_a_user_can_only_switch_off_offer_to_switch_it_off() {
+        for kind in [
+            LoadErrorKind::MissingSymbol("tree_sitter_odin".into()),
+            LoadErrorKind::IncompatibleAbi(12),
+        ] {
+            let problem = explain(&error("odin", kind.clone()));
+            assert!(
+                problem.actions.contains(&LanguageAction::DisableLanguage),
+                "{kind:?}"
+            );
+        }
+        // A query error is fixable in the editor, so it offers the file,
+        // not the off switch.
+        let fixable = explain(&error(
+            "odin",
+            LoadErrorKind::QueryCompile {
+                file: "queries/highlights.scm".into(),
+                message: "Query error at 1:1. bad".into(),
+            },
+        ));
+        assert!(!fixable.actions.contains(&LanguageAction::DisableLanguage));
     }
 
     #[test]

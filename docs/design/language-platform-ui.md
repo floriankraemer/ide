@@ -175,7 +175,7 @@ No "Changes apply immediately" hint — the user sees them apply immediately.
 | v Built-in                                                            |
 |     Rust          *.rs                   Built-in                     |
 |     Python        *.py, *.pyi            Built-in                     |
-|     Zig           *.zig                  Built-in      Not loaded    |
+|     Zig           *.zig                  Built-in                     |
 | v User config                                                         |
 |     Nim           *.nim                  Overlay                      |
 |     Odin          *.odin                 Overlay       Query error   |
@@ -205,12 +205,16 @@ This is the strongest "say nothing" call in the document and it should not be so
 | Status text | Colour | Meaning |
 |---|---|---|
 | *(empty)* | — | Loaded and available. |
-| `Not loaded` | `status.muted` | Compiled in but its grammar is unavailable in this build. |
 | `Grammar error` | `severity.error` | The grammar failed to load: missing symbol, bad ABI, unreadable file. |
 | `Query error` | `severity.error` | The grammar loaded but a `.scm` query would not compile. |
 | `Version mismatch` | `severity.error` | Grammar ABI outside the supported range. |
-| `Disabled` | `status.muted` | Turned off by the user. |
+| `Disabled` | `status.muted` | Turned off by the user. Its details pane says so and offers `Enable Language`. |
 | `Disabled after crash` | `severity.warning` | Auto-quarantined by the crash marker (plan G1b). |
+
+`Not loaded` — "compiled in but its grammar is unavailable in this build" — was specified here and is **not implemented, because it cannot happen**.
+Every grammar in `syntax_core::BUILTIN_LANGUAGES` is a non-optional dependency reached through a plain `fn() -> tree_sitter::Language`, with no Cargo feature and no `cfg` anywhere in the catalog: a language that is compiled in always has its grammar.
+Adding the status would mean adding a state the code can never produce, so the row was removed rather than faked.
+If a build ever gates a grammar behind a feature, that is when the status earns its place.
 
 The filter checkbox `Show only languages with problems` is unchecked by default and filters to the non-empty Status rows.
 It exists because the failure case is a needle in ~25 rows and the user arriving here already knows something is broken.

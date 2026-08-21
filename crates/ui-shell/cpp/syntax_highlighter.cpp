@@ -175,6 +175,17 @@ void SyntaxHighlighter::invalidatePalette()
     scopeFormats_.clear();
 }
 
+void SyntaxHighlighter::reloadLanguage()
+{
+    highlighter_ = makeHighlighter(fileName_);
+    hasParsedOnce_ = false;
+    cachedRevision_ = -1;
+    cachedSpans_.clear();
+    cachedSpanMaxEnd_.clear();
+    cachedTextBytes_.clear();
+    scopeFormats_.clear();
+}
+
 void SyntaxHighlighter::highlightBlock(const QString &text)
 {
     Q_UNUSED(text);

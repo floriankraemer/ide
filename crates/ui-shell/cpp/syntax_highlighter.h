@@ -50,6 +50,13 @@ public:
     // repaints the chrome and leaves the tokens in the old theme's colours.
     void invalidatePalette();
 
+    // Re-resolves which language this file is highlighted with and drops
+    // every cached parse of it. Call after the language registry changes —
+    // the language is bound when the highlighter is constructed, so a
+    // language the user just disabled would otherwise keep highlighting
+    // until the tab is reopened. Follow with rehighlight().
+    void reloadLanguage();
+
 protected:
     void highlightBlock(const QString &text) override;
 

@@ -68,6 +68,8 @@ QColor severityColorFor(FfiRowSeverity severity)
         return colors.error;
     case FfiRowSeverity::Warning:
         return colors.warning;
+    case FfiRowSeverity::Muted:
+        return colors.muted;
     case FfiRowSeverity::Healthy:
         break;
     }
@@ -219,7 +221,8 @@ QString runAddDialog(QWidget *parent, LanguageCatalog *catalog)
 
 QWidget *buildLanguagesPage(QWidget *parent,
                             LanguageCatalog *catalog,
-                            std::function<void(const QString &)> openFile)
+                            std::function<void(const QString &)> openFile,
+                            std::function<void()> languagesChanged)
 {
     auto *page = new QWidget(parent);
     page->setMinimumSize(560, 460);
@@ -260,12 +263,14 @@ QWidget *buildLanguagesPage(QWidget *parent,
     auto *openFileButton = new QPushButton(QObject::tr("Open File"), page);
     auto *reloadProblemButton = new QPushButton(QObject::tr("Reload"), page);
     auto *enableButton = new QPushButton(QObject::tr("Enable Language"), page);
+    auto *disableButton = new QPushButton(QObject::tr("Disable Language"), page);
     auto *openFolderButton = new QPushButton(QObject::tr("Open Folder"), page);
     auto *actionsRow = new QHBoxLayout();
     actionsRow->addStretch(1);
     actionsRow->addWidget(openFileButton);
     actionsRow->addWidget(reloadProblemButton);
     actionsRow->addWidget(enableButton);
+    actionsRow->addWidget(disableButton);
     actionsRow->addWidget(openFolderButton);
     layout->addLayout(actionsRow);
 
@@ -286,13 +291,17 @@ QWidget *buildLanguagesPage(QWidget *parent,
         openFileButton->setVisible(hasProblem && current->open_file);
         reloadProblemButton->setVisible(hasProblem && current->reload);
         enableButton->setVisible(hasProblem && current->enable);
+        disableButton->setVisible(hasProblem && current->disable);
         openFolderButton->setVisible(hasProblem && current->open_folder);
         if (!hasProblem) {
             details->clear();
             return;
         }
         QStringList lines;
-        lines << QObject::tr("%1 — %2").arg(id, current->artifact);
+        // No artefact for a language that simply failed nowhere — a user
+        // disable names itself and nothing else.
+        lines << (current->artifact.isEmpty() ? id
+                                              : QObject::tr("%1 — %2").arg(id, current->artifact));
         lines << current->sentence;
         if (!current->detail.isEmpty()) {
             lines << current->detail;
@@ -331,23 +340,45 @@ QWidget *buildLanguagesPage(QWidget *parent,
         QDesktopServices::openUrl(QUrl::fromLocalFile(QFileInfo(current->path).absolutePath()));
     });
 
-    // The one setting in this dialog that can take the application down, so
-    // the one that asks first.
+    // Whether re-enabling needs confirming, and what it asks, is decided in
+    // Rust: re-arming a grammar that already crashed the editor is the one
+    // setting in this dialog that can take the application down, and a plain
+    // user disable is not.
     QObject::connect(enableButton, &QPushButton::clicked, page, [=]() {
         const QString id = selectedId(tree);
-        const auto answer = QMessageBox::warning(
-          page, QObject::tr("Enable Language"),
-          QObject::tr("%1 crashed the editor while loading. Enable it again?").arg(id),
-          QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
-        if (answer != QMessageBox::Yes) {
-            return;
+        if (!current->confirm.isEmpty()) {
+            const auto answer =
+              QMessageBox::warning(page, QObject::tr("Enable Language"), current->confirm,
+                                   QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+            if (answer != QMessageBox::Yes) {
+                return;
+            }
         }
-        const FfiResult result = catalog->clearQuarantine(current->marker);
+        const FfiResult result = catalog->setDisabled(id, false);
         if (result.code != 0) {
             QMessageBox::critical(page, QObject::tr("Cannot enable language"), result.message);
             return;
         }
         refresh(id);
+        if (languagesChanged) {
+            languagesChanged();
+        }
+    });
+
+    // No confirmation and no "Enabled" checkmark anywhere: turning a
+    // language off is reversible, and a healthy row keeps an empty Status
+    // cell so the one row that failed still catches the eye.
+    QObject::connect(disableButton, &QPushButton::clicked, page, [=]() {
+        const QString id = selectedId(tree);
+        const FfiResult result = catalog->setDisabled(id, true);
+        if (result.code != 0) {
+            QMessageBox::critical(page, QObject::tr("Cannot disable language"), result.message);
+            return;
+        }
+        refresh(id);
+        if (languagesChanged) {
+            languagesChanged();
+        }
     });
 
     refresh(QString());

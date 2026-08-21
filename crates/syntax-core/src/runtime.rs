@@ -796,7 +796,7 @@ mod tests {
         // builtin.
         assert_eq!(added.queries.locals, None);
 
-        let registry = LanguageRegistry::with_runtime(builtins(), &loaded.entries);
+        let registry = LanguageRegistry::with_runtime(builtins(), &loaded.entries, &[]);
         let language = registry
             .language_by_id("myrust")
             .expect("added language is in the registry");
@@ -813,7 +813,7 @@ mod tests {
         let fixture = Fixture::new();
         fixture.write("rust/language.toml", "name = \"Rust (mine)\"\n");
         let loaded = fixture.load();
-        let registry = LanguageRegistry::with_runtime(builtins(), &loaded.entries);
+        let registry = LanguageRegistry::with_runtime(builtins(), &loaded.entries, &[]);
 
         assert_eq!(registry.languages().len(), 3, "plaintext + rust + json");
         let rust = registry.language_by_id("rust").expect("rust");
@@ -892,7 +892,7 @@ mod tests {
         assert!(!message.is_empty());
 
         // The registry built from what did load is intact.
-        let registry = LanguageRegistry::with_runtime(builtins(), &loaded.entries);
+        let registry = LanguageRegistry::with_runtime(builtins(), &loaded.entries, &[]);
         let name_of = |id: &str| {
             registry
                 .def(registry.language_by_id(id).unwrap())
@@ -1057,7 +1057,7 @@ mod tests {
 
     /// The builtins are still resolvable after a foreign grammar failed.
     fn assert_registry_intact(loaded: &RuntimeLanguages) {
-        let registry = LanguageRegistry::with_runtime(builtins(), &loaded.entries);
+        let registry = LanguageRegistry::with_runtime(builtins(), &loaded.entries, &[]);
         for id in ["rust", "json"] {
             let language = registry.language_by_id(id).expect("builtin survives");
             assert!(matches!(registry.compiled(language), Some(Ok(_))));
@@ -1083,7 +1083,7 @@ mod tests {
         let loaded = fixture.load();
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
 
-        let registry = LanguageRegistry::with_runtime(builtins(), &loaded.entries);
+        let registry = LanguageRegistry::with_runtime(builtins(), &loaded.entries, &[]);
         let language = registry.language_by_id(id).expect("the foreign language");
         let compiled = registry
             .compiled(language)
@@ -1271,7 +1271,7 @@ mod tests {
     fn plain_text_survives_the_overlay() {
         let fixture = Fixture::new();
         fixture.write("rust/language.toml", "");
-        let registry = LanguageRegistry::with_runtime(builtins(), &fixture.load().entries);
+        let registry = LanguageRegistry::with_runtime(builtins(), &fixture.load().entries, &[]);
         assert_eq!(
             registry.language_by_id("plaintext"),
             Some(Language::PLAIN_TEXT)

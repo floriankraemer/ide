@@ -148,6 +148,12 @@ pub struct Settings {
     /// this crate only stores them.
     #[serde(default, rename = "language_server")]
     pub language_servers: Vec<LanguageServerSetting>,
+    /// Stable ids of languages the user turned off. A disabled language is
+    /// still *listed* by the Languages page — otherwise it could never be
+    /// switched back on — but the registry refuses to resolve it, so its
+    /// files open as plain text. Ids, not names: names are display-only.
+    #[serde(default)]
+    pub disabled_languages: Vec<String>,
 }
 
 /// Cap on remembered recent projects — enough for a useful menu without
@@ -233,6 +239,20 @@ impl Settings {
         self.recent_files.retain(|p| p != &path);
         self.recent_files.insert(0, path);
         self.recent_files.truncate(MAX_RECENT_FILES);
+    }
+
+    /// Turn one language off or back on. Kept sorted and deduped so the
+    /// persisted list is stable no matter what order the user toggled in.
+    pub fn set_language_disabled(&mut self, id: &str, disabled: bool) {
+        self.disabled_languages.retain(|other| other != id);
+        if disabled {
+            self.disabled_languages.push(id.to_string());
+            self.disabled_languages.sort();
+        }
+    }
+
+    pub fn is_language_disabled(&self, id: &str) -> bool {
+        self.disabled_languages.iter().any(|other| other == id)
     }
 }
 
@@ -381,6 +401,7 @@ mod tests {
                 command: Some("/opt/rust-analyzer".to_string()),
                 ..LanguageServerSetting::default()
             }],
+            disabled_languages: vec!["vala".to_string()],
         };
 
         save(dir.path(), &settings).unwrap();
@@ -680,6 +701,31 @@ mod tests {
         // Unset fields stay unset rather than being written as empty strings,
         // so "only disable it" cannot silently wipe the shipped command.
         assert!(loaded.language_servers[1].command.is_none());
+    }
+
+    #[test]
+    fn disabled_languages_round_trip_and_stay_sorted_and_deduped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings::default();
+        settings.set_language_disabled("zig", true);
+        settings.set_language_disabled("rust", true);
+        settings.set_language_disabled("zig", true);
+
+        save(dir.path(), &settings).unwrap();
+        let mut loaded = load(dir.path()).unwrap();
+        assert_eq!(loaded.disabled_languages, vec!["rust", "zig"]);
+        assert!(loaded.is_language_disabled("rust"));
+
+        loaded.set_language_disabled("rust", false);
+        assert_eq!(loaded.disabled_languages, vec!["zig"]);
+        assert!(!loaded.is_language_disabled("rust"));
+    }
+
+    #[test]
+    fn a_settings_file_without_disabled_languages_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(SETTINGS_FILE), "theme = \"light\"\n").unwrap();
+        assert!(load(dir.path()).unwrap().disabled_languages.is_empty());
     }
 
     #[test]

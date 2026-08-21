@@ -1861,6 +1861,9 @@ mod ffi {
     /// status text at all.
     enum FfiRowSeverity {
         Healthy,
+        /// `status.muted`: a true statement about the row that is not a
+        /// problem — a language the user turned off.
+        Muted,
         Warning,
         Error,
     }
@@ -1888,11 +1891,14 @@ mod ffi {
         /// The specific detail, with a line number when there is one.
         detail: QString,
         path: QString,
+        /// What to ask before `enable` goes ahead; empty means ask nothing.
+        confirm: QString,
         /// The crash marker to delete when `enable` is offered.
         marker: QString,
         open_file: bool,
         reload: bool,
         enable: bool,
+        disable: bool,
         open_folder: bool,
     }
 
@@ -2009,11 +2015,13 @@ mod ffi {
         #[qinvokable]
         fn problem(self: &LanguageCatalog, id: &QString) -> FfiLanguageProblem;
 
-        /// Delete a crash marker so the grammar is tried again on the next
-        /// scan (G1b's quarantine, cleared deliberately by the user).
+        /// Turn one language off or back on: persist the choice, clear the
+        /// crash marker if a quarantine is what turned it off, and rebuild
+        /// the registry, so files already open stop (or start) resolving to
+        /// it without a restart. The rows are refreshed too.
         #[qinvokable]
-        #[cxx_name = "clearQuarantine"]
-        fn clear_quarantine(self: &LanguageCatalog, marker: &QString) -> FfiResult;
+        #[cxx_name = "setDisabled"]
+        fn set_disabled(self: &LanguageCatalog, id: &QString, disabled: bool) -> FfiResult;
 
         /// Copy a folder of tree-sitter queries into the config directory.
         #[qinvokable]
@@ -2352,7 +2360,11 @@ impl ffi::AppSettings {
     }
 
     pub fn reload_languages(&self) -> QStringList {
-        syntax_core::reload(&app_core::resolve_config_dir())
+        let config_dir = app_core::resolve_config_dir();
+        let disabled = app_config::load(&config_dir)
+            .unwrap_or_default()
+            .disabled_languages;
+        syntax_core::reload(&config_dir, &disabled)
             .iter()
             .map(|err| QString::from(err.to_string().as_str()))
             .collect()
@@ -5141,11 +5153,15 @@ impl ffi::LanguageCatalog {
                 settings_model::languages::catalog_entry(&syntax_core::Def::Runtime(def.clone()))
             })
             .collect();
+        let disabled = app_config::load(&config_dir)
+            .unwrap_or_default()
+            .disabled_languages;
         *self.rows.borrow_mut() = settings_model::languages::rows(
             &builtins,
             &loaded,
             &overlay.errors,
             &settings_model::scan_manifests(&config_dir),
+            &disabled,
         );
     }
 
@@ -5165,6 +5181,7 @@ impl ffi::LanguageCatalog {
                 },
                 severity: match row.status {
                     settings_model::LanguageStatus::Ok => ffi::FfiRowSeverity::Healthy,
+                    settings_model::LanguageStatus::Disabled => ffi::FfiRowSeverity::Muted,
                     settings_model::LanguageStatus::DisabledAfterCrash => {
                         ffi::FfiRowSeverity::Warning
                     }
@@ -5190,19 +5207,49 @@ impl ffi::LanguageCatalog {
             sentence: QString::from(problem.sentence.as_str()),
             detail: QString::from(problem.detail.as_str()),
             path: QString::from(problem.path.as_str()),
+            confirm: QString::from(problem.confirm.as_str()),
             marker: QString::from(problem.marker.as_str()),
             open_file: offers(settings_model::LanguageAction::OpenFile),
             reload: offers(settings_model::LanguageAction::Reload),
             enable: offers(settings_model::LanguageAction::EnableLanguage),
+            disable: offers(settings_model::LanguageAction::DisableLanguage),
             open_folder: offers(settings_model::LanguageAction::OpenFolder),
         }
     }
 
-    pub fn clear_quarantine(&self, marker: &QString) -> FfiResult {
-        let marker = marker.to_string();
-        to_ffi_io_result(
-            settings_model::languages::clear_quarantine(Path::new(&marker)).map(|()| marker),
-        )
+    pub fn set_disabled(&self, id: &QString, disabled: bool) -> FfiResult {
+        let id = id.to_string();
+        let config_dir = app_core::resolve_config_dir();
+        let mut settings = app_config::load(&config_dir).unwrap_or_default();
+        if disabled {
+            settings.set_language_disabled(&id, true);
+        } else {
+            let row = self.rows.borrow().iter().find(|row| row.id == id).cloned();
+            let enabled = match &row {
+                Some(row) => settings_model::languages::enable(&mut settings, row),
+                None => {
+                    settings.set_language_disabled(&id, false);
+                    Ok(())
+                }
+            };
+            if let Err(err) = enabled {
+                return FfiResult {
+                    code: 1,
+                    message: QString::from(err.to_string().as_str()),
+                };
+            }
+        }
+        if let Err(err) = app_config::save(&config_dir, &settings) {
+            return FfiResult {
+                code: 1,
+                message: QString::from(err.to_string().as_str()),
+            };
+        }
+        // Same swap the reload path does, so the change reaches files that
+        // are already open instead of waiting for a restart.
+        syntax_core::reload(&config_dir, &settings.disabled_languages);
+        self.refresh();
+        FfiResult::default()
     }
 
     pub fn add_language_folder(&self, path: &QString) -> FfiResult {
