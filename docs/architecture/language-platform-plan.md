@@ -9,12 +9,12 @@ per `CLAUDE.md`.
 
 | Task | Status | Commit |
 |---|---|---|
-| X1 | open | |
+| X1 | done | pending |
 | X2 | done | `0554341` |
 | P1 | done | `faa1a00` |
-| R1 | done | pending |
+| R1 | done | `a8f0ebf` |
 | R2 | open | |
-| R3 | open | |
+| R3 | done | pending |
 | T1 | open | |
 | T2 | done | `76352ce` |
 | T3 | open | |

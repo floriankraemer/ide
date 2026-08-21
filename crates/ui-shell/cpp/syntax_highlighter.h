@@ -1,6 +1,10 @@
 #pragma once
 
+#include <cstddef>
+#include <vector>
+
 #include <QByteArray>
+#include <QColor>
 #include <QSyntaxHighlighter>
 #include <QString>
 #include <QVector>
@@ -49,6 +53,11 @@ private:
     bool hasParsedOnce_ = false;
     int cachedRevision_ = -1;
     QVector<FfiHighlightSpan> cachedSpans_;
+    // Prefix maxima of cachedSpans_[i].end — monotonic, so highlightBlock()
+    // can binary-search the first span reaching into a block.
+    std::vector<std::size_t> cachedSpanMaxEnd_;
+    QVector<QColor> scopeColors_;
+    QString scopeColorsTheme_;
     QVector<int> cachedByteOffsets_;
     QByteArray cachedTextBytes_;
 };

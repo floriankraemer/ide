@@ -73,17 +73,6 @@ mod ffi {
         is_default: bool,
     }
 
-    /// Token category (Y2), 1:1 with `syntax_core::TokenKind`.
-    enum FfiTokenKind {
-        Keyword,
-        String,
-        Comment,
-        Number,
-        Function,
-        Type,
-        Other,
-    }
-
     /// A classified span within the text passed to `highlight_line`, in
     /// UTF-8 byte offsets (matching `syntax_core::HighlightSpan`) — not
     /// `ui-shell`'s usual QString/UTF-16 offsets, since classification
@@ -92,7 +81,13 @@ mod ffi {
     struct FfiHighlightSpan {
         start: usize,
         end: usize,
-        kind: FfiTokenKind,
+        /// Index into `syntax_core::SCOPES`, carried as a bare id on
+        /// purpose: a cxx enum would make every new scope a bridge
+        /// change. ADR-0003 governs error shapes and entity identity;
+        /// this is neither — it indexes a table the view fetches through
+        /// `syntax_scope_names()` in the same session. The view MUST
+        /// range-guard it against that table.
+        scope: u16,
     }
 
     /// One in-editor find match, as a half-open `[start, end)` range of
@@ -316,6 +311,13 @@ mod ffi {
         /// anything unrecognized, which is a cheap no-op — see
         /// `syntax_core::Highlighter`'s doc comment).
         fn new_syntax_highlighter(extension: &str) -> Box<SyntaxHighlighterHandle>;
+
+        /// `syntax_core::SCOPES`, in id order: entry `i` is the canonical
+        /// capture name of scope id `i`. The view builds its format table
+        /// from this, so it keys colours off names and never off a
+        /// hardcoded id, and its table is always exactly as long as the
+        /// Rust one.
+        fn syntax_scope_names() -> Vec<String>;
 
         /// Full (re)parse of `text`, discarding any previous incremental
         /// tree. Call once, on initial attach/file load.
@@ -1551,27 +1553,22 @@ impl SyntaxHighlighterHandle {
     }
 }
 
+fn syntax_scope_names() -> Vec<String> {
+    syntax_core::SCOPES
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect()
+}
+
 fn to_ffi_spans(spans: Vec<syntax_core::HighlightSpan>) -> Vec<ffi::FfiHighlightSpan> {
     spans
         .into_iter()
         .map(|span| ffi::FfiHighlightSpan {
             start: span.start,
             end: span.end,
-            kind: to_ffi_token_kind(span.kind),
+            scope: span.scope.id(),
         })
         .collect()
-}
-
-fn to_ffi_token_kind(kind: syntax_core::TokenKind) -> ffi::FfiTokenKind {
-    match kind {
-        syntax_core::TokenKind::Keyword => ffi::FfiTokenKind::Keyword,
-        syntax_core::TokenKind::String => ffi::FfiTokenKind::String,
-        syntax_core::TokenKind::Comment => ffi::FfiTokenKind::Comment,
-        syntax_core::TokenKind::Number => ffi::FfiTokenKind::Number,
-        syntax_core::TokenKind::Function => ffi::FfiTokenKind::Function,
-        syntax_core::TokenKind::Type => ffi::FfiTokenKind::Type,
-        syntax_core::TokenKind::Other => ffi::FfiTokenKind::Other,
-    }
 }
 
 /// Pre-order flatten `nodes` (Task D) into `out`, recording each node's

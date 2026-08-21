@@ -16,17 +16,93 @@ pub use registry::{
     LanguageDef, LanguageRegistry, QuerySet, BUILTIN_LANGUAGES,
 };
 
-/// Coarse token categories, kept to what tree-sitter's stock Rust/JSON
-/// grammars naturally distinguish — not a general-purpose taxonomy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenKind {
-    Keyword,
-    String,
-    Comment,
-    Number,
-    Function,
-    Type,
-    Other,
+/// The highlighting vocabulary: the standard tree-sitter capture names
+/// that upstream `queries/highlights.scm` files actually emit.
+///
+/// **Static and closed, deliberately.** Runtime-loaded grammars never
+/// intern new entries — an unknown capture falls back up its dotted path
+/// (see [`Scope::resolve`]) or is dropped. Interning would let this table
+/// and the view's format table (indexed by the same ids) drift apart, and
+/// a stale id is a wrong colour, not a compile error. Adding a scope means
+/// editing this list and nothing else: the seam carries a bare id and the
+/// view range-guards it.
+///
+/// Append-friendly but *not* reorder-friendly while a build is in flight:
+/// ids are only meaningful within one build (they are never persisted —
+/// [`Scope::name`] is what T2 writes to disk).
+pub static SCOPES: &[&str] = &[
+    "attribute",
+    "boolean",
+    "character",
+    "comment",
+    "comment.documentation",
+    "constant",
+    "constant.builtin",
+    "constructor",
+    "embedded",
+    "escape",
+    "function",
+    "function.builtin",
+    "function.call",
+    "function.macro",
+    "function.method",
+    "keyword",
+    "label",
+    "module",
+    "number",
+    "number.float",
+    "operator",
+    "property",
+    "punctuation",
+    "punctuation.bracket",
+    "punctuation.delimiter",
+    "punctuation.special",
+    "string",
+    "string.escape",
+    "string.regexp",
+    "string.special",
+    "tag",
+    "type",
+    "type.builtin",
+    "type.definition",
+    "variable",
+    "variable.builtin",
+    "variable.member",
+    "variable.parameter",
+];
+
+/// A handle into [`SCOPES`] — an index, not an enum, so adding a scope is
+/// a one-line table edit and never a bridge or C++ change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Scope(u16);
+
+impl Scope {
+    /// The scope a query capture name maps to, with hierarchical fallback:
+    /// `a.b.c` → `a.b` → `a` → `None`.
+    ///
+    /// This is what makes upstream `.scm` files usable unmodified — a
+    /// grammar we never saw can emit `@keyword.coroutine` and still get
+    /// keyword colouring. Resolution is done once per query at
+    /// compile time (see `registry::capture_scopes`), never per span.
+    pub fn resolve(capture_name: &str) -> Option<Scope> {
+        let mut candidate = capture_name;
+        loop {
+            if let Some(index) = SCOPES.iter().position(|s| *s == candidate) {
+                return Some(Scope(index as u16));
+            }
+            candidate = candidate.rsplit_once('.')?.0;
+        }
+    }
+
+    /// The canonical capture name, e.g. `"function.method"`.
+    pub fn name(self) -> &'static str {
+        SCOPES[usize::from(self.0)]
+    }
+
+    /// The raw table index, as it crosses the FFI seam.
+    pub fn id(self) -> u16 {
+        self.0
+    }
 }
 
 /// A classified byte range within the highlighted text.
@@ -34,7 +110,7 @@ pub enum TokenKind {
 pub struct HighlightSpan {
     pub start: usize,
     pub end: usize,
-    pub kind: TokenKind,
+    pub scope: Scope,
 }
 
 /// One occurrence of an identifier-like node (byte range `start..end` into
@@ -126,22 +202,6 @@ fn symbol_kind_for_capture(capture_name: &str) -> Option<SymbolKind> {
         "method" => Some(SymbolKind::Method),
         "function" => Some(SymbolKind::Function),
         "field" => Some(SymbolKind::Field),
-        _ => None,
-    }
-}
-
-/// Map a query capture name (`@keyword`, `@string`, ...) onto the existing
-/// `TokenKind` taxonomy. Captures with no mapping (there are none today,
-/// since every capture in our `.scm` files is one of these six) are
-/// dropped, mirroring the old hand-matcher's `_ => None` arm.
-fn token_kind_for_capture(capture_name: &str) -> Option<TokenKind> {
-    match capture_name {
-        "keyword" => Some(TokenKind::Keyword),
-        "string" => Some(TokenKind::String),
-        "comment" => Some(TokenKind::Comment),
-        "number" => Some(TokenKind::Number),
-        "function" => Some(TokenKind::Function),
-        "type" => Some(TokenKind::Type),
         _ => None,
     }
 }
@@ -392,18 +452,25 @@ fn build_symbol_tree(mut raw: Vec<RawSymbol>, text: &str) -> Vec<SymbolNode> {
     roots
 }
 
-fn spans_from_tree(query: &Query, tree: &tree_sitter::Tree, text: &str) -> Vec<HighlightSpan> {
+/// `capture_scopes` is the query's capture index -> [`Scope`] table,
+/// resolved once when the query was compiled — the per-span hot path only
+/// indexes it.
+fn spans_from_tree(
+    query: &Query,
+    capture_scopes: &[Option<Scope>],
+    tree: &tree_sitter::Tree,
+    text: &str,
+) -> Vec<HighlightSpan> {
     let mut spans = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
     while let Some(m) = matches.next() {
         for capture in m.captures {
-            let capture_name = query.capture_names()[capture.index as usize];
-            if let Some(kind) = token_kind_for_capture(capture_name) {
+            if let Some(Some(scope)) = capture_scopes.get(capture.index as usize) {
                 spans.push(HighlightSpan {
                     start: capture.node.start_byte(),
                     end: capture.node.end_byte(),
-                    kind,
+                    scope: *scope,
                 });
             }
         }
@@ -512,7 +579,10 @@ impl Highlighter {
     }
 
     fn reparse(&mut self) -> Vec<HighlightSpan> {
-        let Some(query) = self.compiled.as_ref().and_then(|c| c.highlights.as_ref()) else {
+        let Some(compiled) = self.compiled.clone() else {
+            return Vec::new();
+        };
+        let Some(query) = compiled.highlights.as_ref() else {
             return Vec::new();
         };
         let Some(parser) = self.parser.as_mut() else {
@@ -521,7 +591,7 @@ impl Highlighter {
         let Some(new_tree) = parser.parse(&self.text, self.tree.as_ref()) else {
             return Vec::new();
         };
-        let spans = spans_from_tree(query, &new_tree, &self.text);
+        let spans = spans_from_tree(query, &compiled.highlight_scopes, &new_tree, &self.text);
         self.tree = Some(new_tree);
         spans
     }
@@ -583,8 +653,47 @@ mod tests {
         lang("php")
     }
 
-    fn find(spans: &[HighlightSpan], kind: TokenKind) -> Option<&HighlightSpan> {
-        spans.iter().find(|s| s.kind == kind)
+    fn scope(name: &str) -> Scope {
+        Scope::resolve(name).unwrap_or_else(|| panic!("no such scope: {name}"))
+    }
+
+    fn find<'a>(spans: &'a [HighlightSpan], name: &str) -> Option<&'a HighlightSpan> {
+        let wanted = scope(name);
+        spans.iter().find(|s| s.scope == wanted)
+    }
+
+    #[test]
+    fn scope_names_are_unique_and_every_dotted_scope_has_its_root() {
+        let mut sorted: Vec<&str> = SCOPES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), SCOPES.len(), "duplicate scope name");
+        for name in SCOPES {
+            if let Some((parent, _)) = name.rsplit_once('.') {
+                assert!(
+                    SCOPES.contains(&parent),
+                    "{name} has no parent scope {parent}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn an_unknown_capture_falls_back_up_its_dotted_path() {
+        // Exact hit.
+        assert_eq!(scope("function.method").name(), "function.method");
+        // One level up: `function.method` is in the table, its `.static`
+        // refinement is not.
+        assert_eq!(scope("function.method.static").name(), "function.method");
+        // All the way to the root: no `keyword.*` entry exists at all.
+        assert_eq!(scope("keyword.conditional.ternary").name(), "keyword");
+    }
+
+    #[test]
+    fn a_fully_unknown_capture_is_dropped() {
+        assert_eq!(Scope::resolve("nonsense"), None);
+        assert_eq!(Scope::resolve("nonsense.and.more"), None);
+        assert_eq!(Scope::resolve(""), None);
     }
 
     #[test]
@@ -617,7 +726,7 @@ mod tests {
     fn rust_fn_keyword_is_highlighted() {
         let text = "fn foo() {}";
         let spans = highlight(rust(), text);
-        let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        let span = find(&spans, "keyword").expect("expected a Keyword span");
         assert_eq!(&text[span.start..span.end], "fn");
     }
 
@@ -625,7 +734,7 @@ mod tests {
     fn rust_function_name_is_highlighted() {
         let text = "fn foo() {}";
         let spans = highlight(rust(), text);
-        let span = find(&spans, TokenKind::Function).expect("expected a Function span");
+        let span = find(&spans, "function").expect("expected a Function span");
         assert_eq!(&text[span.start..span.end], "foo");
     }
 
@@ -633,7 +742,7 @@ mod tests {
     fn rust_string_literal_is_highlighted() {
         let text = "fn foo() { let s = \"hi\"; }";
         let spans = highlight(rust(), text);
-        let span = find(&spans, TokenKind::String).expect("expected a String span");
+        let span = find(&spans, "string").expect("expected a String span");
         assert_eq!(&text[span.start..span.end], "\"hi\"");
     }
 
@@ -641,7 +750,7 @@ mod tests {
     fn rust_comment_is_highlighted() {
         let text = "fn foo() { // hello\n}";
         let spans = highlight(rust(), text);
-        let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
+        let span = find(&spans, "comment").expect("expected a Comment span");
         assert!(&text[span.start..span.end].starts_with("// hello"));
     }
 
@@ -649,7 +758,7 @@ mod tests {
     fn rust_number_is_highlighted() {
         let text = "fn foo() { let x = 42; }";
         let spans = highlight(rust(), text);
-        let span = find(&spans, TokenKind::Number).expect("expected a Number span");
+        let span = find(&spans, "number").expect("expected a Number span");
         assert_eq!(&text[span.start..span.end], "42");
     }
 
@@ -657,7 +766,7 @@ mod tests {
     fn rust_type_is_highlighted() {
         let text = "fn foo() { let x: i32 = 42; }";
         let spans = highlight(rust(), text);
-        let span = find(&spans, TokenKind::Type).expect("expected a Type span");
+        let span = find(&spans, "type").expect("expected a Type span");
         assert_eq!(&text[span.start..span.end], "i32");
     }
 
@@ -665,7 +774,7 @@ mod tests {
     fn json_string_key_is_highlighted() {
         let text = "{\"key\": \"value\"}";
         let spans = highlight(json(), text);
-        let span = find(&spans, TokenKind::String).expect("expected a String span");
+        let span = find(&spans, "string").expect("expected a String span");
         assert_eq!(&text[span.start..span.end], "\"key\"");
     }
 
@@ -673,7 +782,7 @@ mod tests {
     fn json_number_is_highlighted() {
         let text = "{\"n\": 42}";
         let spans = highlight(json(), text);
-        let span = find(&spans, TokenKind::Number).expect("expected a Number span");
+        let span = find(&spans, "number").expect("expected a Number span");
         assert_eq!(&text[span.start..span.end], "42");
     }
 
@@ -681,7 +790,7 @@ mod tests {
     fn json_boolean_is_highlighted_as_keyword() {
         let text = "{\"b\": true}";
         let spans = highlight(json(), text);
-        let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        let span = find(&spans, "keyword").expect("expected a Keyword span");
         assert_eq!(&text[span.start..span.end], "true");
     }
 
@@ -710,8 +819,8 @@ mod tests {
         assert_eq!(incremental_spans, fresh_spans_sorted(fresh_spans.clone()));
         // The number literal, well away from the edit, is still classified
         // correctly and at its new (shifted) position.
-        let number = find(&incremental_spans, TokenKind::Number)
-            .expect("expected a Number span after the edit");
+        let number =
+            find(&incremental_spans, "number").expect("expected a Number span after the edit");
         assert_eq!(&new_text[number.start..number.end], "42");
     }
 
@@ -731,16 +840,16 @@ mod tests {
         // Byte 21 is right after the opening quote + "h": edit "i" -> "xi".
         let spans = highlighter.edit(new_text, 21, 21, 22);
 
-        let keyword = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        let keyword = find(&spans, "keyword").expect("expected a Keyword span");
         assert_eq!(&new_text[keyword.start..keyword.end], "fn");
 
-        let function = find(&spans, TokenKind::Function).expect("expected a Function span");
+        let function = find(&spans, "function").expect("expected a Function span");
         assert_eq!(&new_text[function.start..function.end], "foo");
 
-        let string = find(&spans, TokenKind::String).expect("expected a String span");
+        let string = find(&spans, "string").expect("expected a String span");
         assert_eq!(&new_text[string.start..string.end], "\"hxi\"");
 
-        let number = find(&spans, TokenKind::Number).expect("expected a Number span");
+        let number = find(&spans, "number").expect("expected a Number span");
         assert_eq!(&new_text[number.start..number.end], "1");
     }
 
@@ -815,21 +924,21 @@ mod tests {
     #[test]
     fn csharp_class_keyword_is_highlighted() {
         let spans = highlight(csharp(), CSHARP_SNIPPET);
-        let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        let span = find(&spans, "keyword").expect("expected a Keyword span");
         assert_eq!(&CSHARP_SNIPPET[span.start..span.end], "class");
     }
 
     #[test]
     fn csharp_string_literal_is_highlighted() {
         let spans = highlight(csharp(), CSHARP_SNIPPET);
-        let span = find(&spans, TokenKind::String).expect("expected a String span");
+        let span = find(&spans, "string").expect("expected a String span");
         assert_eq!(&CSHARP_SNIPPET[span.start..span.end], "\"Hello, \"");
     }
 
     #[test]
     fn csharp_comment_is_highlighted() {
         let spans = highlight(csharp(), CSHARP_SNIPPET);
-        let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
+        let span = find(&spans, "comment").expect("expected a Comment span");
         assert!(&CSHARP_SNIPPET[span.start..span.end].starts_with("// say hi"));
     }
 
@@ -838,7 +947,7 @@ mod tests {
         let spans = highlight(csharp(), CSHARP_SNIPPET);
         let type_span = spans
             .iter()
-            .find(|s| s.kind == TokenKind::Type && &CSHARP_SNIPPET[s.start..s.end] == "Greeter");
+            .find(|s| s.scope == scope("type") && &CSHARP_SNIPPET[s.start..s.end] == "Greeter");
         assert!(
             type_span.is_some(),
             "expected `Greeter` highlighted as a Type"
@@ -872,21 +981,21 @@ mod tests {
     #[test]
     fn java_class_keyword_is_highlighted() {
         let spans = highlight(java(), JAVA_SNIPPET);
-        let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        let span = find(&spans, "keyword").expect("expected a Keyword span");
         assert_eq!(&JAVA_SNIPPET[span.start..span.end], "public");
     }
 
     #[test]
     fn java_string_literal_is_highlighted() {
         let spans = highlight(java(), JAVA_SNIPPET);
-        let span = find(&spans, TokenKind::String).expect("expected a String span");
+        let span = find(&spans, "string").expect("expected a String span");
         assert_eq!(&JAVA_SNIPPET[span.start..span.end], "\"Hello, \"");
     }
 
     #[test]
     fn java_comment_is_highlighted() {
         let spans = highlight(java(), JAVA_SNIPPET);
-        let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
+        let span = find(&spans, "comment").expect("expected a Comment span");
         assert!(&JAVA_SNIPPET[span.start..span.end].starts_with("// say hi"));
     }
 
@@ -895,7 +1004,7 @@ mod tests {
         let spans = highlight(java(), JAVA_SNIPPET);
         let type_span = spans
             .iter()
-            .find(|s| s.kind == TokenKind::Type && &JAVA_SNIPPET[s.start..s.end] == "Greeter");
+            .find(|s| s.scope == scope("type") && &JAVA_SNIPPET[s.start..s.end] == "Greeter");
         assert!(
             type_span.is_some(),
             "expected `Greeter` highlighted as a Type"
@@ -929,21 +1038,21 @@ mod tests {
     #[test]
     fn php_class_keyword_is_highlighted() {
         let spans = highlight(php(), PHP_SNIPPET);
-        let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        let span = find(&spans, "keyword").expect("expected a Keyword span");
         assert_eq!(&PHP_SNIPPET[span.start..span.end], "class");
     }
 
     #[test]
     fn php_string_literal_is_highlighted() {
         let spans = highlight(php(), PHP_SNIPPET);
-        let span = find(&spans, TokenKind::String).expect("expected a String span");
+        let span = find(&spans, "string").expect("expected a String span");
         assert_eq!(&PHP_SNIPPET[span.start..span.end], "\"Hello, \"");
     }
 
     #[test]
     fn php_comment_is_highlighted() {
         let spans = highlight(php(), PHP_SNIPPET);
-        let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
+        let span = find(&spans, "comment").expect("expected a Comment span");
         assert!(&PHP_SNIPPET[span.start..span.end].starts_with("// say hi"));
     }
 
@@ -952,7 +1061,7 @@ mod tests {
         let spans = highlight(php(), PHP_SNIPPET);
         let type_span = spans
             .iter()
-            .find(|s| s.kind == TokenKind::Type && &PHP_SNIPPET[s.start..s.end] == "Greeter");
+            .find(|s| s.scope == scope("type") && &PHP_SNIPPET[s.start..s.end] == "Greeter");
         assert!(
             type_span.is_some(),
             "expected `Greeter` highlighted as a Type"

@@ -1,0 +1,6 @@
+{
+  "name": "harness fixture",
+  "enabled": true,
+  "retries": 3,
+  "fallback": null
+}

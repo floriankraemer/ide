@@ -13,6 +13,8 @@ use std::sync::{Arc, LazyLock, OnceLock, RwLock};
 
 use tree_sitter::Query;
 
+use crate::Scope;
+
 /// The `.scm` sources shipped for one language, each optional. Bundled
 /// into the binary via `include_str!` so highlighting behaves identically
 /// under `cargo test` and in the packaged app.
@@ -151,6 +153,12 @@ impl Language {
 pub struct CompiledLanguage {
     pub grammar: tree_sitter::Language,
     pub highlights: Option<Query>,
+    /// `highlights`' capture index -> [`Scope`], resolved once here rather
+    /// than per span in the highlight hot path. `None` for a capture whose
+    /// name has no scope even after hierarchical fallback — that capture
+    /// simply yields no spans, which is how an upstream `.scm` file we
+    /// never vetted stays safe to load unmodified.
+    pub highlight_scopes: Vec<Option<Scope>>,
     pub locals: Option<Query>,
     pub folds: Option<Query>,
     pub tags: Option<Query>,
@@ -166,13 +174,27 @@ fn compile(def: &LanguageDef) -> Result<CompiledLanguage, String> {
             })
             .transpose()
     };
+    let highlights = compile_one("highlights", def.queries.highlights)?;
     Ok(CompiledLanguage {
-        highlights: compile_one("highlights", def.queries.highlights)?,
+        highlight_scopes: capture_scopes(highlights.as_ref()),
+        highlights,
         locals: compile_one("locals", def.queries.locals)?,
         folds: compile_one("folds", def.queries.folds)?,
         tags: compile_one("tags", def.queries.tags)?,
         inherits: compile_one("inherits", def.queries.inherits)?,
         grammar,
+    })
+}
+
+/// Resolve every capture name in `query` to a [`Scope`] once, in capture
+/// index order.
+fn capture_scopes(query: Option<&Query>) -> Vec<Option<Scope>> {
+    query.map_or_else(Vec::new, |query| {
+        query
+            .capture_names()
+            .iter()
+            .map(|name| Scope::resolve(name))
+            .collect()
     })
 }
 

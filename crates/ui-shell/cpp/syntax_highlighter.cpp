@@ -6,6 +6,8 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <vector>
 
 #include <QColor>
 #include <QTextBlock>
@@ -17,24 +19,38 @@ namespace ui_shell {
 
 namespace {
 
+// The six colour buckets the palette has always had. A file-local enum,
+// not an FFI type: scopes cross the seam as bare ids now, and T3 replaces
+// both functions below with a Rust-supplied palette anyway.
+enum class TokenKind
+{
+    Keyword,
+    String,
+    Comment,
+    Number,
+    Function,
+    Type,
+    Other,
+};
+
 // VS Code's Dark+ token colors. Kept here rather than in theme.cpp so the
 // theme module stays free of the generated FFI types.
-QColor vscodeDarkColorForKind(FfiTokenKind kind)
+QColor vscodeDarkColorForKind(TokenKind kind)
 {
     switch (kind) {
-    case FfiTokenKind::Keyword:
+    case TokenKind::Keyword:
         return QColor(QStringLiteral("#569cd6"));
-    case FfiTokenKind::String:
+    case TokenKind::String:
         return QColor(QStringLiteral("#ce9178"));
-    case FfiTokenKind::Comment:
+    case TokenKind::Comment:
         return QColor(QStringLiteral("#6a9955"));
-    case FfiTokenKind::Number:
+    case TokenKind::Number:
         return QColor(QStringLiteral("#b5cea8"));
-    case FfiTokenKind::Function:
+    case TokenKind::Function:
         return QColor(QStringLiteral("#dcdcaa"));
-    case FfiTokenKind::Type:
+    case TokenKind::Type:
         return QColor(QStringLiteral("#4ec9b0"));
-    case FfiTokenKind::Other:
+    case TokenKind::Other:
     default:
         // Invalid means "leave it to the editor palette's Text role".
         return QColor();
@@ -45,29 +61,65 @@ QColor vscodeDarkColorForKind(FfiTokenKind kind)
 // theme, which is what a theme named after an editor has to do to look like
 // it. A3's split still holds — the *mechanism* stays separate from the
 // chrome QSS, it just keys off the same theme name.
-QColor colorForKind(FfiTokenKind kind, const QString &themeName)
+QColor colorForKind(TokenKind kind, const QString &themeName)
 {
     if (themeName == QStringLiteral("vscode-dark")) {
         return vscodeDarkColorForKind(kind);
     }
     // Darcula-ish palette for the Dark and Light themes, unchanged.
     switch (kind) {
-    case FfiTokenKind::Keyword:
+    case TokenKind::Keyword:
         return QColor(QStringLiteral("#cc7832"));
-    case FfiTokenKind::String:
+    case TokenKind::String:
         return QColor(QStringLiteral("#6a8759"));
-    case FfiTokenKind::Comment:
+    case TokenKind::Comment:
         return QColor(QStringLiteral("#808080"));
-    case FfiTokenKind::Number:
+    case TokenKind::Number:
         return QColor(QStringLiteral("#6897bb"));
-    case FfiTokenKind::Function:
+    case TokenKind::Function:
         return QColor(QStringLiteral("#ffc66d"));
-    case FfiTokenKind::Type:
+    case TokenKind::Type:
         return QColor(QStringLiteral("#a9b7c6"));
-    case FfiTokenKind::Other:
+    case TokenKind::Other:
     default:
         return QColor();
     }
+}
+
+// The colour table, indexed by scope id. Built from the Rust scope table's
+// *names* (syntax_scope_names()), never from hardcoded ids, and always
+// exactly as long as it — so a scope added on the Rust side lands here as
+// a no-colour entry rather than as a shifted palette.
+//
+// T3 replaces this with a Rust-supplied palette; until then the six
+// colour buckets above are keyed off each scope's root segment, which
+// reproduces the old @keyword/@string/@comment/@number/@function/@type
+// behaviour exactly (every other capture stays uncoloured, as before).
+QVector<QColor> buildScopeColors(const QString &themeName)
+{
+    const rust::Vec<rust::String> names = syntax_scope_names();
+    QVector<QColor> colors;
+    colors.reserve(static_cast<int>(names.size()));
+    for (const auto &name : names) {
+        const QString scope = QString::fromUtf8(name.data(), static_cast<int>(name.size()));
+        const QString root = scope.section(QLatin1Char('.'), 0, 0);
+        TokenKind kind = TokenKind::Other;
+        if (root == QStringLiteral("keyword")) {
+            kind = TokenKind::Keyword;
+        } else if (root == QStringLiteral("string")) {
+            kind = TokenKind::String;
+        } else if (root == QStringLiteral("comment")) {
+            kind = TokenKind::Comment;
+        } else if (root == QStringLiteral("number")) {
+            kind = TokenKind::Number;
+        } else if (root == QStringLiteral("function")) {
+            kind = TokenKind::Function;
+        } else if (root == QStringLiteral("type")) {
+            kind = TokenKind::Type;
+        }
+        colors.append(colorForKind(kind, themeName));
+    }
+    return colors;
 }
 
 // Builds a UTF-16-code-unit-index -> UTF-8-byte-offset table by walking
@@ -109,6 +161,16 @@ QVector<int> byteOffsetsByUtf16Index(const QString &text)
     }
     offsets.append(byteOffset);
     return offsets;
+}
+
+// Byte offset of UTF-16 index `index`, clamped to the table — a block's
+// end index can sit one past the last entry.
+std::size_t byteOffsetAtUtf16Index(const QVector<int> &offsets, int index)
+{
+    if (offsets.isEmpty()) {
+        return 0;
+    }
+    return static_cast<std::size_t>(offsets.at(std::clamp<qsizetype>(index, 0, offsets.size() - 1)));
 }
 
 // Inverse lookup into `byteOffsetsByUtf16Index`'s table: the UTF-16 index
@@ -214,8 +276,18 @@ void SyntaxHighlighter::highlightBlock(const QString &text)
 
         cachedSpans_.clear();
         cachedSpans_.reserve(static_cast<int>(spans.size()));
+        cachedSpanMaxEnd_.clear();
+        cachedSpanMaxEnd_.reserve(spans.size());
+        std::size_t maxEnd = 0;
         for (const auto &span : spans) {
             cachedSpans_.append(span);
+            // Running max of `end`: spans are sorted by start, but a span
+            // can nest inside an earlier one, so `end` alone isn't
+            // monotonic and can't be binary-searched. This is, and it is
+            // what lets highlightBlock() jump straight to the first span
+            // that can still reach into the block.
+            maxEnd = std::max(maxEnd, span.end);
+            cachedSpanMaxEnd_.push_back(maxEnd);
         }
         cachedByteOffsets_ = byteOffsetsByUtf16Index(wholeDocument);
         cachedTextBytes_ = textBytes;
@@ -251,23 +323,46 @@ void SyntaxHighlighter::highlightBlock(const QString &text)
     // Read once per block rather than per span — it can't change mid-block,
     // and a theme switch re-runs the whole highlighter anyway.
     const QString theme = activeThemeName();
+    if (theme != scopeColorsTheme_ || scopeColors_.isEmpty()) {
+        scopeColors_ = buildScopeColors(theme);
+        scopeColorsTheme_ = theme;
+    }
+
     const QVector<int> &byteOffsets = cachedByteOffsets_;
     const int blockStart = block.position();
     const int blockEnd = blockStart + block.length();
+    const std::size_t blockStartByte = byteOffsetAtUtf16Index(byteOffsets, blockStart);
+    const std::size_t blockEndByte = byteOffsetAtUtf16Index(byteOffsets, blockEnd);
 
-    for (const auto &span : cachedSpans_) {
-        const int start = utf16IndexForByteOffset(byteOffsets, span.start);
-        const int end = utf16IndexForByteOffset(byteOffsets, span.end);
-        if (end <= blockStart || start >= blockEnd) {
+    // Spans arrive in document order, so seek to the first one that can
+    // still overlap this block instead of scanning the whole document per
+    // block (which made attaching to an N-span document O(blocks x N)).
+    const auto begin = std::upper_bound(cachedSpanMaxEnd_.begin(), cachedSpanMaxEnd_.end(),
+                                        blockStartByte);
+    for (auto i = static_cast<int>(std::distance(cachedSpanMaxEnd_.begin(), begin));
+         i < cachedSpans_.size(); ++i) {
+        const auto &span = cachedSpans_.at(i);
+        // Sorted by start: once past the block, every later span is too.
+        if (span.start >= blockEndByte) {
+            break;
+        }
+        if (span.end <= blockStartByte) {
             continue;
         }
+        // The whole correctness story against a palette built from a
+        // different scope table than the spans: never index past it.
+        if (span.scope >= static_cast<std::uint16_t>(scopeColors_.size())) {
+            continue;
+        }
+        const QColor color = scopeColors_.at(static_cast<int>(span.scope));
+        if (!color.isValid()) {
+            continue;
+        }
+        const int start = utf16IndexForByteOffset(byteOffsets, span.start);
+        const int end = utf16IndexForByteOffset(byteOffsets, span.end);
         const int localStart = std::max(start, blockStart) - blockStart;
         const int localEnd = std::min(end, blockEnd) - blockStart;
         if (localEnd <= localStart) {
-            continue;
-        }
-        const QColor color = colorForKind(span.kind, theme);
-        if (!color.isValid()) {
             continue;
         }
         QTextCharFormat format;
