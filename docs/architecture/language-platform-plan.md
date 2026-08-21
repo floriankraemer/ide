@@ -27,13 +27,13 @@ per `CLAUDE.md`.
 | R5 | open | |
 | R6 | open | |
 | G1a | done | `01f1685` |
-| G1b | done | pending |
+| G1b | done | `f4f2687` |
 | G2 | open | |
 | G3 | open | |
 | L1 | done | `0554341` |
 | L2 | done | `c0a83b5` |
-| L3 | done | pending |
-| L4 | done | pending |
+| L3 | done | `f4f2687` |
+| L4 | done | `f4f2687` |
 | L5 | open | |
 | L6 | open | |
 
