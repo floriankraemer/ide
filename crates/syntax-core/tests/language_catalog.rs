@@ -218,6 +218,16 @@ fn declared_patterns_resolve_back_to_a_claimant() {
                 name.clone(),
                 &|d: &syntax_core::Def| d.filenames().any(|n| n == name),
             );
+            // The suffix step: `Dockerfile.dev`, `Makefile.local`. Every
+            // declared file name gains its `<name>.<suffix>` spelling, and
+            // it must land on a row that declares that same file name.
+            // `local` is deliberately not an extension in the catalog, so
+            // this exercises step 3 and not step 2.
+            check(
+                PathBuf::from("/project").join(format!("{name}.local")),
+                format!("{name}.local"),
+                &|d: &syntax_core::Def| d.filenames().any(|n| n == name),
+            );
         }
 
         assert!(

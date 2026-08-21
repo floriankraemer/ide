@@ -158,11 +158,14 @@ reasoning intact.
   was caught by eye, not by the harness.
   Requiring at least one exact match, with descendants as a fallback only
   when the exact scope is genuinely unused, would close it.
-- **`filenames` is exact-match only.** ([#19](https://github.com/floriankraemer/ide/issues/19))
-  `Dockerfile.dev` and `Makefile.local` do not resolve, because the registry
-  has no prefix, suffix or glob rule.
-  Enumerating guesses was rejected as inventing a list.
-  A pattern field on `LanguageDef` is the honest fix.
+- **~~`filenames` is exact-match only.~~** (fixed, [#19](https://github.com/floriankraemer/ide/issues/19))
+  `language_for_path` now resolves in three ordered steps: exact file name,
+  then extension, then the file name with its final `.suffix` removed matched
+  against `filenames` again.
+  `Dockerfile.dev` and `Makefile.local` resolve through the third step, while
+  `Dockerfile.md` stays Markdown because a real extension is consulted first.
+  No pattern field was needed: the rule holds for every row in the catalog and
+  for runtime languages, so no language opts into it.
 - **`lsp-core`'s extension-to-language-id table will drift.** ([#20](https://github.com/floriankraemer/ide/issues/20))
   It is a second, independent mapping from the tree-sitter catalog, and the
   markup and batch-two languages were never added to it.
