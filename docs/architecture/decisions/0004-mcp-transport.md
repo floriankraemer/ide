@@ -57,6 +57,9 @@ a real HTTP client.
 
 ## Related
 
+- [ADR-0012: MCP protocol surface, index tools, and lifecycle](0012-mcp-protocol-index-and-lifecycle.md) —
+  pays off the "MCP protocol details … now have to be implemented by hand" debt booked above, and
+  revisits the fixed-vs-assigned port decision (`0` still means OS-assigned, but a port can now be pinned).
 - [ADR-0003: FFI seam conventions](0003-ffi-conventions.md) — the same typed-result discipline
   MCP's JSON-RPC error codes echo at a different boundary.
 - `crates/mcp-server/src/lib.rs` — the spike this ADR documents.

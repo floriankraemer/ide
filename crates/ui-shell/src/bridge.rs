@@ -793,16 +793,48 @@ mod ffi {
         #[cxx_name = "canJumpForward"]
         fn can_jump_forward(self: &DocumentManager) -> bool;
 
-        /// Starts the MCP transport on a dedicated background thread (its
-        /// own Tokio runtime, since `run_app()`'s Qt event loop isn't async)
-        /// and the `EditorCommand` listener loop that marshals each command
-        /// onto this QObject's own `CxxQtThread` (M3). Call exactly once,
-        /// right after constructing the `DocumentManager` — there is only
-        /// ever one MCP server per process, mirroring the one shared
-        /// `AppSession`.
+        /// Brings the MCP server in line with the saved settings: stops a
+        /// running one, then starts a fresh one on the configured port if
+        /// MCP is enabled. Idempotent — the view calls it once at startup
+        /// and again whenever the Settings dialog commits, and never has to
+        /// track what is currently running.
+        ///
+        /// The server lives on a dedicated background thread with its own
+        /// Tokio runtime (`run_app()`'s Qt event loop isn't async); its
+        /// `EditorCommand` listener loop marshals each command back onto
+        /// this QObject's `CxxQtThread` (M3). The outcome arrives as
+        /// `mcpStarted`/`mcpStopped`/`mcpFailed` rather than a return value,
+        /// because binding happens on that other thread.
         #[qinvokable]
-        #[cxx_name = "startMcpServer"]
-        fn start_mcp_server(self: Pin<&mut DocumentManager>);
+        #[cxx_name = "applyMcpSettings"]
+        fn apply_mcp_settings(self: Pin<&mut DocumentManager>);
+
+        /// Stops the MCP server and removes its discovery file. The view
+        /// calls this as the window closes so a stale discovery file never
+        /// points a client at a dead port.
+        #[qinvokable]
+        #[cxx_name = "shutdownMcpServer"]
+        fn shutdown_mcp_server(self: &DocumentManager);
+
+        /// Emitted once the MCP server is listening, with the port it
+        /// actually bound (which is the OS's choice when the configured
+        /// port is 0).
+        #[qsignal]
+        #[cxx_name = "mcpStarted"]
+        fn mcp_started(self: Pin<&mut DocumentManager>, port: u16);
+
+        /// Emitted when MCP is turned off in settings and the running
+        /// server has been shut down.
+        #[qsignal]
+        #[cxx_name = "mcpStopped"]
+        fn mcp_stopped(self: Pin<&mut DocumentManager>);
+
+        /// Emitted when the server could not start — almost always a
+        /// configured port that is already in use. Carries the message to
+        /// show; the IDE itself keeps running without MCP.
+        #[qsignal]
+        #[cxx_name = "mcpFailed"]
+        fn mcp_failed(self: Pin<&mut DocumentManager>, message: QString);
     }
 
     // Enables `self.qt_thread()` on `DocumentManager` — the MCP listener
@@ -899,6 +931,31 @@ mod ffi {
             current_line: &QString,
         );
 
+        /// Where the running server publishes its port and auth token, so
+        /// the Settings page can tell the user what to point an agent at.
+        #[qinvokable]
+        #[cxx_name = "mcpDiscoveryFilePath"]
+        fn mcp_discovery_file_path(self: &AppSettings) -> QString;
+
+        /// Whether the MCP server should run, defaulting to on for a
+        /// settings file that predates the switch.
+        #[qinvokable]
+        #[cxx_name = "mcpEnabled"]
+        fn mcp_enabled(self: &AppSettings) -> bool;
+
+        /// The configured MCP port; `0` means "let the OS choose", which is
+        /// what keeps two IDE instances from colliding (ADR-0004).
+        #[qinvokable]
+        #[cxx_name = "mcpPort"]
+        fn mcp_port(self: &AppSettings) -> u16;
+
+        /// Persist both MCP settings together (the Settings dialog's MCP
+        /// page, on OK) — one load-modify-save instead of two, so a port
+        /// change and an enable change cannot half-apply.
+        #[qinvokable]
+        #[cxx_name = "saveMcpSettings"]
+        fn save_mcp_settings(self: &AppSettings, enabled: bool, port: u16);
+
         /// The shortcut `action_id` currently responds to, as `QKeySequence`
         /// portable text — the user's override if there is one, otherwise the
         /// default from `app_config::ACTIONS`. Empty means unbound. Menu
@@ -963,7 +1020,7 @@ mod ffi {
         /// search both happen on a background `std::thread` (index
         /// building and search are both I/O-bound; neither may block the
         /// Qt thread), with every result marshaled back via
-        /// `CxxQtThread::queue()`, the exact pattern `start_mcp_server`
+        /// `CxxQtThread::queue()`, the exact pattern `apply_mcp_settings`
         /// already established.
         #[qobject]
         type SearchModel = super::SearchModelRust;
@@ -1280,7 +1337,7 @@ mod ffi {
         /// A background `std::thread` starts doing blocking
         /// `PtySession::read` in a loop, feeding `TerminalEmulator::feed`
         /// and emitting `gridUpdated` after each chunk via
-        /// `CxxQtThread::queue()` — the exact pattern `start_mcp_server`
+        /// `CxxQtThread::queue()` — the exact pattern `apply_mcp_settings`
         /// already established. Spawn failure (e.g. no shell resolvable)
         /// returns a typed non-zero `code` (ADR-0003); no `QString`
         /// sentinel.
@@ -1431,51 +1488,6 @@ fn shared_session() -> Rc<RefCell<AppSession>> {
     APP_SESSION.with(Rc::clone)
 }
 
-/// Translate a command result into the FFI struct (ADR-0003).
-/// Turns the view's "these spans, this pattern, this replacement" into the
-/// concrete per-span replacement text `index_core` applies.
-///
-/// The expansion runs `editor_core::replacements` over just the matched
-/// slice, so a regex `$1` refers to the capture inside that match — the same
-/// engine the in-editor Replace uses, not a second implementation.
-fn resolve_replacements(
-    edits: &[(std::path::PathBuf, usize, usize, usize)],
-    pattern: &str,
-    replacement: &str,
-    opts: editor_core::SearchOptions,
-) -> Result<Vec<index_core::FileReplacement>, String> {
-    let mut out = Vec::with_capacity(edits.len());
-    let mut cached: Option<(&std::path::Path, Vec<String>)> = None;
-    for (path, line, start, end) in edits {
-        if cached.as_ref().is_none_or(|(p, _)| *p != path.as_path()) {
-            let content = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-            cached = Some((path.as_path(), content.lines().map(str::to_owned).collect()));
-        }
-        let lines = &cached.as_ref().expect("just populated").1;
-        let Some(matched) = lines
-            .get(line.wrapping_sub(1))
-            .and_then(|l| l.get(*start..*end))
-        else {
-            // The file changed since the search; `replace_in_files` counts
-            // this file as skipped rather than rewriting the wrong span.
-            continue;
-        };
-        let expanded = editor_core::replacements(matched, pattern, replacement, opts)
-            .map_err(|e| e.to_string())?;
-        let Some(first) = expanded.into_iter().next() else {
-            continue;
-        };
-        out.push(index_core::FileReplacement {
-            path: path.clone(),
-            line: *line,
-            start: *start,
-            end: *end,
-            text: first.text,
-        });
-    }
-    Ok(out)
-}
-
 /// The two view-facing booleans as the domain type they mean.
 fn search_options(is_regex: bool, case_sensitive: bool) -> editor_core::SearchOptions {
     editor_core::SearchOptions {
@@ -1484,6 +1496,7 @@ fn search_options(is_regex: bool, case_sensitive: bool) -> editor_core::SearchOp
     }
 }
 
+/// Translate a command result into the FFI struct (ADR-0003).
 fn to_ffi_result(result: Result<(), AppError>) -> FfiResult {
     match result {
         Ok(()) => FfiResult::default(),
@@ -1737,6 +1750,31 @@ impl ffi::AppSettings {
         };
         settings.editor_font_family = family.to_string();
         settings.editor_font_size = size;
+        let _ = app_config::save(&config_dir, &settings);
+    }
+
+    pub fn mcp_discovery_file_path(&self) -> QString {
+        let path = mcp_server::discovery_file_path(&app_core::resolve_config_dir());
+        QString::from(path.to_string_lossy().as_ref())
+    }
+
+    pub fn mcp_enabled(&self) -> bool {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        settings.mcp_enabled_or_default()
+    }
+
+    pub fn mcp_port(&self) -> u16 {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        settings.mcp_port
+    }
+
+    pub fn save_mcp_settings(&self, enabled: bool, port: u16) {
+        let config_dir = app_core::resolve_config_dir();
+        let Ok(mut settings) = app_config::load(&config_dir) else {
+            return;
+        };
+        settings.mcp_enabled = Some(enabled);
+        settings.mcp_port = port;
         let _ = app_config::save(&config_dir, &settings);
     }
 
@@ -2360,32 +2398,117 @@ impl ffi::DocumentManager {
         to_ffi_result(result)
     }
 
-    pub fn start_mcp_server(self: Pin<&mut Self>) {
+    pub fn apply_mcp_settings(mut self: Pin<&mut Self>) {
+        stop_mcp_server();
+
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        if !settings.mcp_enabled_or_default() {
+            self.as_mut().mcp_stopped();
+            return;
+        }
+        let port = settings.mcp_port;
+
         let qt_thread = self.qt_thread();
-        std::thread::spawn(move || {
+        let index = index_slot();
+        // A tokio oneshot rather than a std channel: its `send` needs no
+        // runtime, so `stop_mcp_server` can raise it straight from the Qt
+        // thread, and the server loop can await it in a `select!`.
+        let (stop_tx, mut stop_rx) = tokio::sync::oneshot::channel::<()>();
+        let thread = std::thread::spawn(move || {
             let Ok(runtime) = tokio::runtime::Runtime::new() else {
+                let _ = qt_thread.queue(|mut doc_manager: Pin<&mut Self>| {
+                    doc_manager
+                        .as_mut()
+                        .mcp_failed(QString::from("Could not start the MCP server's runtime."));
+                });
                 return;
             };
             runtime.block_on(async move {
                 let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
                 let config_dir = app_core::resolve_config_dir();
-                // Held for the thread's lifetime — dropping it would shut
-                // the server down. No explicit shutdown wired up yet; the
-                // process exiting takes it down along with everything else.
-                let Ok(_server_handle) = mcp_server::start(&config_dir, tx).await else {
-                    return;
+                let server = match mcp_server::start(&config_dir, tx, index, port).await {
+                    Ok(server) => server,
+                    Err(err) => {
+                        let message =
+                            format!("The MCP server could not listen on 127.0.0.1:{port}: {err}");
+                        let _ = qt_thread.queue(move |mut doc_manager: Pin<&mut Self>| {
+                            doc_manager
+                                .as_mut()
+                                .mcp_failed(QString::from(message.as_str()));
+                        });
+                        return;
+                    }
                 };
-                while let Some(cmd) = rx.recv().await {
-                    let _ = qt_thread.queue(move |doc_manager: Pin<&mut Self>| {
-                        dispatch_editor_command(doc_manager, cmd);
-                    });
+                let bound_port = server.port;
+                let _ = qt_thread.queue(move |mut doc_manager: Pin<&mut Self>| {
+                    doc_manager.as_mut().mcp_started(bound_port);
+                });
+
+                loop {
+                    tokio::select! {
+                        command = rx.recv() => match command {
+                            Some(cmd) => {
+                                let _ = qt_thread.queue(move |doc_manager: Pin<&mut Self>| {
+                                    dispatch_editor_command(doc_manager, cmd);
+                                });
+                            }
+                            // Every sender is gone, so nothing can arrive
+                            // any more — there is nothing left to serve.
+                            None => break,
+                        },
+                        _ = &mut stop_rx => break,
+                    }
                 }
+                server.shutdown().await;
             });
         });
+
+        *mcp_control().lock().expect("MCP control lock poisoned") = Some(McpControl {
+            stop: stop_tx,
+            thread,
+        });
+    }
+
+    pub fn shutdown_mcp_server(&self) {
+        stop_mcp_server();
     }
 }
 
-/// Runs on the Qt thread (queued there by `start_mcp_server`'s listener):
+/// The handle `apply_mcp_settings` keeps on a running server so a later
+/// call (or app shutdown) can take it down again.
+struct McpControl {
+    stop: tokio::sync::oneshot::Sender<()>,
+    thread: std::thread::JoinHandle<()>,
+}
+
+/// There is one MCP server per process, and the QObject that owns its
+/// lifecycle is constructed by cxx-qt via `Default` with no place to put
+/// state — so the control handle lives here, next to the index slot, for
+/// the same reason.
+fn mcp_control() -> &'static std::sync::Mutex<Option<McpControl>> {
+    static CONTROL: std::sync::OnceLock<std::sync::Mutex<Option<McpControl>>> =
+        std::sync::OnceLock::new();
+    CONTROL.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+/// Stop the running MCP server, if any, and wait for its thread to finish
+/// so a restart cannot race the old server for the same port. Returns once
+/// the port is free and the discovery file is gone.
+fn stop_mcp_server() {
+    let Some(control) = mcp_control()
+        .lock()
+        .expect("MCP control lock poisoned")
+        .take()
+    else {
+        return;
+    };
+    // A send failure means the thread already exited on its own — nothing
+    // to signal, but still something to join.
+    let _ = control.stop.send(());
+    let _ = control.thread.join();
+}
+
+/// Runs on the Qt thread (queued there by `apply_mcp_settings`'s listener):
 /// does the actual `AppSession`-mediated work for one `EditorCommand` and
 /// answers it through the command's own `oneshot::Sender`.
 fn dispatch_editor_command(
@@ -2433,6 +2556,13 @@ fn dispatch_editor_command(
                 .cursor_position(TabId::from_raw(tab_id))
                 .map(|(line, column)| mcp_server::CursorPosition { line, column });
             let _ = respond.send(position);
+        }
+        mcp_server::EditorCommand::BufferContentForPath { path, respond } => {
+            let content = doc_manager
+                .session
+                .borrow()
+                .content_for_path(std::path::Path::new(&path));
+            let _ = respond.send(content);
         }
         mcp_server::EditorCommand::OpenFile { path, respond } => {
             // Reuses the openFile invokable's own body verbatim (path
@@ -2550,14 +2680,35 @@ impl ffi::KeymapEditor {
 /// the Qt-thread invokables below only ever clone the `Arc` and hand it off.
 /// A read lock is enough for every query, so several searches can run at
 /// once and only re-indexing serialises them.
-#[derive(Default)]
 pub struct SearchModelRust {
-    index: std::sync::Arc<std::sync::RwLock<index_core::IndexSlot>>,
+    index: mcp_server::IndexHandle,
     context: std::sync::Arc<std::sync::Mutex<SearchContext>>,
     /// Separate query guards so the popup and the results panel never
     /// cancel each other.
     everywhere: std::sync::Arc<QueryGuard>,
     find_in_files: std::sync::Arc<QueryGuard>,
+}
+
+impl Default for SearchModelRust {
+    fn default() -> Self {
+        SearchModelRust {
+            // Not a fresh slot: the MCP server queries the same index this
+            // QObject builds, and cxx-qt constructs QObjects via `Default`
+            // with no way to inject a shared handle. Same reasoning as the
+            // `APP_SESSION` thread-local above — one project, one index.
+            index: index_slot(),
+            context: Default::default(),
+            everywhere: Default::default(),
+            find_in_files: Default::default(),
+        }
+    }
+}
+
+/// The one project index in this process, shared by `SearchModel` (which
+/// builds and updates it) and the MCP server (which only queries it).
+fn index_slot() -> mcp_server::IndexHandle {
+    static INDEX: std::sync::OnceLock<mcp_server::IndexHandle> = std::sync::OnceLock::new();
+    std::sync::Arc::clone(INDEX.get_or_init(Default::default))
 }
 
 /// The non-index inputs Search Everywhere's cheap tiers need. Cached here
@@ -3030,18 +3181,19 @@ impl ffi::SearchModel {
                 return;
             };
 
-            let resolved = match resolve_replacements(&edits, &pattern, &replacement, opts) {
-                Ok(resolved) => resolved,
-                Err(message) => {
-                    drop(guard);
-                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                        model
-                            .as_mut()
-                            .replace_failed(QString::from(message.as_str()));
-                    });
-                    return;
-                }
-            };
+            let resolved =
+                match index_core::resolve_replacements(&edits, &pattern, &replacement, opts) {
+                    Ok(resolved) => resolved,
+                    Err(message) => {
+                        drop(guard);
+                        let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                            model
+                                .as_mut()
+                                .replace_failed(QString::from(message.as_str()));
+                        });
+                        return;
+                    }
+                };
             let result = index.replace_in_files(&resolved);
             drop(guard);
             match result {

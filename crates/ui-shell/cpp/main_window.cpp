@@ -34,6 +34,7 @@
 #include <QFormLayout>
 #include <QHash>
 #include <algorithm>
+#include <cstdint>
 #include <functional>
 #include <QHBoxLayout>
 #include <QHash>
@@ -1555,6 +1556,7 @@ public:
     void setEditorTabs(EditorTabs *editorTabs) { editorTabs_ = editorTabs; }
     void setAppSettings(AppSettings *appSettings) { appSettings_ = appSettings; }
     void setDockManager(ads::CDockManager *dockManager) { dockManager_ = dockManager; }
+    void setDocumentManager(DocumentManager *docManager) { docManager_ = docManager; }
     // Opens Search Everywhere. Set once the popup exists; until then the
     // double-Shift gesture is simply inert.
     void setSearchEverywhereTrigger(std::function<void()> trigger)
@@ -1610,6 +1612,11 @@ protected:
                 appSettings_->saveEditorLayout(editorTabs_->saveLayout());
             }
         }
+        if (docManager_) {
+            // Takes the discovery file with it — one left behind points the
+            // next agent that reads it at a port nothing answers on.
+            docManager_->shutdownMcpServer();
+        }
         QMainWindow::closeEvent(event);
     }
 
@@ -1619,6 +1626,7 @@ private:
     EditorTabs *editorTabs_ = nullptr;
     AppSettings *appSettings_ = nullptr;
     ads::CDockManager *dockManager_ = nullptr;
+    DocumentManager *docManager_ = nullptr;
 };
 
 // Go to Declaration (N2/N8): turns SearchModel's streamed resolution
@@ -1839,7 +1847,8 @@ void applyKeymap(const QHash<QString, QAction *> &actions, AppSettings *appSetti
 }
 
 void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *editorTabs,
-                        KeymapEditor *keymapEditor, const QHash<QString, QAction *> &actions)
+                        KeymapEditor *keymapEditor, const QHash<QString, QAction *> &actions,
+                        DocumentManager *docManager, const std::shared_ptr<QString> &mcpStatus)
 {
     const QString originalTheme = appSettings->themeName();
     const FfiEditorFont originalFont = appSettings->editorFont();
@@ -1852,6 +1861,7 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     categoryList->addItem(QObject::tr("Appearance"));
     categoryList->addItem(QObject::tr("Editor"));
     categoryList->addItem(QObject::tr("Keymap"));
+    categoryList->addItem(QObject::tr("MCP"));
     categoryList->setMaximumWidth(150);
 
     auto *pages = new QStackedWidget(&dialog);
@@ -1955,6 +1965,49 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     keymapEditor->beginEdit();
     pages->addWidget(buildKeymapPage(&dialog, keymapEditor));
 
+    // MCP, like Keymap and unlike Appearance/Editor, commits on OK rather
+    // than applying live: restarting the server on every keystroke in the
+    // port field would bind a series of half-typed port numbers.
+    auto *mcpPage = new QWidget(&dialog);
+    auto *mcpForm = new QFormLayout(mcpPage);
+    auto *mcpEnabledCheck = new QCheckBox(QObject::tr("Enable MCP server"), mcpPage);
+    mcpEnabledCheck->setChecked(appSettings->mcpEnabled());
+    mcpForm->addRow(mcpEnabledCheck);
+
+    auto *mcpPortSpin = new QSpinBox(mcpPage);
+    mcpPortSpin->setRange(0, 65535);
+    mcpPortSpin->setSpecialValueText(QObject::tr("Automatic"));
+    mcpPortSpin->setValue(static_cast<int>(appSettings->mcpPort()));
+    mcpPortSpin->setEnabled(mcpEnabledCheck->isChecked());
+    mcpForm->addRow(QObject::tr("Port:"), mcpPortSpin);
+    QObject::connect(mcpEnabledCheck, &QCheckBox::toggled, mcpPortSpin, &QSpinBox::setEnabled);
+
+    auto *mcpStatusLabel = new QLabel(*mcpStatus, mcpPage);
+    mcpStatusLabel->setWordWrap(true);
+    mcpForm->addRow(QObject::tr("Status:"), mcpStatusLabel);
+    // Live only while the dialog is open, so a failed restart on OK is
+    // visible without reopening Settings.
+    QObject::connect(docManager, &DocumentManager::mcpStarted, &dialog,
+                      [mcpStatusLabel](std::uint16_t port) {
+                          mcpStatusLabel->setText(
+                            QObject::tr("Listening on 127.0.0.1:%1").arg(port));
+                      });
+    QObject::connect(docManager, &DocumentManager::mcpStopped, &dialog, [mcpStatusLabel]() {
+        mcpStatusLabel->setText(QObject::tr("Disabled"));
+    });
+    QObject::connect(docManager, &DocumentManager::mcpFailed, &dialog,
+                      [mcpStatusLabel](const QString &message) {
+                          mcpStatusLabel->setText(message);
+                      });
+
+    // The port and token an agent needs are written here on every start,
+    // so the useful thing to show is where to read them from.
+    auto *mcpDiscoveryEdit = new QLineEdit(appSettings->mcpDiscoveryFilePath(), mcpPage);
+    mcpDiscoveryEdit->setReadOnly(true);
+    mcpForm->addRow(QObject::tr("Discovery file:"), mcpDiscoveryEdit);
+
+    pages->addWidget(mcpPage);
+
     QObject::connect(categoryList, &QListWidget::currentRowChanged, pages,
                       &QStackedWidget::setCurrentIndex);
     categoryList->setCurrentRow(0);
@@ -1978,6 +2031,12 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
         appSettings->saveEditorColors(*backgroundColor, *foregroundColor, *currentLineColor);
         keymapEditor->commit();
         applyKeymap(actions, appSettings);
+        appSettings->saveMcpSettings(mcpEnabledCheck->isChecked(),
+                                      static_cast<quint16>(mcpPortSpin->value()));
+        // Unconditional: applyMcpSettings is idempotent, and working out
+        // whether anything changed here would be the view deciding
+        // something the Rust side already decides.
+        docManager->applyMcpSettings();
     } else {
         applyTheme(originalTheme);
         editorTabs->refreshHighlighting();
@@ -2380,10 +2439,24 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // establish above. The shell isn't spawned yet (TerminalSession::start
     // hasn't been called) until TerminalWidget knows its own pixel size.
     auto *terminalSession = new TerminalSession(window);
-    // M3: one MCP server per process, started once right after the shared
+    // One MCP server per process, brought up right after the shared
     // DocumentManager exists — the listener thread it spawns dispatches
-    // every EditorCommand back onto this same QObject's Qt thread.
-    docManager->startMcpServer();
+    // every EditorCommand back onto this same QObject's Qt thread. Whether
+    // it listens at all, and on which port, is the Rust side's decision
+    // from settings; this call only says "make it match".
+    //
+    // The status string outlives the Settings dialog, so reopening Settings
+    // shows what the server is actually doing rather than a stale guess.
+    auto mcpStatus = std::make_shared<QString>(QObject::tr("Starting..."));
+    QObject::connect(docManager, &DocumentManager::mcpStarted, window,
+                      [mcpStatus](std::uint16_t port) {
+                          *mcpStatus = QObject::tr("Listening on 127.0.0.1:%1").arg(port);
+                      });
+    QObject::connect(docManager, &DocumentManager::mcpStopped, window,
+                      [mcpStatus]() { *mcpStatus = QObject::tr("Disabled"); });
+    QObject::connect(docManager, &DocumentManager::mcpFailed, window,
+                      [mcpStatus](const QString &message) { *mcpStatus = message; });
+    docManager->applyMcpSettings();
     progress(3, QObject::tr("Building workspace..."));
     const CentralWidgets central =
       buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession);
@@ -2391,6 +2464,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     window->setEditorTabs(editorTabs);
     window->setAppSettings(appSettings);
     window->setDockManager(central.dockManager);
+    window->setDocumentManager(docManager);
 
     // S2: applied before reopenLastProject() (below) opens any tabs, so
     // every tab — including ones opened at startup — starts with the
@@ -2472,9 +2546,10 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     });
 
     QObject::connect(preferencesAction, &QAction::triggered, window,
-                      [window, appSettings, editorTabs, keymapEditor, actions]() {
+                      [window, appSettings, editorTabs, keymapEditor, actions, docManager,
+                       mcpStatus]() {
                           showSettingsDialog(window, appSettings, editorTabs, keymapEditor,
-                                              *actions);
+                                              *actions, docManager, mcpStatus);
                       });
 
     QMenu *editMenu = window->menuBar()->addMenu(QObject::tr("&Edit"));

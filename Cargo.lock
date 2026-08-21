@@ -1174,6 +1174,7 @@ dependencies = [
 name = "index-core"
 version = "0.1.0"
 dependencies = [
+ "editor-core",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
@@ -1407,7 +1408,8 @@ name = "mcp-server"
 version = "0.1.0"
 dependencies = [
  "axum",
- "dirs",
+ "editor-core",
+ "index-core",
  "reqwest",
  "serde",
  "serde_json",
