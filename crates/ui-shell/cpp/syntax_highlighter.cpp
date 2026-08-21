@@ -1,6 +1,7 @@
 #include "syntax_highlighter.h"
 
 #include "code_editor.h"
+#include "theme.h"
 #include "ui-shell/src/bridge.cxxqt.h"
 
 #include <algorithm>
@@ -16,12 +17,40 @@ namespace ui_shell {
 
 namespace {
 
-QColor colorForKind(FfiTokenKind kind)
+// VS Code's Dark+ token colors. Kept here rather than in theme.cpp so the
+// theme module stays free of the generated FFI types.
+QColor vscodeDarkColorForKind(FfiTokenKind kind)
 {
-    // Darcula-ish palette regardless of the active chrome theme — editor
-    // text colors are QPalette/theme-independent for now (A3 splits UI
-    // theme from editor color scheme; a real per-theme color scheme is S2's
-    // territory once someone asks for it, not this foundation task).
+    switch (kind) {
+    case FfiTokenKind::Keyword:
+        return QColor(QStringLiteral("#569cd6"));
+    case FfiTokenKind::String:
+        return QColor(QStringLiteral("#ce9178"));
+    case FfiTokenKind::Comment:
+        return QColor(QStringLiteral("#6a9955"));
+    case FfiTokenKind::Number:
+        return QColor(QStringLiteral("#b5cea8"));
+    case FfiTokenKind::Function:
+        return QColor(QStringLiteral("#dcdcaa"));
+    case FfiTokenKind::Type:
+        return QColor(QStringLiteral("#4ec9b0"));
+    case FfiTokenKind::Other:
+    default:
+        // Invalid means "leave it to the editor palette's Text role".
+        return QColor();
+    }
+}
+
+// Y2's promised theme-sourced colors: the color scheme follows the chrome
+// theme, which is what a theme named after an editor has to do to look like
+// it. A3's split still holds — the *mechanism* stays separate from the
+// chrome QSS, it just keys off the same theme name.
+QColor colorForKind(FfiTokenKind kind, const QString &themeName)
+{
+    if (themeName == QStringLiteral("vscode-dark")) {
+        return vscodeDarkColorForKind(kind);
+    }
+    // Darcula-ish palette for the Dark and Light themes, unchanged.
     switch (kind) {
     case FfiTokenKind::Keyword:
         return QColor(QStringLiteral("#cc7832"));
@@ -219,6 +248,9 @@ void SyntaxHighlighter::highlightBlock(const QString &text)
         return;
     }
 
+    // Read once per block rather than per span — it can't change mid-block,
+    // and a theme switch re-runs the whole highlighter anyway.
+    const QString theme = activeThemeName();
     const QVector<int> &byteOffsets = cachedByteOffsets_;
     const int blockStart = block.position();
     const int blockEnd = blockStart + block.length();
@@ -234,7 +266,7 @@ void SyntaxHighlighter::highlightBlock(const QString &text)
         if (localEnd <= localStart) {
             continue;
         }
-        const QColor color = colorForKind(span.kind);
+        const QColor color = colorForKind(span.kind, theme);
         if (!color.isValid()) {
             continue;
         }

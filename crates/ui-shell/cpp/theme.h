@@ -23,13 +23,19 @@ ThemeColors colorsForTheme(const QString &themeName);
 // text colors are QPalette-driven, not QSS (A3) — kept separate here.
 QString darculaStyleSheet();
 QString lightStyleSheet();
+QString vscodeDarkStyleSheet();
 
 // Picks the matching stylesheet for a theme name from `app-config::Settings`
-// (T2). Any name other than "light" falls back to Darcula — the same
-// default `Settings::theme_name()` already resolves an unset theme to, so
-// an unrecognized value degrades to the default rather than an unstyled
-// window.
+// (T2). Any name other than "light"/"vscode-dark" falls back to Darcula —
+// the same default `Settings::theme_name()` already resolves an unset theme
+// to, so an unrecognized value degrades to the default rather than an
+// unstyled window.
 QString styleSheetForTheme(const QString &themeName);
+
+// The theme name last passed to applyTheme(). Widgets that pick colors in
+// code rather than through QSS or the palette — today only the syntax
+// highlighter's token colors — have no other route to the active theme.
+QString activeThemeName();
 
 // The QSS above only reaches widgets we wrote selectors for. Qt Advanced
 // Docking System ships its own stylesheet, applied to the CDockManager

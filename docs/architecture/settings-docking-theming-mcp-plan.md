@@ -52,6 +52,7 @@ per `CLAUDE.md`.
 | M6 | done | `6d365cd` (shipped together with M7/M8 — see M8's row for what was and was not verified) |
 | M7 | done | `6d365cd` (see M8) |
 | M8 | done | `6d365cd` (`cargo test` green on every Qt-free crate: `app-config`, `app-core`, `index-core`, `mcp-server`; Qt-leakage gate clean on `mcp-server` and `index-core`. **Not verified:** the Qt build and every UI-side change — no Qt toolchain and no display in this environment, and Docker was explicitly out of scope for this change) |
+| T3 | done | `1a7cc6d` (third theme "VS Code Dark": QSS + palette + theme-sourced token colors; not built or manually verified in this session — the build was explicitly deferred by the requester) |
 
 ## Context
 
@@ -171,7 +172,8 @@ on the old bridge.rs/int-index/`QString` one. In particular:
 |---|---|---|
 | A1 | New Qt-free crate `app-config` (serde+toml) for structured settings | Mirrors `project-model`'s Qt-free/unit-testable pattern; the existing single-line persistence doesn't scale to theme/font/colors/recent-projects/window-geometry. `serde`+`toml` is a warranted new dependency, not hand-rolled parsing. |
 | A2 | Docking: vendor **Qt Advanced Docking System (ADS)** as a git submodule, compiled via extended `build.rs` (moc + cc), CMake-via-`cmake`-crate as fallback only if that proves unworkable | Hand-rolling a docking engine (drag-to-dock previews, floating/pinned/auto-hide panels, layout persistence) is a multi-month reinvention of a solved, battle-tested library. Try direct moc+cc integration first to keep one build system (Cargo); fall back to a second (CMake) only if proven necessary. |
-| A3 | Theming: QSS-based engine, Darcula + Light themes, Material-inspired palette; editor text colors via `QPalette` (separate from chrome QSS); icon theming explicitly out of scope | QSS is what the architecture overview already named; `QPalette`-only can't restyle scrollbars/tabs/menus. JetBrains itself splits "UI Theme" from "Editor Color Scheme" — same split here avoids the per-editor override fighting the global stylesheet cascade. |
+| A3 | Theming: QSS-based engine, Darcula + Light + VS Code Dark themes, Material-inspired palette; editor text colors via `QPalette` (separate from chrome QSS); icon theming explicitly out of scope | QSS is what the architecture overview already named; `QPalette`-only can't restyle scrollbars/tabs/menus. JetBrains itself splits "UI Theme" from "Editor Color Scheme" — same split here avoids the per-editor override fighting the global stylesheet cascade. |
+| A7 | Syntax token colors are keyed off the active theme name (T3), not fixed to one scheme | The mechanism split A3 describes stays — the color scheme is still chosen outside the chrome QSS — but a theme named after another editor has to bring that editor's token colors with it, or its editor area is the one surface that doesn't match. This is what Y2's "theme-sourced colors" deliverable always said. |
 | A4 | MCP transport: **local Streamable-HTTP JSON-RPC on 127.0.0.1**, port + short-lived auth token written to a discovery file in `default_config_dir()` | The IDE is already running when an agent attaches — stdio (subprocess-owns-lifecycle) is the wrong shape. A domain socket lacks a clean Windows story. Streamable HTTP is what off-the-shelf MCP clients already speak with zero custom transport code. Loopback + per-launch token avoids an unauthenticated open door. |
 | A5 | Syntax highlighting: **tree-sitter**, wrapped by new Qt-free crate `syntax-core`, driven by a `QSyntaxHighlighter` subclass in `ui-shell/cpp` | User-directed. Grammars are added as crates one at a time, matching the existing "add crates when the work starts" discipline. |
 | A6 | v1 re-tokenizes the whole buffer on every highlight call — no tree-sitter incremental `InputEdit` reparse yet | Deliberate ceiling. Upgrade path: a stateful `Highlighter` holding a persistent `tree_sitter::Tree` per document, using `.edit()` + incremental `.parse()`, once large-file typing latency is actually measured as a problem. |
@@ -265,6 +267,13 @@ explicit named color constants, not scattered hex), applied via
 via `QPalette`, separate from chrome QSS. Font size via
 `QFont::setPointSize()`, not QSS. Icon theming explicitly deferred
 (separate design-asset task).
+Implemented as embedded QSS strings plus a hand-built `QPalette` per theme
+in `ui-shell/cpp/theme.{h,cpp}` rather than as `.qss` assets — the app
+ships as one binary, so there is no asset-deployment step to wire up and no
+runtime path resolution to get wrong across platforms.
+T3 adds a third theme, **VS Code Dark** (Dark+ colors, flat square tabs
+with a top accent, thin scrollbars), selected by the same theme-name string
+and carrying its own syntax token colors per A7.
 
 **Line numbers**: new `ui-shell/cpp/code_editor.{h,cpp}` — `CodeEditor :
 public QPlainTextEdit` (`Q_OBJECT`) + sibling `LineNumberArea : public
@@ -366,6 +375,7 @@ run in parallel except where noted.
 | G2 | Tab reordering | `setMovable(true)` in `main_window.cpp` — no `app-core`/adapter change needed (see "Phase 0" above) | Manual: drag-reorder tabs; dirty indicators, close, and external-change prompts still target the correct (moved) tab |
 | T1 | QSS engine + Darcula | `.qss` loading mechanism; darcula default | Manual: app launches dark-themed, chrome restyled |
 | T2 | Light theme + live switch | `light.qss`; `setStyleSheet()` live switch | Manual: switch theme, restyles without restart |
+| T3 | VS Code Dark theme | third QSS + `QPalette` pair in `theme.cpp`, Dark+ token colors keyed off `activeThemeName()`, combo entry | Manual: pick VS Code Dark — chrome and syntax both match Dark+; switching back restores Darcula colors |
 | S1 | Settings dialog shell | category list + stacked detail pane; Appearance page wired to T2 + persisted | Manual: change theme, OK, relaunch persists; Cancel discards |
 | S2 | Editor colors + font settings | font size/family, color pickers; applied live + persisted | Manual: change settings, all open editors update live, persists across relaunch |
 | Y1 | `syntax-core` crate + Rust/JSON grammars | `Language`/extension map, `highlight()` via tree-sitter | `cargo test -p syntax-core`: known snippets → expected spans |

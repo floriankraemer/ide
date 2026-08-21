@@ -33,6 +33,7 @@
 #include <QFont>
 #include <QFormLayout>
 #include <QHash>
+#include <algorithm>
 #include <cstdint>
 #include <functional>
 #include <QHBoxLayout>
@@ -65,6 +66,7 @@
 #include <QSplitter>
 #include <QTabBar>
 #include <QTabWidget>
+#include <QtGui/QSyntaxHighlighter>
 #include <QtGui/QTextDocument>
 #include <QTreeView>
 #include <QTreeWidget>
@@ -496,6 +498,21 @@ public:
         editorForeground_ = foregroundHex;
         editorCurrentLine_ = currentLineHex;
         forEachEditor([this](QPlainTextEdit *editor) { applyEditorAppearance(editor); });
+    }
+
+    // Token colors follow the theme (see syntax_highlighter.cpp), and a
+    // QSyntaxHighlighter only re-runs when its document changes — so a live
+    // theme switch has to ask every open editor to re-highlight itself.
+    void refreshHighlighting()
+    {
+        forEachEditor([](QPlainTextEdit *editor) {
+            // QSyntaxHighlighter parents itself to the document it attaches
+            // to, so that — not the editor widget — is where onTabOpened's
+            // instance can be found again.
+            if (auto *highlighter = editor->document()->findChild<QSyntaxHighlighter *>()) {
+                highlighter->rehighlight();
+            }
+        });
     }
 
     // Rename/delete via the tree changed a tab's title (US-2b) — re-render
@@ -1854,13 +1871,18 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     auto *themeCombo = new QComboBox(appearancePage);
     themeCombo->addItem(QObject::tr("Dark"), QStringLiteral("dark"));
     themeCombo->addItem(QObject::tr("Light"), QStringLiteral("light"));
-    themeCombo->setCurrentIndex(originalTheme == QStringLiteral("light") ? 1 : 0);
+    themeCombo->addItem(QObject::tr("VS Code Dark"), QStringLiteral("vscode-dark"));
+    // findData() of an unknown persisted name yields -1; falling back to 0
+    // lands on Dark, the same theme styleSheetForTheme() would apply for it.
+    themeCombo->setCurrentIndex(std::max(0, themeCombo->findData(originalTheme)));
     appearanceForm->addRow(QObject::tr("Theme:"), themeCombo);
     pages->addWidget(appearancePage);
 
-    QObject::connect(themeCombo, &QComboBox::currentIndexChanged, &dialog, [themeCombo]() {
-        applyTheme(themeCombo->currentData().toString());
-    });
+    QObject::connect(themeCombo, &QComboBox::currentIndexChanged, &dialog,
+                     [themeCombo, editorTabs]() {
+                         applyTheme(themeCombo->currentData().toString());
+                         editorTabs->refreshHighlighting();
+                     });
 
     auto *editorPage = new QWidget(&dialog);
     auto *editorForm = new QFormLayout(editorPage);
@@ -2017,6 +2039,7 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
         docManager->applyMcpSettings();
     } else {
         applyTheme(originalTheme);
+        editorTabs->refreshHighlighting();
         editorTabs->setEditorFont(QFont(originalFont.family, static_cast<int>(originalFont.size)));
         editorTabs->setEditorColors(originalColors.background, originalColors.foreground,
                                      originalColors.current_line);
