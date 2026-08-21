@@ -70,7 +70,9 @@ pub struct LanguageDef {
     /// — see [`LanguageRegistry::language_for_path`].
     pub extensions: &'static [&'static str],
     /// Whole file names for extensionless languages (`Dockerfile`,
-    /// `Makefile`). Matched before extensions, case-sensitively.
+    /// `Makefile`). Matched before extensions, case-sensitively, and once
+    /// more against the name minus a trailing `.suffix` after extensions
+    /// have had their turn — see [`LanguageRegistry::language_for_path`].
     pub filenames: &'static [&'static str],
     pub grammar: fn() -> tree_sitter::Language,
     pub queries: QuerySet,
@@ -396,7 +398,8 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         extensions: &["mk", "mak"],
         // Make is normally reached by whole file name, not extension.
         // `filenames` is exact and case-sensitive, so every spelling GNU
-        // make itself looks for gets its own entry.
+        // make itself looks for gets its own entry; `Makefile.local` and
+        // friends come from the suffix step of `language_for_path`.
         filenames: &[
             "Makefile",
             "makefile",
@@ -411,10 +414,9 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         id: "dockerfile",
         name: "Dockerfile",
         extensions: &["dockerfile", "containerfile"],
-        // The `Dockerfile.<stage>` convention cannot be expressed here —
-        // `filenames` is exact-match and the registry has no prefix rule —
-        // so the `.dockerfile` extension above is what covers a variant
-        // file, spelled `<stage>.dockerfile`.
+        // `Dockerfile.<stage>` resolves through the suffix step of
+        // `language_for_path`, and the `.dockerfile` extension above
+        // covers the `<stage>.dockerfile` spelling.
         filenames: &["Dockerfile", "dockerfile", "Containerfile", "containerfile"],
         // `tree-sitter-containerfile`, not `tree-sitter-dockerfile`: the
         // latter is pinned to the tree-sitter 0.20 runtime and would drag a
@@ -713,8 +715,20 @@ impl LanguageRegistry {
             .map(|index| Language(index as u16))
     }
 
-    /// Which language highlights `path`, by whole file name first and
-    /// extension second, first match wins in catalog order.
+    /// Which language highlights `path`. Three steps, in this order, and
+    /// within each step the first match in catalog order wins:
+    ///
+    /// 1. the whole file name against `filenames`, case-sensitively;
+    /// 2. the extension against `extensions`, lowercased;
+    /// 3. the file name with its final `.suffix` removed, against
+    ///    `filenames` again — `Dockerfile.dev`, `Makefile.local`,
+    ///    `.env.local`.
+    ///
+    /// Step 3 is last on purpose: `Dockerfile.md` is Markdown, because a
+    /// real extension describes the file's contents and a stage suffix
+    /// does not. It re-checks only `filenames`, never `extensions`, so it
+    /// widens the extensionless languages and cannot make `Cargo.lock.bak`
+    /// resolve through some unrelated extension.
     pub fn language_for_path(&self, path: &Path) -> Language {
         let file_name = path
             .file_name()
@@ -725,18 +739,32 @@ impl LanguageRegistry {
             .map(|e| e.to_string_lossy().to_lowercase())
             .unwrap_or_default();
 
+        // `Dockerfile.dev` -> `Dockerfile`; empty when the name carries no
+        // suffix at all, so a plain `Dockerfile` is never checked twice.
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .filter(|s| *s != file_name)
+            .unwrap_or_default();
+
         let defs = || {
             self.entries
                 .iter()
                 .enumerate()
                 .filter_map(|(i, e)| Some((i, e.def.as_ref()?)))
         };
-        let by_filename = defs().find(|(_, d)| d.filenames().any(|n| n == file_name));
-        let matched = by_filename.or_else(|| {
-            (!extension.is_empty())
-                .then(|| defs().find(|(_, d)| d.extensions().any(|e| e == extension)))
+        let by_name = |name: &str| {
+            (!name.is_empty())
+                .then(|| defs().find(|(_, d)| d.filenames().any(|n| n == name)))
                 .flatten()
-        });
+        };
+        let matched = by_name(&file_name)
+            .or_else(|| {
+                (!extension.is_empty())
+                    .then(|| defs().find(|(_, d)| d.extensions().any(|e| e == extension)))
+                    .flatten()
+            })
+            .or_else(|| by_name(&stem));
         matched.map_or(Language::PLAIN_TEXT, |(index, _)| Language(index as u16))
     }
 
@@ -1109,6 +1137,32 @@ mod tests {
             "a compiled language still parses after its definition is freed"
         );
         assert!(compiled.highlights.is_some());
+    }
+
+    /// The suffix step, on the real catalog: it widens the extensionless
+    /// languages to their `<name>.<suffix>` spellings without letting a
+    /// suffix that *is* an extension lose to it, and without claiming a
+    /// file no language ever named.
+    #[test]
+    fn a_suffixed_file_name_falls_back_to_the_bare_name() {
+        let resolve = |name: &str| language_for_path(Path::new(name)).id().to_string();
+
+        // 1. exact file name
+        assert_eq!(resolve("Dockerfile"), "dockerfile");
+        assert_eq!(resolve("Makefile"), "make");
+        // 2. extension
+        assert_eq!(resolve("build.dockerfile"), "dockerfile");
+        // 3. file name minus its final suffix
+        assert_eq!(resolve("Dockerfile.dev"), "dockerfile");
+        assert_eq!(resolve("Dockerfile.prod"), "dockerfile");
+        assert_eq!(resolve("/srv/app/Makefile.local"), "make");
+        // The conflicting case: `md` is a real extension, and step 2 runs
+        // before step 3, so this is Markdown and not a Dockerfile.
+        assert_eq!(resolve("Dockerfile.md"), "markdown");
+        // Not a match: nothing claims the bare name, so the suffix rule
+        // must not invent a claimant.
+        assert_eq!(resolve("notes.dev"), "plaintext");
+        assert_eq!(resolve("Dockerfilez.dev"), "plaintext");
     }
 
     #[test]
