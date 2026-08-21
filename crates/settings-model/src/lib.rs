@@ -22,5 +22,6 @@ pub use languages::{
 };
 pub use servers::{lsp_language_id, ServerDraft, ServerRow, ServerRowStatus};
 pub use syntax_colors::{
-    ordered_scopes, scope_family, scope_sample, Origin, SyntaxColorDraft, FAMILY_ORDER,
+    ordered_scopes, scope_family, scope_sample, unknown_scope_warning, unknown_scopes, Origin,
+    SyntaxColorDraft, FAMILY_ORDER,
 };

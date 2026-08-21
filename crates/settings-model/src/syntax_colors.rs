@@ -189,6 +189,60 @@ pub const FAMILY_ORDER: &[&str] = &[
     "Markup",
 ];
 
+/// Every scope name in the persisted tables that this build's vocabulary
+/// does not contain, deduplicated and sorted.
+///
+/// The scope vocabulary is closed (`syntax_core::SCOPES`), so a name outside
+/// it paints nothing — and a hand-edited `settings.toml` is exactly where a
+/// typo gets in. `app-config` cannot check this itself: it deliberately
+/// knows no scope names (ADR-0016), which is also why an unknown name is
+/// kept on load rather than dropped.
+pub fn unknown_scopes(settings: &Settings) -> Vec<String> {
+    let mut unknown: Vec<String> = settings
+        .syntax_colors
+        .keys()
+        .chain(
+            settings
+                .syntax_colors_by_language
+                .values()
+                .flat_map(|styles| styles.keys()),
+        )
+        .filter(|scope| !syntax_core::SCOPES.contains(&scope.as_str()))
+        .map(String::to_owned)
+        .collect();
+    unknown.sort();
+    unknown.dedup();
+    unknown
+}
+
+/// The sentence the Syntax Colors page shows above the table when
+/// [`unknown_scopes`] finds anything; empty when it does not, so the page
+/// has nothing to decide.
+///
+/// Names the offending keys, because "some scopes are unknown" leaves the
+/// user to diff their file against a 39-entry list by hand.
+pub fn unknown_scope_warning(settings: &Settings) -> String {
+    let unknown = unknown_scopes(settings);
+    if unknown.is_empty() {
+        return String::new();
+    }
+    format!(
+        "settings.toml sets colours for {} this build does not know, so {} ignored: {}. \
+         Check the spelling against the Scope column below.",
+        if unknown.len() == 1 {
+            "a scope name"
+        } else {
+            "scope names"
+        },
+        if unknown.len() == 1 {
+            "it is"
+        } else {
+            "they are"
+        },
+        unknown.join(", ")
+    )
+}
+
 /// Which family a scope belongs under. Keyed on the dotted prefix, so a
 /// scope added to `syntax_core::SCOPES` under an existing root is grouped
 /// without touching this table.
@@ -407,6 +461,117 @@ mod tests {
         let mut settings = Settings::default();
         draft.apply_to(&mut settings);
         assert_eq!(SyntaxColorDraft::from_settings(&settings), draft);
+    }
+
+    /// Write `body` as `settings.toml`, load it back the way the app does,
+    /// and hand back the settings — the hand-edited-file path end to end.
+    fn load_toml(body: &str) -> (tempfile::TempDir, Settings) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        std::fs::write(dir.path().join("settings.toml"), body).expect("written");
+        let settings = app_config::load(dir.path()).expect("parses");
+        (dir, settings)
+    }
+
+    #[test]
+    fn a_hand_written_nested_scope_key_reaches_the_page() {
+        let (_dir, settings) = load_toml("[syntax_colors]\nfunction.method = \"#ffc66d\"\n");
+        let draft = SyntaxColorDraft::from_settings(&settings);
+        assert_eq!(
+            draft
+                .effective(None, "function.method")
+                .and_then(|s| s.fg()),
+            Some("#ffc66d")
+        );
+        assert_eq!(draft.origin(None, "function.method"), Origin::Base);
+        assert!(unknown_scopes(&settings).is_empty());
+    }
+
+    #[test]
+    fn a_hand_written_quoted_scope_key_reaches_the_page() {
+        let (_dir, settings) = load_toml("[syntax_colors]\n\"function.method\" = \"#ffc66d\"\n");
+        let draft = SyntaxColorDraft::from_settings(&settings);
+        assert_eq!(
+            draft
+                .effective(None, "function.method")
+                .and_then(|s| s.fg()),
+            Some("#ffc66d")
+        );
+    }
+
+    #[test]
+    fn both_spellings_in_one_file_both_reach_the_page() {
+        let (_dir, settings) = load_toml(
+            "[syntax_colors]\n\
+             \"string.escape\" = \"#a5c261\"\n\
+             punctuation.bracket = \"#a9b7c6\"\n\
+             comment = { fg = \"#808080\", italic = true }\n\
+             [syntax_colors_by_language.python]\n\
+             function.builtin = \"#8888c6\"\n",
+        );
+        let draft = SyntaxColorDraft::from_settings(&settings);
+        assert_eq!(
+            draft.effective(None, "string.escape").and_then(|s| s.fg()),
+            Some("#a5c261")
+        );
+        assert_eq!(
+            draft
+                .effective(None, "punctuation.bracket")
+                .and_then(|s| s.fg()),
+            Some("#a9b7c6")
+        );
+        assert!(draft.entry(None, "comment").expect("stored").italic());
+        assert_eq!(
+            draft
+                .effective(Some("python"), "function.builtin")
+                .and_then(|s| s.fg()),
+            Some("#8888c6")
+        );
+        assert!(unknown_scopes(&settings).is_empty());
+    }
+
+    #[test]
+    fn an_unknown_scope_name_is_reported_rather_than_dropped() {
+        let (_dir, settings) = load_toml(
+            "[syntax_colors]\n\
+             keyword = \"#cc7832\"\n\
+             function.methdo = \"#ffc66d\"\n\
+             [syntax_colors_by_language.python]\n\
+             decorator = \"#ffc66d\"\n",
+        );
+        assert_eq!(
+            unknown_scopes(&settings),
+            vec!["decorator".to_string(), "function.methdo".to_string()]
+        );
+        let warning = unknown_scope_warning(&settings);
+        assert!(warning.contains("function.methdo"), "{warning}");
+        assert!(warning.contains("decorator"), "{warning}");
+        // Reported, not discarded: the value is still in the file the page
+        // will write back.
+        assert!(settings.syntax_colors.contains_key("function.methdo"));
+    }
+
+    #[test]
+    fn a_known_scope_vocabulary_warns_about_nothing() {
+        let (_dir, settings) = load_toml("[syntax_colors]\nfunction.method = \"#ffc66d\"\n");
+        assert_eq!(unknown_scope_warning(&settings), "");
+    }
+
+    #[test]
+    fn a_hand_written_file_round_trips_through_save_and_load() {
+        let (dir, settings) = load_toml(
+            "[syntax_colors]\n\
+             function.method = \"#ffc66d\"\n\
+             comment = { fg = \"#808080\", italic = true }\n\
+             [syntax_colors_by_language.python]\n\
+             string.escape = \"#a5c261\"\n",
+        );
+        app_config::save(dir.path(), &settings).expect("saved");
+        let reloaded = app_config::load(dir.path()).expect("parses");
+        assert_eq!(reloaded, settings);
+        assert_eq!(
+            SyntaxColorDraft::from_settings(&reloaded),
+            SyntaxColorDraft::from_settings(&settings)
+        );
     }
 
     #[test]

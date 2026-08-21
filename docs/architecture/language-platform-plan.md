@@ -190,5 +190,7 @@ Two further defects found during the work are filed but not listed above,
 because they were fixed or accepted rather than left open as gaps:
 the go-to-definition regression the single-parse refactor introduced
 ([#21](https://github.com/floriankraemer/ide/issues/21), measured and knowingly accepted),
-and the TOML nested-table gotcha that silently discards a hand-edited dotted
-scope colour ([#22](https://github.com/floriankraemer/ide/issues/22)).
+and the TOML nested-table gotcha that silently discarded a hand-edited dotted
+scope colour ([#22](https://github.com/floriankraemer/ide/issues/22), fixed:
+both spellings load, and an unknown scope name is now said out loud on the
+Syntax Colors page).

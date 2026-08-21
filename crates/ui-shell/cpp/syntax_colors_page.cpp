@@ -150,6 +150,16 @@ QWidget *buildSyntaxColorsPage(QWidget *parent,
         languageCombo->addItem(option.name, option.id);
     }
 
+    // A scope name the file names but this build does not know has no row to
+    // show itself in, so it is said in words, above the table and for as long
+    // as the page is open. The sentence is `settings-model`'s.
+    auto *unknownScopeLabel = new QLabel(editor->unknownScopeWarning(), page);
+    unknownScopeLabel->setWordWrap(true);
+    unknownScopeLabel->setStyleSheet(
+      QStringLiteral("color: %1;").arg(semanticColors().warning.name()));
+    unknownScopeLabel->setVisible(!unknownScopeLabel->text().isEmpty());
+    layout->addWidget(unknownScopeLabel);
+
     auto *resetLevelButton = new QPushButton(page);
     auto *topRow = new QHBoxLayout();
     topRow->addWidget(new QLabel(QObject::tr("Language:"), page));
