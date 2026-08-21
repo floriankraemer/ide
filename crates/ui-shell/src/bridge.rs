@@ -1976,6 +1976,14 @@ mod ffi {
         /// Cancel branch of the dialog.
         #[qinvokable]
         fn revert(self: &SyntaxColorEditor);
+
+        /// One sentence naming any scope in `settings.toml` this build does
+        /// not know, or empty when there is none — a hand-edited typo has
+        /// no row to show itself in, so the page says it in words. The
+        /// wording is `settings_model::unknown_scope_warning`.
+        #[qinvokable]
+        #[cxx_name = "unknownScopeWarning"]
+        fn unknown_scope_warning(self: &SyntaxColorEditor) -> QString;
     }
 
     extern "RustQt" {
@@ -5087,6 +5095,11 @@ impl ffi::SyntaxColorEditor {
         };
         *self.draft.borrow_mut() = snapshot;
         self.save();
+    }
+
+    pub fn unknown_scope_warning(&self) -> QString {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        QString::from(&settings_model::unknown_scope_warning(&settings))
     }
 }
 

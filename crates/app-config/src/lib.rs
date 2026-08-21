@@ -129,12 +129,19 @@ pub struct Settings {
     /// collides with a scope name, or a scope table uses a key a future style
     /// field also uses. Two flat maps parse unambiguously and cost one extra
     /// TOML header.
-    #[serde(default)]
+    ///
+    /// Dotted scope names may be written either quoted
+    /// (`"function.method" = "…"`) or as the nested table TOML makes of a
+    /// bare dotted key — see [`syntax_colors::deserialize_scope_styles`].
+    #[serde(default, deserialize_with = "syntax_colors::deserialize_scope_styles")]
     pub syntax_colors: ScopeStyles,
     /// Per-language syntax color overrides: language id -> (scope name ->
     /// style). Layered over [`Settings::syntax_colors`] by the theme
     /// resolution in `syntax-core` — this crate only stores them.
-    #[serde(default)]
+    #[serde(
+        default,
+        deserialize_with = "syntax_colors::deserialize_language_scope_styles"
+    )]
     pub syntax_colors_by_language: LanguageScopeStyles,
     /// Per-language language-server overrides, written as `[[language_server]]`
     /// blocks. Layered over the shipped catalog by `lsp_core::resolve_servers`;
