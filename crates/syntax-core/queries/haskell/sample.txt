@@ -1,0 +1,5 @@
+-- Harness fixture (X1): must contain a keyword, a string and a comment.
+module Fixtures (greet) where
+
+greet :: String -> String
+greet name = "hello, " ++ name

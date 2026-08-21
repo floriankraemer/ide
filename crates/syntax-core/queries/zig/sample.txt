@@ -1,0 +1,10 @@
+// Harness fixture (X1): must contain a keyword, a string and a comment.
+const std = @import("std");
+
+const Greeter = struct {
+    name: []const u8,
+
+    pub fn greet(self: Greeter) void {
+        std.debug.print("hello, {s}\n", .{self.name});
+    }
+};

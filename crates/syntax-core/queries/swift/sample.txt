@@ -1,0 +1,10 @@
+// Harness fixture (X1): must contain a keyword, a string and a comment.
+import Foundation
+
+struct Greeter {
+    let name: String
+
+    func greet() -> String {
+        return "hello, " + name
+    }
+}
