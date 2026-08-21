@@ -1,9 +1,9 @@
 # The inline grammar sees one run of Markdown prose at a time: emphasis,
-# code spans, links, autolinks and escapes. Prose has no reserved words
-# and no comment syntax — neither concept exists at this level, and
-# nothing in the grammar could be captured as one without lying. (There
-# is no `string` exception: a backslash escape is captured as
-# `@string.escape`, which the harness counts as a string, so the fixture
-# produces one honestly.)
+# code spans, links, autolinks and escapes. Prose has no reserved words,
+# no comment syntax and no string literals — none of the three concepts
+# exists at this level, and nothing in the grammar could be captured as
+# one without lying. A backslash escape is captured as `@string.escape`,
+# which is a descendant and deliberately does not satisfy `string`.
 keyword
 comment
+string
