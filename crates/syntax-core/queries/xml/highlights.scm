@@ -2,15 +2,18 @@
 ; `queries/xml/highlights.scm` (MIT,
 ; https://github.com/tree-sitter-grammars/tree-sitter-xml).
 ;
-; One upstream pattern is dropped:
+; One upstream pattern is still absent:
 ;
 ;   ((EntityRef) @constant.builtin
 ;    (#any-of? @constant.builtin "&amp;" "&lt;" ...))
 ;
-; span extraction does not evaluate predicates, so it would ship unguarded
-; and paint every entity reference as builtin, stacked under the
-; `(EntityRef) @constant` span above it. The general `@constant` capture
-; is kept and the distinction is lost, which costs a shade of colour.
+; `#any-of?` is evaluated (see queries/go/highlights.scm), so it would
+; match only the entities it lists, and — since same-node captures resolve
+; first-pattern-wins — placing it before the `(EntityRef) @constant`
+; pattern below would give the builtins their own colour. It has simply
+; not been ported back, so the general `@constant` capture carries every
+; entity reference and the distinction is lost, which costs a shade of
+; colour.
 ;
 ; Capture names upstream uses that `syntax_core::SCOPES` does not know
 ; (`@markup`, `@markup.link`, `@markup.raw`, `@error`,

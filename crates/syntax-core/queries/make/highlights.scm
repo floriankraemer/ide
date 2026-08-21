@@ -2,12 +2,13 @@
 ; queries/highlights.scm (MIT,
 ; https://github.com/tree-sitter-grammars/tree-sitter-make).
 ;
-; Three systematic changes, the same ones go/highlights.scm documents:
+; Three systematic differences from upstream; go/highlights.scm
+; documents the predicate rules they follow:
 ;
-;   * every pattern guarded by a `#match?` predicate is dropped, because
-;     `spans_from_tree` does not evaluate predicates — upstream's
-;     well-known-variable and standard-target lists would otherwise paint
-;     every variable and every target as a builtin;
+;   * every pattern guarded by a `#match?` predicate is still absent —
+;     `#match?` is evaluated (see queries/go/highlights.scm), so
+;     upstream's well-known-variable and standard-target lists would work
+;     as written; nobody has ported them back yet;
 ;   * `(variable_assignment (word) @string)` is dropped: the `(word)` it
 ;     matches is the assignment's *name*, which the pattern below already
 ;     captures as `@constant`, so shipping both stacks two spans on it;

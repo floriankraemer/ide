@@ -2,11 +2,13 @@
 ; which (unlike the other grammars in this catalog) ships no `queries/`
 ; directory of its own, so there is nothing upstream to adapt.
 ;
-; Written to the same two rules the adapted files follow: no `#match?`
-; predicates, because this crate's highlighter does not evaluate them, and
-; no catch-all `(identifier) @variable`, because span extraction has no
-; first-wins dedup and a catch-all would stack a span under every specific
-; capture.
+; Written to the same two rules the adapted files followed: no `#match?`
+; predicates in the body and no catch-all `(identifier) @variable`.
+; Neither rule is forced any more — `#match?` is evaluated (see
+; queries/go/highlights.scm) and same-node captures resolve
+; first-pattern-wins, so a catch-all placed last would lose to every
+; specific capture rather than stack under it. This file has just not been
+; revisited, beyond the naming-conventions block at its end.
 
 ; Comments
 
@@ -195,3 +197,19 @@
   "${"
   "@"
 ] @punctuation.special
+
+; --- Naming conventions -----------------------------------------------
+;
+; Guarded by `#match?` text predicates, which `QueryCursor::matches` does
+; evaluate (see `spans_from_tree`). They sit last on purpose: captures on
+; the same node resolve first-pattern-wins, so every specific pattern
+; above still beats these catch-alls.
+
+; SCREAMING_CASE is a constant. Two characters minimum, so a bare
+; `T` stays a type rather than becoming a constant.
+((identifier) @constant
+  (#match? @constant "^[A-Z][A-Z0-9_]+$"))
+
+; CamelCase is a type.
+((identifier) @type
+  (#match? @type "^[A-Z]"))

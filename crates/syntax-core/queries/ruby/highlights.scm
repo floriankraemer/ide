@@ -1,15 +1,22 @@
 ; Ruby highlights.scm — adapted from tree-sitter-ruby 0.23.1's own
 ; queries/highlights.scm (MIT, (c) 2016 Rob Rix).
 ;
-; Three systematic changes, the same ones go/highlights.scm documents:
+; Four systematic differences from upstream; go/highlights.scm documents
+; the predicate rules they follow:
 ;
-;   * the catch-all `(identifier) @variable` is dropped — span extraction
-;     has no first-wins dedup, so it would stack a second span under every
-;     method name, parameter and call site;
-;   * every pattern guarded by `#match?`, `#eq?` or `#is-not?` is dropped,
-;     because `spans_from_tree` does not evaluate predicates and a shipped
-;     guard would paint unconditionally (the upstream `#is-not? local`
-;     pattern would make every identifier a method call);
+;   * the catch-all `(identifier) @variable` is still absent — not for
+;     want of dedup (span extraction resolves same-node captures
+;     first-pattern-wins now, so a catch-all placed last would lose to
+;     every method name, parameter and call site rather than stack a
+;     second span under it), but because nobody has ported it back;
+;   * the patterns guarded by `#match?` or `#eq?` are likewise still
+;     absent, though those predicates *are* evaluated (see
+;     `spans_from_tree`) and could be ported back as written;
+;   * upstream's `(identifier) @method (#is-not? local)` stays out for a
+;     harder reason: `#is-not? local` is a property predicate tree-sitter
+;     does not evaluate, so `spans_from_tree` drops the whole pattern
+;     rather than let it paint every identifier — pasting it in would buy
+;     nothing;
 ;   * `@function.method.builtin` is rewritten to `@function.builtin`, the
 ;     standard name in `syntax_core::SCOPES`.
 

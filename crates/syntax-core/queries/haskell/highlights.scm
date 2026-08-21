@@ -1,15 +1,16 @@
 ; Haskell highlights.scm — adapted from tree-sitter-haskell 0.23.1's own
 ; queries/highlights.scm (MIT, https://github.com/tree-sitter/tree-sitter-haskell).
-; Two classes of upstream pattern were dropped:
+; Two classes of upstream pattern are still absent:
 ;
-;   * seventeen guarded by `#match?`/`#eq?`/`#any-of?` predicates — this
-;     crate's highlighter does not evaluate predicates (see
-;     queries/go/highlights.scm);
+;   * seventeen guarded by `#match?`/`#eq?`/`#any-of?` predicates — those
+;     are evaluated (see queries/go/highlights.scm), so they would work as
+;     written; nobody has ported them back;
 ;   * the bare `(variable) @variable` and `(variable) @type` catch-alls.
 ;     Upstream relies on a last-match-wins highlighter to let the later
 ;     `@type` override the earlier `@variable` for lowercase type
-;     variables; this crate's span extraction has no such dedup, so both
-;     would fire on every variable at once.
+;     variables; this crate resolves same-node captures first-pattern-wins
+;     instead, so the two would have to be reordered rather than copied
+;     across — which nobody has done.
 
 ; ----------------------------------------------------------------------------
 ; Parameters and variables

@@ -1,12 +1,15 @@
 ; Python highlights.scm — adapted from tree-sitter-python's own
 ; queries/highlights.scm (MIT, Copyright (c) 2016 Max Brunsfeld).
 ;
-; Two deliberate departures from upstream:
-;   * the `#match?`-driven naming-convention patterns (SCREAMING_CASE ->
-;     @constant, CamelCase -> @constructor) are dropped — this crate does
-;     not evaluate text predicates, so they would paint every identifier.
-;   * the catch-all `(identifier) @variable` is dropped for the same
-;     reason: it would emit a span under every more specific capture.
+; Two departures from upstream:
+;   * the `#match?`-driven naming-convention patterns live in the block at
+;     the end of this file rather than up here, and CamelCase maps to
+;     `@type` instead of upstream's `@constructor`. Text predicates are
+;     evaluated (see queries/go/highlights.scm) and same-node captures
+;     resolve first-pattern-wins, so sitting last they only paint what no
+;     specific pattern claimed.
+;   * the catch-all `(identifier) @variable` is still absent — placing it
+;     last would cost nothing now, it has just not been ported back.
 
 (comment) @comment
 (string) @string
@@ -59,3 +62,19 @@
   "import" "lambda" "nonlocal" "pass" "print" "raise" "return" "try"
   "while" "with" "yield" "match" "case"
 ] @keyword
+
+; --- Naming conventions -----------------------------------------------
+;
+; Guarded by `#match?` text predicates, which `QueryCursor::matches` does
+; evaluate (see `spans_from_tree`). They sit last on purpose: captures on
+; the same node resolve first-pattern-wins, so every specific pattern
+; above still beats these catch-alls.
+
+; SCREAMING_CASE is a constant. Two characters minimum, so a bare
+; `T` stays a type rather than becoming a constant.
+((identifier) @constant
+  (#match? @constant "^[A-Z][A-Z0-9_]+$"))
+
+; CamelCase is a type.
+((identifier) @type
+  (#match? @type "^[A-Z]"))

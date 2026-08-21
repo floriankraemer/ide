@@ -4,8 +4,9 @@
 ; `class`, `interface` and `enum class` share one `class_declaration` node
 ; in this grammar, so the leading keyword token is matched to tell them
 ; apart. An `enum class` carries both `enum` and `class` tokens and is
-; therefore reported as a class — which it is; splitting it out would need
-; a `#eq?` predicate, and this crate does not evaluate predicates.
+; therefore reported as a class — which it is. Splitting it out would need
+; a `#eq?` predicate; those are evaluated (see queries/go/highlights.scm),
+; so it could be written — it just has not been.
 ;
 ; Kotlin has one `function_declaration` node at every nesting level, so
 ; every function is reported as `definition.function`; `outline()` nests it

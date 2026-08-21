@@ -331,9 +331,9 @@ fn injected_regions_are_highlighted_as_the_injected_language() {
 }
 
 /// A fence tagged with a common alias (` ```rs `) resolves to the language
-/// it means. Predicates are not evaluated during span extraction, so this
-/// cannot be done in `injections.scm`; `canonical_injection_language` in
-/// lib.rs does it once for every injected name.
+/// it means. `canonical_injection_language` in lib.rs does this once for
+/// every injected name, rather than every `injections.scm` repeating an
+/// `#eq?`/`#set!` pair per alias per language.
 #[test]
 fn a_fence_tagged_with_an_alias_resolves_to_the_registry_language() {
     let text = "```rs\nconst X: u8 = 1;\n```\n";
@@ -353,4 +353,86 @@ fn php_markup_outside_the_tags_is_highlighted_as_html() {
     // between the quotes, and the quotes themselves are not captured.
     assert_scope_at(php, text, "note", "string");
     assert_scope_at(php, text, "echo", "keyword");
+}
+
+// ---- naming conventions (#16) ---------------------------------------
+
+/// The two naming conventions every mainstream editor paints, per
+/// language: a SCREAMING_CASE name is a constant, a CamelCase name is a
+/// type (a constructor in the languages whose real types already have a
+/// node of their own — Rust's `type_identifier`, JS/TS class names).
+///
+/// These patterns are guarded by `#match?` text predicates in each
+/// `highlights.scm`, so this table is also the end-to-end proof that
+/// predicate evaluation reaches the shipped queries: without it every
+/// lowercase identifier in these snippets would be painted too, and the
+/// negative assertions below would fail.
+///
+/// One row per language that carries the convention block. A row is
+/// `(id, source, camel_scope)`; the source must contain `Widget` and
+/// `LIMIT` as plain identifier references, not declarations, so no more
+/// specific pattern claims them first.
+const NAMING_CONVENTIONS: &[(&str, &str, &str)] = &[
+    ("python", "value = Widget\nother = LIMIT\n", "type"),
+    ("c", "int f(void) { return LIMIT; }\n", ""),
+    ("cpp", "int f() { return LIMIT; }\n", ""),
+    (
+        "go",
+        "package p\nfunc f() { a := Widget; b := LIMIT }\n",
+        "type",
+    ),
+    ("lua", "local a = Widget\nlocal b = LIMIT\n", "type"),
+    ("scala", "val a = Widget\nval b = LIMIT\n", "type"),
+    ("zig", "const a = Widget;\nconst b = LIMIT;\n", "type"),
+    ("fsharp", "let a = Widget\nlet b = LIMIT\n", "type"),
+    (
+        "rust",
+        "fn f() { let a = Widget; let b = LIMIT; }\n",
+        "constructor",
+    ),
+    (
+        "javascript",
+        "const a = Widget;\nconst b = LIMIT;\n",
+        "constructor",
+    ),
+    (
+        "typescript",
+        "const a = Widget;\nconst b = LIMIT;\n",
+        "constructor",
+    ),
+    (
+        "tsx",
+        "const a = Widget;\nconst b = LIMIT;\n",
+        "constructor",
+    ),
+    ("swift", "let a = Widget\nlet b = LIMIT\n", "type"),
+    ("kotlin", "val a = Widget\nval b = LIMIT\n", "type"),
+];
+
+#[test]
+fn naming_conventions_are_painted_and_only_where_they_apply() {
+    for (id, source, camel_scope) in NAMING_CONVENTIONS {
+        let language = language(id);
+        assert_scope_at(language, source, "LIMIT", "constant");
+        if !camel_scope.is_empty() {
+            assert_scope_at(language, source, "Widget", camel_scope);
+        }
+        // The guard really guards: no lowercase name picked up either
+        // scope. This is the assertion that fails if predicates stop
+        // being evaluated.
+        let spans = highlight(language, source);
+        for span in &spans {
+            let name = span.scope.name();
+            if name != "constant" && name != *camel_scope {
+                continue;
+            }
+            let painted = &source[span.start..span.end];
+            assert!(
+                painted.starts_with(|c: char| c.is_uppercase()),
+                "language `{id}`: {painted:?} was painted `{name}` — the \
+                 `#match?` guard on the naming-convention pattern is not \
+                 being evaluated"
+            );
+        }
+    }
 }

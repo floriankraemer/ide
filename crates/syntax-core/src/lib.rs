@@ -578,31 +578,75 @@ fn build_symbol_tree(mut raw: Vec<RawSymbol>, text: &str) -> Vec<SymbolNode> {
     roots
 }
 
+/// True when tree-sitter parsed a predicate on `pattern` that it does not
+/// itself evaluate, so the pattern would match *unguarded*.
+///
+/// `QueryCursor::matches` filters on the standard text predicates
+/// (`#eq?`, `#not-eq?`, `#match?`, `#not-match?`, `#any-of?`,
+/// `#not-any-of?` and their `#any-*` variants) — that is where predicate
+/// evaluation actually happens, and it is why guarded patterns are safe to
+/// ship. Two other kinds are parsed but never applied:
+///
+///   * property predicates — `#is? local` / `#is-not? local`, which depend
+///     on a locals-scope resolver this crate does not have;
+///   * general predicates — anything tree-sitter does not know at all,
+///     which is where nvim-treesitter's `#lua-match?`, `#has-ancestor?`
+///     and friends land.
+///
+/// A pattern carrying one of those is *dropped*, not silently unguarded.
+/// Failing closed is the only safe default: Ruby's `(identifier) @method
+/// (#is-not? local)` unguarded paints every identifier in the file. It
+/// also makes pasting an upstream `.scm` file safe — an unsupported guard
+/// costs that one pattern's highlighting, never a wrong repaint of the
+/// whole document.
+///
+/// `#set!` is a directive, not a predicate; it lands in the query's
+/// property *settings* and is simply ignored here.
+fn pattern_is_guarded_by_an_unevaluated_predicate(query: &Query, pattern: usize) -> bool {
+    !query.property_predicates(pattern).is_empty() || !query.general_predicates(pattern).is_empty()
+}
+
 /// `capture_scopes` is the query's capture index -> [`Scope`] table,
 /// resolved once when the query was compiled — the per-span hot path only
 /// indexes it.
+///
+/// Overlapping captures on the *same* node resolve first-pattern-wins, the
+/// standard tree-sitter highlighting convention: a file lists its specific
+/// patterns first and its naming-convention catch-alls (CamelCase is a
+/// type, SCREAMING_CASE is a constant) last, and the specific one wins.
+/// Without this the view would paint whichever span happened to be sorted
+/// last, since it applies formats in order and the later write wins.
 fn spans_from_tree(
     query: &Query,
     capture_scopes: &[Option<Scope>],
     tree: &tree_sitter::Tree,
     text: &str,
 ) -> Vec<HighlightSpan> {
-    let mut spans = Vec::new();
+    // (span, pattern index) — the pattern index is only needed to break
+    // same-node ties and is dropped again below.
+    let mut spans: Vec<(HighlightSpan, usize)> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
     while let Some(m) = matches.next() {
+        if pattern_is_guarded_by_an_unevaluated_predicate(query, m.pattern_index) {
+            continue;
+        }
         for capture in m.captures {
             if let Some(Some(scope)) = capture_scopes.get(capture.index as usize) {
-                spans.push(HighlightSpan {
-                    start: capture.node.start_byte(),
-                    end: capture.node.end_byte(),
-                    scope: *scope,
-                });
+                spans.push((
+                    HighlightSpan {
+                        start: capture.node.start_byte(),
+                        end: capture.node.end_byte(),
+                        scope: *scope,
+                    },
+                    m.pattern_index,
+                ));
             }
         }
     }
-    spans.sort_by_key(|span| (span.start, span.end));
-    spans
+    spans.sort_by_key(|(span, pattern)| (span.start, span.end, *pattern));
+    spans.dedup_by_key(|(span, _)| (span.start, span.end));
+    spans.into_iter().map(|(span, _)| span).collect()
 }
 
 /// How deep injected regions are followed: the host document is depth 0,
@@ -640,12 +684,12 @@ impl InjectionRegion {
 ///
 /// A Markdown fence is tagged by a human (` ```js `), not by a query
 /// author, and injection resolution matches a registry id exactly. The
-/// usual tree-sitter answer — `((#eq? @lang "js") (#set! injection.language
-/// "javascript"))` — cannot work here, because span extraction does not
-/// evaluate predicates: such a pattern would match every fence and
-/// relabel all of them. So the normalisation lives here, in the one place
-/// every injected language name passes through, rather than being
-/// repeated (and silently broken) in each `injections.scm`.
+/// usual tree-sitter answer is one `((#eq? @lang "js") (#set!
+/// injection.language "javascript"))` pattern per alias per host language
+/// — a table that would have to be written out, and kept in step, in
+/// every `injections.scm` that can host a fence. So the normalisation
+/// lives here instead: one place, which every injected language name
+/// passes through.
 ///
 /// Deliberately short: only aliases that are genuinely common in the
 /// wild, and only onto ids the catalog actually has. An unknown name
@@ -698,6 +742,13 @@ fn injection_regions(query: &Query, tree: &tree_sitter::Tree, text: &str) -> Vec
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
     while let Some(m) = matches.next() {
+        // Same rule as `spans_from_tree`: a guard tree-sitter cannot
+        // evaluate takes its pattern down rather than shipping unguarded.
+        // Here the cost of getting that wrong is parsing an arbitrary
+        // region as the wrong language, not just a wrong colour.
+        if pattern_is_guarded_by_an_unevaluated_predicate(query, m.pattern_index) {
+            continue;
+        }
         let mut language = query
             .property_settings(m.pattern_index)
             .iter()
@@ -2074,5 +2125,140 @@ mod tests {
         let spans = highlighter.edit(after, start, start + 1, start + 1);
         assert!(scopes_at(&spans, after, "keyword").contains(&"fn"));
         assert!(!highlighter.fold_ranges().is_empty());
+    }
+
+    // --- Query predicates -------------------------------------------
+    //
+    // `spans_from_tree`'s contract: text predicates guard their pattern,
+    // predicates tree-sitter cannot evaluate drop it, and same-node
+    // captures resolve first-pattern-wins.
+
+    /// Runs one hand-written highlights query, bypassing the shipped
+    /// `.scm` file, so a predicate can be tested in isolation.
+    fn spans_of(language: Language, highlights: &str, text: &str) -> Vec<HighlightSpan> {
+        let def = language.def().expect("catalog language");
+        let grammar = (def.grammar())();
+        let query = Query::new(&grammar, highlights).expect("query compiles");
+        let scopes: Vec<Option<Scope>> = query
+            .capture_names()
+            .iter()
+            .map(|name| Scope::resolve(name))
+            .collect();
+        let tree = parse_once(&grammar, text).expect("parse");
+        spans_from_tree(&query, &scopes, &tree, text)
+    }
+
+    #[test]
+    fn a_match_predicate_guards_its_pattern() {
+        let text = "FOO = Bar + baz\n";
+        let spans = spans_of(
+            lang("python"),
+            r#"((identifier) @constant (#match? @constant "^[A-Z][A-Z0-9_]+$"))"#,
+            text,
+        );
+        // The guard holds: the SCREAMING_CASE name matches and neither the
+        // CamelCase nor the lowercase one does.
+        assert_eq!(scopes_at(&spans, text, "constant"), vec!["FOO"]);
+    }
+
+    #[test]
+    fn a_not_match_predicate_guards_its_pattern() {
+        let text = "FOO = Bar + baz\n";
+        let spans = spans_of(
+            lang("python"),
+            r#"((identifier) @variable (#not-match? @variable "^[A-Z]"))"#,
+            text,
+        );
+        assert_eq!(scopes_at(&spans, text, "variable"), vec!["baz"]);
+    }
+
+    #[test]
+    fn eq_and_any_of_predicates_guard_their_patterns() {
+        let text = "alpha = beta + gamma\n";
+        let spans = spans_of(
+            lang("python"),
+            r#"((identifier) @constant (#eq? @constant "beta"))"#,
+            text,
+        );
+        assert_eq!(scopes_at(&spans, text, "constant"), vec!["beta"]);
+
+        let spans = spans_of(
+            lang("python"),
+            r#"((identifier) @constant (#any-of? @constant "alpha" "gamma"))"#,
+            text,
+        );
+        assert_eq!(scopes_at(&spans, text, "constant"), vec!["alpha", "gamma"]);
+    }
+
+    /// A predicate tree-sitter parses but never applies must take its
+    /// pattern down with it. Shipping such a pattern unguarded is the
+    /// failure mode this protects against — `#is-not? local` unguarded
+    /// paints every identifier in the file.
+    #[test]
+    fn a_predicate_tree_sitter_cannot_evaluate_drops_its_pattern() {
+        let text = "FOO = Bar + baz\n";
+        for guard in [
+            // Property predicate: needs a locals resolver we do not have.
+            r#"((identifier) @constant (#is-not? local))"#,
+            // General predicate: nvim-treesitter flavour, unknown to
+            // tree-sitter itself.
+            r#"((identifier) @constant (#lua-match? @constant "^%u+$"))"#,
+        ] {
+            let spans = spans_of(lang("python"), guard, text);
+            assert!(
+                spans.is_empty(),
+                "{guard} shipped unguarded and produced {spans:?}"
+            );
+        }
+    }
+
+    /// `#set!` is a directive, not a predicate: it must not disarm the
+    /// pattern it sits on (injection resolution relies on this).
+    #[test]
+    fn a_set_directive_does_not_drop_its_pattern() {
+        let text = "alpha = 1\n";
+        let spans = spans_of(
+            lang("python"),
+            r#"((identifier) @constant (#set! priority 100))"#,
+            text,
+        );
+        assert_eq!(scopes_at(&spans, text, "constant"), vec!["alpha"]);
+    }
+
+    #[test]
+    fn same_node_captures_resolve_first_pattern_wins() {
+        let text = "class Widget:\n    pass\n";
+        let spans = spans_of(
+            lang("python"),
+            r#"
+            (class_definition name: (identifier) @type)
+            ((identifier) @constant (#match? @constant "^[A-Z]"))
+            "#,
+            text,
+        );
+        assert_eq!(scopes_at(&spans, text, "type"), vec!["Widget"]);
+        assert!(
+            scopes_at(&spans, text, "constant").is_empty(),
+            "the later catch-all beat the specific pattern: {spans:?}"
+        );
+    }
+
+    /// End-to-end through the shipped `python/highlights.scm`: the two
+    /// naming conventions every mainstream editor paints.
+    #[test]
+    fn shipped_queries_paint_the_naming_conventions() {
+        let text = "MAX_RETRIES = 3\nvalue = Widget\nname = other\n";
+        let spans = highlight(lang("python"), text);
+        assert!(
+            scopes_at(&spans, text, "constant").contains(&"MAX_RETRIES"),
+            "SCREAMING_CASE is not a constant: {spans:?}"
+        );
+        assert!(
+            scopes_at(&spans, text, "type").contains(&"Widget"),
+            "CamelCase is not a type: {spans:?}"
+        );
+        // The lowercase names are untouched by the convention patterns.
+        assert!(!scopes_at(&spans, text, "type").contains(&"value"));
+        assert!(!scopes_at(&spans, text, "constant").contains(&"name"));
     }
 }
