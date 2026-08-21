@@ -126,3 +126,62 @@ textobject queries, a chrome-theme editor, and WASM grammars (tree-sitter 0.26's
 `wasm` feature drags `wasmtime-c-api`, which would have to cross-compile under
 MXE — revisit only if `libloading` proves crashy). A per-file "Set language"
 override is deferred but expected once `.h`/`.ts`/`.m` ambiguity is live.
+
+## Known gaps, found while building
+
+Each of these was discovered by the task that hit it, and deliberately
+left rather than fixed in place.
+They are recorded here so the next session can pick them up with the
+reasoning intact.
+
+- **Query predicates are not evaluated.**
+  `spans_from_tree` runs `QueryCursor::matches` without checking `#match?`,
+  `#eq?`, `#any-of?` or `#is-not?`.
+  Every tranche therefore had to *drop* upstream patterns guarded by them —
+  Ruby's `#is-not? local` rule alone would have painted every identifier as a
+  method call.
+  The cost is real: CamelCase-is-a-type and SCREAMING_CASE-is-a-constant
+  conventions are simply absent.
+  Implementing predicate evaluation would let most of those patterns be
+  restored, and is the single largest available improvement to highlighting
+  quality.
+- **`SCOPES` has no `markup` family.**
+  Markdown headings, links, emphasis and code spans are captured upstream as
+  `@markup.heading`, `@markup.link` and so on, which resolve to nothing here,
+  so a Markdown file shows only its fenced code and inline HTML coloured.
+  Adding the family touches `SCOPES`, every theme table and the view's format
+  table, so it is its own change rather than a markup-tranche edit.
+- **The X1 harness can be satisfied by a descendant scope.**
+  `produces_scope` counts a `string.escape` span as satisfying `string`,
+  which is right for fallback but means a language that has *lost* its
+  `string` rule can still pass — this actually happened to Zig during R6 and
+  was caught by eye, not by the harness.
+  Requiring at least one exact match, with descendants as a fallback only
+  when the exact scope is genuinely unused, would close it.
+- **`filenames` is exact-match only.**
+  `Dockerfile.dev` and `Makefile.local` do not resolve, because the registry
+  has no prefix, suffix or glob rule.
+  Enumerating guesses was rejected as inventing a list.
+  A pattern field on `LanguageDef` is the honest fix.
+- **`lsp-core`'s extension-to-language-id table will drift.**
+  It is a second, independent mapping from the tree-sitter catalog, and the
+  markup and batch-two languages were never added to it.
+  It is deliberately separate — LSP language identifiers are defined by the
+  protocol, not by our grammar ids — but nothing keeps the two in step, and a
+  test asserting every catalog language either has an LSP id or is explicitly
+  excluded would.
+- **Runtime language definitions leak one generation per reload.**
+  Bounded and tiny — a few KB per reload of a human pressing a button — and
+  the alternative costs a lifetime parameter on every `LanguageDef` reader.
+  The reasoning, and the one condition that flips the answer (reloading from
+  a file watcher rather than a button), is commented at the leak site.
+- **No user-facing enable/disable for a healthy language.**
+  The Languages page can only re-enable a crash-quarantined grammar, because
+  no settings field or registry filtering exists for a plain disable.
+  A button was not added rather than shipping one that lies.
+- **Everything visual is unverified.**
+  There is no display in the build environment, so the three settings pages,
+  the Problems dock, squiggles, hover tooltips and the completion popup have
+  been compiled and unit-tested but never seen.
+  `docs/design/language-platform-ui.md` and the final task reports list what
+  a human should click through.
