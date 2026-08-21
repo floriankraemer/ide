@@ -14,8 +14,8 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 
 pub use registry::{
-    language_by_id, language_for_path, language_name, registry, reload, CompiledLanguage, Language,
-    LanguageDef, LanguageRegistry, QuerySet, BUILTIN_LANGUAGES,
+    language_by_id, language_for_path, language_name, registry, reload, CompiledLanguage, Def,
+    Language, LanguageDef, LanguageRegistry, OwnedLanguageDef, QuerySet, BUILTIN_LANGUAGES,
 };
 
 /// The highlighting vocabulary: the standard tree-sitter capture names
@@ -1802,8 +1802,8 @@ mod tests {
     /// because `Query` is not `Clone`.
     fn with_injections(language: Language, injections: &str) -> Arc<CompiledLanguage> {
         let def = language.def().expect("catalog language");
-        let grammar = (def.grammar)();
-        let highlights = Query::new(&grammar, def.queries.highlights.expect("highlights.scm"))
+        let grammar = (def.grammar())();
+        let highlights = Query::new(&grammar, def.queries().highlights.expect("highlights.scm"))
             .expect("highlights.scm compiles");
         let highlight_scopes = highlights
             .capture_names()

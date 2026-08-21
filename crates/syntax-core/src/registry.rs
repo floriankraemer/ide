@@ -15,23 +15,45 @@ use tree_sitter::Query;
 
 use crate::Scope;
 
-/// The `.scm` sources shipped for one language, each optional. Bundled
-/// into the binary via `include_str!` so highlighting behaves identically
-/// under `cargo test` and in the packaged app.
+/// The `.scm` sources for one language, each optional.
+///
+/// Generic over how the sources are held so the two owners can share one
+/// type: the const catalog bundles them into the binary via `include_str!`
+/// (`QuerySet<&'static str>`, the default) and a runtime language owns
+/// what it read off disk (`QuerySet<String>`).
 #[derive(Debug, Clone, Copy, Default)]
-pub struct QuerySet {
-    pub highlights: Option<&'static str>,
-    pub locals: Option<&'static str>,
-    pub folds: Option<&'static str>,
-    pub tags: Option<&'static str>,
-    pub inherits: Option<&'static str>,
+pub struct QuerySet<S = &'static str> {
+    pub highlights: Option<S>,
+    pub locals: Option<S>,
+    pub folds: Option<S>,
+    pub tags: Option<S>,
+    pub inherits: Option<S>,
     /// Regions of a file written in *another* language (CSS in a `<style>`
     /// element, a fenced code block in Markdown). Standard tree-sitter
     /// shape: `@injection.content` is the region, and the language is named
     /// either by an `@injection.language` capture or a
     /// `(#set! injection.language "css")` directive — see
     /// [`crate::MAX_INJECTION_DEPTH`].
-    pub injections: Option<&'static str>,
+    pub injections: Option<S>,
+}
+
+fn borrow<S: AsRef<str>>(field: &Option<S>) -> Option<&str> {
+    field.as_ref().map(AsRef::as_ref)
+}
+
+impl<S: AsRef<str>> QuerySet<S> {
+    /// Borrowed view, so the catalog's `&'static str` sources and a
+    /// runtime language's owned ones read identically.
+    pub fn as_deref(&self) -> QuerySet<&str> {
+        QuerySet {
+            highlights: borrow(&self.highlights),
+            locals: borrow(&self.locals),
+            folds: borrow(&self.folds),
+            tags: borrow(&self.tags),
+            inherits: borrow(&self.inherits),
+            injections: borrow(&self.injections),
+        }
+    }
 }
 
 /// One language the editor can highlight and index.
@@ -52,6 +74,88 @@ pub struct LanguageDef {
     pub filenames: &'static [&'static str],
     pub grammar: fn() -> tree_sitter::Language,
     pub queries: QuerySet,
+}
+
+/// A language loaded from the config directory at runtime.
+///
+/// The owned twin of [`LanguageDef`]: same fields, but nothing borrowed,
+/// so a generation of runtime languages is freed when the registry that
+/// used it is dropped. `grammar` stays a bare `fn` pointer — foreign
+/// grammar libraries are deliberately never unloaded (see
+/// [`crate::runtime`]), and this type must not make one droppable.
+#[derive(Debug)]
+pub struct OwnedLanguageDef {
+    pub id: String,
+    pub name: String,
+    pub extensions: Vec<String>,
+    pub filenames: Vec<String>,
+    pub grammar: fn() -> tree_sitter::Language,
+    pub queries: QuerySet<String>,
+}
+
+/// What stands behind one registry row: a const catalog row, or a
+/// reference-counted runtime one.
+///
+/// The split is why the catalog can stay a `const` table of `&'static str`
+/// while a reload still frees the generation it replaced. Cheap to clone
+/// (a pointer copy or an `Arc` bump).
+#[derive(Debug, Clone)]
+pub enum Def {
+    Builtin(&'static LanguageDef),
+    Runtime(Arc<OwnedLanguageDef>),
+}
+
+/// One iterator type over both a catalog row's `&'static [&'static str]`
+/// and a runtime row's `Vec<String>`; exactly one side is ever non-empty.
+fn strs<'a>(builtin: &'a [&'static str], owned: &'a [String]) -> impl Iterator<Item = &'a str> {
+    builtin
+        .iter()
+        .copied()
+        .chain(owned.iter().map(String::as_str))
+}
+
+impl Def {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::Builtin(def) => def.id,
+            Self::Runtime(def) => &def.id,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            Self::Builtin(def) => def.name,
+            Self::Runtime(def) => &def.name,
+        }
+    }
+
+    pub fn extensions(&self) -> impl Iterator<Item = &str> {
+        match self {
+            Self::Builtin(def) => strs(def.extensions, &[]),
+            Self::Runtime(def) => strs(&[], &def.extensions),
+        }
+    }
+
+    pub fn filenames(&self) -> impl Iterator<Item = &str> {
+        match self {
+            Self::Builtin(def) => strs(def.filenames, &[]),
+            Self::Runtime(def) => strs(&[], &def.filenames),
+        }
+    }
+
+    pub fn grammar(&self) -> fn() -> tree_sitter::Language {
+        match self {
+            Self::Builtin(def) => def.grammar,
+            Self::Runtime(def) => def.grammar,
+        }
+    }
+
+    pub fn queries(&self) -> QuerySet<&str> {
+        match self {
+            Self::Builtin(def) => def.queries.as_deref(),
+            Self::Runtime(def) => def.queries.as_deref(),
+        }
+    }
 }
 
 macro_rules! queries {
@@ -450,19 +554,34 @@ impl Language {
     /// spans. Reserved at registry index 0, so it survives any reload.
     pub const PLAIN_TEXT: Language = Language(0);
 
-    /// The catalog entry behind this handle, or `None` for plain text.
-    pub fn def(self) -> Option<&'static LanguageDef> {
-        registry().def(self)
+    /// The definition behind this handle in the *current* registry, or
+    /// `None` for plain text.
+    ///
+    /// Returned by value, not borrowed: a runtime definition lives only as
+    /// long as some registry snapshot holds it, and cloning a [`Def`] is a
+    /// pointer copy or an `Arc` bump. Prefer [`LanguageRegistry::def`] when
+    /// you already hold a registry.
+    pub fn def(self) -> Option<Def> {
+        registry().def(self).cloned()
     }
 
     /// Stable, persistable id — `"plaintext"` for [`Language::PLAIN_TEXT`].
-    pub fn id(self) -> &'static str {
-        self.def().map_or("plaintext", |d| d.id)
+    ///
+    /// Owned, not `&'static str`: since G2 a runtime definition can be
+    /// dropped by the next reload, so nothing read out of the global
+    /// registry can outlive the snapshot it came from. Borrowing through
+    /// [`LanguageRegistry::def`] avoids the allocation where a caller
+    /// already holds a snapshot; these two exist for the callers that do
+    /// not (status bar, settings pages), where one `String` is noise.
+    pub fn id(self) -> String {
+        self.def()
+            .map_or_else(|| "plaintext".to_string(), |d| d.id().to_string())
     }
 
     /// Human-readable name for the status bar.
-    pub fn name(self) -> &'static str {
-        self.def().map_or("Plain Text", |d| d.name)
+    pub fn name(self) -> String {
+        self.def()
+            .map_or_else(|| "Plain Text".to_string(), |d| d.name().to_string())
     }
 }
 
@@ -486,24 +605,26 @@ pub struct CompiledLanguage {
     pub injections: Option<Query>,
 }
 
-fn compile(def: &LanguageDef) -> Result<CompiledLanguage, String> {
-    let grammar = (def.grammar)();
-    let compile_one = |kind: &str, source: Option<&'static str>| -> Result<Option<Query>, String> {
+fn compile(def: &Def) -> Result<CompiledLanguage, String> {
+    let grammar = (def.grammar())();
+    let queries = def.queries();
+    let compile_one = |kind: &str, source: Option<&str>| -> Result<Option<Query>, String> {
         source
             .map(|source| {
-                Query::new(&grammar, source).map_err(|err| format!("{}/{kind}.scm: {err}", def.id))
+                Query::new(&grammar, source)
+                    .map_err(|err| format!("{}/{kind}.scm: {err}", def.id()))
             })
             .transpose()
     };
-    let highlights = compile_one("highlights", def.queries.highlights)?;
+    let highlights = compile_one("highlights", queries.highlights)?;
     Ok(CompiledLanguage {
         highlight_scopes: capture_scopes(highlights.as_ref()),
         highlights,
-        locals: compile_one("locals", def.queries.locals)?,
-        folds: compile_one("folds", def.queries.folds)?,
-        tags: compile_one("tags", def.queries.tags)?,
-        inherits: compile_one("inherits", def.queries.inherits)?,
-        injections: compile_one("injections", def.queries.injections)?,
+        locals: compile_one("locals", queries.locals)?,
+        folds: compile_one("folds", queries.folds)?,
+        tags: compile_one("tags", queries.tags)?,
+        inherits: compile_one("inherits", queries.inherits)?,
+        injections: compile_one("injections", queries.injections)?,
         grammar,
     })
 }
@@ -522,7 +643,7 @@ fn capture_scopes(query: Option<&Query>) -> Vec<Option<Scope>> {
 
 struct Entry {
     /// `None` only for the reserved plain-text slot.
-    def: Option<&'static LanguageDef>,
+    def: Option<Def>,
     compiled: OnceLock<Result<Arc<CompiledLanguage>, String>>,
 }
 
@@ -549,13 +670,14 @@ impl LanguageRegistry {
     /// does not parse or compile.
     pub fn with_runtime(
         builtins: &'static [LanguageDef],
-        runtime: &[&'static LanguageDef],
+        runtime: &[Arc<OwnedLanguageDef>],
     ) -> Self {
-        let mut defs: Vec<&'static LanguageDef> = builtins.iter().collect();
-        for &entry in runtime {
-            match defs.iter().position(|d| d.id == entry.id) {
-                Some(index) => defs[index] = entry,
-                None => defs.push(entry),
+        let mut defs: Vec<Def> = builtins.iter().map(Def::Builtin).collect();
+        for entry in runtime {
+            let def = Def::Runtime(Arc::clone(entry));
+            match defs.iter().position(|d| d.id() == def.id()) {
+                Some(index) => defs[index] = def,
+                None => defs.push(def),
             }
         }
         let mut entries = vec![Entry {
@@ -572,8 +694,8 @@ impl LanguageRegistry {
     /// The catalog entry behind `language` in *this* registry, or `None`
     /// for plain text. Prefer this over [`Language::def`] when holding a
     /// registry that is not the global one.
-    pub fn def(&self, language: Language) -> Option<&'static LanguageDef> {
-        self.entries.get(usize::from(language.0))?.def
+    pub fn def(&self, language: Language) -> Option<&Def> {
+        self.entries.get(usize::from(language.0))?.def.as_ref()
     }
 
     /// Every language in the registry, plain text first.
@@ -587,7 +709,7 @@ impl LanguageRegistry {
         }
         self.entries
             .iter()
-            .position(|e| e.def.is_some_and(|d| d.id == id))
+            .position(|e| e.def.as_ref().is_some_and(|d| d.id() == id))
             .map(|index| Language(index as u16))
     }
 
@@ -607,12 +729,12 @@ impl LanguageRegistry {
             self.entries
                 .iter()
                 .enumerate()
-                .filter_map(|(i, e)| Some((i, e.def?)))
+                .filter_map(|(i, e)| Some((i, e.def.as_ref()?)))
         };
-        let by_filename = defs().find(|(_, d)| d.filenames.contains(&file_name.as_str()));
+        let by_filename = defs().find(|(_, d)| d.filenames().any(|n| n == file_name));
         let matched = by_filename.or_else(|| {
             (!extension.is_empty())
-                .then(|| defs().find(|(_, d)| d.extensions.contains(&extension.as_str())))
+                .then(|| defs().find(|(_, d)| d.extensions().any(|e| e == extension)))
                 .flatten()
         });
         matched.map_or(Language::PLAIN_TEXT, |(index, _)| Language(index as u16))
@@ -625,7 +747,7 @@ impl LanguageRegistry {
     /// down. `every_shipped_query_compiles` keeps that from shipping.
     pub fn compiled(&self, language: Language) -> Option<Result<Arc<CompiledLanguage>, String>> {
         let entry = self.entries.get(usize::from(language.0))?;
-        let def = entry.def?;
+        let def = entry.def.as_ref()?;
         Some(
             entry
                 .compiled
@@ -690,7 +812,7 @@ pub fn reload(config_dir: &Path) -> Vec<crate::runtime::LanguageLoadError> {
 }
 
 /// Human-readable name for `language` (status bar, L3).
-pub fn language_name(language: Language) -> &'static str {
+pub fn language_name(language: Language) -> String {
     language.name()
 }
 
@@ -746,8 +868,8 @@ mod tests {
     /// `Language` is an index into the registry it came from, so a
     /// stand-in catalog must be asked for its own ids, not the global
     /// registry's.
-    fn id_in(registry: &LanguageRegistry, language: Language) -> &'static str {
-        registry.def(language).map_or("plaintext", |d| d.id)
+    fn id_in(registry: &LanguageRegistry, language: Language) -> &str {
+        registry.def(language).map_or("plaintext", Def::id)
     }
 
     #[test]
@@ -894,6 +1016,99 @@ mod tests {
         let empty = tempfile::tempdir().unwrap();
         assert_eq!(reload(empty.path()), Vec::new());
         assert!(language_by_id("g2test").is_none());
+    }
+
+    /// The leak G2 would otherwise have had: every reload used to
+    /// `Box::leak` a fresh definition plus every `.scm` string it read,
+    /// and a user iterating on a query file writes *new* content each
+    /// time, so it grew per edit rather than converging. Runtime
+    /// definitions are `Arc`d now, so a generation dies with the last
+    /// registry snapshot that held it — while the `Arc<CompiledLanguage>`
+    /// a live editor is parsing with keeps working.
+    ///
+    /// Built from local snapshots rather than the process-wide [`reload`]
+    /// on purpose: another test in this binary may be holding a global
+    /// snapshot while this one runs, which would keep an old generation
+    /// alive and make the assertion flaky. The ownership under test is the
+    /// same — `reload` is `runtime::load`, `with_runtime`, and dropping
+    /// the `Arc` it replaced.
+    #[test]
+    fn a_reload_frees_the_generation_it_replaced() {
+        use std::fs;
+        use std::sync::Weak;
+
+        let config = tempfile::tempdir().unwrap();
+        let dir = config.path().join("languages").join("freed");
+        fs::create_dir_all(dir.join("queries")).unwrap();
+        fs::write(
+            dir.join("language.toml"),
+            "grammar = \"json\"\nextensions = [\"freed\"]\n",
+        )
+        .unwrap();
+
+        let mut live: Option<Arc<LanguageRegistry>> = None;
+        let mut still_open: Vec<Arc<CompiledLanguage>> = Vec::new();
+        let mut generations: Vec<Weak<OwnedLanguageDef>> = Vec::new();
+
+        for generation in 0..5 {
+            // Different content every round: this is the case interning
+            // the strings would *not* have bounded.
+            fs::write(
+                dir.join("queries").join("highlights.scm"),
+                format!("(string) @string ; generation {generation}\n"),
+            )
+            .unwrap();
+
+            let loaded = crate::runtime::load(config.path(), BUILTIN_LANGUAGES);
+            assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+            let registry = Arc::new(LanguageRegistry::with_runtime(
+                BUILTIN_LANGUAGES,
+                &loaded.entries,
+            ));
+            let language = registry.language_by_id("freed").expect("freed");
+            // What an editor open across the reload holds on to.
+            still_open.push(
+                registry
+                    .compiled(language)
+                    .expect("a runtime language compiles")
+                    .expect("its queries compile"),
+            );
+            let Some(Def::Runtime(def)) = registry.def(language) else {
+                panic!("a language loaded from disk must not be a catalog row");
+            };
+            generations.push(Arc::downgrade(def));
+            drop(loaded);
+            // Swapping the snapshot drops the one before it, exactly as
+            // `reload` does.
+            live = Some(registry);
+
+            assert!(
+                generations[..generation]
+                    .iter()
+                    .all(|weak| weak.upgrade().is_none()),
+                "a replaced generation is still alive after {} reload(s)",
+                generation + 1
+            );
+            assert!(generations[generation].upgrade().is_some());
+        }
+
+        drop(live);
+        assert!(
+            generations.iter().all(|weak| weak.upgrade().is_none()),
+            "the last generation outlived the registry that held it"
+        );
+
+        // The grammar and queries the open editors hold are untouched by
+        // any of that — a `fn` pointer into a grammar that is deliberately
+        // never unloaded, and `Query`s that own their source.
+        let compiled = still_open.last().expect("five generations");
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&compiled.grammar).expect("grammar");
+        assert!(
+            parser.parse("{\"a\": 1}", None).is_some(),
+            "a compiled language still parses after its definition is freed"
+        );
+        assert!(compiled.highlights.is_some());
     }
 
     #[test]

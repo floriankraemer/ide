@@ -100,6 +100,7 @@ fn catalog_languages() -> Vec<Language> {
 fn every_language_highlights_its_sample() {
     for language in catalog_languages() {
         let id = language.id();
+        let id = id.as_str();
         let sample_path = queries_dir(id).join("sample.txt");
         let sample = std::fs::read_to_string(&sample_path).unwrap_or_else(|err| {
             panic!(
@@ -149,7 +150,7 @@ fn injected_by_another_language(id: &str) -> bool {
     catalog_languages()
         .into_iter()
         .filter(|l| l.id() != id)
-        .filter_map(|l| l.def()?.queries.injections)
+        .filter_map(|l| Some(l.def()?.queries().injections?.to_string()))
         .any(|source| source.contains(&needle))
 }
 
@@ -167,8 +168,9 @@ fn declared_patterns_resolve_back_to_a_claimant() {
     let registry = registry();
     for language in catalog_languages() {
         let def = language.def().expect("filtered to catalog rows");
-        let id = def.id;
-        if def.extensions.is_empty() && def.filenames.is_empty() {
+        let id = def.id().to_string();
+        let id = id.as_str();
+        if def.extensions().next().is_none() && def.filenames().next().is_none() {
             // An injection-only language (`markdown_inline`) is legal and
             // deliberately unreachable by path — no file is written in it.
             // What makes that different from a row whose patterns were
@@ -185,7 +187,7 @@ fn declared_patterns_resolve_back_to_a_claimant() {
 
         let mut reachable = false;
         let mut check =
-            |path: PathBuf, pattern: String, claims: &dyn Fn(&syntax_core::LanguageDef) -> bool| {
+            |path: PathBuf, pattern: String, claims: &dyn Fn(&syntax_core::Def) -> bool| {
                 let resolved = registry.language_for_path(&path);
                 let resolved_def = resolved.def().unwrap_or_else(|| {
                     panic!(
@@ -195,28 +197,26 @@ fn declared_patterns_resolve_back_to_a_claimant() {
                     )
                 });
                 assert!(
-                    claims(resolved_def),
+                    claims(&resolved_def),
                     "language `{id}`: `{pattern}` resolves to `{}`, which does not \
                  declare it — the registry and the catalog disagree",
-                    resolved_def.id
+                    resolved_def.id()
                 );
                 reachable |= resolved == language;
             };
 
-        for ext in def.extensions {
-            let ext = (*ext).to_string();
+        for ext in def.extensions().map(str::to_string).collect::<Vec<_>>() {
             check(
                 PathBuf::from(format!("fixture.{ext}")),
                 format!(".{ext}"),
-                &|d: &syntax_core::LanguageDef| d.extensions.contains(&ext.as_str()),
+                &|d: &syntax_core::Def| d.extensions().any(|e| e == ext),
             );
         }
-        for name in def.filenames {
-            let name = (*name).to_string();
+        for name in def.filenames().map(str::to_string).collect::<Vec<_>>() {
             check(
                 PathBuf::from("/project").join(&name),
                 name.clone(),
-                &|d: &syntax_core::LanguageDef| d.filenames.contains(&name.as_str()),
+                &|d: &syntax_core::Def| d.filenames().any(|n| n == name),
             );
         }
 
@@ -235,10 +235,10 @@ fn declared_patterns_resolve_back_to_a_claimant() {
 fn extensions_are_normalized_and_unique_within_a_language() {
     for language in catalog_languages() {
         let def = language.def().expect("filtered to catalog rows");
-        let id = def.id;
-        for ext in def.extensions {
+        let id = def.id();
+        for ext in def.extensions() {
             assert_eq!(
-                *ext,
+                ext,
                 ext.to_lowercase(),
                 "language `{id}`: extension `{ext}` must be lowercase"
             );
@@ -247,10 +247,10 @@ fn extensions_are_normalized_and_unique_within_a_language() {
                 "language `{id}`: extension `{ext}` must not carry a leading dot"
             );
         }
-        let unique: BTreeSet<_> = def.extensions.iter().collect();
+        let unique: BTreeSet<_> = def.extensions().collect();
         assert_eq!(
             unique.len(),
-            def.extensions.len(),
+            def.extensions().count(),
             "language `{id}` repeats an extension"
         );
     }

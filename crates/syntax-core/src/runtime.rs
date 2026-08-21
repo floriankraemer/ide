@@ -88,7 +88,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use libloading::Library;
 use serde::Deserialize;
@@ -97,7 +97,7 @@ use tree_sitter::{
 };
 use tree_sitter_language::LanguageFn;
 
-use crate::registry::{LanguageDef, QuerySet, BUILTIN_LANGUAGES};
+use crate::registry::{LanguageDef, OwnedLanguageDef, QuerySet, BUILTIN_LANGUAGES};
 
 /// Sub-directory of the config directory the overlay is read from.
 const LANGUAGES_DIR: &str = "languages";
@@ -219,8 +219,9 @@ impl std::error::Error for LanguageLoadError {}
 #[derive(Debug, Default)]
 pub struct RuntimeLanguages {
     /// Loaded entries in directory order, ready for
-    /// `LanguageRegistry::with_runtime`.
-    pub entries: Vec<&'static LanguageDef>,
+    /// `LanguageRegistry::with_runtime`. Each is dropped once the last
+    /// registry built from it is gone.
+    pub entries: Vec<Arc<OwnedLanguageDef>>,
     pub errors: Vec<LanguageLoadError>,
 }
 
@@ -279,8 +280,8 @@ pub fn load_builtin_overlay(config_dir: &Path) -> RuntimeLanguages {
 fn load_one(
     dir: &Path,
     builtins: &'static [LanguageDef],
-    already_loaded: &[&'static LanguageDef],
-) -> Result<&'static LanguageDef, LanguageLoadError> {
+    already_loaded: &[Arc<OwnedLanguageDef>],
+) -> Result<Arc<OwnedLanguageDef>, LanguageLoadError> {
     let dir_name = dir
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -338,7 +339,7 @@ fn load_one(
     };
 
     let inherited = base.map(|d| d.queries).unwrap_or_default();
-    let queries = QuerySet {
+    let queries: QuerySet<String> = QuerySet {
         highlights: read_query(dir, "highlights", inherited.highlights).map_err(fail)?,
         locals: read_query(dir, "locals", inherited.locals).map_err(fail)?,
         folds: read_query(dir, "folds", inherited.folds).map_err(fail)?,
@@ -352,13 +353,14 @@ fn load_one(
     // lazy compile where it only ever means "no highlighting".
     let grammar_fn = source.grammar_fn();
     let grammar = grammar_fn();
+    let borrowed = queries.as_deref();
     for (name, source) in [
-        ("highlights", queries.highlights),
-        ("locals", queries.locals),
-        ("folds", queries.folds),
-        ("tags", queries.tags),
-        ("inherits", queries.inherits),
-        ("injections", queries.injections),
+        ("highlights", borrowed.highlights),
+        ("locals", borrowed.locals),
+        ("folds", borrowed.folds),
+        ("tags", borrowed.tags),
+        ("inherits", borrowed.inherits),
+        ("injections", borrowed.injections),
     ] {
         if let Some(source) = source {
             Query::new(&grammar, source).map_err(|err| {
@@ -378,40 +380,32 @@ fn load_one(
         .name
         .unwrap_or_else(|| base.map_or_else(|| source.default_name(&id), |d| d.name.to_string()));
 
-    // ponytail: leaked so runtime entries satisfy `LanguageDef`'s
-    // `&'static str` fields, which the const catalog needs.
-    //
-    // G2 makes this per *reload*, not once, so the honest question is
-    // whether it is unbounded. It grows only when a human presses Reload
-    // Languages, and one generation is the manifest's strings plus its
-    // `.scm` sources — single-digit kilobytes per runtime language. A
-    // thousand reloads in one session is a few megabytes; nobody reloads
-    // a thousand times, and the process exits long before it matters.
-    // Accepted, deliberately, because the alternative is real: making
-    // these fields `Arc<str>`/`Cow` would stop `BUILTIN_LANGUAGES` being
-    // a `const` table and push a lifetime or an `Arc` through every
-    // `LanguageDef` reader — a large, permanent complexity cost to
-    // reclaim kilobytes. Revisit only if a `LanguageDef` ever grows a
-    // large owned payload, or if something starts reloading on a timer
-    // or a file watcher instead of a button (that would make it a leak
-    // per file save, which is a different answer).
-    Ok(Box::leak(Box::new(LanguageDef {
-        id: leak(id),
-        name: leak(name),
-        extensions: leak_list(
-            manifest
-                .extensions
-                .map(|list| list.iter().map(|e| e.to_lowercase()).collect())
-                .unwrap_or_else(|| base.map_or_else(Vec::new, |d| strings(d.extensions))),
-        ),
-        filenames: leak_list(
-            manifest
-                .filenames
-                .unwrap_or_else(|| base.map_or_else(Vec::new, |d| strings(d.filenames))),
-        ),
+    // ponytail: owned and reference-counted, not leaked. Runtime
+    // definitions used to be `Box::leak`ed so they could satisfy
+    // `LanguageDef`'s `&'static str` fields, which the const catalog
+    // needs; G2's live reload turned that into one leaked generation per
+    // press of Reload Languages, and a user iterating on a `.scm` file
+    // produces *new* content each time, so it grew rather than converged.
+    // `OwnedLanguageDef` keeps the const catalog exactly as it was —
+    // `Def::Builtin` still points straight at `BUILTIN_LANGUAGES` — while
+    // a reload's old generation is freed as soon as the registry snapshot
+    // holding it is dropped (`a_reload_frees_the_generation_it_replaced`).
+    // Foreign grammar libraries are a separate question and are still
+    // never unloaded: `grammar` is a bare `fn` pointer into a leaked
+    // `Library`, so nothing here can make one droppable.
+    Ok(Arc::new(OwnedLanguageDef {
+        id,
+        name,
+        extensions: manifest
+            .extensions
+            .map(|list| list.iter().map(|e| e.to_lowercase()).collect())
+            .unwrap_or_else(|| base.map_or_else(Vec::new, |d| strings(d.extensions))),
+        filenames: manifest
+            .filenames
+            .unwrap_or_else(|| base.map_or_else(Vec::new, |d| strings(d.filenames))),
         grammar: grammar_fn,
         queries,
-    })))
+    }))
 }
 
 /// What `LanguageDef::grammar` wants: a bare `fn`, no captured state.
@@ -625,13 +619,13 @@ fn load_grammar_library(
 fn read_query(
     dir: &Path,
     name: &str,
-    inherited: Option<&'static str>,
-) -> Result<Option<&'static str>, LoadErrorKind> {
+    inherited: Option<&str>,
+) -> Result<Option<String>, LoadErrorKind> {
     let path = dir.join("queries").join(format!("{name}.scm"));
     if !path.exists() {
-        return Ok(inherited);
+        return Ok(inherited.map(str::to_string));
     }
-    Ok(Some(leak(read(&path)?)))
+    Ok(Some(read(&path)?))
 }
 
 fn read(path: &Path) -> Result<String, LoadErrorKind> {
@@ -646,14 +640,6 @@ fn read(path: &Path) -> Result<String, LoadErrorKind> {
 
 fn strings(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| s.to_string()).collect()
-}
-
-fn leak(value: String) -> &'static str {
-    String::leak(value)
-}
-
-fn leak_list(values: Vec<String>) -> &'static [&'static str] {
-    Vec::leak(values.into_iter().map(leak).collect::<Vec<_>>())
 }
 
 #[cfg(test)]
@@ -741,12 +727,15 @@ mod tests {
         let loaded = fixture.load();
 
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
-        let [rust] = loaded.entries[..] else {
+        let [rust] = &loaded.entries[..] else {
             panic!("expected one entry, got {}", loaded.entries.len())
         };
         assert_eq!(rust.id, "rust");
         assert_eq!(rust.extensions, ["rs", "rsx"]);
-        assert_eq!(rust.queries.highlights, Some("(identifier) @keyword\n"));
+        assert_eq!(
+            rust.queries.highlights.as_deref(),
+            Some("(identifier) @keyword\n")
+        );
     }
 
     #[test]
@@ -758,10 +747,13 @@ mod tests {
         let loaded = fixture.load();
 
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
-        let rust = loaded.entries[0];
+        let rust = &loaded.entries[0];
         assert_eq!(rust.name, "Rust");
         assert_eq!(rust.extensions, ["rs"]);
-        assert_eq!(rust.queries.highlights, Some("(identifier) @function\n"));
+        assert_eq!(
+            rust.queries.highlights.as_deref(),
+            Some("(identifier) @function\n")
+        );
     }
 
     #[test]
@@ -774,11 +766,14 @@ mod tests {
         let loaded = fixture.load();
 
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
-        let rust = loaded.entries[0];
+        let rust = &loaded.entries[0];
         assert_eq!(rust.name, "Rust (mine)");
         // Extensions are lowercased so path lookup keeps matching.
         assert_eq!(rust.extensions, ["rs", "rs2"]);
-        assert_eq!(rust.queries.highlights, Some("(identifier) @variable"));
+        assert_eq!(
+            rust.queries.highlights.as_deref(),
+            Some("(identifier) @variable")
+        );
     }
 
     #[test]
@@ -793,7 +788,7 @@ mod tests {
         let loaded = fixture.load();
 
         assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
-        let added = loaded.entries[0];
+        let added = &loaded.entries[0];
         assert_eq!(added.id, "myrust");
         assert_eq!(added.name, "My Rust");
         assert_eq!(added.filenames, ["Rustfile"]);
@@ -823,7 +818,7 @@ mod tests {
         assert_eq!(registry.languages().len(), 3, "plaintext + rust + json");
         let rust = registry.language_by_id("rust").expect("rust");
         assert_eq!(registry.language_for_path(Path::new("a.rs")), rust);
-        assert_eq!(registry.def(rust).expect("rust def").name, "Rust (mine)");
+        assert_eq!(registry.def(rust).expect("rust def").name(), "Rust (mine)");
     }
 
     #[test]
@@ -902,7 +897,8 @@ mod tests {
             registry
                 .def(registry.language_by_id(id).unwrap())
                 .unwrap()
-                .name
+                .name()
+                .to_string()
         };
         assert_eq!(name_of("rust"), "Rust");
         assert_eq!(name_of("json"), "JSON5");

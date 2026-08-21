@@ -13,7 +13,7 @@ use std::time::SystemTime;
 
 use serde::Deserialize;
 use syntax_core::runtime::{LanguageLoadError, LoadErrorKind};
-use syntax_core::LanguageDef;
+use syntax_core::Def;
 use tree_sitter::{LANGUAGE_VERSION, MIN_COMPATIBLE_LANGUAGE_VERSION};
 
 /// Sub-directory of the config directory languages are added to. Same
@@ -103,7 +103,7 @@ pub struct LanguageRow {
 }
 
 /// A language as the catalog or the overlay knows it, reduced to what the
-/// page shows. Built from a `LanguageDef` by [`catalog_entry`].
+/// page shows. Built from a [`Def`] by [`catalog_entry`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CatalogEntry {
     pub id: String,
@@ -129,12 +129,12 @@ struct Manifest {
 }
 
 /// The Matches column for one language definition.
-pub fn catalog_entry(def: &LanguageDef) -> CatalogEntry {
-    let mut matches: Vec<String> = def.filenames.iter().map(|n| (*n).to_string()).collect();
-    matches.extend(def.extensions.iter().map(|e| format!("*.{e}")));
+pub fn catalog_entry(def: &Def) -> CatalogEntry {
+    let mut matches: Vec<String> = def.filenames().map(str::to_string).collect();
+    matches.extend(def.extensions().map(|e| format!("*.{e}")));
     CatalogEntry {
-        id: def.id.to_string(),
-        name: def.name.to_string(),
+        id: def.id().to_string(),
+        name: def.name().to_string(),
         matches: matches.join(", "),
     }
 }

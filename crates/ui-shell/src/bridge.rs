@@ -2180,7 +2180,7 @@ impl SyntaxHighlighterHandle {
     fn palette(&self, theme: &str) -> Vec<ffi::FfiScopeStyle> {
         let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
         let user = user_styles(&settings);
-        theme::palette(theme, self.language.id(), &user)
+        theme::palette(theme, &self.language.id(), &user)
             .styles()
             .iter()
             .map(|style| ffi::FfiScopeStyle {
@@ -3024,7 +3024,7 @@ impl ffi::DocumentManager {
             .tab_file_name(TabId::from_raw(tab_id))
             .unwrap_or_default();
         let language = syntax_core::language_for_path(Path::new(&file_name));
-        QString::from(syntax_core::language_name(language))
+        QString::from(&syntax_core::language_name(language))
     }
 
     pub fn tab_outline(&self, tab_id: u64) -> Vec<ffi::FfiSymbolNode> {
@@ -4978,8 +4978,8 @@ impl ffi::SyntaxColorEditor {
             .into_iter()
             .filter(|language| *language != syntax_core::Language::PLAIN_TEXT)
             .map(|language| ffi::FfiLanguageOption {
-                id: QString::from(language.id()),
-                name: QString::from(language.name()),
+                id: QString::from(&language.id()),
+                name: QString::from(&language.name()),
             })
             .collect()
     }
@@ -5106,18 +5106,20 @@ fn to_ffi_io_result(result: std::io::Result<String>) -> FfiResult {
 impl ffi::LanguageCatalog {
     pub fn refresh(&self) {
         let config_dir = app_core::resolve_config_dir();
-        // ponytail: each scan leaks one generation of runtime `LanguageDef`s
-        // (`syntax_core::runtime` documents why it leaks at all). Bounded by
-        // how often a user presses Reload in a settings dialog.
+        // The scan's definitions are read into rows and dropped with
+        // `overlay` when this method returns — refreshing the page costs
+        // nothing permanently.
         let overlay = syntax_core::runtime::load_builtin_overlay(&config_dir);
         let builtins: Vec<settings_model::languages::CatalogEntry> = syntax_core::BUILTIN_LANGUAGES
             .iter()
-            .map(settings_model::languages::catalog_entry)
+            .map(|def| settings_model::languages::catalog_entry(&syntax_core::Def::Builtin(def)))
             .collect();
         let loaded: Vec<settings_model::languages::CatalogEntry> = overlay
             .entries
             .iter()
-            .map(|def| settings_model::languages::catalog_entry(def))
+            .map(|def| {
+                settings_model::languages::catalog_entry(&syntax_core::Def::Runtime(def.clone()))
+            })
             .collect();
         *self.rows.borrow_mut() = settings_model::languages::rows(
             &builtins,
@@ -5228,8 +5230,8 @@ fn server_page_languages() -> Vec<(String, String)> {
         .filter(|language| *language != syntax_core::Language::PLAIN_TEXT)
         .map(|language| {
             (
-                settings_model::lsp_language_id(language.id()).to_string(),
-                language.name().to_string(),
+                settings_model::lsp_language_id(&language.id()).to_string(),
+                language.name(),
             )
         })
         .collect()
