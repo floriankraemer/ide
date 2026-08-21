@@ -286,7 +286,7 @@ fn assert_scope_at(language: Language, text: &str, needle: &str, scope: &str) {
         .map(|s| s.scope.name())
         .collect();
     assert!(
-        found.iter().any(|name| *name == scope),
+        found.contains(&scope),
         "language `{}`: expected a `{scope}` span over {needle:?}, got {found:?} — \
          the injection is not reaching the injected language's queries",
         language.id()
