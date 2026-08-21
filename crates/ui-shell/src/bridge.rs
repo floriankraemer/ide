@@ -340,6 +340,15 @@ mod ffi {
         source: QString,
     }
 
+    /// One place a language server says a symbol is defined (L4), 1:1 with
+    /// `lsp_core::DefinitionTarget`. Same units as `FfiDiagnostic`: `line`
+    /// 1-based, `column` 0-based, both UTF-16 code units.
+    struct FfiDefinition {
+        path: QString,
+        line: u32,
+        column: u32,
+    }
+
     /// How many diagnostics of each severity exist right now, 1:1 with
     /// `lsp_core::DiagnosticCounts` — for the status-bar counter and the
     /// Problems panel's filter buttons.
@@ -1603,6 +1612,64 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "serverNameForFile"]
         fn server_name_for_file(self: &LanguageService, path: &QString) -> QString;
+
+        /// L3 — the pointer dwelled over an identifier: ask the server what
+        /// it is. `line` is 0-based and `character` counts UTF-16 code
+        /// units, which is what the protocol speaks and what `QTextCursor`
+        /// already counts. The answer arrives (or doesn't) on `hoverReady`;
+        /// nothing blocks, because the request runs on the worker thread.
+        #[qinvokable]
+        #[cxx_name = "hoverAt"]
+        fn hover_at(self: Pin<&mut LanguageService>, path: &QString, line: u32, character: u32);
+
+        /// The pointer moved or left the editor: whatever hover is in flight
+        /// is no longer wanted. Discarding it is `lsp_core::HoverTracker`'s
+        /// rule, not the view's — a late answer shown at the new position
+        /// would describe the wrong symbol.
+        #[qinvokable]
+        #[cxx_name = "cancelHover"]
+        fn cancel_hover(self: Pin<&mut LanguageService>);
+
+        /// Hover text for the most recent, still-current request, as the
+        /// HTML subset Qt tooltips render. Never emitted for a superseded or
+        /// cancelled request, and never for an empty hover.
+        #[qsignal]
+        #[cxx_name = "hoverReady"]
+        fn hover_ready(self: Pin<&mut LanguageService>, html: QString);
+
+        /// L4 — Go to Declaration at a position, asked of the language
+        /// server first (ADR-0016). Answers on exactly one of two paths:
+        /// `definitionFound`* then `definitionFinished` when the server had
+        /// an answer, or `definitionFallback` when it did not — no server for
+        /// the language, none running yet, an error, a timeout, or an empty
+        /// result. Which of those it is, is
+        /// `lsp_core::definition_outcome`'s decision, never the view's.
+        #[qinvokable]
+        #[cxx_name = "resolveDefinition"]
+        fn resolve_definition(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            line: u32,
+            character: u32,
+        );
+
+        /// One target of a `resolveDefinition`, in the server's own order.
+        #[qsignal]
+        #[cxx_name = "definitionFound"]
+        fn definition_found(self: Pin<&mut LanguageService>, target: FfiDefinition);
+
+        /// Emitted once after the last `definitionFound`: the server answered
+        /// and its answer is complete.
+        #[qsignal]
+        #[cxx_name = "definitionFinished"]
+        fn definition_finished(self: Pin<&mut LanguageService>);
+
+        /// Emitted instead of the pair above when the server did not answer:
+        /// ADR-0011's name-based index resolves the gesture instead, which is
+        /// what makes Go to Declaration work with no server installed.
+        #[qsignal]
+        #[cxx_name = "definitionFallback"]
+        fn definition_fallback(self: Pin<&mut LanguageService>);
 
         /// Emitted on the Qt thread after the store changed: a server
         /// published, or a document was closed. The view re-reads whatever it
@@ -3965,6 +4032,9 @@ pub struct LanguageServiceRust {
     /// never opened against a server is dropped rather than sent.
     open_docs: RefCell<std::collections::HashMap<String, String>>,
     store: RefCell<lsp_core::DiagnosticStore>,
+    /// L3: which hover request is still the current one. The rule is
+    /// `lsp_core`'s; what is kept here is only its state.
+    hover: RefCell<lsp_core::HoverTracker>,
 }
 
 fn to_ffi_severity(severity: lsp_core::Severity) -> ffi::FfiSeverity {
@@ -4137,6 +4207,72 @@ impl ffi::LanguageService {
         }
     }
 
+    pub fn hover_at(mut self: Pin<&mut Self>, path: &QString, line: u32, character: u32) {
+        let path = path.to_string();
+        if !self.open_docs.borrow().contains_key(&path) {
+            return;
+        }
+        let uri = lsp_core::uri_from_path(&path);
+        let token = self.hover.borrow_mut().begin();
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            let Ok(Some(hover)) = manager.hover(&uri, line, character) else {
+                return;
+            };
+            let html = lsp_core::to_tooltip_html(&hover);
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                if service.hover.borrow().accept(token) {
+                    service
+                        .as_mut()
+                        .hover_ready(QString::from(html.as_str()));
+                }
+            });
+        });
+    }
+
+    pub fn cancel_hover(self: Pin<&mut Self>) {
+        self.hover.borrow_mut().cancel();
+    }
+
+    pub fn resolve_definition(
+        mut self: Pin<&mut Self>,
+        path: &QString,
+        line: u32,
+        character: u32,
+    ) {
+        let uri = lsp_core::uri_from_path(&path.to_string());
+        let qt_thread = self.as_mut().qt_thread();
+        let queued = self.push_job(move |manager| {
+            let outcome =
+                lsp_core::definition_outcome(Some(manager.definition(&uri, line, character)));
+            let _ = qt_thread
+                .queue(move |service: Pin<&mut Self>| service.apply_definition_outcome(outcome));
+        });
+        if !queued {
+            // No worker at all (no project open), which is one more case of
+            // "no server answered" — the same rule decides it.
+            self.apply_definition_outcome(lsp_core::definition_outcome(None));
+        }
+    }
+
+    /// Turn the outcome into signals. The branch is which signal, never
+    /// which source: `definition_outcome` already chose that.
+    fn apply_definition_outcome(mut self: Pin<&mut Self>, outcome: lsp_core::DefinitionOutcome) {
+        match outcome {
+            lsp_core::DefinitionOutcome::Lsp(targets) => {
+                for target in targets {
+                    self.as_mut().definition_found(ffi::FfiDefinition {
+                        path: QString::from(target.path.as_str()),
+                        line: target.line,
+                        column: target.column,
+                    });
+                }
+                self.as_mut().definition_finished();
+            }
+            lsp_core::DefinitionOutcome::Index => self.as_mut().definition_fallback(),
+        }
+    }
+
     /// The enabled server for this path's language, if the catalog plus the
     /// user's settings name one. Both halves of that answer are `lsp-core`'s.
     fn config_for_path(&self, path: &str) -> Option<lsp_core::ServerConfig> {
@@ -4144,9 +4280,13 @@ impl ffi::LanguageService {
         lsp_core::enabled_server(&self.configs.borrow(), language_id).cloned()
     }
 
-    fn push_job(&self, job: impl FnOnce(&lsp_core::LspManager) + Send + 'static) {
-        if let Some(jobs) = self.jobs.borrow().as_ref() {
-            let _ = jobs.send(Box::new(job));
+    /// Queue work for the worker thread. Returns false when there is no
+    /// worker (no project open yet), which callers that must answer either
+    /// way have to handle.
+    fn push_job(&self, job: impl FnOnce(&lsp_core::LspManager) + Send + 'static) -> bool {
+        match self.jobs.borrow().as_ref() {
+            Some(jobs) => jobs.send(Box::new(job)).is_ok(),
+            None => false,
         }
     }
 

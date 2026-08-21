@@ -25,6 +25,11 @@ tree-sitter-toml-ng = "0.7.0"
 streaming-iterator = "0.1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
+# Runtime grammar dylibs (G1b). `tree-sitter-language` is the sanctioned
+# public way to turn a `tree_sitter_<id>` symbol into a `Language`; it is
+# already in the tree as a tree-sitter dependency.
+libloading = "0.9"
+tree-sitter-language = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

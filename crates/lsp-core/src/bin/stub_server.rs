@@ -7,7 +7,10 @@
 //! under a custom `CARGO_TARGET_DIR`, `--release`, or cross-compilation.
 //!
 //! Supported: framing, `initialize`/`initialized`/`shutdown`/`exit`, a canned
-//! diagnostic on `textDocument/didOpen`, and two test affordances —
+//! diagnostic on `textDocument/didOpen`, canned `textDocument/hover` and
+//! `textDocument/definition` replies that vary by the requested position so
+//! every response shape the protocol allows is reachable, and two test
+//! affordances —
 //! `stub/echo` (with an optional `delay_ms`, answered on its own thread so
 //! responses can come back out of order) and the `STUB_LSP_DIE_ON_DIDOPEN`
 //! environment variable, which makes the server die mid-session.
@@ -92,6 +95,54 @@ fn main() {
                     send(&out, json!({"jsonrpc": "2.0", "id": id, "result": params}));
                 });
             }
+            // L3: a hover in every shape a real server might pick, chosen by
+            // the requested line so one stub covers the parsing matrix:
+            // line 0 -> MarkupContent, line 1 -> a {language, value}
+            // MarkedString, line 2 -> an array, anything else -> no hover.
+            ("textDocument/hover", Some(id)) => {
+                let line = params
+                    .pointer("/position/line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let contents = match line {
+                    0 => json!({"kind": "markdown", "value": "```rust\nfn main()\n```\nThe **entry** point."}),
+                    1 => json!({"language": "rust", "value": "fn main()"}),
+                    2 => json!(["plain hover", {"language": "rust", "value": "fn main()"}]),
+                    _ => Value::Null,
+                };
+                let result = if contents.is_null() {
+                    Value::Null
+                } else {
+                    json!({ "contents": contents })
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // L4: one target per requested character, so the single-Location,
+            // Location-array and LocationLink-array replies are all reachable.
+            ("textDocument/definition", Some(id)) => {
+                let uri = params
+                    .pointer("/textDocument/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let character = params
+                    .pointer("/position/character")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let result = match character {
+                    0 => location(&uri, 3, 4),
+                    1 => json!([location(&uri, 3, 4), location(&uri, 9, 2)]),
+                    2 => json!([{
+                        "targetUri": uri,
+                        "targetRange": {"start": {"line": 3, "character": 0},
+                                        "end": {"line": 5, "character": 1}},
+                        "targetSelectionRange": {"start": {"line": 3, "character": 4},
+                                                 "end": {"line": 3, "character": 8}},
+                    }]),
+                    _ => Value::Null,
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
             // Ask the client something it does not implement, to check we
             // answer server-to-client requests instead of hanging.
             ("stub/askClient", Some(id)) => {
@@ -115,6 +166,14 @@ fn main() {
         }
         io::stdout().flush().ok();
     }
+}
+
+/// A `Location` in `uri` at a 0-based line/character.
+fn location(uri: &str, line: u64, character: u64) -> Value {
+    json!({"uri": uri, "range": {
+        "start": {"line": line, "character": character},
+        "end": {"line": line, "character": character + 4},
+    }})
 }
 
 /// The one diagnostic this server ever reports, on line 1.

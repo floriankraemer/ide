@@ -25,6 +25,7 @@
 #include <QTextBlock>
 #include <QTimer>
 #include <QToolButton>
+#include <QToolTip>
 #include <QVector>
 #include <QTreeWidget>
 #include <QColor>
@@ -122,6 +123,18 @@ void moveCursorToLine(QPlainTextEdit *editor, int line, int column)
 // TabId still maps to exactly one editor widget. ADS still sees the whole
 // tree as the single "Editor" dock widget, so D4's dock save/restore is
 // untouched by splitting.
+// A document (UTF-16) position as the line/character pair LSP speaks: both
+// 0-based, characters counted in UTF-16 code units — which is exactly what
+// QTextCursor counts, so this is a re-expression, not a conversion (unlike
+// byteOffsetAt, which the byte-addressed index needs).
+QPair<quint32, quint32> lspPosition(QPlainTextEdit *editor, int documentPosition)
+{
+    QTextCursor cursor(editor->document());
+    cursor.setPosition(documentPosition);
+    return {static_cast<quint32>(cursor.blockNumber()),
+            static_cast<quint32>(cursor.positionInBlock())};
+}
+
 class EditorTabs : public QObject
 {
 public:
@@ -153,6 +166,15 @@ public:
                 }
                 return;
             }
+        });
+
+        // L3: one tooltip for the whole window. The answer is asynchronous,
+        // so it is shown where the pointer is when it arrives — safe only
+        // because `lsp_core::HoverTracker` has already dropped everything
+        // the user has moved on from, so whatever reaches here is still
+        // about the word under the cursor.
+        connect(languageService_, &LanguageService::hoverReady, this, [](const QString &html) {
+            QToolTip::showText(QCursor::pos(), html);
         });
 
         activeGroup_ = makeGroup();
@@ -252,6 +274,14 @@ public:
         }
         return static_cast<quint64>(
           editor->toPlainText().left(documentPosition).toUtf8().size());
+    }
+
+    // L3/L4: the same document position as the line/character pair the
+    // language server speaks.
+    QPair<quint32, quint32> lspPositionAt(int documentPosition) const
+    {
+        auto *editor = currentEditor();
+        return editor ? lspPosition(editor, documentPosition) : QPair<quint32, quint32>{0, 0};
     }
 
     // The word under the caret, used by the caret-driven Find Usages and
@@ -1081,6 +1111,20 @@ private:
             }
         });
 
+        // L3: the pointer dwelled over an identifier. Asking is free of the
+        // UI thread (LanguageService answers from its worker), and a file
+        // with no server never got an lspPath, so nothing is asked for it.
+        connect(editor, &CodeEditor::hoverRequested, this, [this, editor](int position) {
+            const QString path = editor->property("lspPath").toString();
+            if (path.isEmpty()) {
+                return;
+            }
+            const QPair<quint32, quint32> at = lspPosition(editor, position);
+            languageService_->hoverAt(path, at.first, at.second);
+        });
+        connect(editor, &CodeEditor::hoverCanceled, this,
+                [this]() { languageService_->cancelHover(); });
+
         // L3: only the visible tab's cursor should move the status bar —
         // guards against a background tab's programmatic cursor change
         // (e.g. a reload) touching labels that describe a different tab.
@@ -1729,20 +1773,25 @@ private:
     DocumentManager *docManager_ = nullptr;
 };
 
-// Go to Declaration (N2/N8): turns SearchModel's streamed resolution
-// results into either a jump or a chooser.
+// Go to Declaration (N2/N8/L4): turns a resolution — from the language
+// server or from the index — into either a jump or a chooser.
 //
-// The rule this class does *not* contain is which candidate is best —
-// `index_core::resolve_declaration` already ranked them and the first one
-// to arrive is the winner. All that is decided here is presentation: one
-// candidate jumps straight there, several offer the list (resolution is
-// name-based per ADR-0008, so ambiguity is a legitimate answer, not an
-// error), none reports why nothing happened.
+// Two rules this class does *not* contain: which candidate is best
+// (`index_core::resolve_declaration` and the server both answer ranked, and
+// the first candidate to arrive is the winner), and who answers at all —
+// `lsp_core::definition_outcome` decides that, and reaches here as either
+// the definitionFound/definitionFinished pair or definitionFallback.
+// Presentation is all that is decided here: one candidate jumps straight
+// there, several offer the list (resolution may legitimately be ambiguous —
+// name-based per ADR-0008, or genuinely several targets per LSP), none
+// reports why nothing happened.
 class DeclarationNavigator : public QObject
 {
 public:
-    DeclarationNavigator(SearchModel *searchModel, EditorTabs *editorTabs, QMainWindow *window)
+    DeclarationNavigator(LanguageService *languageService, SearchModel *searchModel,
+                          EditorTabs *editorTabs, QMainWindow *window)
       : QObject(window)
+      , languageService_(languageService)
       , searchModel_(searchModel)
       , editorTabs_(editorTabs)
       , window_(window)
@@ -1761,6 +1810,22 @@ public:
                     candidates_.clear();
                     report(tr("Go to Declaration failed: %1").arg(message));
                 });
+
+        // L4: the language server's answer, when it had one. Targets carry
+        // no kind or container — a server answers with places, not with the
+        // index's symbol metadata.
+        connect(languageService_, &LanguageService::definitionFound, this,
+                [this](const FfiDefinition &target) {
+                    candidates_.append(
+                      Candidate{target.path, target.line, target.column, QString(), QString()});
+                });
+        connect(languageService_, &LanguageService::definitionFinished, this, [this]() {
+            // Project tier: several targets are several real answers, so
+            // they are offered rather than silently reduced to the first.
+            finish(FfiResolutionTier::Project, QString());
+        });
+        connect(languageService_, &LanguageService::definitionFallback, this,
+                &DeclarationNavigator::askIndex);
     }
 
     // Entry point for both the Ctrl+Click gesture and the menu action.
@@ -1773,8 +1838,23 @@ public:
             return;
         }
         candidates_.clear();
+        position_ = documentPosition;
+        const QPair<quint32, quint32> at = editorTabs_->lspPositionAt(documentPosition);
+        languageService_->resolveDefinition(path, at.first, at.second);
+    }
+
+    // ADR-0016's fallback: ADR-0011's name-based index answers whenever the
+    // server did not. Never called from a condition evaluated here — it is
+    // wired to definitionFallback, which is `lsp_core`'s verdict.
+    void askIndex()
+    {
+        const QString path = editorTabs_->currentPath();
+        if (path.isEmpty()) {
+            return;
+        }
+        candidates_.clear();
         searchModel_->resolveDeclaration(path, editorTabs_->currentContent(),
-                                          editorTabs_->byteOffsetAt(documentPosition));
+                                          editorTabs_->byteOffsetAt(position_));
     }
 
 private:
@@ -1863,10 +1943,14 @@ private:
         return QString();
     }
 
+    LanguageService *languageService_;
     SearchModel *searchModel_;
     EditorTabs *editorTabs_;
     QMainWindow *window_;
     QList<Candidate> candidates_;
+    // The document position of the gesture being resolved, kept so the
+    // index fallback can re-ask about the same spot in its own units.
+    int position_ = 0;
 };
 
 // File > Recent Projects (C2): rebuilds `menu` from `appSettings`'s
@@ -2808,7 +2892,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // N8: code navigation. The Ctrl+Click gesture and every action below
     // route through the one DeclarationNavigator, so there is a single
     // place that turns a resolution result into a jump.
-    auto *navigator = new DeclarationNavigator(searchModel, editorTabs, window);
+    auto *navigator = new DeclarationNavigator(languageService, searchModel, editorTabs, window);
     editorTabs->setDeclarationRequestedCallback(
       [navigator](int position) { navigator->resolveAt(position); });
 

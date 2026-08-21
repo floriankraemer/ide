@@ -3,6 +3,7 @@
 #include <QColor>
 #include <QEvent>
 #include <QFontMetrics>
+#include <QHelpEvent>
 #include <QMouseEvent>
 #include <QPalette>
 #include <QPaintEvent>
@@ -78,7 +79,34 @@ void CodeEditor::clearHoverSpan()
 void CodeEditor::mouseMoveEvent(QMouseEvent *event)
 {
     updateHoverSpan(event->pos(), event->modifiers().testFlag(Qt::ControlModifier));
+    cancelHover();
     QPlainTextEdit::mouseMoveEvent(event);
+}
+
+bool CodeEditor::viewportEvent(QEvent *event)
+{
+    if (event->type() == QEvent::ToolTip) {
+        const QPair<int, int> span = identifierAt(static_cast<QHelpEvent *>(event)->pos());
+        if (span.first >= 0) {
+            hoverPending_ = true;
+            emit hoverRequested(span.first);
+        }
+        // Accepted either way: the default handler would only offer this
+        // widget's (empty) static tooltip, and a server's answer arrives
+        // later, on hoverReady.
+        event->accept();
+        return true;
+    }
+    return QPlainTextEdit::viewportEvent(event);
+}
+
+void CodeEditor::cancelHover()
+{
+    if (!hoverPending_) {
+        return;
+    }
+    hoverPending_ = false;
+    emit hoverCanceled();
 }
 
 void CodeEditor::mousePressEvent(QMouseEvent *event)
@@ -100,6 +128,7 @@ void CodeEditor::mousePressEvent(QMouseEvent *event)
 void CodeEditor::leaveEvent(QEvent *event)
 {
     clearHoverSpan();
+    cancelHover();
     QPlainTextEdit::leaveEvent(event);
 }
 

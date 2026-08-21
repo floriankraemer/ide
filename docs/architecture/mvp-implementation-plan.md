@@ -214,6 +214,14 @@ the reasons in the table above.
 > (shared build) as the primary and only Windows cross-compile path.
 > The evaluation table above is kept as the historical record of why
 > `aqtinstall` was tried first.
+>
+> That MXE toolchain was initially a hand-built `mxe-spike-snapshot:2` image
+> that existed only on one machine and was later lost to a `docker prune`.
+> It is now the reproducible `mxe-base` stage in `docker/Dockerfile`, which
+> clones MXE at a pinned commit and builds `qt6-qtbase` for
+> `x86_64-w64-mingw32.shared`.
+> Only `qt6-qtbase` is built, not the `qt6` meta-package: `crates/ui-shell`
+> links Core, Gui and Widgets only.
 
 The single most likely failure mode: Qt's official `mingw_64` kit is built
 against a specific MinGW-w64 GCC version (e.g. Qt 6.7's `mingw_64` kit

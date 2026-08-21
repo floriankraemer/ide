@@ -108,6 +108,16 @@ signals:
     // gesture.
     void declarationRequested(int position);
 
+    // L3: the pointer rested over an identifier long enough for Qt to ask
+    // for a tooltip. `position` is a document (UTF-16) position inside that
+    // word; what it means, and whether the answer is still wanted when it
+    // arrives, are decided outside this widget (`lsp_core::hover`).
+    void hoverRequested(int position);
+
+    // The pointer moved on or left: an answer to the last hoverRequested
+    // must not be shown any more.
+    void hoverCanceled();
+
 protected:
     void resizeEvent(QResizeEvent *event) override;
     void changeEvent(QEvent *event) override;
@@ -115,6 +125,10 @@ protected:
     // TerminalWidget's clickable links (F4). Mouse tracking is on so a
     // move with no button held still arrives here.
     void mouseMoveEvent(QMouseEvent *event) override;
+    // L3: QEvent::ToolTip is Qt's own dwell detection, and it arrives on the
+    // viewport for a scroll area — so this, not event(), is where a hover
+    // gesture is picked up.
+    bool viewportEvent(QEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void leaveEvent(QEvent *event) override;
 
@@ -138,6 +152,8 @@ private:
     // ADR-0011.
     QPair<int, int> identifierAt(const QPoint &pos) const;
     void updateHoverSpan(const QPoint &pos, bool ctrlHeld);
+    // Withdraws an outstanding hover request (pointer moved or left).
+    void cancelHover();
     void clearHoverSpan();
 
     bool foldStartingAt(int blockNumber, FoldRange *out) const;
@@ -154,6 +170,9 @@ private:
     // The Ctrl-hovered word, as [start, end) document positions, or
     // {-1, -1} for none. Pure view state, like the fold collapse state.
     QPair<int, int> hoverSpan_{-1, -1};
+    // Whether a hover answer is still outstanding, so an idle mouse move
+    // doesn't cross the FFI seam to cancel nothing.
+    bool hoverPending_ = false;
 };
 
 // No Q_OBJECT: forwards paint events to CodeEditor, uses no signals/slots.

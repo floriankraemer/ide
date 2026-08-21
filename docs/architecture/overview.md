@@ -67,6 +67,8 @@ Rules crossing the FFI seam (typed errors, `TabId`, Rust-owned dirty state) are 
 ## 5. Build and deployment
 
 `docker/Dockerfile` is a single multi-stage file: a `linux-builder` stage (apt Qt6) and a `windows-builder` stage cross-compiling with MXE's mingw-w64 + Qt6 toolchain.
+The MXE toolchain is built by the `mxe-base` stage from a pinned upstream commit (`ARG MXE_COMMIT`), which compiles `qt6-qtbase` for `x86_64-w64-mingw32.shared` from source.
+That first build takes hours and is then served from the Docker layer cache; it exists so the Windows toolchain is reproducible from the repo rather than depending on a hand-built local image.
 Artifacts land in `dist/`.
 
 ## 6. Future scope (not implemented)

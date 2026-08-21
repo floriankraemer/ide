@@ -12,7 +12,9 @@
 pub mod catalog;
 pub mod diagnostics;
 pub mod framing;
+pub mod hover;
 pub mod manager;
+pub mod navigation;
 
 pub use catalog::{
     default_server, enabled_server, language_id_for_path, resolve_servers, ServerConfig, ServerDef,
@@ -21,4 +23,6 @@ pub use catalog::{
 pub use diagnostics::{
     path_from_uri, uri_from_path, DiagnosticCounts, DiagnosticRow, DiagnosticStore, Severity,
 };
+pub use hover::{parse_hover, to_tooltip_html, HoverText, HoverTracker};
 pub use manager::{LspError, LspEvent, LspManager, DEFAULT_REQUEST_TIMEOUT};
+pub use navigation::{definition_outcome, parse_definition, DefinitionOutcome, DefinitionTarget};

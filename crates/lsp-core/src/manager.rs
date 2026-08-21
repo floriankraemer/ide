@@ -20,9 +20,17 @@ use serde_json::{json, Value};
 
 use crate::catalog::ServerConfig;
 use crate::framing::{read_message, write_message};
+use crate::hover::{parse_hover, HoverText};
+use crate::navigation::{parse_definition, DefinitionTarget};
 
 /// How long a request waits for its response before it is cancelled.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// Hover is speculative and mouse-driven: an answer that arrives seconds
+/// after the dwell is not worth showing, so it gets its own short deadline.
+pub const HOVER_TIMEOUT: Duration = Duration::from_secs(2);
+/// Go to Definition is an explicit gesture and the user is waiting for it,
+/// but a jump that lands half a minute later is a bug, not a jump.
+pub const DEFINITION_TIMEOUT: Duration = Duration::from_secs(5);
 /// Delay before the first respawn attempt; doubles per consecutive failure.
 const RESTART_BACKOFF_INITIAL: Duration = Duration::from_millis(200);
 /// Ceiling for the exponential backoff.
@@ -379,6 +387,39 @@ impl LspManager {
         )
     }
 
+    /// `textDocument/hover` for a position in an open document, already
+    /// reduced to the one text the tooltip shows. `Ok(None)` means the server
+    /// has nothing to say here, which is not an error.
+    pub fn hover(&self, uri: &str, line: u32, character: u32) -> Result<Option<HoverText>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/hover",
+            position_params(uri, line, character),
+            HOVER_TIMEOUT,
+        )?;
+        Ok(parse_hover(&result))
+    }
+
+    /// `textDocument/definition` for a position in an open document. An empty
+    /// vector means the server had no answer; whether that falls back to the
+    /// index is [`crate::navigation::definition_outcome`]'s decision.
+    pub fn definition(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<DefinitionTarget>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/definition",
+            position_params(uri, line, character),
+            DEFINITION_TIMEOUT,
+        )?;
+        Ok(parse_definition(&result))
+    }
+
     /// The version last sent for a document, if it is open.
     pub fn document_version(&self, uri: &str) -> Option<i32> {
         self.documents.lock().unwrap().get(uri).map(|d| d.version)
@@ -666,6 +707,15 @@ fn publish_diagnostics(language_id: &str, params: &Value) -> Option<LspEvent> {
     })
 }
 
+/// `TextDocumentPositionParams`: `line` and `character` are 0-based and
+/// counted in UTF-16 code units, per the encoding `initialize` negotiates.
+fn position_params(uri: &str, line: u32, character: u32) -> Value {
+    json!({
+        "textDocument": {"uri": uri},
+        "position": {"line": line, "character": character},
+    })
+}
+
 fn response_error(error: &Value) -> LspError {
     LspError::Response {
         code: error.get("code").and_then(Value::as_i64).unwrap_or(0),
@@ -684,6 +734,11 @@ fn client_capabilities() -> Value {
         "textDocument": {
             "synchronization": {"dynamicRegistration": false},
             "publishDiagnostics": {"relatedInformation": true},
+            // L3/L4: advertised because they are implemented — `contentFormat`
+            // lists markdown first because that is what the tooltip renders,
+            // and `linkSupport` opts into the richer `LocationLink` reply.
+            "hover": {"contentFormat": ["markdown", "plaintext"]},
+            "definition": {"linkSupport": true},
         },
         "general": {"positionEncodings": ["utf-16"]},
     })

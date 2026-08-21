@@ -5,7 +5,8 @@
 Proposed.
 Implemented as task L1 of [the language platform plan](../language-platform-plan.md), with the stub server it is tested against as task X2 (both commit `0554341`).
 Diagnostics (L2) landed on top of it: `ui-shell`'s `LanguageService` QObject owns the manager on a worker thread and drains its events onto the Qt thread, and `app-config` gained the `[[language_server]]` table.
-The remaining feature tasks — hover (L3), go-to-definition (L4), completion (L5) and the settings page (L6) — are still open.
+Hover (L3) and go-to-definition (L4) landed next: `lsp_core::hover` owns the response shapes, the tooltip rendering and the stale-response rule, and `lsp_core::navigation` owns the response shapes and the LSP-over-index precedence rule below.
+The remaining feature tasks — completion (L5) and the settings page (L6) — are still open.
 
 ## Context
 
@@ -55,6 +56,8 @@ Every in-flight request is failed (`drop_pending`) the moment a connection dies,
 
 This does not replace ADR-0011's navigation.
 Task L4 makes LSP the preferred source for go-to-definition and keeps `resolve_declaration` as the fallback, which is what makes the feature work with no server installed, before a server has finished indexing, while a server is inside its restart backoff, and for the many languages the catalog has no entry for.
+That precedence is one function, `navigation::definition_outcome`: a running server's non-empty answer wins, and every other case — no server, a request that errored or timed out, an empty result — resolves to the index.
+The view never re-decides it; `LanguageService` emits either the server's targets or a `definitionFallback` signal, and the C++ navigator is wired to both.
 The tree-sitter outline, Class View, Go to Symbol and Find in Files keep running off `index-core` unchanged — an LSP server answers about the file it was asked about, not about a project-wide symbol index this IDE already has.
 
 ### A const catalog plus per-language user overrides
