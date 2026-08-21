@@ -1,0 +1,6 @@
+// Harness fixture (X1): must contain a keyword, a string and a comment.
+package fixtures
+
+class Greeter(name: String) {
+  def greet(): String = "hello, " + name
+}

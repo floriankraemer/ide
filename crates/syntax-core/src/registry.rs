@@ -223,6 +223,68 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         grammar: || tree_sitter_toml_ng::LANGUAGE.into(),
         queries: queries!("toml"),
     },
+    LanguageDef {
+        id: "kotlin",
+        name: "Kotlin",
+        extensions: &["kt", "kts"],
+        filenames: &[],
+        // `tree-sitter-kotlin-ng` (the tree-sitter-grammars fork), not
+        // `tree-sitter-kotlin`: the fork is the maintained one and ships a
+        // grammar the 0.26 runtime loads. It ships no queries, so
+        // queries/kotlin/highlights.scm is hand-written.
+        grammar: || tree_sitter_kotlin_ng::LANGUAGE.into(),
+        queries: queries!("kotlin"),
+    },
+    LanguageDef {
+        id: "swift",
+        name: "Swift",
+        extensions: &["swift"],
+        filenames: &[],
+        grammar: || tree_sitter_swift::LANGUAGE.into(),
+        queries: queries!("swift"),
+    },
+    LanguageDef {
+        id: "scala",
+        name: "Scala",
+        extensions: &["scala", "sc"],
+        filenames: &[],
+        grammar: || tree_sitter_scala::LANGUAGE.into(),
+        queries: queries!("scala"),
+    },
+    LanguageDef {
+        id: "zig",
+        name: "Zig",
+        // Not `.zon`: that is ZON, a separate grammar this catalog does
+        // not carry, and the Zig grammar does not parse it.
+        extensions: &["zig"],
+        filenames: &[],
+        grammar: || tree_sitter_zig::LANGUAGE.into(),
+        queries: queries!("zig"),
+    },
+    LanguageDef {
+        id: "haskell",
+        name: "Haskell",
+        extensions: &["hs"],
+        filenames: &[],
+        grammar: || tree_sitter_haskell::LANGUAGE.into(),
+        queries: queries!("haskell"),
+    },
+    LanguageDef {
+        id: "fsharp",
+        name: "F#",
+        // Implementation files only. The crate also exposes
+        // `LANGUAGE_SIGNATURE` for `.fsi` signature files, which is a
+        // *different* grammar with different node names; since `grammar`
+        // is per row (the same reason `tsx` is its own row), registering
+        // `.fsi` would mean a second row with a second query set. Signature
+        // files are rare enough that shipping them as plain text is
+        // honest, where highlighting them with the implementation grammar
+        // would not be.
+        extensions: &["fs", "fsx", "fsscript"],
+        filenames: &[],
+        grammar: || tree_sitter_fsharp::LANGUAGE_FSHARP.into(),
+        queries: queries!("fsharp"),
+    },
 ];
 
 /// An opaque handle to a language in the registry.
