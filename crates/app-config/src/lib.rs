@@ -16,8 +16,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod keymap;
+pub mod syntax_colors;
 
 pub use keymap::{action, ActionDef, Binding, Keymap, ACTIONS};
+pub use syntax_colors::{LanguageScopeStyles, ScopeStyle, ScopeStyles};
 
 /// File name used to persist settings inside the config directory.
 const SETTINGS_FILE: &str = "settings.toml";
@@ -92,6 +94,24 @@ pub struct Settings {
     /// See [`Keymap`] for the rules layered over this map.
     #[serde(default)]
     pub keymap: HashMap<String, String>,
+    /// Base syntax colors: scope name -> style, applying to every language.
+    ///
+    /// Per-language overrides deliberately live in a *separate* top-level
+    /// table rather than nesting under `[syntax_colors.<lang>]`: in TOML both
+    /// a table-form style (`comment = { fg = "…" }`) and a language sub-table
+    /// (`[syntax_colors.python]`) are just tables under the same key, so
+    /// nothing in the syntax tells them apart. Disambiguating would mean
+    /// guessing from the inner keys — fragile the moment a language id
+    /// collides with a scope name, or a scope table uses a key a future style
+    /// field also uses. Two flat maps parse unambiguously and cost one extra
+    /// TOML header.
+    #[serde(default)]
+    pub syntax_colors: ScopeStyles,
+    /// Per-language syntax color overrides: language id -> (scope name ->
+    /// style). Layered over [`Settings::syntax_colors`] by the theme
+    /// resolution in `syntax-core` — this crate only stores them.
+    #[serde(default)]
+    pub syntax_colors_by_language: LanguageScopeStyles,
 }
 
 /// Cap on remembered recent projects — enough for a useful menu without
@@ -298,6 +318,28 @@ mod tests {
             window_state: "opaque-blob".to_string(),
             editor_layout: "{\"groups\":[]}".to_string(),
             keymap: HashMap::from([("view.goToLine".to_string(), "Ctrl+L".to_string())]),
+            syntax_colors: HashMap::from([
+                (
+                    "keyword".to_string(),
+                    ScopeStyle::Color("#cc7832".to_string()),
+                ),
+                (
+                    "comment".to_string(),
+                    ScopeStyle::Full {
+                        fg: Some("#808080".to_string()),
+                        bold: false,
+                        italic: true,
+                        underline: false,
+                    },
+                ),
+            ]),
+            syntax_colors_by_language: HashMap::from([(
+                "python".to_string(),
+                HashMap::from([(
+                    "decorator".to_string(),
+                    ScopeStyle::Color("#ffc66d".to_string()),
+                )]),
+            )]),
         };
 
         save(dir.path(), &settings).unwrap();
@@ -448,6 +490,123 @@ mod tests {
         assert_eq!(
             settings.recent_files[0],
             PathBuf::from(format!("/f{}.rs", MAX_RECENT_FILES + 9))
+        );
+    }
+
+    #[test]
+    fn syntax_colors_accept_both_the_string_and_table_spellings() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(SETTINGS_FILE),
+            concat!(
+                "[syntax_colors]\n",
+                "keyword = \"#cc7832\"\n",
+                "comment = { fg = \"#808080\", italic = true }\n",
+                "\n",
+                "[syntax_colors_by_language.python]\n",
+                "decorator = \"#ffc66d\"\n",
+            ),
+        )
+        .unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+
+        let keyword = &loaded.syntax_colors["keyword"];
+        assert_eq!(keyword.fg(), Some("#cc7832"));
+        assert!(!keyword.italic());
+        let comment = &loaded.syntax_colors["comment"];
+        assert_eq!(comment.fg(), Some("#808080"));
+        assert!(comment.italic());
+        assert!(!comment.bold());
+        assert_eq!(
+            loaded.syntax_colors_by_language["python"]["decorator"].fg(),
+            Some("#ffc66d")
+        );
+
+        // And both spellings survive being written back out.
+        save(dir.path(), &loaded).unwrap();
+        assert_eq!(load(dir.path()).unwrap(), loaded);
+    }
+
+    #[test]
+    fn syntax_color_table_form_keeps_only_the_flags_it_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(SETTINGS_FILE),
+            "[syntax_colors]\nerror = { bold = true, underline = true }\n",
+        )
+        .unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+        let style = &loaded.syntax_colors["error"];
+
+        assert_eq!(style.fg(), None);
+        assert!(style.bold());
+        assert!(style.underline());
+        assert!(!style.italic());
+
+        save(dir.path(), &loaded).unwrap();
+        assert_eq!(load(dir.path()).unwrap(), loaded);
+    }
+
+    #[test]
+    fn unknown_scope_names_and_language_ids_survive_a_load_save_cycle() {
+        // A newer build may know scopes and languages this one does not; they
+        // are stored as opaque strings, never rejected or dropped. Dotted
+        // scope names must be quoted in TOML — a bare `a.b.c` key is a nested
+        // table per the TOML spec, not a scope named "a.b.c" — and the
+        // serializer quotes them again on the way out.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(SETTINGS_FILE),
+            concat!(
+                "[syntax_colors]\n",
+                "\"some.future.scope\" = \"#123456\"\n",
+                "\n",
+                "[syntax_colors_by_language.brainfuck]\n",
+                "\"tape.pointer\" = { fg = \"#abcdef\", bold = true }\n",
+            ),
+        )
+        .unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+        save(dir.path(), &loaded).unwrap();
+        let reloaded = load(dir.path()).unwrap();
+
+        assert_eq!(reloaded, loaded);
+        assert_eq!(
+            reloaded.syntax_colors["some.future.scope"].fg(),
+            Some("#123456")
+        );
+        assert!(reloaded.syntax_colors_by_language["brainfuck"]["tape.pointer"].bold());
+    }
+
+    #[test]
+    fn settings_file_without_syntax_colors_loads_empty_maps() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(SETTINGS_FILE), "theme = \"light\"\n").unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+
+        assert!(loaded.syntax_colors.is_empty());
+        assert!(loaded.syntax_colors_by_language.is_empty());
+    }
+
+    #[test]
+    fn per_language_overrides_can_be_set_without_a_base_table() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(SETTINGS_FILE),
+            "[syntax_colors_by_language.rust]\nmacro = \"#bbb529\"\n",
+        )
+        .unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+
+        assert!(loaded.syntax_colors.is_empty());
+        assert_eq!(
+            loaded.syntax_colors_by_language["rust"]["macro"].fg(),
+            Some("#bbb529")
         );
     }
 }
