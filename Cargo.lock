@@ -1417,6 +1417,7 @@ dependencies = [
  "lsp-types",
  "serde",
  "serde_json",
+ "syntax-core",
 ]
 
 [[package]]

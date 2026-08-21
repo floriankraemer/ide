@@ -166,13 +166,13 @@ reasoning intact.
   `Dockerfile.md` stays Markdown because a real extension is consulted first.
   No pattern field was needed: the rule holds for every row in the catalog and
   for runtime languages, so no language opts into it.
-- **`lsp-core`'s extension-to-language-id table will drift.** ([#20](https://github.com/floriankraemer/ide/issues/20))
-  It is a second, independent mapping from the tree-sitter catalog, and the
-  markup and batch-two languages were never added to it.
-  It is deliberately separate — LSP language identifiers are defined by the
-  protocol, not by our grammar ids — but nothing keeps the two in step, and a
-  test asserting every catalog language either has an LSP id or is explicitly
-  excluded would.
+- ~~**`lsp-core`'s extension-to-language-id table will drift.**~~ ([#20](https://github.com/floriankraemer/ide/issues/20), fixed)
+  It had drifted: no server started for the markup and batch-two languages.
+  The duplicate table is gone rather than extended — `lsp-core` now derives
+  the language from `syntax-core`'s registry and keeps only what the protocol
+  actually owns, the server command per language id and the one id that
+  diverges (`tsx` -> `typescriptreact`).
+  See [ADR-0018](decisions/0018-single-source-language-detection.md).
 - **Runtime language definitions leak one generation per reload.** (not filed: bounded and deliberate)
   Bounded and tiny — a few KB per reload of a human pressing a button — and
   the alternative costs a lifetime parameter on every `LanguageDef` reader.
