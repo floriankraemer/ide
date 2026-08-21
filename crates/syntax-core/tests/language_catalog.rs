@@ -41,18 +41,19 @@ const REQUIRED_SCOPES: [&str; 3] = ["keyword", "string", "comment"];
 /// capture names, and this was the only place in the harness that had to
 /// change. Keep it that way.
 ///
-/// A scope matches its descendants too — a language whose `highlights.scm`
-/// only ever emits `@string.special` still counts as producing a string,
-/// mirroring `Scope::resolve`'s hierarchical fallback.
+/// The match is **exact**: a `string.escape` span does not count as a
+/// `string`. `Scope::resolve`'s hierarchical fallback is about *theming* a
+/// scope no theme styles; it is not evidence that a rule for the parent
+/// scope exists. Accepting descendants here let Zig ship with its
+/// `@string` pattern deleted, because its sample's escape produced a
+/// `string.escape` span (issue #17). A language that genuinely emits only
+/// a descendant declares the parent in its `no-scopes.txt`.
 fn produces_scope(spans: &[HighlightSpan], scope: &str) -> bool {
     assert!(
         Scope::resolve(scope).is_some(),
         "unknown scope name {scope:?} — it is not in syntax_core::SCOPES"
     );
-    spans.iter().any(|span| {
-        let name = span.scope.name();
-        name == scope || name.starts_with(&format!("{scope}."))
-    })
+    spans.iter().any(|span| span.scope.name() == scope)
 }
 
 fn queries_dir(id: &str) -> PathBuf {
@@ -269,8 +270,8 @@ fn extensions_are_normalized_and_unique_within_a_language() {
 // ---- injections (I1, exercised for real by R4d) ---------------------
 
 /// The one span covering `needle`'s first byte in `text`, highlighted as
-/// `language`, asserted to carry `scope` (or a descendant of it, matching
-/// `produces_scope`'s hierarchical rule).
+/// `language`, asserted to carry exactly `scope` — a descendant does not
+/// count, for the same reason it does not in `produces_scope`.
 fn assert_scope_at(language: Language, text: &str, needle: &str, scope: &str) {
     let offset = text.find(needle).unwrap_or_else(|| {
         panic!(
@@ -285,9 +286,7 @@ fn assert_scope_at(language: Language, text: &str, needle: &str, scope: &str) {
         .map(|s| s.scope.name())
         .collect();
     assert!(
-        found
-            .iter()
-            .any(|name| *name == scope || name.starts_with(&format!("{scope}."))),
+        found.iter().any(|name| *name == scope),
         "language `{}`: expected a `{scope}` span over {needle:?}, got {found:?} — \
          the injection is not reaching the injected language's queries",
         language.id()

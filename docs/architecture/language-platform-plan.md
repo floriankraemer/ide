@@ -155,13 +155,15 @@ reasoning intact.
   font, because `ScopeStyle` only carries bold/italic/underline and adding a
   fourth flag would touch the FFI struct, the C++ format table and the syntax
   colours page at once.
-- **The X1 harness can be satisfied by a descendant scope.** ([#17](https://github.com/floriankraemer/ide/issues/17))
-  `produces_scope` counts a `string.escape` span as satisfying `string`,
-  which is right for fallback but means a language that has *lost* its
-  `string` rule can still pass — this actually happened to Zig during R6 and
-  was caught by eye, not by the harness.
-  Requiring at least one exact match, with descendants as a fallback only
-  when the exact scope is genuinely unused, would close it.
+- **~~The X1 harness can be satisfied by a descendant scope.~~** (fixed, [#17](https://github.com/floriankraemer/ide/issues/17))
+  `produces_scope` and `assert_scope_at` counted a `string.escape` span as
+  satisfying `string`, which is right for theming fallback but let a language
+  that had *lost* its `string` rule keep passing — this happened to Zig during
+  R6 and was caught by eye, not by the harness.
+  Both now compare scope names exactly.
+  The one language the tightening exposed, `markdown_inline`, turned out to be
+  an honest exception rather than a lost rule: prose has no string literals, so
+  it declares `string` in its `no-scopes.txt`.
 - **~~`filenames` is exact-match only.~~** (fixed, [#19](https://github.com/floriankraemer/ide/issues/19))
   `language_for_path` now resolves in three ordered steps: exact file name,
   then extension, then the file name with its final `.suffix` removed matched
