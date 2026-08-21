@@ -1504,22 +1504,29 @@ pub fn resolve_declaration_in_buffer(
     byte_offset: usize,
 ) -> Resolution {
     let language = language_for_path(current_path);
-    let analysis = analyze_file(language, current_content);
-    let occurrences = &analysis.occurrences;
+    let no_identifier = || Resolution {
+        name: String::new(),
+        tier: ResolutionTier::None,
+        candidates: Vec::new(),
+    };
+    // One parse, then the `locals` walk alone -- the caret has to be on an
+    // identifier before the `tags` walk (which costs about as much as the
+    // parse) is worth running at all.
+    let Some(parsed) = syntax_core::ParsedFile::parse(language, current_content) else {
+        return no_identifier();
+    };
+    let occurrences = parsed.occurrences();
     let Some(target) = occurrences
         .iter()
         .find(|o| byte_offset >= o.start && byte_offset < o.end)
     else {
-        return Resolution {
-            name: String::new(),
-            tier: ResolutionTier::None,
-            candidates: Vec::new(),
-        };
+        return no_identifier();
     };
     let name = target.name.clone();
 
+    let outline = parsed.outline();
     let mut flat: BTreeMap<(usize, usize), FlatSymbol<'_>> = BTreeMap::new();
-    flatten_outline(&analysis.outline, None, &mut flat);
+    flatten_outline(&outline, None, &mut flat);
 
     let mut local: Vec<(usize, SymbolMatch)> = occurrences
         .iter()
