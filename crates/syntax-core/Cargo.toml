@@ -22,6 +22,15 @@ tree-sitter-javascript = "0.25"
 tree-sitter-bash = "0.25.1"
 tree-sitter-yaml = "0.7.2"
 tree-sitter-toml-ng = "0.7.0"
+# Batch 2 languages (R5).
+tree-sitter-sequel = "0.3.11"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-lua = "0.5"
+tree-sitter-make = "1.1.1"
+# camdencheek/tree-sitter-dockerfile 0.2 pins the tree-sitter 0.20 runtime
+# and would drag a second one into the build (same trap as tree-sitter-toml).
+# wharflab's fork is on the modern tree-sitter-language shape.
+tree-sitter-containerfile = "0.9.2"
 streaming-iterator = "0.1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

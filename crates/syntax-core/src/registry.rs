@@ -223,6 +223,76 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         grammar: || tree_sitter_toml_ng::LANGUAGE.into(),
         queries: queries!("toml"),
     },
+    LanguageDef {
+        id: "sql",
+        name: "SQL",
+        extensions: &["sql"],
+        filenames: &[],
+        // `tree-sitter-sequel` is the crate name of derekstride's SQL
+        // grammar — not a typo, and not a different language.
+        grammar: || tree_sitter_sequel::LANGUAGE.into(),
+        queries: queries!("sql"),
+    },
+    LanguageDef {
+        id: "ruby",
+        name: "Ruby",
+        extensions: &["rb", "rake", "gemspec", "ru"],
+        // Ruby's build and config DSLs are extensionless by convention;
+        // without these rows the `Gemfile` a user edits daily opens as
+        // plain text.
+        filenames: &[
+            "Gemfile",
+            "Rakefile",
+            "rakefile",
+            "Guardfile",
+            "Vagrantfile",
+            "Brewfile",
+            "Podfile",
+            "Capfile",
+        ],
+        grammar: || tree_sitter_ruby::LANGUAGE.into(),
+        queries: queries!("ruby"),
+    },
+    LanguageDef {
+        id: "lua",
+        name: "Lua",
+        extensions: &["lua", "rockspec"],
+        filenames: &[".luacheckrc"],
+        grammar: || tree_sitter_lua::LANGUAGE.into(),
+        queries: queries!("lua"),
+    },
+    LanguageDef {
+        id: "make",
+        name: "Makefile",
+        extensions: &["mk", "mak"],
+        // Make is normally reached by whole file name, not extension.
+        // `filenames` is exact and case-sensitive, so every spelling GNU
+        // make itself looks for gets its own entry.
+        filenames: &[
+            "Makefile",
+            "makefile",
+            "GNUmakefile",
+            "Makefile.am",
+            "Makefile.in",
+        ],
+        grammar: || tree_sitter_make::LANGUAGE.into(),
+        queries: queries!("make"),
+    },
+    LanguageDef {
+        id: "dockerfile",
+        name: "Dockerfile",
+        extensions: &["dockerfile", "containerfile"],
+        // The `Dockerfile.<stage>` convention cannot be expressed here —
+        // `filenames` is exact-match and the registry has no prefix rule —
+        // so the `.dockerfile` extension above is what covers a variant
+        // file, spelled `<stage>.dockerfile`.
+        filenames: &["Dockerfile", "dockerfile", "Containerfile", "containerfile"],
+        // `tree-sitter-containerfile`, not `tree-sitter-dockerfile`: the
+        // latter is pinned to the tree-sitter 0.20 runtime and would drag a
+        // second one into the build, exactly like `tree-sitter-toml` above.
+        grammar: || tree_sitter_containerfile::LANGUAGE.into(),
+        queries: queries!("dockerfile"),
+    },
 ];
 
 /// An opaque handle to a language in the registry.

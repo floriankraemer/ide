@@ -1,0 +1,11 @@
+-- A tiny greeter module, used as the highlighting fixture.
+local M = {}
+
+function M.greet(name)
+  if name == nil then
+    return "hello, world"
+  end
+  return "hello, " .. name
+end
+
+return M
