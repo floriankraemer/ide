@@ -4,8 +4,8 @@
 #include <vector>
 
 #include <QByteArray>
-#include <QColor>
 #include <QSyntaxHighlighter>
+#include <QTextCharFormat>
 #include <QString>
 #include <QVector>
 
@@ -43,6 +43,13 @@ public:
     // callers that don't need folding (e.g. tests).
     SyntaxHighlighter(QTextDocument *document, QString fileName, CodeEditor *editor = nullptr);
 
+    // Drops the cached per-scope format table so the next highlight pass
+    // asks Rust for a freshly resolved palette. Call whenever anything the
+    // palette is resolved from changes — the active theme, the user's
+    // syntax colours — and then rehighlight(). Without it a theme switch
+    // repaints the chrome and leaves the tokens in the old theme's colours.
+    void invalidatePalette();
+
 protected:
     void highlightBlock(const QString &text) override;
 
@@ -56,8 +63,9 @@ private:
     // Prefix maxima of cachedSpans_[i].end — monotonic, so highlightBlock()
     // can binary-search the first span reaching into a block.
     std::vector<std::size_t> cachedSpanMaxEnd_;
-    QVector<QColor> scopeColors_;
-    QString scopeColorsTheme_;
+    // Per-scope character formats for the current (theme, language),
+    // resolved by syntax_core::theme. Empty means "not built yet".
+    QVector<QTextCharFormat> scopeFormats_;
     QVector<int> cachedByteOffsets_;
     QByteArray cachedTextBytes_;
 };

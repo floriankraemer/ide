@@ -68,12 +68,7 @@ pub struct Theme {
 }
 
 // The Darcula-ish palette, lifted verbatim from the C++ `colorForKind`
-// literals so T3 can delete them without changing a pixel.
-//
-// NOTE: `dark` and `light` deliberately still share this one palette, which
-// is what the C++ did — and it is a latent bug (mid-grey comments on a light
-// background read badly). Fixing it is a visible change and belongs with
-// T3's review, not smuggled in here.
+// literals — the `dark` theme still looks exactly as it did.
 const DARCULA: &[(&str, ScopeStyle)] = &[
     ("keyword", ScopeStyle::fg(Rgb::new(0xcc, 0x78, 0x32))),
     ("string", ScopeStyle::fg(Rgb::new(0x6a, 0x87, 0x59))),
@@ -81,6 +76,20 @@ const DARCULA: &[(&str, ScopeStyle)] = &[
     ("number", ScopeStyle::fg(Rgb::new(0x68, 0x97, 0xbb))),
     ("function", ScopeStyle::fg(Rgb::new(0xff, 0xc6, 0x6d))),
     ("type", ScopeStyle::fg(Rgb::new(0xa9, 0xb7, 0xc6))),
+];
+
+// The `light` theme paints on `#ffffff` (see `colorsForTheme` in
+// `theme.cpp`), where Darcula's colours — mid-grey comments above all —
+// are unreadable. IntelliJ-Light-flavoured replacements, every one at or
+// above WCAG AA 4.5:1 on white, the bar `docs/design/language-platform-ui.md`
+// section 1 sets for every other colour in this product.
+const LIGHT: &[(&str, ScopeStyle)] = &[
+    ("keyword", ScopeStyle::fg(Rgb::new(0x00, 0x33, 0xb3))), // 9.9:1
+    ("string", ScopeStyle::fg(Rgb::new(0x06, 0x7d, 0x17))),  // 5.3:1
+    ("comment", ScopeStyle::fg(Rgb::new(0x5f, 0x6b, 0x7a))), // 5.4:1
+    ("number", ScopeStyle::fg(Rgb::new(0x17, 0x50, 0xeb))),  // 6.2:1
+    ("function", ScopeStyle::fg(Rgb::new(0x79, 0x5e, 0x26))), // 6.1:1
+    ("type", ScopeStyle::fg(Rgb::new(0x0f, 0x5b, 0x8f))),    // 7.2:1
 ];
 
 // VS Code Dark+, likewise from `vscodeDarkColorForKind`.
@@ -103,7 +112,7 @@ pub static BUILTIN_THEMES: &[Theme] = &[
     },
     Theme {
         name: "light",
-        base: DARCULA,
+        base: LIGHT,
         languages: &[],
     },
     Theme {
@@ -243,6 +252,18 @@ mod tests {
         assert_eq!(
             style_of(&vs, "keyword").fg,
             Some(Rgb::new(0x56, 0x9c, 0xd6))
+        );
+    }
+
+    #[test]
+    fn light_theme_does_not_reuse_the_dark_palette() {
+        let light = palette("light", "rust", &UserStyles::default());
+        let dark = super::palette("dark", "rust", &UserStyles::default());
+        assert_ne!(light, dark);
+        // Darcula's mid-grey comment is the worst offender on white.
+        assert_ne!(
+            style_of(&light, "comment").fg,
+            style_of(&dark, "comment").fg
         );
     }
 

@@ -90,6 +90,25 @@ mod ffi {
         scope: u16,
     }
 
+    /// One resolved entry of a syntax palette (T3), at the index that is
+    /// its `syntax_core::Scope` id — the same `u16` `FfiHighlightSpan`
+    /// carries. Every colour rule (theme lookup, user override
+    /// precedence, parent-scope inheritance) has already been applied on
+    /// the Rust side; the view only paints.
+    ///
+    /// `has_fg == false` means "no colour of this scope's own": the
+    /// editor's default foreground, which is what an invalid `QColor`
+    /// used to mean in `syntax_highlighter.cpp`.
+    struct FfiScopeStyle {
+        has_fg: bool,
+        red: u8,
+        green: u8,
+        blue: u8,
+        bold: bool,
+        italic: bool,
+        underline: bool,
+    }
+
     /// One in-editor find match, as a half-open `[start, end)` range of
     /// UTF-16 code units — the unit `QTextCursor::setPosition` takes, so
     /// the view can use these directly without an offset table (unlike
@@ -386,6 +405,14 @@ mod ffi {
         /// Call after either, on the same revision-change hook that
         /// already drives highlighting.
         fn fold_ranges(self: &SyntaxHighlighterHandle) -> Vec<FfiFoldRange>;
+
+        /// The resolved syntax palette for `theme` and *this* handle's
+        /// language, indexed by scope id and always exactly as long as
+        /// `syntax_scope_names()`. User overrides are read from
+        /// `settings.toml` here, so the view neither knows the config
+        /// shape nor the precedence rules. Build once per (theme,
+        /// language) — it is pure data afterwards.
+        fn palette(self: &SyntaxHighlighterHandle, theme: &str) -> Vec<FfiScopeStyle>;
     }
 
     unsafe extern "C++Qt" {
@@ -1615,11 +1642,13 @@ mod ffi {
 
 use core::pin::Pin;
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
 use app_core::{AppError, AppSession, TabId};
 use cxx_qt::Threading;
+use syntax_core::theme;
 use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QVariant,
 };
@@ -1663,18 +1692,25 @@ fn to_ffi_result(result: Result<(), AppError>) -> FfiResult {
 /// Rust side of the opaque `SyntaxHighlighterHandle` (Y2/A1): one
 /// `syntax_core::Highlighter` per open editor, owned across the FFI seam
 /// by the C++ `SyntaxHighlighter` as a `rust::Box`.
-pub struct SyntaxHighlighterHandle(syntax_core::Highlighter);
+pub struct SyntaxHighlighterHandle {
+    highlighter: syntax_core::Highlighter,
+    /// Kept alongside the highlighter so `palette` can resolve
+    /// per-language colours without the view having to know, or plumb,
+    /// a language id of its own.
+    language: syntax_core::Language,
+}
 
 fn new_syntax_highlighter(file_name: &str) -> Box<SyntaxHighlighterHandle> {
     let language = syntax_core::language_for_path(Path::new(file_name));
-    Box::new(SyntaxHighlighterHandle(syntax_core::Highlighter::new(
+    Box::new(SyntaxHighlighterHandle {
+        highlighter: syntax_core::Highlighter::new(language),
         language,
-    )))
+    })
 }
 
 impl SyntaxHighlighterHandle {
     fn set_text(&mut self, text: &str) -> Vec<ffi::FfiHighlightSpan> {
-        to_ffi_spans(self.0.set_text(text))
+        to_ffi_spans(self.highlighter.set_text(text))
     }
 
     fn apply_edit(
@@ -1685,13 +1721,13 @@ impl SyntaxHighlighterHandle {
         new_end_byte: usize,
     ) -> Vec<ffi::FfiHighlightSpan> {
         to_ffi_spans(
-            self.0
+            self.highlighter
                 .edit(new_text, start_byte, old_end_byte, new_end_byte),
         )
     }
 
     fn fold_ranges(&self) -> Vec<ffi::FfiFoldRange> {
-        self.0
+        self.highlighter
             .fold_ranges()
             .into_iter()
             .map(|range| ffi::FfiFoldRange {
@@ -1700,6 +1736,57 @@ impl SyntaxHighlighterHandle {
             })
             .collect()
     }
+
+    fn palette(&self, theme: &str) -> Vec<ffi::FfiScopeStyle> {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        let user = user_styles(&settings);
+        theme::palette(theme, self.language.id(), &user)
+            .styles()
+            .iter()
+            .map(|style| ffi::FfiScopeStyle {
+                has_fg: style.fg.is_some(),
+                red: style.fg.map_or(0, |rgb| rgb.r),
+                green: style.fg.map_or(0, |rgb| rgb.g),
+                blue: style.fg.map_or(0, |rgb| rgb.b),
+                bold: style.bold,
+                italic: style.italic,
+                underline: style.underline,
+            })
+            .collect()
+    }
+}
+
+/// Translate the plain string maps `app-config` persists into the typed
+/// overrides `syntax_core::theme` resolves against. A colour that will not
+/// parse is dropped rather than reported: a hand-edited `settings.toml`
+/// with one bad hex value must not stop the editor from highlighting, and
+/// `theme::palette` already ignores scope names it does not know.
+fn user_styles(settings: &app_config::Settings) -> theme::UserStyles {
+    theme::UserStyles {
+        base: to_scope_styles(&settings.syntax_colors),
+        by_language: settings
+            .syntax_colors_by_language
+            .iter()
+            .map(|(language, styles)| (language.clone(), to_scope_styles(styles)))
+            .collect(),
+    }
+}
+
+fn to_scope_styles(styles: &app_config::ScopeStyles) -> HashMap<String, theme::ScopeStyle> {
+    styles
+        .iter()
+        .map(|(scope, style)| {
+            (
+                scope.clone(),
+                theme::ScopeStyle {
+                    fg: style.fg().and_then(theme::Rgb::parse),
+                    bold: style.bold(),
+                    italic: style.italic(),
+                    underline: style.underline(),
+                },
+            )
+        })
+        .collect()
 }
 
 fn syntax_scope_names() -> Vec<String> {

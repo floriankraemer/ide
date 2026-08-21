@@ -17,12 +17,12 @@ per `CLAUDE.md`.
 | R3 | done | `ea4f8eb` |
 | T1 | done | `01f1685` |
 | T2 | done | `76352ce` |
-| T3 | open | |
+| T3 | done | pending |
 | T4 | open | |
-| I1 | open | |
-| R4a | done | pending |
-| R4b | done | pending |
-| R4c | done | pending |
+| I1 | done | pending |
+| R4a | done | `7ed7b79` |
+| R4b | done | `7ed7b79` |
+| R4c | done | `7ed7b79` |
 | R4d | open | |
 | R5 | open | |
 | R6 | open | |
@@ -31,7 +31,7 @@ per `CLAUDE.md`.
 | G2 | open | |
 | G3 | open | |
 | L1 | done | `0554341` |
-| L2 | done | pending |
+| L2 | done | `c0a83b5` |
 | L3 | open | |
 | L4 | open | |
 | L5 | open | |

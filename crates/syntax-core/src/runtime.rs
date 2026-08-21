@@ -17,7 +17,7 @@
 //!
 //! ```text
 //! <config_dir>/languages/<dir>/language.toml
-//! <config_dir>/languages/<dir>/queries/{highlights,locals,folds,tags,inherits}.scm
+//! <config_dir>/languages/<dir>/queries/{highlights,locals,folds,tags,inherits,injections}.scm
 //! ```
 //!
 //! ## `language.toml`
@@ -209,6 +209,7 @@ fn load_one(
         folds: read_query(dir, "folds", inherited.folds).map_err(fail)?,
         tags: read_query(dir, "tags", inherited.tags).map_err(fail)?,
         inherits: read_query(dir, "inherits", inherited.inherits).map_err(fail)?,
+        injections: read_query(dir, "injections", inherited.injections).map_err(fail)?,
     };
 
     // Compile before publishing: a broken query must be reported here,
@@ -221,6 +222,7 @@ fn load_one(
         ("folds", queries.folds),
         ("tags", queries.tags),
         ("inherits", queries.inherits),
+        ("injections", queries.injections),
     ] {
         if let Some(source) = source {
             Query::new(&grammar, source).map_err(|err| {

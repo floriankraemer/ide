@@ -70,7 +70,6 @@
 #include <QSplitter>
 #include <QTabBar>
 #include <QTabWidget>
-#include <QtGui/QSyntaxHighlighter>
 #include <QtGui/QTextDocument>
 #include <QTreeView>
 #include <QTreeWidget>
@@ -560,16 +559,22 @@ public:
         forEachEditor([this](QPlainTextEdit *editor) { applyEditorAppearance(editor); });
     }
 
-    // Token colors follow the theme (see syntax_highlighter.cpp), and a
-    // QSyntaxHighlighter only re-runs when its document changes — so a live
-    // theme switch has to ask every open editor to re-highlight itself.
+    // Token colors are resolved by syntax_core::theme from the active
+    // theme (and the user's syntax colours) and then cached per
+    // highlighter, and a QSyntaxHighlighter only re-runs when its document
+    // changes — so a live theme switch has to drop that cache and ask every
+    // open editor to re-highlight itself.
     void refreshHighlighting()
     {
         forEachEditor([](QPlainTextEdit *editor) {
             // QSyntaxHighlighter parents itself to the document it attaches
             // to, so that — not the editor widget — is where onTabOpened's
-            // instance can be found again.
-            if (auto *highlighter = editor->document()->findChild<QSyntaxHighlighter *>()) {
+            // instance can be found again. SyntaxHighlighter has no
+            // Q_OBJECT of its own, so this matches on QSyntaxHighlighter's
+            // metaobject — sound because onTabOpened attaches no other
+            // QSyntaxHighlighter subclass to an editor document.
+            if (auto *highlighter = editor->document()->findChild<SyntaxHighlighter *>()) {
+                highlighter->invalidatePalette();
                 highlighter->rehighlight();
             }
         });

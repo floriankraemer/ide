@@ -548,6 +548,151 @@ fn spans_from_tree(
     spans
 }
 
+/// How deep injected regions are followed: the host document is depth 0,
+/// and a tree is only asked for its own injections while its depth is
+/// below this bound. So up to three nested injected trees are parsed
+/// (Markdown → HTML → CSS is exactly the limit), and a fourth level is
+/// left unhighlighted rather than followed.
+///
+/// A bound, not recursion to exhaustion: injection queries are data —
+/// a runtime grammar (G1a/G1b) or a hostile file can describe a region
+/// that injects itself, and an unbounded walk on that input hangs the
+/// editor. Three levels covers every real nesting anyone has reported.
+pub const MAX_INJECTION_DEPTH: usize = 3;
+
+/// One injected region found by an `injections.scm` match: the language
+/// it is written in, and the byte ranges of its `@injection.content`
+/// captures. Several ranges in one match are parsed as *one* tree (that
+/// is what `Parser::set_included_ranges` is for), so a language split
+/// across several nodes still sees one continuous document.
+struct InjectionRegion {
+    language: String,
+    ranges: Vec<tree_sitter::Range>,
+}
+
+impl InjectionRegion {
+    fn covers(&self, span: &HighlightSpan) -> bool {
+        self.ranges
+            .iter()
+            .any(|r| span.start < r.end_byte && span.end > r.start_byte)
+    }
+}
+
+/// The injected regions `query` finds in `tree`.
+///
+/// Both standard spellings of the language name are supported: an
+/// `@injection.language` capture (the node's text names the language) and
+/// a `(#set! injection.language "css")` pattern directive. The directive
+/// wins when a pattern somehow carries both, since it is the literal the
+/// query author wrote rather than text read out of the document.
+fn injection_regions(query: &Query, tree: &tree_sitter::Tree, text: &str) -> Vec<InjectionRegion> {
+    let capture_names = query.capture_names();
+    let mut regions = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
+    while let Some(m) = matches.next() {
+        let mut language = query
+            .property_settings(m.pattern_index)
+            .iter()
+            .find(|p| &*p.key == "injection.language")
+            .and_then(|p| p.value.as_deref())
+            .map(str::to_string);
+        let mut ranges = Vec::new();
+        for capture in m.captures {
+            match capture_names[capture.index as usize] {
+                "injection.content" => {
+                    let range = capture.node.range();
+                    if range.end_byte > range.start_byte {
+                        ranges.push(range);
+                    }
+                }
+                "injection.language" if language.is_none() => {
+                    language = capture
+                        .node
+                        .utf8_text(text.as_bytes())
+                        .ok()
+                        .map(|name| name.trim().trim_matches(['"', '\'', '`']).to_lowercase());
+                }
+                _ => {}
+            }
+        }
+        let Some(language) = language.filter(|l| !l.is_empty()) else {
+            continue;
+        };
+        if ranges.is_empty() {
+            continue;
+        }
+        // `set_included_ranges` rejects ranges that are not ascending and
+        // disjoint, and query captures arrive in match order, not
+        // document order.
+        ranges.sort_by_key(|r| r.start_byte);
+        ranges.dedup_by_key(|r| r.start_byte);
+        regions.push(InjectionRegion { language, ranges });
+    }
+    regions
+}
+
+/// Highlight spans for `tree` plus every language injected into it, as one
+/// stream sorted by `(start, end)`.
+///
+/// The sort is a contract, not a convenience: the view binary-searches
+/// this stream by `start` (`syntax_highlighter.cpp`), so an out-of-order
+/// span silently mis-colours the document rather than failing loudly.
+///
+/// Injected spans win: a host span overlapping an injected region is
+/// dropped before the injected spans are merged in, so `<script>`'s JS is
+/// coloured as JS and not left under whatever the host grammar made of it.
+///
+/// `resolve` maps an injected language name onto a compiled language. It
+/// is a parameter rather than a direct registry call so the recursion can
+/// be driven by synthetic languages in tests — [`MAX_INJECTION_DEPTH`] is
+/// only worth having if something proves it holds.
+fn spans_with_injections(
+    compiled: &CompiledLanguage,
+    tree: &tree_sitter::Tree,
+    text: &str,
+    depth: usize,
+    resolve: &dyn Fn(&str) -> Option<Arc<CompiledLanguage>>,
+) -> Vec<HighlightSpan> {
+    let mut spans = compiled.highlights.as_ref().map_or_else(Vec::new, |query| {
+        spans_from_tree(query, &compiled.highlight_scopes, tree, text)
+    });
+    let regions = match compiled.injections.as_ref() {
+        Some(query) if depth < MAX_INJECTION_DEPTH => injection_regions(query, tree, text),
+        _ => Vec::new(),
+    };
+    if regions.is_empty() {
+        return spans;
+    }
+    spans.retain(|span| !regions.iter().any(|region| region.covers(span)));
+    for region in regions {
+        let Some(inner) = resolve(&region.language) else {
+            continue;
+        };
+        let mut parser = Parser::new();
+        if parser.set_language(&inner.grammar).is_err()
+            || parser.set_included_ranges(&region.ranges).is_err()
+        {
+            continue;
+        }
+        // `set_included_ranges` over the *whole* document, not a
+        // substring: byte offsets in the sub-tree are already document
+        // offsets, so nothing has to be shifted back afterwards.
+        let Some(subtree) = parser.parse(text, None) else {
+            continue;
+        };
+        spans.extend(spans_with_injections(
+            &inner,
+            &subtree,
+            text,
+            depth + 1,
+            resolve,
+        ));
+    }
+    spans.sort_by_key(|span| (span.start, span.end));
+    spans
+}
+
 /// Byte offset `offset` within `text`, expressed as a tree-sitter
 /// [`tree_sitter::Point`] (row, byte-column-within-row) — the coordinate
 /// `InputEdit` needs alongside byte offsets. `offset` is clamped to
@@ -647,11 +792,23 @@ impl Highlighter {
         self.reparse()
     }
 
+    /// Reparse the host tree incrementally, then re-derive every injected
+    /// region from scratch.
+    ///
+    /// Only the host tree is persistent. Injected sub-trees are rebuilt on
+    /// every reparse, because an edit can move, split, delete or create a
+    /// region outright (typing `</script>` re-languages everything after
+    /// it), and a sub-tree kept across that is not stale in a way the user
+    /// forgives — it is the wrong language on screen. The cost is one full
+    /// parse per injected region per keystroke, bounded by how much of the
+    /// document is injected; a document with no `injections.scm` pays
+    /// nothing at all and behaves exactly as before.
+    ///
+    /// ponytail: re-derive per edit; make injected sub-trees incremental
+    /// (edit each, keyed by region identity) only if profiling on a real
+    /// HTML/Markdown file says it matters.
     fn reparse(&mut self) -> Vec<HighlightSpan> {
         let Some(compiled) = self.compiled.clone() else {
-            return Vec::new();
-        };
-        let Some(query) = compiled.highlights.as_ref() else {
             return Vec::new();
         };
         let Some(parser) = self.parser.as_mut() else {
@@ -660,7 +817,13 @@ impl Highlighter {
         let Some(new_tree) = parser.parse(&self.text, self.tree.as_ref()) else {
             return Vec::new();
         };
-        let spans = spans_from_tree(query, &compiled.highlight_scopes, &new_tree, &self.text);
+        // Resolved through the registry per reparse rather than cached: a
+        // lookup is an `Arc` clone plus a `OnceLock` read, and reading
+        // through means a live registry reload (G2) also reaches injected
+        // grammars. The host grammar stays pinned, as decision 3 requires.
+        let spans = spans_with_injections(&compiled, &new_tree, &self.text, 0, &|id| {
+            language_by_id(id).and_then(registry::compiled)
+        });
         self.tree = Some(new_tree);
         spans
     }
@@ -1564,5 +1727,243 @@ mod tests {
                 .any(|o| o.name == "radius" && !o.is_definition),
             "self.radius is a reference"
         );
+    }
+
+    // ---- injections (I1) -------------------------------------------
+    //
+    // The catalog ships no `injections.scm` yet: the languages that
+    // genuinely need one (HTML, Markdown, CSS) arrive in R4d, and PHP —
+    // the one catalog language that *looks* like it should inject — cannot,
+    // because the row deliberately uses `LANGUAGE_PHP_ONLY`, whose grammar
+    // has no production for text outside `<?php ... ?>` (it parses such a
+    // file into an `ERROR` node, so there is no node to capture as
+    // `@injection.content`). Injecting HTML into PHP means switching that
+    // row to `LANGUAGE_PHP` once an HTML row exists — an R4d decision.
+    //
+    // So the mechanism is proved here against synthetic hosts built from
+    // real grammars: Rust injecting JSON (cross-language, both spellings
+    // of the language name) and JSON injecting itself (nesting, and the
+    // depth bound). Same code path the shipped queries will take.
+
+    /// A catalog language's compiled grammar and highlights, plus an
+    /// `injections.scm` it does not ship. Rebuilt rather than cloned
+    /// because `Query` is not `Clone`.
+    fn with_injections(language: Language, injections: &str) -> Arc<CompiledLanguage> {
+        let def = language.def().expect("catalog language");
+        let grammar = (def.grammar)();
+        let highlights = Query::new(&grammar, def.queries.highlights.expect("highlights.scm"))
+            .expect("highlights.scm compiles");
+        let highlight_scopes = highlights
+            .capture_names()
+            .iter()
+            .map(|name| Scope::resolve(name))
+            .collect();
+        Arc::new(CompiledLanguage {
+            highlights: Some(highlights),
+            highlight_scopes,
+            injections: Some(Query::new(&grammar, injections).expect("injections.scm compiles")),
+            locals: None,
+            folds: None,
+            tags: None,
+            inherits: None,
+            grammar,
+        })
+    }
+
+    fn parse_with(compiled: &CompiledLanguage, text: &str) -> tree_sitter::Tree {
+        parse_once(&compiled.grammar, text).expect("parse")
+    }
+
+    fn from_registry(id: &str) -> Option<Arc<CompiledLanguage>> {
+        language_by_id(id).and_then(registry::compiled)
+    }
+
+    fn scopes_at<'a>(spans: &'a [HighlightSpan], text: &'a str, name: &str) -> Vec<&'a str> {
+        let wanted = scope(name);
+        spans
+            .iter()
+            .filter(|s| s.scope == wanted)
+            .map(|s| &text[s.start..s.end])
+            .collect()
+    }
+
+    /// `#set! injection.language` spelling: a Rust raw string holding JSON.
+    #[test]
+    fn a_set_directive_names_the_injected_language() {
+        let host = with_injections(
+            rust(),
+            r#"((raw_string_literal (string_content) @injection.content)
+                (#set! injection.language "json"))"#,
+        );
+        let text = r####"const C: &str = r#"{"k": true}"#;"####;
+        let tree = parse_with(&host, text);
+        let spans = spans_with_injections(&host, &tree, text, 0, &from_registry);
+
+        // `true` as a keyword inside a Rust string literal is something
+        // only the injected JSON grammar can produce.
+        assert!(
+            scopes_at(&spans, text, "keyword").contains(&"true"),
+            "region not highlighted as JSON: {spans:?}"
+        );
+        assert!(
+            scopes_at(&spans, text, "string").contains(&"\"k\""),
+            "JSON key not highlighted as a JSON string"
+        );
+        // The host's own `@string` over the whole raw string is gone: the
+        // injected language owns that range.
+        assert!(
+            !scopes_at(&spans, text, "string")
+                .iter()
+                .any(|t| t.starts_with("r#\"")),
+            "host span survived inside an injected region"
+        );
+        // The host still highlights everything outside the region.
+        assert!(scopes_at(&spans, text, "keyword").contains(&"const"));
+    }
+
+    /// `@injection.language` capture spelling: the node's *text* names the
+    /// language, the way `(#match?)`-free upstream queries do it.
+    #[test]
+    fn an_injection_language_capture_names_the_injected_language() {
+        let host = with_injections(
+            rust(),
+            "(macro_invocation
+               macro: (identifier) @injection.language
+               (token_tree (token_tree) @injection.content))",
+        );
+        let text = r#"fn f() { json!({"k": true}); }"#;
+        let tree = parse_with(&host, text);
+        let spans = spans_with_injections(&host, &tree, text, 0, &from_registry);
+
+        assert!(
+            scopes_at(&spans, text, "string").contains(&"\"k\""),
+            "macro body not parsed as JSON: {spans:?}"
+        );
+    }
+
+    #[test]
+    fn merged_spans_stay_sorted_by_start_offset() {
+        let host = with_injections(
+            rust(),
+            r#"((raw_string_literal (string_content) @injection.content)
+                (#set! injection.language "json"))"#,
+        );
+        let text = r####"fn f() { let a = r#"{"x": 1}"#; let b = r#"[2, 3]"#; }"####;
+        let tree = parse_with(&host, text);
+        let spans = spans_with_injections(&host, &tree, text, 0, &from_registry);
+
+        assert!(
+            spans.len() > 4,
+            "expected host and injected spans: {spans:?}"
+        );
+        assert!(
+            spans
+                .windows(2)
+                .all(|w| (w[0].start, w[0].end) <= (w[1].start, w[1].end)),
+            "merged stream is not sorted; the view binary-searches it: {spans:?}"
+        );
+    }
+
+    /// An unknown injected language is skipped, not fatal — a runtime
+    /// grammar can name a language this build does not have.
+    #[test]
+    fn an_unknown_injected_language_leaves_the_host_spans_alone() {
+        let host = with_injections(
+            rust(),
+            r#"((raw_string_literal) @injection.content
+                (#set! injection.language "klingon"))"#,
+        );
+        let text = r####"const C: &str = r#"{"k": true}"#;"####;
+        let tree = parse_with(&host, text);
+        let spans = spans_with_injections(&host, &tree, text, 0, &from_registry);
+
+        assert!(scopes_at(&spans, text, "keyword").contains(&"const"));
+        assert!(!scopes_at(&spans, text, "keyword").contains(&"true"));
+    }
+
+    /// A host with no `injections.scm` must produce byte-identical output
+    /// to the pre-I1 single-tree path.
+    #[test]
+    fn a_document_without_injections_is_unchanged() {
+        let compiled = registry::compiled(rust()).expect("rust compiles");
+        let text = "fn main() { let s = \"hi\"; /* c */ }";
+        let tree = parse_with(&compiled, text);
+        let merged = spans_with_injections(&compiled, &tree, text, 0, &from_registry);
+        let single = spans_from_tree(
+            compiled.highlights.as_ref().unwrap(),
+            &compiled.highlight_scopes,
+            &tree,
+            text,
+        );
+        assert_eq!(merged, single);
+        assert_eq!(merged, highlight(rust(), text));
+    }
+
+    /// Nesting: injections are followed through injected trees, and the
+    /// walk stops at [`MAX_INJECTION_DEPTH`] instead of running forever.
+    ///
+    /// A chain of four synthetic languages over the JSON grammar, each
+    /// injecting the next into any nested object. `l4` is what the
+    /// depth-3 tree would ask for, so "`l4` was never resolved" is the
+    /// bound, stated as an observation rather than a constant.
+    #[test]
+    fn nesting_is_followed_and_bounded() {
+        let injects = |next: &str| {
+            with_injections(
+                json(),
+                &format!(r#"((object) @injection.content (#set! injection.language "{next}"))"#),
+            )
+        };
+        let host = injects("l1");
+        let chain = [
+            ("l1", injects("l2")),
+            ("l2", injects("l3")),
+            ("l3", injects("l4")),
+        ];
+        // Nested deeper than the bound, so the bound stops the walk, not
+        // the document.
+        let text = r#"{"a":{"b":{"c":{"d":{"e":true}}}}}"#;
+        let tree = parse_with(&host, text);
+
+        let asked = std::cell::RefCell::new(Vec::new());
+        let resolve = |id: &str| {
+            asked.borrow_mut().push(id.to_string());
+            chain
+                .iter()
+                .find(|(name, _)| *name == id)
+                .map(|(_, compiled)| compiled.clone())
+        };
+        let spans = spans_with_injections(&host, &tree, text, 0, &resolve);
+
+        let asked = asked.into_inner();
+        assert!(
+            asked.contains(&"l3".to_string()),
+            "nesting stopped early: {asked:?}"
+        );
+        assert!(
+            !asked.contains(&"l4".to_string()),
+            "recursed past MAX_INJECTION_DEPTH = {MAX_INJECTION_DEPTH}: {asked:?}"
+        );
+        assert!(
+            spans
+                .windows(2)
+                .all(|w| (w[0].start, w[0].end) <= (w[1].start, w[1].end)),
+            "nested merge is not sorted: {spans:?}"
+        );
+        assert!(scopes_at(&spans, text, "keyword").contains(&"true"));
+    }
+
+    /// Injections survive an incremental edit, and `fold_ranges` still
+    /// reads off the host tree.
+    #[test]
+    fn incremental_editing_still_works_with_a_host_tree() {
+        let mut highlighter = Highlighter::new(rust());
+        let before = "fn main() {\n    let x = 1;\n}\n";
+        highlighter.set_text(before);
+        let after = "fn main() {\n    let x = 2;\n}\n";
+        let start = before.find('1').unwrap();
+        let spans = highlighter.edit(after, start, start + 1, start + 1);
+        assert!(scopes_at(&spans, after, "keyword").contains(&"fn"));
+        assert!(!highlighter.fold_ranges().is_empty());
     }
 }

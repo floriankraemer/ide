@@ -10,6 +10,7 @@
 #include <vector>
 
 #include <QColor>
+#include <QFont>
 #include <QTextBlock>
 #include <QTextCharFormat>
 #include <QTextDocument>
@@ -19,107 +20,33 @@ namespace ui_shell {
 
 namespace {
 
-// The six colour buckets the palette has always had. A file-local enum,
-// not an FFI type: scopes cross the seam as bare ids now, and T3 replaces
-// both functions below with a Rust-supplied palette anyway.
-enum class TokenKind
+// The character formats of one (theme, language), indexed by scope id —
+// exactly the layout `FfiHighlightSpan::scope` indexes and exactly as long
+// as the Rust scope table, because Rust built it. Every colour decision
+// (theme table, user override precedence, parent-scope inheritance, what a
+// missing colour means) lives in `syntax_core::theme`; this only paints.
+QVector<QTextCharFormat> buildScopeFormats(const SyntaxHighlighterHandle &handle,
+                                           const QString &themeName)
 {
-    Keyword,
-    String,
-    Comment,
-    Number,
-    Function,
-    Type,
-    Other,
-};
+    const QByteArray themeBytes = themeName.toUtf8();
+    const rust::Vec<FfiScopeStyle> styles = handle.palette(
+      rust::Str(themeBytes.constData(), static_cast<std::size_t>(themeBytes.size())));
 
-// VS Code's Dark+ token colors. Kept here rather than in theme.cpp so the
-// theme module stays free of the generated FFI types.
-QColor vscodeDarkColorForKind(TokenKind kind)
-{
-    switch (kind) {
-    case TokenKind::Keyword:
-        return QColor(QStringLiteral("#569cd6"));
-    case TokenKind::String:
-        return QColor(QStringLiteral("#ce9178"));
-    case TokenKind::Comment:
-        return QColor(QStringLiteral("#6a9955"));
-    case TokenKind::Number:
-        return QColor(QStringLiteral("#b5cea8"));
-    case TokenKind::Function:
-        return QColor(QStringLiteral("#dcdcaa"));
-    case TokenKind::Type:
-        return QColor(QStringLiteral("#4ec9b0"));
-    case TokenKind::Other:
-    default:
-        // Invalid means "leave it to the editor palette's Text role".
-        return QColor();
-    }
-}
-
-// Y2's promised theme-sourced colors: the color scheme follows the chrome
-// theme, which is what a theme named after an editor has to do to look like
-// it. A3's split still holds — the *mechanism* stays separate from the
-// chrome QSS, it just keys off the same theme name.
-QColor colorForKind(TokenKind kind, const QString &themeName)
-{
-    if (themeName == QStringLiteral("vscode-dark")) {
-        return vscodeDarkColorForKind(kind);
-    }
-    // Darcula-ish palette for the Dark and Light themes, unchanged.
-    switch (kind) {
-    case TokenKind::Keyword:
-        return QColor(QStringLiteral("#cc7832"));
-    case TokenKind::String:
-        return QColor(QStringLiteral("#6a8759"));
-    case TokenKind::Comment:
-        return QColor(QStringLiteral("#808080"));
-    case TokenKind::Number:
-        return QColor(QStringLiteral("#6897bb"));
-    case TokenKind::Function:
-        return QColor(QStringLiteral("#ffc66d"));
-    case TokenKind::Type:
-        return QColor(QStringLiteral("#a9b7c6"));
-    case TokenKind::Other:
-    default:
-        return QColor();
-    }
-}
-
-// The colour table, indexed by scope id. Built from the Rust scope table's
-// *names* (syntax_scope_names()), never from hardcoded ids, and always
-// exactly as long as it — so a scope added on the Rust side lands here as
-// a no-colour entry rather than as a shifted palette.
-//
-// T3 replaces this with a Rust-supplied palette; until then the six
-// colour buckets above are keyed off each scope's root segment, which
-// reproduces the old @keyword/@string/@comment/@number/@function/@type
-// behaviour exactly (every other capture stays uncoloured, as before).
-QVector<QColor> buildScopeColors(const QString &themeName)
-{
-    const rust::Vec<rust::String> names = syntax_scope_names();
-    QVector<QColor> colors;
-    colors.reserve(static_cast<int>(names.size()));
-    for (const auto &name : names) {
-        const QString scope = QString::fromUtf8(name.data(), static_cast<int>(name.size()));
-        const QString root = scope.section(QLatin1Char('.'), 0, 0);
-        TokenKind kind = TokenKind::Other;
-        if (root == QStringLiteral("keyword")) {
-            kind = TokenKind::Keyword;
-        } else if (root == QStringLiteral("string")) {
-            kind = TokenKind::String;
-        } else if (root == QStringLiteral("comment")) {
-            kind = TokenKind::Comment;
-        } else if (root == QStringLiteral("number")) {
-            kind = TokenKind::Number;
-        } else if (root == QStringLiteral("function")) {
-            kind = TokenKind::Function;
-        } else if (root == QStringLiteral("type")) {
-            kind = TokenKind::Type;
+    QVector<QTextCharFormat> formats;
+    formats.reserve(static_cast<int>(styles.size()));
+    for (const auto &style : styles) {
+        QTextCharFormat format;
+        if (style.has_fg) {
+            format.setForeground(QColor(style.red, style.green, style.blue));
         }
-        colors.append(colorForKind(kind, themeName));
+        if (style.bold) {
+            format.setFontWeight(QFont::Bold);
+        }
+        format.setFontItalic(style.italic);
+        format.setFontUnderline(style.underline);
+        formats.append(format);
     }
-    return colors;
+    return formats;
 }
 
 // Builds a UTF-16-code-unit-index -> UTF-8-byte-offset table by walking
@@ -243,6 +170,11 @@ SyntaxHighlighter::SyntaxHighlighter(QTextDocument *document, QString fileName,
 {
 }
 
+void SyntaxHighlighter::invalidatePalette()
+{
+    scopeFormats_.clear();
+}
+
 void SyntaxHighlighter::highlightBlock(const QString &text)
 {
     Q_UNUSED(text);
@@ -320,12 +252,13 @@ void SyntaxHighlighter::highlightBlock(const QString &text)
         return;
     }
 
-    // Read once per block rather than per span — it can't change mid-block,
-    // and a theme switch re-runs the whole highlighter anyway.
-    const QString theme = activeThemeName();
-    if (theme != scopeColorsTheme_ || scopeColors_.isEmpty()) {
-        scopeColors_ = buildScopeColors(theme);
-        scopeColorsTheme_ = theme;
+    // Built once and reused across blocks and revisions. It is *not*
+    // re-derived per block from the active theme, so anything that changes
+    // what the palette resolves to — a theme switch, edited syntax colours —
+    // must call invalidatePalette() before rehighlight(); see
+    // MainWindow's refreshHighlighting().
+    if (scopeFormats_.isEmpty()) {
+        scopeFormats_ = buildScopeFormats(*highlighter_, activeThemeName());
     }
 
     const QVector<int> &byteOffsets = cachedByteOffsets_;
@@ -351,11 +284,7 @@ void SyntaxHighlighter::highlightBlock(const QString &text)
         }
         // The whole correctness story against a palette built from a
         // different scope table than the spans: never index past it.
-        if (span.scope >= static_cast<std::uint16_t>(scopeColors_.size())) {
-            continue;
-        }
-        const QColor color = scopeColors_.at(static_cast<int>(span.scope));
-        if (!color.isValid()) {
+        if (span.scope >= static_cast<std::uint16_t>(scopeFormats_.size())) {
             continue;
         }
         const int start = utf16IndexForByteOffset(byteOffsets, span.start);
@@ -365,9 +294,8 @@ void SyntaxHighlighter::highlightBlock(const QString &text)
         if (localEnd <= localStart) {
             continue;
         }
-        QTextCharFormat format;
-        format.setForeground(color);
-        setFormat(localStart, localEnd - localStart, format);
+        setFormat(localStart, localEnd - localStart,
+                   scopeFormats_.at(static_cast<int>(span.scope)));
     }
 }
 

@@ -25,6 +25,13 @@ pub struct QuerySet {
     pub folds: Option<&'static str>,
     pub tags: Option<&'static str>,
     pub inherits: Option<&'static str>,
+    /// Regions of a file written in *another* language (CSS in a `<style>`
+    /// element, a fenced code block in Markdown). Standard tree-sitter
+    /// shape: `@injection.content` is the region, and the language is named
+    /// either by an `@injection.language` capture or a
+    /// `(#set! injection.language "css")` directive — see
+    /// [`crate::MAX_INJECTION_DEPTH`].
+    pub injections: Option<&'static str>,
 }
 
 /// One language the editor can highlight and index.
@@ -59,6 +66,20 @@ macro_rules! queries {
             folds: Some(include_str!(concat!("../queries/", $dir, "/folds.scm"))),
             tags: Some(include_str!(concat!("../queries/", $dir, "/tags.scm"))),
             inherits: Some(include_str!(concat!("../queries/", $dir, "/inherits.scm"))),
+            injections: None,
+        }
+    };
+    // Opt-in arm: most languages have no injected regions, and an absent
+    // `injections.scm` must stay absent rather than become an empty file
+    // per language just to satisfy `include_str!`.
+    ($dir:literal, injections) => {
+        QuerySet {
+            injections: Some(include_str!(concat!(
+                "../queries/",
+                $dir,
+                "/injections.scm"
+            ))),
+            ..queries!($dir)
         }
     };
 }
@@ -271,6 +292,7 @@ pub struct CompiledLanguage {
     pub folds: Option<Query>,
     pub tags: Option<Query>,
     pub inherits: Option<Query>,
+    pub injections: Option<Query>,
 }
 
 fn compile(def: &LanguageDef) -> Result<CompiledLanguage, String> {
@@ -290,6 +312,7 @@ fn compile(def: &LanguageDef) -> Result<CompiledLanguage, String> {
         folds: compile_one("folds", def.queries.folds)?,
         tags: compile_one("tags", def.queries.tags)?,
         inherits: compile_one("inherits", def.queries.inherits)?,
+        injections: compile_one("injections", def.queries.injections)?,
         grammar,
     })
 }
