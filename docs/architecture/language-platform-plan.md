@@ -179,15 +179,23 @@ reasoning intact.
   actually owns, the server command per language id and the one id that
   diverges (`tsx` -> `typescriptreact`).
   See [ADR-0018](decisions/0018-single-source-language-detection.md).
-- **Runtime language definitions leak one generation per reload.** (not filed: bounded and deliberate)
-  Bounded and tiny — a few KB per reload of a human pressing a button — and
-  the alternative costs a lifetime parameter on every `LanguageDef` reader.
-  The reasoning, and the one condition that flips the answer (reloading from
-  a file watcher rather than a button), is commented at the leak site.
-- **No user-facing enable/disable for a healthy language.** (not filed: unbuilt feature, not a defect)
-  The Languages page can only re-enable a crash-quarantined grammar, because
-  no settings field or registry filtering exists for a plain disable.
-  A button was not added rather than shipping one that lies.
+- **~~Runtime language definitions leak one generation per reload.~~** (fixed, not filed)
+  Runtime definitions are owned and reference-counted, so a reload frees the
+  generation it replaced.
+  Proven by a test that holds each generation by `Weak` across five reloads of
+  *differing* query files — the case string interning would not have bounded.
+  The const catalog and its 31 rows were not touched, which was the cost the
+  original decision was right to avoid.
+- **~~No user-facing enable/disable for a healthy language.~~** (built, not filed)
+  Disabled ids persist in settings, the registry refuses to resolve them while
+  still listing them so the state stays reversible, and a disable takes effect
+  on open editors without a restart.
+  The control is a toggle in the Languages page's bottom strip, not a per-row
+  checkbox, which the spec's empty-Status-cell rule forbids.
+  The spec's `Not loaded` status was removed rather than implemented, because
+  every catalog grammar is a non-optional dependency and the state cannot occur.
+  Wiring it surfaced that `reloadLanguages()` was never called at startup, so
+  the running app had only ever had built-in languages.
 - **Everything visual is unverified.** (not filed: a review task, not a defect)
   There is no display in the build environment, so the three settings pages,
   the Problems dock, squiggles, hover tooltips and the completion popup have
