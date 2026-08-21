@@ -1,0 +1,818 @@
+//! Settings > Languages (task G3): what the page lists, and how a typed
+//! `LoadErrorKind` becomes a sentence a user can act on.
+//!
+//! The reason this is a rule and not view code: the page's whole value is
+//! that it never prints a Rust error. Every cause maps to one sentence, one
+//! detail line and a fixed set of offered actions, and that mapping is
+//! worth a test.
+
+use std::fs;
+use std::io;
+use std::path::{Path, PathBuf};
+use std::time::SystemTime;
+
+use serde::Deserialize;
+use syntax_core::runtime::{LanguageLoadError, LoadErrorKind};
+use syntax_core::LanguageDef;
+use tree_sitter::{LANGUAGE_VERSION, MIN_COMPATIBLE_LANGUAGE_VERSION};
+
+/// Sub-directory of the config directory languages are added to. Same
+/// constant `syntax_core::runtime` scans; duplicated rather than exported
+/// from a file another task owns.
+pub const LANGUAGES_DIR: &str = "languages";
+const MANIFEST_FILE: &str = "language.toml";
+
+/// Where a language came from — the page's grouping, and the first question
+/// a user opens it with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanguageSource {
+    /// Compiled into this build.
+    BuiltIn,
+    /// A folder of queries under the config directory.
+    Overlay,
+    /// A compiled grammar library loaded at runtime.
+    Library,
+}
+
+/// The Status column. `Ok` renders as an *empty* cell — thirty rows of
+/// green checks train the eye to skip the one column that has to catch it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanguageStatus {
+    Ok,
+    GrammarError,
+    QueryError,
+    VersionMismatch,
+    DisabledAfterCrash,
+}
+
+impl LanguageStatus {
+    /// The word shown in the Status column; empty for a healthy language.
+    pub fn text(self) -> &'static str {
+        match self {
+            LanguageStatus::Ok => "",
+            LanguageStatus::GrammarError => "Grammar error",
+            LanguageStatus::QueryError => "Query error",
+            LanguageStatus::VersionMismatch => "Version mismatch",
+            LanguageStatus::DisabledAfterCrash => "Disabled after crash",
+        }
+    }
+}
+
+/// A button the details pane offers for one problem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LanguageAction {
+    /// Open the offending file in the editor behind the dialog.
+    OpenFile,
+    /// Re-scan the config directory.
+    Reload,
+    /// Delete the crash marker so the grammar is tried again.
+    EnableLanguage,
+    /// Show the language's directory.
+    OpenFolder,
+}
+
+/// The details pane's fixed four-part shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Problem {
+    /// The artefact that failed, for the title line (`highlights.scm`).
+    pub artifact: String,
+    /// One plain sentence saying what is wrong.
+    pub sentence: String,
+    /// The specific detail, with a line number when the error carries one.
+    /// Empty when the sentence says everything.
+    pub detail: String,
+    /// The path, so it can be selected and copied.
+    pub path: String,
+    pub actions: Vec<LanguageAction>,
+    /// The crash marker to delete for `EnableLanguage`; empty otherwise.
+    pub marker: String,
+}
+
+/// One row of the tree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageRow {
+    pub id: String,
+    pub name: String,
+    /// Extensions and file names, as the Matches column shows them.
+    pub matches: String,
+    pub source: LanguageSource,
+    pub status: LanguageStatus,
+    /// `None` for a healthy language: the pane collapses rather than saying
+    /// "No problems."
+    pub problem: Option<Problem>,
+}
+
+/// A language as the catalog or the overlay knows it, reduced to what the
+/// page shows. Built from a `LanguageDef` by [`catalog_entry`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CatalogEntry {
+    pub id: String,
+    pub name: String,
+    pub matches: String,
+}
+
+/// What one `language.toml` in the overlay declares, as far as this page
+/// cares: which id it claims, and whether it brings its own grammar
+/// library. Both are needed to say where a language came from, including
+/// for an entry that failed to load and therefore has no `LanguageDef`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ManifestInfo {
+    pub id: String,
+    pub dir: PathBuf,
+    pub library: bool,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Manifest {
+    id: Option<String>,
+    grammar_library: Option<String>,
+}
+
+/// The Matches column for one language definition.
+pub fn catalog_entry(def: &LanguageDef) -> CatalogEntry {
+    let mut matches: Vec<String> = def.filenames.iter().map(|n| (*n).to_string()).collect();
+    matches.extend(def.extensions.iter().map(|e| format!("*.{e}")));
+    CatalogEntry {
+        id: def.id.to_string(),
+        name: def.name.to_string(),
+        matches: matches.join(", "),
+    }
+}
+
+/// Read every `language.toml` under `<config_dir>/languages`. A directory
+/// that cannot be read at all simply contributes nothing — the page still
+/// lists the built-ins.
+pub fn scan_manifests(config_dir: &Path) -> Vec<ManifestInfo> {
+    let root = config_dir.join(LANGUAGES_DIR);
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .filter(|path| {
+            !path
+                .file_name()
+                .is_some_and(|name| name.as_encoded_bytes().starts_with(b"."))
+        })
+        .collect();
+    dirs.sort();
+
+    dirs.into_iter()
+        .map(|dir| {
+            let dir_name = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let manifest: Manifest = fs::read_to_string(dir.join(MANIFEST_FILE))
+                .ok()
+                .and_then(|source| toml::from_str(&source).ok())
+                .unwrap_or_default();
+            ManifestInfo {
+                id: manifest.id.unwrap_or(dir_name),
+                library: manifest.grammar_library.is_some(),
+                dir,
+            }
+        })
+        .collect()
+}
+
+/// Every row the page shows: the built-in catalog, whatever the overlay
+/// added or replaced, and one row per language that failed to load.
+///
+/// A built-in whose id an overlay entry claims is listed once, under the
+/// overlay — it *is* the language now, and showing both would invite the
+/// user to edit the one that is not in effect.
+pub fn rows(
+    builtins: &[CatalogEntry],
+    overlay: &[CatalogEntry],
+    errors: &[LanguageLoadError],
+    manifests: &[ManifestInfo],
+) -> Vec<LanguageRow> {
+    let source_of = |id: &str| {
+        manifests
+            .iter()
+            .find(|info| info.id == id)
+            .map_or(LanguageSource::Overlay, |info| {
+                if info.library {
+                    LanguageSource::Library
+                } else {
+                    LanguageSource::Overlay
+                }
+            })
+    };
+
+    let mut rows: Vec<LanguageRow> = builtins
+        .iter()
+        .filter(|entry| !overlay.iter().any(|o| o.id == entry.id))
+        .map(|entry| healthy(entry, LanguageSource::BuiltIn))
+        .collect();
+
+    rows.extend(
+        overlay
+            .iter()
+            .map(|entry| healthy(entry, source_of(&entry.id))),
+    );
+
+    rows.extend(errors.iter().map(|error| {
+        let problem = explain(error);
+        LanguageRow {
+            id: error.id.clone(),
+            name: error.id.clone(),
+            matches: String::new(),
+            source: source_of(&error.id),
+            status: status_of(&error.kind),
+            problem: Some(problem),
+        }
+    }));
+
+    rows
+}
+
+fn healthy(entry: &CatalogEntry, source: LanguageSource) -> LanguageRow {
+    LanguageRow {
+        id: entry.id.clone(),
+        name: entry.name.clone(),
+        matches: entry.matches.clone(),
+        source,
+        status: LanguageStatus::Ok,
+        problem: None,
+    }
+}
+
+fn status_of(kind: &LoadErrorKind) -> LanguageStatus {
+    match kind {
+        LoadErrorKind::QueryCompile { .. } => LanguageStatus::QueryError,
+        LoadErrorKind::IncompatibleAbi(_) => LanguageStatus::VersionMismatch,
+        LoadErrorKind::Quarantined { .. } => LanguageStatus::DisabledAfterCrash,
+        _ => LanguageStatus::GrammarError,
+    }
+}
+
+/// Turn one load failure into the details pane's four parts.
+///
+/// The underlying `LoadErrorKind` string is never rendered on its own; it
+/// stays available through `LanguageLoadError`'s `Display` for the log.
+pub fn explain(error: &LanguageLoadError) -> Problem {
+    let dir = error.dir.display().to_string();
+    let in_dir = |file: &str| error.dir.join(file).display().to_string();
+
+    match &error.kind {
+        LoadErrorKind::QueryCompile { file, message } => Problem {
+            artifact: file_name(file),
+            sentence: "The highlighting query does not match this grammar.".into(),
+            detail: query_detail(message),
+            path: in_dir(file),
+            actions: vec![LanguageAction::OpenFile, LanguageAction::Reload],
+            marker: String::new(),
+        },
+        LoadErrorKind::MissingSymbol(symbol) => Problem {
+            artifact: "grammar library".into(),
+            sentence: format!(
+                "This library does not export a tree-sitter grammar. \
+                 Expected a function named {symbol}."
+            ),
+            detail: String::new(),
+            path: dir,
+            actions: vec![LanguageAction::Reload, LanguageAction::OpenFolder],
+            marker: String::new(),
+        },
+        LoadErrorKind::IncompatibleAbi(abi) => Problem {
+            artifact: "grammar library".into(),
+            sentence: format!(
+                "This grammar was built for tree-sitter ABI {abi}; this build supports \
+                 {MIN_COMPATIBLE_LANGUAGE_VERSION} to {LANGUAGE_VERSION}. \
+                 Rebuild it against a newer tree-sitter."
+            ),
+            detail: String::new(),
+            path: dir,
+            actions: vec![LanguageAction::Reload, LanguageAction::OpenFolder],
+            marker: String::new(),
+        },
+        LoadErrorKind::MalformedManifest(message) => Problem {
+            artifact: MANIFEST_FILE.into(),
+            sentence: format!("{MANIFEST_FILE} could not be read."),
+            detail: sentence(message),
+            path: in_dir(MANIFEST_FILE),
+            actions: vec![LanguageAction::OpenFile, LanguageAction::Reload],
+            marker: String::new(),
+        },
+        LoadErrorKind::Unreadable { file, message } => Problem {
+            artifact: file_name(file),
+            sentence: "The file could not be opened.".into(),
+            detail: sentence(message),
+            path: file.clone(),
+            actions: vec![LanguageAction::Reload],
+            marker: String::new(),
+        },
+        LoadErrorKind::LibraryUnloadable { file, message } => Problem {
+            artifact: file_name(file),
+            sentence: "The grammar library could not be loaded.".into(),
+            detail: sentence(message),
+            path: file.clone(),
+            actions: vec![LanguageAction::Reload, LanguageAction::OpenFolder],
+            marker: String::new(),
+        },
+        LoadErrorKind::UnknownGrammar(name) => Problem {
+            artifact: MANIFEST_FILE.into(),
+            sentence: format!(
+                "No grammar named {name} is compiled into this build. \
+                 Name a compiled-in grammar, or add a grammar_library."
+            ),
+            detail: String::new(),
+            path: in_dir(MANIFEST_FILE),
+            actions: vec![LanguageAction::OpenFile, LanguageAction::Reload],
+            marker: String::new(),
+        },
+        LoadErrorKind::MissingGrammar => Problem {
+            artifact: MANIFEST_FILE.into(),
+            sentence: "This language names no grammar to use. Add a grammar to borrow \
+                       from a compiled-in language, or a grammar_library to load."
+                .into(),
+            detail: String::new(),
+            path: in_dir(MANIFEST_FILE),
+            actions: vec![LanguageAction::OpenFile, LanguageAction::Reload],
+            marker: String::new(),
+        },
+        LoadErrorKind::DuplicateId => Problem {
+            artifact: MANIFEST_FILE.into(),
+            sentence: format!(
+                "Another language in this folder already uses the id {}. \
+                 Give this one an id of its own.",
+                error.id
+            ),
+            detail: String::new(),
+            path: in_dir(MANIFEST_FILE),
+            actions: vec![LanguageAction::OpenFile, LanguageAction::Reload],
+            marker: String::new(),
+        },
+        LoadErrorKind::TooManyGrammars => Problem {
+            artifact: "grammar library".into(),
+            sentence: "Too many grammar libraries are loaded for this one to be added. \
+                       Remove one you no longer use."
+                .into(),
+            detail: String::new(),
+            path: dir,
+            actions: vec![LanguageAction::OpenFolder],
+            marker: String::new(),
+        },
+        LoadErrorKind::Quarantined { marker } => Problem {
+            artifact: "grammar library".into(),
+            sentence: quarantine_sentence(marker),
+            detail: String::new(),
+            path: dir,
+            actions: vec![LanguageAction::EnableLanguage, LanguageAction::OpenFolder],
+            marker: marker.display().to_string(),
+        },
+    }
+}
+
+fn quarantine_sentence(marker: &Path) -> String {
+    let when = fs::metadata(marker)
+        .and_then(|meta| meta.modified())
+        .ok()
+        .and_then(date_of);
+    let crashed = match when {
+        Some(date) => format!("This grammar crashed the editor on {date}"),
+        // No readable marker timestamp: still true, just less specific.
+        None => "This grammar crashed the editor while loading".to_string(),
+    };
+    format!(
+        "{crashed}, so it was disabled automatically. \
+         Re-enable it if you have since rebuilt or replaced it."
+    )
+}
+
+/// Delete a crash marker, so the next load tries the grammar again.
+pub fn clear_quarantine(marker: &Path) -> io::Result<()> {
+    fs::remove_file(marker)
+}
+
+/// Copy a folder of tree-sitter queries into the config directory, under
+/// its own name. Fails rather than overwriting an existing language.
+pub fn install_language_folder(config_dir: &Path, source: &Path) -> io::Result<String> {
+    if !source.join(MANIFEST_FILE).is_file() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{} contains no {MANIFEST_FILE}", source.display()),
+        ));
+    }
+    let name = source
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .filter(|n| !n.is_empty())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a folder"))?;
+    let dest = config_dir.join(LANGUAGES_DIR).join(&name);
+    if dest.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} already exists", dest.display()),
+        ));
+    }
+    copy_dir(source, &dest)?;
+    Ok(name)
+}
+
+/// Copy a compiled grammar library into the config directory and write the
+/// one-line manifest that points at it. The id is the library's file name
+/// with the platform's decorations removed (`libtree-sitter-odin.so` ->
+/// `odin`), which is the id the loader will look for `tree_sitter_<id>` in.
+pub fn install_grammar_library(config_dir: &Path, library: &Path) -> io::Result<String> {
+    let file_name = library
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "not a file"))?;
+    let id = grammar_id(&file_name);
+    if id.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("cannot derive a language id from {file_name}"),
+        ));
+    }
+    let dest = config_dir.join(LANGUAGES_DIR).join(&id);
+    if dest.exists() {
+        return Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            format!("{} already exists", dest.display()),
+        ));
+    }
+    fs::create_dir_all(&dest)?;
+    fs::copy(library, dest.join(&file_name))?;
+    fs::write(
+        dest.join(MANIFEST_FILE),
+        format!("id = \"{id}\"\ngrammar_library = \"{file_name}\"\n"),
+    )?;
+    Ok(id)
+}
+
+/// `libtree-sitter-odin.so` -> `odin`, `tree_sitter_zig.dylib` -> `zig`.
+fn grammar_id(file_name: &str) -> String {
+    let stem = file_name.split('.').next().unwrap_or(file_name);
+    let stem = stem.strip_prefix("lib").unwrap_or(stem);
+    let stem = stem
+        .strip_prefix("tree-sitter-")
+        .or_else(|| stem.strip_prefix("tree_sitter_"))
+        .unwrap_or(stem);
+    stem.replace('-', "_")
+}
+
+fn copy_dir(source: &Path, dest: &Path) -> io::Result<()> {
+    fs::create_dir_all(dest)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let target = dest.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)?;
+        }
+    }
+    Ok(())
+}
+
+/// tree-sitter reports a query error as `Query error at 14:3. ...`; the
+/// pane wants that as `Line 14: ...`, and anything unrecognised unchanged.
+fn query_detail(message: &str) -> String {
+    let rest = message.trim();
+    let Some(after) = rest.strip_prefix("Query error at ") else {
+        return sentence(rest);
+    };
+    let Some((position, tail)) = after.split_once('.') else {
+        return sentence(rest);
+    };
+    let line = position.split(':').next().unwrap_or(position);
+    sentence(&format!("Line {line}: {}", tail.trim()))
+}
+
+/// One detail line, ending in a period like every other status sentence.
+fn sentence(text: &str) -> String {
+    let trimmed = text.trim().trim_end_matches('.');
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    format!("{trimmed}.")
+}
+
+fn file_name(path: &str) -> String {
+    Path::new(path)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.to_string())
+}
+
+/// `SystemTime` as `YYYY-MM-DD` in UTC. Howard Hinnant's civil-from-days,
+/// which is the whole of what a date crate would be pulled in for.
+fn date_of(time: SystemTime) -> Option<String> {
+    let secs = time.duration_since(SystemTime::UNIX_EPOCH).ok()?.as_secs() as i64;
+    let days = secs.div_euclid(86_400) + 719_468;
+    let era = days.div_euclid(146_097);
+    let day_of_era = days - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let mp = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = if month <= 2 { year + 1 } else { year };
+    Some(format!("{year:04}-{month:02}-{day:02}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn error(id: &str, kind: LoadErrorKind) -> LanguageLoadError {
+        LanguageLoadError {
+            id: id.to_string(),
+            dir: PathBuf::from("/home/you/.config/ide/languages").join(id),
+            kind,
+        }
+    }
+
+    fn entry(id: &str) -> CatalogEntry {
+        CatalogEntry {
+            id: id.to_string(),
+            name: id.to_string(),
+            matches: format!("*.{id}"),
+        }
+    }
+
+    #[test]
+    fn a_query_error_names_the_file_the_line_and_offers_to_open_it() {
+        let problem = explain(&error(
+            "odin",
+            LoadErrorKind::QueryCompile {
+                file: "queries/highlights.scm".into(),
+                message: "Query error at 14:3. Invalid node type proc_declaration".into(),
+            },
+        ));
+        assert_eq!(problem.artifact, "highlights.scm");
+        assert_eq!(
+            problem.sentence,
+            "The highlighting query does not match this grammar."
+        );
+        assert_eq!(
+            problem.detail,
+            "Line 14: Invalid node type proc_declaration."
+        );
+        assert!(problem.path.ends_with("odin/queries/highlights.scm"));
+        assert_eq!(
+            problem.actions,
+            vec![LanguageAction::OpenFile, LanguageAction::Reload]
+        );
+    }
+
+    #[test]
+    fn a_query_error_in_an_unexpected_shape_is_still_a_sentence() {
+        let problem = explain(&error(
+            "odin",
+            LoadErrorKind::QueryCompile {
+                file: "queries/folds.scm".into(),
+                message: "something else entirely".into(),
+            },
+        ));
+        assert_eq!(problem.detail, "something else entirely.");
+    }
+
+    #[test]
+    fn a_missing_entry_symbol_names_the_symbol_it_wanted() {
+        let problem = explain(&error(
+            "odin",
+            LoadErrorKind::MissingSymbol("tree_sitter_odin".into()),
+        ));
+        assert!(problem.sentence.contains("tree_sitter_odin"));
+        assert!(!problem.actions.contains(&LanguageAction::OpenFile));
+    }
+
+    #[test]
+    fn an_abi_mismatch_names_both_versions() {
+        let problem = explain(&error("odin", LoadErrorKind::IncompatibleAbi(12)));
+        assert!(problem.sentence.contains("ABI 12"));
+        assert!(problem.sentence.contains(&LANGUAGE_VERSION.to_string()));
+    }
+
+    #[test]
+    fn every_cause_produces_a_sentence_and_at_least_one_action() {
+        let kinds = [
+            LoadErrorKind::Unreadable {
+                file: "/tmp/x/language.toml".into(),
+                message: "No such file or directory".into(),
+            },
+            LoadErrorKind::MalformedManifest("expected `=`".into()),
+            LoadErrorKind::UnknownGrammar("elm".into()),
+            LoadErrorKind::MissingGrammar,
+            LoadErrorKind::LibraryUnloadable {
+                file: "/tmp/x/libodin.so".into(),
+                message: "wrong ELF class".into(),
+            },
+            LoadErrorKind::MissingSymbol("tree_sitter_odin".into()),
+            LoadErrorKind::IncompatibleAbi(3),
+            LoadErrorKind::Quarantined {
+                marker: PathBuf::from("/tmp/x/.quarantine/odin"),
+            },
+            LoadErrorKind::TooManyGrammars,
+            LoadErrorKind::QueryCompile {
+                file: "queries/tags.scm".into(),
+                message: "Query error at 1:1. bad".into(),
+            },
+            LoadErrorKind::DuplicateId,
+        ];
+        for kind in kinds {
+            let problem = explain(&error("odin", kind.clone()));
+            assert!(problem.sentence.ends_with('.'), "{kind:?}");
+            assert!(!problem.actions.is_empty(), "{kind:?}");
+            assert!(!problem.path.is_empty(), "{kind:?}");
+            // Never the raw Rust error string.
+            assert_ne!(problem.sentence, kind.to_string(), "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn a_quarantined_grammar_is_a_warning_that_can_be_re_enabled() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let marker = dir.path().join("odin");
+        fs::write(&marker, "").expect("marker");
+        let problem = explain(&error(
+            "odin",
+            LoadErrorKind::Quarantined {
+                marker: marker.clone(),
+            },
+        ));
+        assert!(problem.sentence.contains("crashed the editor on 20"));
+        assert!(problem.actions.contains(&LanguageAction::EnableLanguage));
+        assert_eq!(problem.marker, marker.display().to_string());
+
+        clear_quarantine(&marker).expect("cleared");
+        assert!(!marker.exists());
+    }
+
+    #[test]
+    fn statuses_follow_the_cause() {
+        assert_eq!(
+            status_of(&LoadErrorKind::QueryCompile {
+                file: "q".into(),
+                message: "m".into()
+            }),
+            LanguageStatus::QueryError
+        );
+        assert_eq!(
+            status_of(&LoadErrorKind::IncompatibleAbi(9)),
+            LanguageStatus::VersionMismatch
+        );
+        assert_eq!(
+            status_of(&LoadErrorKind::Quarantined {
+                marker: PathBuf::new()
+            }),
+            LanguageStatus::DisabledAfterCrash
+        );
+        assert_eq!(
+            status_of(&LoadErrorKind::MissingGrammar),
+            LanguageStatus::GrammarError
+        );
+        // A healthy language says nothing at all.
+        assert_eq!(LanguageStatus::Ok.text(), "");
+    }
+
+    #[test]
+    fn an_overlay_entry_replaces_the_builtin_it_shadows() {
+        let manifests = vec![ManifestInfo {
+            id: "rust".into(),
+            dir: PathBuf::from("/c/languages/rust"),
+            library: false,
+        }];
+        let rows = rows(
+            &[entry("rust"), entry("json")],
+            &[entry("rust")],
+            &[],
+            &manifests,
+        );
+        assert_eq!(rows.len(), 2);
+        let rust: Vec<&LanguageRow> = rows.iter().filter(|r| r.id == "rust").collect();
+        assert_eq!(rust.len(), 1);
+        assert_eq!(rust[0].source, LanguageSource::Overlay);
+        assert_eq!(rows[0].source, LanguageSource::BuiltIn);
+    }
+
+    #[test]
+    fn a_failed_language_is_a_row_of_its_own_with_its_source() {
+        let manifests = vec![ManifestInfo {
+            id: "vala".into(),
+            dir: PathBuf::from("/c/languages/vala"),
+            library: true,
+        }];
+        let rows = rows(
+            &[entry("rust")],
+            &[],
+            &[error("vala", LoadErrorKind::MissingGrammar)],
+            &manifests,
+        );
+        let vala = rows.iter().find(|r| r.id == "vala").expect("row");
+        assert_eq!(vala.source, LanguageSource::Library);
+        assert_eq!(vala.status, LanguageStatus::GrammarError);
+        assert!(vala.problem.is_some());
+        assert!(rows[0].problem.is_none());
+    }
+
+    #[test]
+    fn manifests_are_scanned_for_id_and_grammar_library() {
+        let config = tempfile::tempdir().expect("tempdir");
+        let languages = config.path().join(LANGUAGES_DIR);
+        fs::create_dir_all(languages.join("nim")).expect("dir");
+        fs::write(
+            languages.join("nim").join(MANIFEST_FILE),
+            "grammar = \"rust\"\n",
+        )
+        .expect("manifest");
+        fs::create_dir_all(languages.join("vala")).expect("dir");
+        fs::write(
+            languages.join("vala").join(MANIFEST_FILE),
+            "id = \"vala\"\ngrammar_library = \"libvala.so\"\n",
+        )
+        .expect("manifest");
+        // Dot directories are the quarantine store, never a language.
+        fs::create_dir_all(languages.join(".quarantine")).expect("dir");
+
+        let found = scan_manifests(config.path());
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].id, "nim");
+        assert!(!found[0].library);
+        assert_eq!(found[1].id, "vala");
+        assert!(found[1].library);
+    }
+
+    #[test]
+    fn scanning_a_config_directory_without_languages_finds_nothing() {
+        let config = tempfile::tempdir().expect("tempdir");
+        assert!(scan_manifests(config.path()).is_empty());
+    }
+
+    #[test]
+    fn installing_a_folder_copies_it_and_refuses_to_overwrite() {
+        let config = tempfile::tempdir().expect("tempdir");
+        let source = tempfile::tempdir().expect("tempdir");
+        let nim = source.path().join("nim");
+        fs::create_dir_all(nim.join("queries")).expect("dir");
+        fs::write(nim.join(MANIFEST_FILE), "grammar = \"rust\"\n").expect("manifest");
+        fs::write(nim.join("queries").join("highlights.scm"), "(x) @keyword").expect("query");
+
+        let id = install_language_folder(config.path(), &nim).expect("installed");
+        assert_eq!(id, "nim");
+        assert!(config
+            .path()
+            .join(LANGUAGES_DIR)
+            .join("nim/queries/highlights.scm")
+            .is_file());
+        assert!(install_language_folder(config.path(), &nim).is_err());
+    }
+
+    #[test]
+    fn a_folder_without_a_manifest_is_not_a_language() {
+        let config = tempfile::tempdir().expect("tempdir");
+        let source = tempfile::tempdir().expect("tempdir");
+        let nim = source.path().join("nim");
+        fs::create_dir_all(&nim).expect("dir");
+        assert!(install_language_folder(config.path(), &nim).is_err());
+    }
+
+    #[test]
+    fn installing_a_library_writes_a_manifest_pointing_at_it() {
+        let config = tempfile::tempdir().expect("tempdir");
+        let source = tempfile::tempdir().expect("tempdir");
+        let library = source.path().join("libtree-sitter-odin.so");
+        fs::write(&library, b"\x7fELF").expect("library");
+
+        let id = install_grammar_library(config.path(), &library).expect("installed");
+        assert_eq!(id, "odin");
+        let dir = config.path().join(LANGUAGES_DIR).join("odin");
+        assert!(dir.join("libtree-sitter-odin.so").is_file());
+        let manifest = fs::read_to_string(dir.join(MANIFEST_FILE)).expect("manifest");
+        assert!(manifest.contains("grammar_library = \"libtree-sitter-odin.so\""));
+        // And the scan reads it back as a library-sourced language.
+        let scanned = scan_manifests(config.path());
+        assert_eq!(scanned.len(), 1);
+        assert!(scanned[0].library);
+    }
+
+    #[test]
+    fn grammar_ids_lose_the_platform_decorations() {
+        assert_eq!(grammar_id("libtree-sitter-odin.so"), "odin");
+        assert_eq!(grammar_id("tree_sitter_zig.dylib"), "zig");
+        assert_eq!(grammar_id("vala.dll"), "vala");
+        assert_eq!(grammar_id("tree-sitter-c-sharp.so"), "c_sharp");
+    }
+
+    #[test]
+    fn dates_are_utc_calendar_days() {
+        assert_eq!(
+            date_of(SystemTime::UNIX_EPOCH).as_deref(),
+            Some("1970-01-01")
+        );
+        assert_eq!(
+            date_of(SystemTime::UNIX_EPOCH + Duration::from_secs(1_755_000_000)).as_deref(),
+            Some("2025-08-12")
+        );
+    }
+}

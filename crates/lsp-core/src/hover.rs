@@ -216,7 +216,7 @@ mod tests {
         );
 
         let plain = parse_hover(&json!({"contents": {"kind": "plaintext", "value": "**x**"}}));
-        assert_eq!(plain.unwrap().markdown, false, "plaintext stays literal");
+        assert!(!plain.unwrap().markdown, "plaintext stays literal");
     }
 
     #[test]

@@ -10,6 +10,7 @@
 //! ```
 
 pub mod catalog;
+pub mod completion;
 pub mod diagnostics;
 pub mod framing;
 pub mod hover;
@@ -19,6 +20,10 @@ pub mod navigation;
 pub use catalog::{
     default_server, enabled_server, language_id_for_path, resolve_servers, ServerConfig, ServerDef,
     ServerOverride, SERVERS,
+};
+pub use completion::{
+    completion_prefix, filter as filter_completions, kind_name, parse_completion, should_request,
+    strip_snippet, CompletionItem, CompletionList, CompletionTracker, TextRange,
 };
 pub use diagnostics::{
     path_from_uri, uri_from_path, DiagnosticCounts, DiagnosticRow, DiagnosticStore, Severity,

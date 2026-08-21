@@ -1,0 +1,15 @@
+[package]
+name = "settings-model"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+app-config = { path = "../app-config" }
+syntax-core = { path = "../syntax-core" }
+lsp-core = { path = "../lsp-core" }
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tree-sitter = "0.26"
+
+[dev-dependencies]
+tempfile = "3"

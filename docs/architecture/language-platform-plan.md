@@ -18,7 +18,7 @@ per `CLAUDE.md`.
 | T1 | done | `01f1685` |
 | T2 | done | `76352ce` |
 | T3 | done | `fb02f2b` |
-| T4 | open | |
+| T4 | done | pending |
 | I1 | done | `fb02f2b` |
 | R4a | done | `7ed7b79` |
 | R4b | done | `7ed7b79` |
@@ -28,14 +28,14 @@ per `CLAUDE.md`.
 | R6 | done | `e2a37e4` |
 | G1a | done | `01f1685` |
 | G1b | done | `f4f2687` |
-| G2 | open | |
-| G3 | open | |
+| G2 | done | pending |
+| G3 | done | pending |
 | L1 | done | `0554341` |
 | L2 | done | `c0a83b5` |
 | L3 | done | `f4f2687` |
 | L4 | done | `f4f2687` |
-| L5 | open | |
-| L6 | open | |
+| L5 | done | pending |
+| L6 | done | pending |
 
 ## Context
 

@@ -3,6 +3,9 @@
 #include "code_editor.h"
 #include "find_bar.h"
 #include "keymap_page.h"
+#include "language_servers_page.h"
+#include "languages_page.h"
+#include "syntax_colors_page.h"
 #include "search_everywhere_dialog.h"
 #include "problems_panel.h"
 #include "search_results_panel.h"
@@ -175,6 +178,17 @@ public:
         // about the word under the cursor.
         connect(languageService_, &LanguageService::hoverReady, this, [](const QString &html) {
             QToolTip::showText(QCursor::pos(), html);
+        });
+
+        // L5: a completion answer landed. Only a still-current one is ever
+        // signalled (`lsp_core::CompletionTracker`), so the visible editor
+        // simply re-reads the candidates for the word it is on.
+        connect(languageService_, &LanguageService::completionReady, this, [this]() {
+            auto *editor = qobject_cast<CodeEditor *>(
+                activeGroup_ ? activeGroup_->currentWidget() : nullptr);
+            if (editor) {
+                editor->refreshCompletions();
+            }
         });
 
         activeGroup_ = makeGroup();
@@ -587,6 +601,20 @@ public:
         editorForeground_ = foregroundHex;
         editorCurrentLine_ = currentLineHex;
         forEachEditor([this](QPlainTextEdit *editor) { applyEditorAppearance(editor); });
+    }
+
+    // L6: the language-server settings were committed and stale servers
+    // were stopped, so every open document has to be announced again — to a
+    // replacement server for the languages that changed, and to nobody at
+    // all for the ones that did not (reopenDocument drops those).
+    void reannounceDocuments()
+    {
+        forEachEditor([this](QPlainTextEdit *editor) {
+            const QString path = editor->property("lspPath").toString();
+            if (!path.isEmpty()) {
+                languageService_->reopenDocument(path, editor->toPlainText());
+            }
+        });
     }
 
     // Token colors are resolved by syntax_core::theme from the active
@@ -1124,6 +1152,49 @@ private:
         });
         connect(editor, &CodeEditor::hoverCanceled, this,
                 [this]() { languageService_->cancelHover(); });
+
+        // L5: completion. The editor reports keystrokes and the caret; every
+        // decision about them — whether a request is worth making, which
+        // candidates match, in what order, and what each one types — is
+        // `lsp_core::completion`'s. All that happens here is the position
+        // conversion and the FFI-to-view struct copy.
+        connect(editor,
+                &CodeEditor::completionRequested,
+                this,
+                [this, editor](int position, const QString &textBefore, bool explicitRequest) {
+                    const QString path = editor->property("lspPath").toString();
+                    if (path.isEmpty()) {
+                        return;
+                    }
+                    const QPair<quint32, quint32> at = lspPosition(editor, position);
+                    languageService_->completionAt(path, at.first, at.second, textBefore,
+                                                   explicitRequest);
+                });
+        connect(editor,
+                &CodeEditor::completionFilterChanged,
+                this,
+                [this, editor](const QString &textBefore) {
+                    QVector<CompletionEntry> entries;
+                    for (const FfiCompletionItem &item :
+                         languageService_->completionItems(textBefore)) {
+                        entries.append(CompletionEntry{
+                            item.label,
+                            item.kind,
+                            item.detail,
+                            item.documentation,
+                            item.insert,
+                            item.has_range,
+                            static_cast<int>(item.start_line),
+                            static_cast<int>(item.start_character),
+                            static_cast<int>(item.end_line),
+                            static_cast<int>(item.end_character),
+                            static_cast<int>(item.prefix_length),
+                        });
+                    }
+                    editor->showCompletions(entries);
+                });
+        connect(editor, &CodeEditor::completionCanceled, this,
+                [this]() { languageService_->cancelCompletion(); });
 
         // L3: only the visible tab's cursor should move the status bar —
         // guards against a background tab's programmatic cursor change
@@ -2032,7 +2103,10 @@ void applyKeymap(const QHash<QString, QAction *> &actions, AppSettings *appSetti
 
 void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *editorTabs,
                         KeymapEditor *keymapEditor, const QHash<QString, QAction *> &actions,
-                        DocumentManager *docManager, const std::shared_ptr<QString> &mcpStatus)
+                        DocumentManager *docManager, const std::shared_ptr<QString> &mcpStatus,
+                        SyntaxColorEditor *syntaxColorEditor, LanguageCatalog *languageCatalog,
+                        LanguageServerEditor *languageServerEditor,
+                        LanguageService *languageService)
 {
     const QString originalTheme = appSettings->themeName();
     const FfiEditorFont originalFont = appSettings->editorFont();
@@ -2044,7 +2118,10 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     auto *categoryList = new QListWidget(&dialog);
     categoryList->addItem(QObject::tr("Appearance"));
     categoryList->addItem(QObject::tr("Editor"));
+    categoryList->addItem(QObject::tr("Syntax Colors"));
     categoryList->addItem(QObject::tr("Keymap"));
+    categoryList->addItem(QObject::tr("Languages"));
+    categoryList->addItem(QObject::tr("Language Servers"));
     categoryList->addItem(QObject::tr("MCP"));
     categoryList->setMaximumWidth(150);
 
@@ -2143,11 +2220,34 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
 
     pages->addWidget(editorPage);
 
+    // Syntax Colors follows Appearance rather than Keymap: it applies live,
+    // so the user sees the colour in the open editor while picking it, and
+    // the Cancel branch below reverts it the same way the theme is reverted.
+    syntaxColorEditor->beginEdit();
+    pages->addWidget(buildSyntaxColorsPage(
+      &dialog, syntaxColorEditor, QFont(originalFont.family, static_cast<int>(originalFont.size)),
+      [editorTabs]() { editorTabs->refreshHighlighting(); }));
+
     // Unlike Appearance/Editor, the keymap isn't applied live: the page edits
     // a draft held in Rust, so Cancel discards it by never committing, and
     // the next beginEdit() re-reads from disk.
     keymapEditor->beginEdit();
     pages->addWidget(buildKeymapPage(&dialog, keymapEditor));
+
+    // Languages needs no draft: nothing on it is a setting. Adding a
+    // language, clearing a quarantine and reloading all take effect when
+    // pressed, which is why the page offers no OK-shaped promise.
+    pages->addWidget(buildLanguagesPage(&dialog, languageCatalog,
+                                         [&dialog, editorTabs](const QString &path) {
+                                             editorTabs->openFileAtLine(path, 1, 1);
+                                             dialog.accept();
+                                         }));
+
+    // Language Servers commits on OK, like Keymap and MCP: starting and
+    // stopping a server on every keystroke in a command field is not a
+    // preview.
+    languageServerEditor->beginEdit();
+    pages->addWidget(buildLanguageServersPage(&dialog, languageServerEditor, languageService));
 
     // MCP, like Keymap and unlike Appearance/Editor, commits on OK rather
     // than applying live: restarting the server on every keystroke in the
@@ -2221,7 +2321,14 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
         // whether anything changed here would be the view deciding
         // something the Rust side already decides.
         docManager->applyMcpSettings();
+        languageServerEditor->commit();
+        // Reconciling is the Rust side's decision: it stops what the new
+        // settings no longer describe and leaves the rest running, and the
+        // re-announcement below starts the replacements.
+        languageService->applyServerSettings();
+        editorTabs->reannounceDocuments();
     } else {
+        syntaxColorEditor->revert();
         applyTheme(originalTheme);
         editorTabs->refreshHighlighting();
         editorTabs->setEditorFont(QFont(originalFont.family, static_cast<int>(originalFont.size)));
@@ -2637,6 +2744,13 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // Holds the Settings > Keymap page's draft between beginEdit() and
     // commit(); parented to the window so it outlives each dialog.
     auto *keymapEditor = new KeymapEditor(window);
+    // The same arrangement for the three language-platform pages (T4, G3,
+    // L6): each holds its page's state between the dialog's beginEdit() and
+    // its commit/revert, and is parented to the window so it outlives the
+    // dialog.
+    auto *syntaxColorEditor = new SyntaxColorEditor(window);
+    auto *languageCatalog = new LanguageCatalog(window);
+    auto *languageServerEditor = new LanguageServerEditor(window);
 
     const FfiWindowGeometry savedGeometry = appSettings->windowGeometry();
     if (savedGeometry.width > 0 && savedGeometry.height > 0) {
@@ -2798,9 +2912,12 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
 
     QObject::connect(preferencesAction, &QAction::triggered, window,
                       [window, appSettings, editorTabs, keymapEditor, actions, docManager,
-                       mcpStatus]() {
+                       mcpStatus, syntaxColorEditor, languageCatalog, languageServerEditor,
+                       languageService]() {
                           showSettingsDialog(window, appSettings, editorTabs, keymapEditor,
-                                              *actions, docManager, mcpStatus);
+                                              *actions, docManager, mcpStatus,
+                                              syntaxColorEditor, languageCatalog,
+                                              languageServerEditor, languageService);
                       });
 
     QMenu *editMenu = window->menuBar()->addMenu(QObject::tr("&Edit"));

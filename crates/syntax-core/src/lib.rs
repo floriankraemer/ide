@@ -14,7 +14,7 @@ use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 
 pub use registry::{
-    language_by_id, language_for_path, language_name, registry, CompiledLanguage, Language,
+    language_by_id, language_for_path, language_name, registry, reload, CompiledLanguage, Language,
     LanguageDef, LanguageRegistry, QuerySet, BUILTIN_LANGUAGES,
 };
 

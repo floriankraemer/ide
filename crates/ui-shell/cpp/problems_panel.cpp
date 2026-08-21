@@ -1,5 +1,7 @@
 #include "problems_panel.h"
 
+#include "theme.h"
+
 #include <QApplication>
 #include <QClipboard>
 #include <QHBoxLayout>
@@ -41,15 +43,19 @@ QString severityText(FfiSeverity severity)
 
 QColor severityColor(FfiSeverity severity)
 {
+    // The product-wide semantic set (`theme.h`), not hues of this panel's
+    // own: the same red has to mean the same thing in the Languages page,
+    // the status bar and the editor's squiggles.
+    const SemanticColors colors = semanticColors();
     switch (severity) {
     case FfiSeverity::Error:
-        return QColor(QStringLiteral("#e51400"));
+        return colors.error;
     case FfiSeverity::Warning:
-        return QColor(QStringLiteral("#bf8803"));
+        return colors.warning;
     case FfiSeverity::Information:
-        return QColor(QStringLiteral("#1a85ff"));
+        return colors.info;
     case FfiSeverity::Hint:
-        return QColor(QStringLiteral("#6c6c6c"));
+        return colors.muted;
     }
     return QColor();
 }

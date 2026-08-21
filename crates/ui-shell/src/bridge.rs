@@ -349,6 +349,29 @@ mod ffi {
         column: u32,
     }
 
+    /// One completion candidate (L5), 1:1 with `lsp_core::CompletionItem`
+    /// once it has been filtered and ordered. `insert` is the text to type —
+    /// the server's `textEdit`, `insertText` or label, whichever it chose,
+    /// with snippet placeholders already resolved. When `has_range` is true
+    /// the server said which span to replace (0-based lines, UTF-16
+    /// characters, the protocol's own units); otherwise the caller replaces
+    /// the word the caret is in.
+    struct FfiCompletionItem {
+        label: QString,
+        kind: QString,
+        detail: QString,
+        documentation: QString,
+        insert: QString,
+        has_range: bool,
+        start_line: u32,
+        start_character: u32,
+        end_line: u32,
+        end_character: u32,
+        /// How many UTF-16 characters before the caret the typed word
+        /// occupies — what the view replaces when `has_range` is false.
+        prefix_length: u32,
+    }
+
     /// How many diagnostics of each severity exist right now, 1:1 with
     /// `lsp_core::DiagnosticCounts` — for the status-bar counter and the
     /// Problems panel's filter buttons.
@@ -1048,6 +1071,15 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "shortcutFor"]
         fn shortcut_for(self: &AppSettings, action_id: &QString) -> QString;
+
+        /// Re-scan `<config_dir>/languages` and swap in the rebuilt
+        /// language registry (G2), returning one line per language that
+        /// failed to load — empty when everything loaded. Editors already
+        /// open keep the grammar they were built with; files opened after
+        /// this call see the new registry.
+        #[qinvokable]
+        #[cxx_name = "reloadLanguages"]
+        fn reload_languages(self: &AppSettings) -> QStringList;
     }
 
     extern "RustQt" {
@@ -1586,6 +1618,28 @@ mod ffi {
         #[cxx_name = "documentClosed"]
         fn document_closed(self: Pin<&mut LanguageService>, path: &QString);
 
+        /// L6 — the `[[language_server]]` settings were committed: re-read
+        /// them and stop every server whose configuration changed or was
+        /// switched off, so the next `reopenDocument` starts the new one.
+        /// Servers whose configuration is untouched are left running.
+        #[qinvokable]
+        #[cxx_name = "applyServerSettings"]
+        fn apply_server_settings(self: Pin<&mut LanguageService>);
+
+        /// `documentOpened` for a document that may already be open: after
+        /// `applyServerSettings` the view re-announces every open tab, and
+        /// only the ones whose server was stopped need re-sending.
+        #[qinvokable]
+        #[cxx_name = "reopenDocument"]
+        fn reopen_document(self: Pin<&mut LanguageService>, path: &QString, text: &QString);
+
+        /// L6 — `Restart Server`: stop this language's server and start it
+        /// again from the saved configuration. An action, not a setting, so
+        /// it takes effect immediately rather than on OK.
+        #[qinvokable]
+        #[cxx_name = "restartServer"]
+        fn restart_server(self: Pin<&mut LanguageService>, language_id: &QString);
+
         /// Every known diagnostic, grouped by file and ordered within it.
         #[qinvokable]
         fn diagnostics(self: &LanguageService) -> Vec<FfiDiagnostic>;
@@ -1671,6 +1725,59 @@ mod ffi {
         #[cxx_name = "definitionFallback"]
         fn definition_fallback(self: Pin<&mut LanguageService>);
 
+        /// L5 — ask the server what could be typed at this position.
+        /// `text_before_cursor` is the current line up to the caret, from
+        /// which `lsp_core::completion` derives both the word being typed
+        /// and whether the request is worth making at all: `explicit_request`
+        /// (the shortcut) always asks, otherwise a server trigger character or
+        /// two identifier characters do. A request that is not worth making
+        /// is dropped here — including one whose answer is already in hand
+        /// (a complete list is filtered locally as the word grows) — so the
+        /// view may call this on every keystroke.
+        ///
+        /// Answers on `completionReady`, never synchronously and never on
+        /// the UI thread. A superseded or too-late answer produces no signal
+        /// at all — `lsp_core::CompletionTracker`'s rule.
+        #[qinvokable]
+        #[cxx_name = "completionAt"]
+        fn completion_at(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            line: u32,
+            character: u32,
+            text_before_cursor: &QString,
+            // `explicit` is a C++ keyword, so the parameter cannot be named
+            // that: this is the Ctrl+Space gesture.
+            explicit_request: bool,
+        );
+
+        /// The popup closed, or the caret left the word: whatever is in
+        /// flight is no longer wanted.
+        #[qinvokable]
+        #[cxx_name = "cancelCompletion"]
+        fn cancel_completion(self: Pin<&mut LanguageService>);
+
+        /// The last answer's candidates for the word inside
+        /// `text_before_cursor`, ordered by the server's `sortText` and
+        /// matched against its `filterText`. Empty when nothing matches, and
+        /// empty when the caret has left the word the answer was about — all
+        /// of that is `lsp_core::completion`'s decision, including picking
+        /// the word out of the line, so the popup can be driven straight
+        /// from this.
+        #[qinvokable]
+        #[cxx_name = "completionItems"]
+        fn completion_items(
+            self: &LanguageService,
+            text_before_cursor: &QString,
+        ) -> Vec<FfiCompletionItem>;
+
+        /// A completion answer arrived and is still current. The view reads
+        /// it back with `completionItems`, the same
+        /// re-read-what-you-display shape `diagnosticsChanged` uses.
+        #[qsignal]
+        #[cxx_name = "completionReady"]
+        fn completion_ready(self: Pin<&mut LanguageService>);
+
         /// Emitted on the Qt thread after the store changed: a server
         /// published, or a document was closed. The view re-reads whatever it
         /// displays rather than being handed a delta.
@@ -1696,6 +1803,272 @@ mod ffi {
     // Enables `self.qt_thread()` on `LanguageService` for the LSP listener
     // thread's one cross-thread hop, same pattern as `SearchModel` above.
     impl cxx_qt::Threading for LanguageService {}
+
+    /// One row of the Syntax Colors tree (T4).
+    ///
+    /// Carries both halves of the row: the *resolved* style the editor will
+    /// paint this scope with (what the Sample cell renders, including
+    /// parent-scope inheritance), and the entry the control strip edits.
+    /// Both are resolved in `settings-model`/`syntax-core`; the view paints.
+    struct FfiSyntaxScopeRow {
+        scope: QString,
+        /// The group header this row belongs under.
+        family: QString,
+        /// A short fragment representative of the scope.
+        sample: QString,
+        origin: FfiColorOrigin,
+        /// Resolved style for the Sample cell. `has_fg == false` means the
+        /// editor's default foreground, as in `FfiScopeStyle`.
+        has_fg: bool,
+        red: u8,
+        green: u8,
+        blue: u8,
+        sample_bold: bool,
+        sample_italic: bool,
+        sample_underline: bool,
+        /// The stored entry, as the hex field and the three checkboxes show
+        /// it. `hex` is empty when nothing but the theme has an opinion.
+        hex: QString,
+        bold: bool,
+        italic: bool,
+        underline: bool,
+        /// Whether `Reset Scope` would change anything on this row.
+        can_reset: bool,
+    }
+
+    /// Where a Syntax Colors row's value comes from — the "From" column.
+    enum FfiColorOrigin {
+        Theme,
+        Base,
+        Language,
+    }
+
+    /// One entry of the Syntax Colors language combo, and of any other list
+    /// of languages the settings pages show.
+    struct FfiLanguageOption {
+        id: QString,
+        name: QString,
+    }
+
+    /// Where a language came from — the Languages page's grouping.
+    enum FfiLanguageSource {
+        BuiltIn,
+        Overlay,
+        Library,
+    }
+
+    /// How a Languages row's status word is coloured. `Healthy` renders no
+    /// status text at all.
+    enum FfiRowSeverity {
+        Healthy,
+        Warning,
+        Error,
+    }
+
+    /// One row of the Languages page (G3).
+    struct FfiLanguageRow {
+        id: QString,
+        name: QString,
+        /// Extensions and file names this language claims.
+        matches: QString,
+        /// The status word, already chosen on the Rust side; empty for a
+        /// language that loaded correctly.
+        status: QString,
+        source: FfiLanguageSource,
+        severity: FfiRowSeverity,
+    }
+
+    /// The Languages details pane: one failure, already turned into a
+    /// sentence a user can act on. The raw Rust error is never sent.
+    #[derive(Default)]
+    struct FfiLanguageProblem {
+        /// The artefact that failed, for the title line.
+        artifact: QString,
+        sentence: QString,
+        /// The specific detail, with a line number when there is one.
+        detail: QString,
+        path: QString,
+        /// The crash marker to delete when `enable` is offered.
+        marker: QString,
+        open_file: bool,
+        reload: bool,
+        enable: bool,
+        open_folder: bool,
+    }
+
+    /// The configuration half of a Language Servers row's status; the live
+    /// half arrives on `LanguageService::serverStateChanged`.
+    enum FfiServerRowStatus {
+        NotConfigured,
+        Disabled,
+        Enabled,
+    }
+
+    /// One row of the Language Servers page (L6).
+    struct FfiLanguageServerRow {
+        language_id: QString,
+        language_name: QString,
+        command: QString,
+        /// One space-separated line, not a list (see `settings_model::ServerRow`).
+        args: QString,
+        enabled: bool,
+        status: FfiServerRowStatus,
+    }
+
+    extern "RustQt" {
+        /// Settings > Syntax Colors (T4): the draft of the base and
+        /// per-language colour tables the page edits.
+        ///
+        /// Stateful like `KeymapEditor` — Cancel must discard — but, unlike
+        /// it, applied live: every mutation writes settings out so the open
+        /// editors behind the dialog repaint, and `revert` puts the snapshot
+        /// taken by `beginEdit` back. Every rule (precedence, what "From"
+        /// says, which resets are no-ops) is `settings_model` and
+        /// `syntax_core::theme`.
+        #[qobject]
+        type SyntaxColorEditor = super::SyntaxColorEditorRust;
+
+        /// Take a snapshot of the saved tables and start a fresh draft.
+        #[qinvokable]
+        #[cxx_name = "beginEdit"]
+        fn begin_edit(self: &SyntaxColorEditor);
+
+        /// Every language the registry knows, in catalog order — the combo
+        /// below `(Base — all languages)`.
+        #[qinvokable]
+        fn languages(self: &SyntaxColorEditor) -> Vec<FfiLanguageOption>;
+
+        /// Every scope row for one level: `languageId` empty selects the
+        /// base table.
+        #[qinvokable]
+        fn scopes(self: &SyntaxColorEditor, language_id: &QString) -> Vec<FfiSyntaxScopeRow>;
+
+        /// Set one scope's colour and flags at this level, and apply.
+        /// An empty `hex` with no flags removes the entry.
+        #[qinvokable]
+        #[cxx_name = "setStyle"]
+        fn set_style(
+            self: &SyntaxColorEditor,
+            language_id: &QString,
+            scope: &QString,
+            hex: &QString,
+            bold: bool,
+            italic: bool,
+            underline: bool,
+        );
+
+        /// Remove this level's entry for one scope.
+        #[qinvokable]
+        #[cxx_name = "resetScope"]
+        fn reset_scope(self: &SyntaxColorEditor, language_id: &QString, scope: &QString);
+
+        /// Remove every entry at this level.
+        #[qinvokable]
+        #[cxx_name = "resetLevel"]
+        fn reset_level(self: &SyntaxColorEditor, language_id: &QString);
+
+        /// Whether `Reset Language...`/`Reset Base...` would change anything.
+        #[qinvokable]
+        #[cxx_name = "canResetLevel"]
+        fn can_reset_level(self: &SyntaxColorEditor, language_id: &QString) -> bool;
+
+        /// Discard the draft: put the snapshot back and apply it. The
+        /// Cancel branch of the dialog.
+        #[qinvokable]
+        fn revert(self: &SyntaxColorEditor);
+    }
+
+    extern "RustQt" {
+        /// Settings > Languages (G3): what loaded, where each language came
+        /// from, and why anything that failed did.
+        ///
+        /// Read-mostly, and rescanned rather than watched: the page is open
+        /// for seconds and a scan is a directory listing.
+        #[qobject]
+        type LanguageCatalog = super::LanguageCatalogRust;
+
+        /// Rescan the config directory. Also what the `Reload languages`
+        /// button calls.
+        #[qinvokable]
+        fn refresh(self: &LanguageCatalog);
+
+        /// Every language, healthy or not, in catalog-then-overlay order.
+        #[qinvokable]
+        fn languages(self: &LanguageCatalog) -> Vec<FfiLanguageRow>;
+
+        /// The details pane for one language. `sentence` is empty when that
+        /// language has nothing to report, and the pane collapses.
+        #[qinvokable]
+        fn problem(self: &LanguageCatalog, id: &QString) -> FfiLanguageProblem;
+
+        /// Delete a crash marker so the grammar is tried again on the next
+        /// scan (G1b's quarantine, cleared deliberately by the user).
+        #[qinvokable]
+        #[cxx_name = "clearQuarantine"]
+        fn clear_quarantine(self: &LanguageCatalog, marker: &QString) -> FfiResult;
+
+        /// Copy a folder of tree-sitter queries into the config directory.
+        #[qinvokable]
+        #[cxx_name = "addLanguageFolder"]
+        fn add_language_folder(self: &LanguageCatalog, path: &QString) -> FfiResult;
+
+        /// Copy a compiled grammar library into the config directory, with
+        /// the manifest that points at it.
+        #[qinvokable]
+        #[cxx_name = "addGrammarLibrary"]
+        fn add_grammar_library(self: &LanguageCatalog, path: &QString) -> FfiResult;
+
+        /// The directory languages are added to — shown so the user can
+        /// find what the page is talking about.
+        #[qinvokable]
+        #[cxx_name = "languagesDir"]
+        fn languages_dir(self: &LanguageCatalog) -> QString;
+    }
+
+    extern "RustQt" {
+        /// Settings > Language Servers (L6): the draft of the
+        /// `[[language_server]]` table, committed on OK.
+        ///
+        /// Draft-and-commit like `KeymapEditor`, and for a stronger reason:
+        /// starting and stopping a server on every keystroke in a command
+        /// field is not a preview.
+        #[qobject]
+        type LanguageServerEditor = super::LanguageServerEditorRust;
+
+        /// Re-read the settings and build one row per language.
+        #[qinvokable]
+        #[cxx_name = "beginEdit"]
+        fn begin_edit(self: &LanguageServerEditor);
+
+        /// Every row, sorted by language name and stable while the page is
+        /// open, so a live status change never moves one.
+        #[qinvokable]
+        fn rows(self: &LanguageServerEditor) -> Vec<FfiLanguageServerRow>;
+
+        #[qinvokable]
+        #[cxx_name = "setCommand"]
+        fn set_command(self: &LanguageServerEditor, language_id: &QString, command: &QString);
+
+        #[qinvokable]
+        #[cxx_name = "setArgs"]
+        fn set_args(self: &LanguageServerEditor, language_id: &QString, args: &QString);
+
+        #[qinvokable]
+        #[cxx_name = "setEnabled"]
+        fn set_enabled(self: &LanguageServerEditor, language_id: &QString, enabled: bool);
+
+        /// Whether the draft differs from what is saved — what makes
+        /// `Restart Server` a no-op the page refuses rather than a restart
+        /// of the command the user is halfway through replacing.
+        #[qinvokable]
+        #[cxx_name = "isDirty"]
+        fn is_dirty(self: &LanguageServerEditor, language_id: &QString) -> bool;
+
+        /// Write the draft to settings. The manager is reconciled
+        /// separately, by `LanguageService::applyServerSettings`.
+        #[qinvokable]
+        fn commit(self: &LanguageServerEditor);
+    }
 
     unsafe extern "C++" {
         include!("main_window.h");
@@ -1967,6 +2340,13 @@ impl ffi::AppSettings {
             .recent_projects
             .iter()
             .map(|p| QString::from(p.to_string_lossy().as_ref()))
+            .collect()
+    }
+
+    pub fn reload_languages(&self) -> QStringList {
+        syntax_core::reload(&app_core::resolve_config_dir())
+            .iter()
+            .map(|err| QString::from(err.to_string().as_str()))
             .collect()
     }
 
@@ -4035,6 +4415,13 @@ pub struct LanguageServiceRust {
     /// L3: which hover request is still the current one. The rule is
     /// `lsp_core`'s; what is kept here is only its state.
     hover: RefCell<lsp_core::HoverTracker>,
+    /// L5: the same for completion, plus the last answer it accepted — the
+    /// view re-reads that rather than being handed the list in the signal.
+    completion: RefCell<lsp_core::CompletionTracker>,
+    completions: RefCell<lsp_core::CompletionList>,
+    /// Trigger characters per language, as each server advertised them in
+    /// its `initialize` result (`LspEvent::ServerReady`).
+    triggers: RefCell<std::collections::HashMap<String, Vec<String>>>,
 }
 
 fn to_ffi_severity(severity: lsp_core::Severity) -> ffi::FfiSeverity {
@@ -4059,6 +4446,28 @@ fn to_ffi_diagnostic(row: lsp_core::DiagnosticRow) -> ffi::FfiDiagnostic {
     }
 }
 
+fn to_ffi_completion(item: lsp_core::CompletionItem, prefix_length: u32) -> ffi::FfiCompletionItem {
+    let range = item.range.unwrap_or(lsp_core::TextRange {
+        start_line: 0,
+        start_character: 0,
+        end_line: 0,
+        end_character: 0,
+    });
+    ffi::FfiCompletionItem {
+        label: QString::from(item.label.as_str()),
+        kind: QString::from(lsp_core::kind_name(item.kind)),
+        detail: QString::from(item.detail.as_str()),
+        documentation: QString::from(item.documentation.as_str()),
+        insert: QString::from(item.insert.as_str()),
+        has_range: item.range.is_some(),
+        start_line: range.start_line,
+        start_character: range.start_character,
+        end_line: range.end_line,
+        end_character: range.end_character,
+        prefix_length,
+    }
+}
+
 impl ffi::LanguageService {
     pub fn open_project(mut self: Pin<&mut Self>, root_path: &QString) {
         let root = root_path.to_string();
@@ -4071,6 +4480,7 @@ impl ffi::LanguageService {
         self.jobs.borrow_mut().take();
         self.started.borrow_mut().clear();
         self.open_docs.borrow_mut().clear();
+        self.triggers.borrow_mut().clear();
         self.store.borrow_mut().clear();
 
         let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
@@ -4167,6 +4577,80 @@ impl ffi::LanguageService {
         self.as_mut().diagnostics_changed();
     }
 
+    pub fn apply_server_settings(self: Pin<&mut Self>) {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        let overrides: Vec<lsp_core::ServerOverride> = settings
+            .language_servers
+            .iter()
+            .map(|entry| lsp_core::ServerOverride {
+                language_id: entry.language_id.clone(),
+                name: entry.name.clone(),
+                command: entry.command.clone(),
+                args: entry.args.clone(),
+                enabled: entry.enabled,
+            })
+            .collect();
+        let resolved = lsp_core::resolve_servers(&overrides);
+
+        // Which running servers the new settings no longer describe: the
+        // comparison is between two resolved configurations, so "changed" is
+        // `lsp_core`'s definition of the launch, not a field-by-field guess.
+        let previous = self.configs.borrow().clone();
+        let stale: Vec<String> = self
+            .started
+            .borrow()
+            .iter()
+            .filter(|language_id| {
+                let before = previous.iter().find(|c| &&c.language_id == language_id);
+                let after = lsp_core::enabled_server(&resolved, language_id);
+                match (before, after) {
+                    (Some(before), Some(after)) => before != after,
+                    _ => true,
+                }
+            })
+            .cloned()
+            .collect();
+        *self.configs.borrow_mut() = resolved;
+
+        for language_id in stale {
+            self.started.borrow_mut().remove(&language_id);
+            self.triggers.borrow_mut().remove(&language_id);
+            // Forgetting the documents is what lets `reopenDocument` start
+            // the replacement server and re-send `didOpen` to it.
+            self.open_docs
+                .borrow_mut()
+                .retain(|_, open_for| open_for != &language_id);
+            let stopping = language_id.clone();
+            self.as_ref()
+                .push_job(move |manager| manager.stop(&stopping));
+        }
+    }
+
+    pub fn reopen_document(self: Pin<&mut Self>, path: &QString, text: &QString) {
+        if self.open_docs.borrow().contains_key(&path.to_string()) {
+            return;
+        }
+        self.document_opened(path, text);
+    }
+
+    pub fn restart_server(mut self: Pin<&mut Self>, language_id: &QString) {
+        let language_id = language_id.to_string();
+        let config = self
+            .configs
+            .borrow()
+            .iter()
+            .find(|config| config.language_id == language_id)
+            .cloned();
+        let Some(config) = config else {
+            return;
+        };
+        let stopping = language_id.clone();
+        self.as_ref()
+            .push_job(move |manager| manager.stop(&stopping));
+        self.started.borrow_mut().insert(language_id);
+        self.as_mut().start_server(config);
+    }
+
     pub fn diagnostics(&self) -> Vec<ffi::FfiDiagnostic> {
         self.store
             .borrow()
@@ -4230,6 +4714,75 @@ impl ffi::LanguageService {
 
     pub fn cancel_hover(self: Pin<&mut Self>) {
         self.hover.borrow_mut().cancel();
+    }
+
+    pub fn completion_at(
+        mut self: Pin<&mut Self>,
+        path: &QString,
+        line: u32,
+        character: u32,
+        text_before_cursor: &QString,
+        explicit_request: bool,
+    ) {
+        let path = path.to_string();
+        let Some(language_id) = self.open_docs.borrow().get(&path).cloned() else {
+            return;
+        };
+        let text_before_cursor = text_before_cursor.to_string();
+        let worth_asking = lsp_core::should_request(
+            self.triggers
+                .borrow()
+                .get(&language_id)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            &text_before_cursor,
+            explicit_request,
+            &self.completion.borrow(),
+        );
+        if !worth_asking {
+            return;
+        }
+
+        let uri = lsp_core::uri_from_path(&path);
+        let token = self
+            .completion
+            .borrow_mut()
+            .begin(lsp_core::completion_prefix(&text_before_cursor));
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            let Ok(list) = manager.completion(&uri, line, character) else {
+                return;
+            };
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                if !service
+                    .completion
+                    .borrow_mut()
+                    .deliver(token, list.is_incomplete)
+                {
+                    return;
+                }
+                *service.completions.borrow_mut() = list;
+                service.as_mut().completion_ready();
+            });
+        });
+    }
+
+    pub fn cancel_completion(self: Pin<&mut Self>) {
+        self.completion.borrow_mut().cancel();
+        *self.completions.borrow_mut() = lsp_core::CompletionList::default();
+    }
+
+    pub fn completion_items(&self, text_before_cursor: &QString) -> Vec<ffi::FfiCompletionItem> {
+        let text_before_cursor = text_before_cursor.to_string();
+        let prefix = lsp_core::completion_prefix(&text_before_cursor);
+        if !self.completion.borrow().still_typing(prefix) {
+            return Vec::new();
+        }
+        let prefix_length = prefix.encode_utf16().count() as u32;
+        lsp_core::filter_completions(&self.completions.borrow().items, prefix)
+            .into_iter()
+            .map(|item| to_ffi_completion(item, prefix_length))
+            .collect()
     }
 
     pub fn resolve_definition(mut self: Pin<&mut Self>, path: &QString, line: u32, character: u32) {
@@ -4332,8 +4885,15 @@ impl ffi::LanguageService {
                 self.store.borrow_mut().replace(&uri, diagnostics);
                 self.as_mut().diagnostics_changed();
             }
-            lsp_core::LspEvent::ServerReady { language_id, .. } => {
+            lsp_core::LspEvent::ServerReady {
+                language_id,
+                trigger_characters,
+                ..
+            } => {
                 let name = name_of(&language_id);
+                self.triggers
+                    .borrow_mut()
+                    .insert(language_id.clone(), trigger_characters);
                 self.as_mut().server_state_changed(
                     QString::from(language_id.as_str()),
                     QString::from(name.as_str()),
@@ -4371,6 +4931,382 @@ impl ffi::LanguageService {
             }
             lsp_core::LspEvent::Notification { .. } => {}
         }
+    }
+}
+
+/// Rust side of `SyntaxColorEditor` (T4). Holds the draft and the snapshot
+/// `beginEdit` took; every rule is `settings_model::SyntaxColorDraft` and
+/// `syntax_core::theme`.
+#[derive(Default)]
+pub struct SyntaxColorEditorRust {
+    draft: RefCell<settings_model::SyntaxColorDraft>,
+    /// The saved tables as they were when the dialog opened, so Cancel can
+    /// put them back — the page applies live, so there is something to undo.
+    snapshot: RefCell<Option<settings_model::SyntaxColorDraft>>,
+}
+
+/// Level as the page names it: an empty language id is the base table.
+fn color_level(language_id: &QString) -> Option<String> {
+    let id = language_id.to_string();
+    (!id.is_empty()).then_some(id)
+}
+
+impl SyntaxColorEditorRust {
+    /// Write the draft through to settings, which is what makes the page
+    /// apply live: the highlighters re-read them on the next repaint.
+    fn save(&self) {
+        let config_dir = app_core::resolve_config_dir();
+        let Ok(mut settings) = app_config::load(&config_dir) else {
+            return;
+        };
+        self.draft.borrow().apply_to(&mut settings);
+        let _ = app_config::save(&config_dir, &settings);
+    }
+}
+
+impl ffi::SyntaxColorEditor {
+    pub fn begin_edit(&self) {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        let draft = settings_model::SyntaxColorDraft::from_settings(&settings);
+        *self.snapshot.borrow_mut() = Some(draft.clone());
+        *self.draft.borrow_mut() = draft;
+    }
+
+    pub fn languages(&self) -> Vec<ffi::FfiLanguageOption> {
+        syntax_core::registry()
+            .languages()
+            .into_iter()
+            .filter(|language| *language != syntax_core::Language::PLAIN_TEXT)
+            .map(|language| ffi::FfiLanguageOption {
+                id: QString::from(language.id()),
+                name: QString::from(language.name()),
+            })
+            .collect()
+    }
+
+    pub fn scopes(&self, language_id: &QString) -> Vec<ffi::FfiSyntaxScopeRow> {
+        let level = color_level(language_id);
+        let draft = self.draft.borrow();
+
+        // The Sample cell shows what the editor will paint, which is the
+        // draft resolved against the active theme — not the entry stored on
+        // the row, which may be nothing at all.
+        let mut settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        draft.apply_to(&mut settings);
+        let theme_name = settings.theme_name().to_string();
+        let palette = theme::palette(
+            &theme_name,
+            level.as_deref().unwrap_or_default(),
+            &user_styles(&settings),
+        );
+
+        settings_model::ordered_scopes()
+            .into_iter()
+            .filter_map(|name| Some((name, syntax_core::Scope::resolve(name)?)))
+            .map(|(name, scope)| {
+                let resolved = palette.style(scope);
+                let fg = resolved.fg.unwrap_or(theme::Rgb::new(0, 0, 0));
+                let entry = draft.effective(level.as_deref(), name);
+                ffi::FfiSyntaxScopeRow {
+                    scope: QString::from(name),
+                    family: QString::from(settings_model::scope_family(name)),
+                    sample: QString::from(settings_model::scope_sample(name)),
+                    origin: match draft.origin(level.as_deref(), name) {
+                        settings_model::Origin::Theme => ffi::FfiColorOrigin::Theme,
+                        settings_model::Origin::Base => ffi::FfiColorOrigin::Base,
+                        settings_model::Origin::Language => ffi::FfiColorOrigin::Language,
+                    },
+                    has_fg: resolved.fg.is_some(),
+                    red: fg.r,
+                    green: fg.g,
+                    blue: fg.b,
+                    sample_bold: resolved.bold,
+                    sample_italic: resolved.italic,
+                    sample_underline: resolved.underline,
+                    hex: QString::from(entry.and_then(|style| style.fg()).unwrap_or_default()),
+                    bold: entry.is_some_and(|style| style.bold()),
+                    italic: entry.is_some_and(|style| style.italic()),
+                    underline: entry.is_some_and(|style| style.underline()),
+                    can_reset: draft.can_clear(level.as_deref(), name),
+                }
+            })
+            .collect()
+    }
+
+    pub fn set_style(
+        &self,
+        language_id: &QString,
+        scope: &QString,
+        hex: &QString,
+        bold: bool,
+        italic: bool,
+        underline: bool,
+    ) {
+        let level = color_level(language_id);
+        let hex = hex.to_string();
+        self.draft.borrow_mut().set_style(
+            level.as_deref(),
+            &scope.to_string(),
+            Some(hex.as_str()),
+            bold,
+            italic,
+            underline,
+        );
+        self.save();
+    }
+
+    pub fn reset_scope(&self, language_id: &QString, scope: &QString) {
+        let level = color_level(language_id);
+        self.draft
+            .borrow_mut()
+            .clear(level.as_deref(), &scope.to_string());
+        self.save();
+    }
+
+    pub fn reset_level(&self, language_id: &QString) {
+        let level = color_level(language_id);
+        self.draft.borrow_mut().clear_level(level.as_deref());
+        self.save();
+    }
+
+    pub fn can_reset_level(&self, language_id: &QString) -> bool {
+        let level = color_level(language_id);
+        self.draft.borrow().can_clear_level(level.as_deref())
+    }
+
+    pub fn revert(&self) {
+        let Some(snapshot) = self.snapshot.borrow_mut().take() else {
+            return;
+        };
+        *self.draft.borrow_mut() = snapshot;
+        self.save();
+    }
+}
+
+/// Rust side of `LanguageCatalog` (G3).
+///
+/// The overlay is scanned here rather than read out of the global registry
+/// because the registry keeps only what loaded — and the whole point of this
+/// page is the entries that did not.
+#[derive(Default)]
+pub struct LanguageCatalogRust {
+    rows: RefCell<Vec<settings_model::LanguageRow>>,
+}
+
+fn to_ffi_io_result(result: std::io::Result<String>) -> FfiResult {
+    match result {
+        Ok(_) => FfiResult::default(),
+        Err(err) => FfiResult {
+            code: 1,
+            message: QString::from(err.to_string().as_str()),
+        },
+    }
+}
+
+impl ffi::LanguageCatalog {
+    pub fn refresh(&self) {
+        let config_dir = app_core::resolve_config_dir();
+        // ponytail: each scan leaks one generation of runtime `LanguageDef`s
+        // (`syntax_core::runtime` documents why it leaks at all). Bounded by
+        // how often a user presses Reload in a settings dialog.
+        let overlay = syntax_core::runtime::load_builtin_overlay(&config_dir);
+        let builtins: Vec<settings_model::languages::CatalogEntry> = syntax_core::BUILTIN_LANGUAGES
+            .iter()
+            .map(settings_model::languages::catalog_entry)
+            .collect();
+        let loaded: Vec<settings_model::languages::CatalogEntry> = overlay
+            .entries
+            .iter()
+            .map(|def| settings_model::languages::catalog_entry(def))
+            .collect();
+        *self.rows.borrow_mut() = settings_model::languages::rows(
+            &builtins,
+            &loaded,
+            &overlay.errors,
+            &settings_model::scan_manifests(&config_dir),
+        );
+    }
+
+    pub fn languages(&self) -> Vec<ffi::FfiLanguageRow> {
+        self.rows
+            .borrow()
+            .iter()
+            .map(|row| ffi::FfiLanguageRow {
+                id: QString::from(row.id.as_str()),
+                name: QString::from(row.name.as_str()),
+                matches: QString::from(row.matches.as_str()),
+                status: QString::from(row.status.text()),
+                source: match row.source {
+                    settings_model::LanguageSource::BuiltIn => ffi::FfiLanguageSource::BuiltIn,
+                    settings_model::LanguageSource::Overlay => ffi::FfiLanguageSource::Overlay,
+                    settings_model::LanguageSource::Library => ffi::FfiLanguageSource::Library,
+                },
+                severity: match row.status {
+                    settings_model::LanguageStatus::Ok => ffi::FfiRowSeverity::Healthy,
+                    settings_model::LanguageStatus::DisabledAfterCrash => {
+                        ffi::FfiRowSeverity::Warning
+                    }
+                    _ => ffi::FfiRowSeverity::Error,
+                },
+            })
+            .collect()
+    }
+
+    pub fn problem(&self, id: &QString) -> ffi::FfiLanguageProblem {
+        let id = id.to_string();
+        let rows = self.rows.borrow();
+        let problem = rows
+            .iter()
+            .find(|row| row.id == id)
+            .and_then(|row| row.problem.as_ref());
+        let Some(problem) = problem else {
+            return ffi::FfiLanguageProblem::default();
+        };
+        let offers = |action| problem.actions.contains(&action);
+        ffi::FfiLanguageProblem {
+            artifact: QString::from(problem.artifact.as_str()),
+            sentence: QString::from(problem.sentence.as_str()),
+            detail: QString::from(problem.detail.as_str()),
+            path: QString::from(problem.path.as_str()),
+            marker: QString::from(problem.marker.as_str()),
+            open_file: offers(settings_model::LanguageAction::OpenFile),
+            reload: offers(settings_model::LanguageAction::Reload),
+            enable: offers(settings_model::LanguageAction::EnableLanguage),
+            open_folder: offers(settings_model::LanguageAction::OpenFolder),
+        }
+    }
+
+    pub fn clear_quarantine(&self, marker: &QString) -> FfiResult {
+        let marker = marker.to_string();
+        to_ffi_io_result(
+            settings_model::languages::clear_quarantine(Path::new(&marker)).map(|()| marker),
+        )
+    }
+
+    pub fn add_language_folder(&self, path: &QString) -> FfiResult {
+        let config_dir = app_core::resolve_config_dir();
+        to_ffi_io_result(settings_model::languages::install_language_folder(
+            &config_dir,
+            Path::new(&path.to_string()),
+        ))
+    }
+
+    pub fn add_grammar_library(&self, path: &QString) -> FfiResult {
+        let config_dir = app_core::resolve_config_dir();
+        to_ffi_io_result(settings_model::languages::install_grammar_library(
+            &config_dir,
+            Path::new(&path.to_string()),
+        ))
+    }
+
+    pub fn languages_dir(&self) -> QString {
+        QString::from(
+            app_core::resolve_config_dir()
+                .join(settings_model::languages::LANGUAGES_DIR)
+                .display()
+                .to_string()
+                .as_str(),
+        )
+    }
+}
+
+/// Rust side of `LanguageServerEditor` (L6).
+#[derive(Default)]
+pub struct LanguageServerEditorRust {
+    draft: RefCell<Option<settings_model::ServerDraft>>,
+    /// What was saved when the page opened, so the page can tell a row it
+    /// has edited from one it has not without diffing widgets.
+    saved: RefCell<Option<settings_model::ServerDraft>>,
+}
+
+/// Every language a row could be about: the editor's own languages, under
+/// the ids the *protocol* uses, plus whatever the server catalog adds.
+fn server_page_languages() -> Vec<(String, String)> {
+    syntax_core::registry()
+        .languages()
+        .into_iter()
+        .filter(|language| *language != syntax_core::Language::PLAIN_TEXT)
+        .map(|language| {
+            (
+                settings_model::lsp_language_id(language.id()).to_string(),
+                language.name().to_string(),
+            )
+        })
+        .collect()
+}
+
+impl ffi::LanguageServerEditor {
+    pub fn begin_edit(&self) {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        let draft = settings_model::ServerDraft::new(&settings, &server_page_languages());
+        *self.saved.borrow_mut() = Some(draft.clone());
+        *self.draft.borrow_mut() = Some(draft);
+    }
+
+    pub fn rows(&self) -> Vec<ffi::FfiLanguageServerRow> {
+        let draft = self.draft.borrow();
+        let Some(draft) = draft.as_ref() else {
+            return Vec::new();
+        };
+        draft
+            .rows()
+            .iter()
+            .map(|row| ffi::FfiLanguageServerRow {
+                language_id: QString::from(row.language_id.as_str()),
+                language_name: QString::from(row.language_name.as_str()),
+                command: QString::from(row.command.as_str()),
+                args: QString::from(row.args.as_str()),
+                enabled: row.enabled,
+                status: match row.status() {
+                    settings_model::ServerRowStatus::NotConfigured => {
+                        ffi::FfiServerRowStatus::NotConfigured
+                    }
+                    settings_model::ServerRowStatus::Disabled => ffi::FfiServerRowStatus::Disabled,
+                    settings_model::ServerRowStatus::Enabled => ffi::FfiServerRowStatus::Enabled,
+                },
+            })
+            .collect()
+    }
+
+    pub fn set_command(&self, language_id: &QString, command: &QString) {
+        if let Some(draft) = self.draft.borrow_mut().as_mut() {
+            draft.set_command(&language_id.to_string(), &command.to_string());
+        }
+    }
+
+    pub fn set_args(&self, language_id: &QString, args: &QString) {
+        if let Some(draft) = self.draft.borrow_mut().as_mut() {
+            draft.set_args(&language_id.to_string(), &args.to_string());
+        }
+    }
+
+    pub fn set_enabled(&self, language_id: &QString, enabled: bool) {
+        if let Some(draft) = self.draft.borrow_mut().as_mut() {
+            draft.set_enabled(&language_id.to_string(), enabled);
+        }
+    }
+
+    pub fn is_dirty(&self, language_id: &QString) -> bool {
+        let language_id = language_id.to_string();
+        let draft = self.draft.borrow();
+        let saved = self.saved.borrow();
+        match (draft.as_ref(), saved.as_ref()) {
+            (Some(draft), Some(saved)) => draft.row(&language_id) != saved.row(&language_id),
+            _ => false,
+        }
+    }
+
+    pub fn commit(&self) {
+        let Some(draft) = self.draft.borrow().clone() else {
+            return;
+        };
+        let config_dir = app_core::resolve_config_dir();
+        let Ok(mut settings) = app_config::load(&config_dir) else {
+            return;
+        };
+        draft.apply_to(&mut settings);
+        let _ = app_config::save(&config_dir, &settings);
+        *self.saved.borrow_mut() = Some(draft);
     }
 }
 

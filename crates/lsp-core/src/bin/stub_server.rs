@@ -7,8 +7,8 @@
 //! under a custom `CARGO_TARGET_DIR`, `--release`, or cross-compilation.
 //!
 //! Supported: framing, `initialize`/`initialized`/`shutdown`/`exit`, a canned
-//! diagnostic on `textDocument/didOpen`, canned `textDocument/hover` and
-//! `textDocument/definition` replies that vary by the requested position so
+//! diagnostic on `textDocument/didOpen`, canned `textDocument/hover`,
+//! `textDocument/definition` and `textDocument/completion` replies that vary by the requested position so
 //! every response shape the protocol allows is reachable, and two test
 //! affordances —
 //! `stub/echo` (with an optional `delay_ms`, answered on its own thread so
@@ -53,7 +53,12 @@ fn main() {
             ("initialize", Some(id)) => send(
                 &out,
                 json!({"jsonrpc": "2.0", "id": id, "result": {
-                    "capabilities": {"textDocumentSync": 1},
+                    "capabilities": {
+                        "textDocumentSync": 1,
+                        // L5: the same pair rust-analyzer advertises, so
+                        // `.` and (twice over) `::` are covered.
+                        "completionProvider": {"triggerCharacters": [".", ":"]},
+                    },
                     "serverInfo": {"name": "stub_server", "version": "0.1.0"},
                 }}),
             ),
@@ -141,6 +146,37 @@ fn main() {
                         "targetSelectionRange": {"start": {"line": 3, "character": 4},
                                                  "end": {"line": 3, "character": 8}},
                     }]),
+                    _ => Value::Null,
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // L5: both response shapes, chosen by the requested line —
+            // line 0 -> a bare CompletionItem[], line 1 -> a CompletionList
+            // that is incomplete and carries a snippet item and a textEdit
+            // item, anything else -> null (nothing to complete).
+            ("textDocument/completion", Some(id)) => {
+                let line = params
+                    .pointer("/position/line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let result = match line {
+                    0 => json!([
+                        {"label": "push", "kind": 2, "detail": "fn push(&mut self, value: T)",
+                         "sortText": "0001"},
+                        {"label": "pop", "kind": 2, "sortText": "0000",
+                         "documentation": {"kind": "markdown", "value": "Removes the last element."}},
+                        {"label": "#[allow]", "kind": 15, "filterText": "allow",
+                         "insertText": "#[allow(dead_code)]"},
+                    ]),
+                    1 => json!({"isIncomplete": true, "items": [
+                        {"label": "map", "kind": 3, "insertTextFormat": 2,
+                         "insertText": "map(${1:f})$0"},
+                        {"label": "max", "kind": 3, "textEdit": {
+                            "newText": "max()",
+                            "range": {"start": {"line": 1, "character": 2},
+                                      "end": {"line": 1, "character": 4}},
+                        }},
+                    ]}),
                     _ => Value::Null,
                 };
                 send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));

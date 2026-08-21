@@ -6,7 +6,8 @@ Proposed.
 Implemented as task L1 of [the language platform plan](../language-platform-plan.md), with the stub server it is tested against as task X2 (both commit `0554341`).
 Diagnostics (L2) landed on top of it: `ui-shell`'s `LanguageService` QObject owns the manager on a worker thread and drains its events onto the Qt thread, and `app-config` gained the `[[language_server]]` table.
 Hover (L3) and go-to-definition (L4) landed next: `lsp_core::hover` owns the response shapes, the tooltip rendering and the stale-response rule, and `lsp_core::navigation` owns the response shapes and the LSP-over-index precedence rule below.
-The remaining feature tasks — completion (L5) and the settings page (L6) — are still open.
+Completion (L5) followed the same shape: `lsp_core::completion` owns the two response shapes, the `textEdit`/`insertText`/label insertion precedence, the `sortText`/`filterText` ordering and matching, the snippet-to-plain-text flattening, the trigger policy, and the stale-response rule — the editor's popup only paints what that module returns.
+The settings page (L6) landed with the other two language-platform settings pages: its draft model and the "persist only what differs from the catalog" rule live in `settings-model` (ADR-0017), and `LanguageService` gained `applyServerSettings`/`restartServer` so a committed change reconciles the running servers without restarting the untouched ones.
 
 ## Context
 
@@ -85,6 +86,7 @@ Nothing in the catalog is installed by us — a missing executable simply means 
 - Positive: the whole client is unit- and integration-testable in CI without Qt and without a network — the X2 stub server exercises framing, handshake, request/response, timeout, diagnostics and a die-mid-session respawn, offline.
 - Positive: `bridge.rs` will stay thin when L2–L5 land, because there is nothing left for it to decide.
 - Positive: features can be added one capability at a time. `client_capabilities()` is deliberately minimal (synchronization + `publishDiagnostics` + UTF-16 position encoding); each feature task adds the capability it implements rather than advertising support speculatively.
+- Negative / accepted: snippet completions are inserted as plain text — placeholders resolve to their default (`foo(${1:bar})` becomes `foo(bar)`), the caret is not parked on a tabstop and Tab does not walk them. `snippetSupport: false` is advertised accordingly, so a server that can offer plain items does. Real tabstop navigation is a follow-up that needs no change below `completion::strip_snippet`.
 - Negative / accepted: document sync is full-text (`contentChanges: [{ text }]`), not incremental. Simple and always correct; if a large file proves slow, incremental sync is the documented upgrade and needs no change to anything above the manager.
 - Negative / accepted: server-to-client requests are answered with JSON-RPC `-32601` (method not found). `workspace/configuration` and `client/registerCapability` are the two that matter in practice, and both are deferred to the feature tasks that need them — a server blocks until it is answered, so answering honestly now is better than either hanging or lying.
 - Negative / accepted: server `stderr` is `Stdio::null()`. Servers are chatty on it and nothing reads it, and a full pipe would deadlock the child — but it also means a server that explains its startup failure only on stderr fails silently. Capturing it into a log view is a follow-up for L6, where server status is already surfaced.

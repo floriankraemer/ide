@@ -151,8 +151,8 @@ fn an_unimplemented_request_returns_the_servers_error() {
     manager.start(&stub_config()).expect("stub starts");
 
     let err = manager
-        .request(LANG, "textDocument/completion", json!({}))
-        .expect_err("the stub implements no completion");
+        .request(LANG, "textDocument/rename", json!({}))
+        .expect_err("the stub implements no rename");
     assert!(
         matches!(err, LspError::Response { code: -32601, .. }),
         "got {err:?}"
@@ -367,4 +367,71 @@ fn definitions_are_parsed_and_fall_back_to_the_index() {
         definition_outcome(Some(manager.definition(uri, 0, 0))),
         DefinitionOutcome::Index
     );
+}
+
+/// L5: both response shapes, the insertion precedence, and the server's
+/// ordering and filtering, driven through a real child process.
+#[test]
+fn completions_are_parsed_ordered_and_filtered() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    let uri = "file:///workspace/main.rs";
+    manager
+        .did_open(uri, LANG, "fn main() {}")
+        .expect("didOpen");
+
+    // The trigger characters reach the UI through ServerReady, not a getter.
+    let triggers = wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady {
+            trigger_characters, ..
+        } => Some(trigger_characters.clone()),
+        _ => None,
+    });
+    assert_eq!(triggers, [".", ":"]);
+    assert!(lsp_core::should_request(
+        &triggers,
+        "self.",
+        false,
+        &lsp_core::CompletionTracker::default(),
+    ));
+
+    // Line 0: a bare CompletionItem[], ordered by sortText, not by label.
+    let plain = manager.completion(uri, 0, 0).expect("completion");
+    assert!(!plain.is_incomplete);
+    let ordered: Vec<String> = lsp_core::filter_completions(&plain.items, "p")
+        .into_iter()
+        .map(|i| i.label)
+        .collect();
+    assert_eq!(ordered, ["pop", "push"], "sortText wins over the label");
+    // filterText, not the label, decides what a prefix matches.
+    let filtered = lsp_core::filter_completions(&plain.items, "allo");
+    assert_eq!(filtered.len(), 1);
+    assert_eq!(filtered[0].label, "#[allow]");
+    assert_eq!(filtered[0].insert, "#[allow(dead_code)]", "insertText");
+
+    // Line 1: a CompletionList, incomplete, with a snippet and a textEdit.
+    let list = manager.completion(uri, 1, 0).expect("completion");
+    assert!(list.is_incomplete, "ask again as the word grows");
+    let snippet = &list.items[0];
+    assert_eq!(
+        snippet.insert, "map(f)",
+        "no placeholders left in the buffer"
+    );
+    let edit = &list.items[1];
+    assert_eq!(edit.insert, "max()");
+    assert_eq!(
+        edit.range
+            .expect("a textEdit names its range")
+            .start_character,
+        2
+    );
+
+    // Anywhere else: an empty list, which is not an error.
+    assert!(manager
+        .completion(uri, 7, 0)
+        .expect("completion")
+        .items
+        .is_empty());
+
+    manager.stop(LANG);
 }

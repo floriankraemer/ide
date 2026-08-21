@@ -2339,6 +2339,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "settings-model"
+version = "0.1.0"
+dependencies = [
+ "app-config",
+ "lsp-core",
+ "serde",
+ "syntax-core",
+ "tempfile",
+ "toml",
+ "tree-sitter",
+]
+
+[[package]]
 name = "shared_library"
 version = "0.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3290,6 +3303,7 @@ dependencies = [
  "mcp-server",
  "project-model",
  "pty-core",
+ "settings-model",
  "syntax-core",
  "terminal-core",
  "tokio",

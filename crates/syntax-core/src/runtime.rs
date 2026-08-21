@@ -88,7 +88,7 @@ use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 
 use libloading::Library;
 use serde::Deserialize;
@@ -326,8 +326,10 @@ fn load_one(
             let (grammar, guard) = load_grammar_library(dir, &id, library).map_err(fail)?;
             // Held until the queries have compiled: `ts_query_new` walks
             // the foreign grammar's tables, so it is inside the window a
-            // crash must be blamed on.
-            quarantine = Some(guard);
+            // crash must be blamed on. `None` when this library was
+            // already loaded by an earlier scan — nothing is being
+            // `dlopen`ed, so there is no crash window to guard.
+            quarantine = guard;
             GrammarSource::Foreign(grammar)
         }
         (None, None) => {
@@ -377,10 +379,22 @@ fn load_one(
         .unwrap_or_else(|| base.map_or_else(|| source.default_name(&id), |d| d.name.to_string()));
 
     // ponytail: leaked so runtime entries satisfy `LanguageDef`'s
-    // `&'static str` fields, which the const catalog needs. Bounded by the
-    // number of manifests; a G2 reload leaks one generation per reload,
-    // which is fine for a user-initiated action and avoids threading a
-    // lifetime through every `Language` handle.
+    // `&'static str` fields, which the const catalog needs.
+    //
+    // G2 makes this per *reload*, not once, so the honest question is
+    // whether it is unbounded. It grows only when a human presses Reload
+    // Languages, and one generation is the manifest's strings plus its
+    // `.scm` sources — single-digit kilobytes per runtime language. A
+    // thousand reloads in one session is a few megabytes; nobody reloads
+    // a thousand times, and the process exits long before it matters.
+    // Accepted, deliberately, because the alternative is real: making
+    // these fields `Arc<str>`/`Cow` would stop `BUILTIN_LANGUAGES` being
+    // a `const` table and push a lifetime or an `Arc` through every
+    // `LanguageDef` reader — a large, permanent complexity cost to
+    // reclaim kilobytes. Revisit only if a `LanguageDef` ever grows a
+    // large owned payload, or if something starts reloading on a timer
+    // or a file watcher instead of a button (that would make it a leak
+    // per file save, which is a different answer).
     Ok(Box::leak(Box::new(LanguageDef {
         id: leak(id),
         name: leak(name),
@@ -442,6 +456,11 @@ static FOREIGN_GRAMMARS: [OnceLock<LanguageFn>; MAX_FOREIGN_GRAMMARS] =
     [const { OnceLock::new() }; MAX_FOREIGN_GRAMMARS];
 static NEXT_FOREIGN_SLOT: AtomicUsize = AtomicUsize::new(0);
 
+/// Every grammar library loaded so far, by path, so a reload reuses the
+/// slot and the `dlopen` instead of consuming a new one — see
+/// [`load_grammar_library`]. Never shrinks; libraries are never unloaded.
+static LOADED_LIBRARIES: Mutex<Vec<(PathBuf, GrammarFn)>> = Mutex::new(Vec::new());
+
 fn foreign_grammar<const N: usize>() -> TsLanguage {
     TsLanguage::new(
         *FOREIGN_GRAMMARS[N]
@@ -489,7 +508,7 @@ fn load_grammar_library(
     dir: &Path,
     id: &str,
     library: &str,
-) -> Result<(GrammarFn, QuarantineGuard), LoadErrorKind> {
+) -> Result<(GrammarFn, Option<QuarantineGuard>), LoadErrorKind> {
     // The symbol is derived from the id and never named by the manifest —
     // an attacker who can write `language.toml` must not be able to pick
     // what gets called. Restricting the id keeps that derivation total.
@@ -516,6 +535,22 @@ fn load_grammar_library(
     let marker = quarantine_marker(dir, id);
     if marker.exists() {
         return Err(LoadErrorKind::Quarantined { marker });
+    }
+
+    // A library this process already loaded is reused rather than
+    // `dlopen`ed again. Not an optimisation: a G2 reload re-runs this
+    // scan, and without the cache every reload would burn another
+    // trampoline slot (16 reloads and a perfectly good grammar starts
+    // reporting `TooManyGrammars`) and leak another `Library`. Grammars
+    // are never unloaded, so the first load's function pointer stays
+    // valid for the life of the process — reusing it is also the only
+    // *correct* answer, since trees and queries built from the old load
+    // are still alive.
+    let mut loaded = LOADED_LIBRARIES
+        .lock()
+        .expect("grammar library cache poisoned");
+    if let Some((_, grammar)) = loaded.iter().find(|(cached, _)| cached == &path) {
+        return Ok((*grammar, None));
     }
 
     // Claimed before anything is loaded: running out of slots must not
@@ -581,7 +616,9 @@ fn load_grammar_library(
     std::mem::forget(library);
 
     let _ = FOREIGN_GRAMMARS[slot].set(language_fn);
-    Ok((FOREIGN_TRAMPOLINES[slot], guard))
+    let grammar = FOREIGN_TRAMPOLINES[slot];
+    loaded.push((path, grammar));
+    Ok((grammar, Some(guard)))
 }
 
 /// A `queries/<name>.scm` override, falling back to the builtin's source.

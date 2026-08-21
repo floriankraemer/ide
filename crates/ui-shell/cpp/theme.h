@@ -19,6 +19,29 @@ struct ThemeColors
 
 ThemeColors colorsForTheme(const QString &themeName);
 
+// The semantic colours every status and severity label in the product uses
+// (`docs/design/language-platform-ui.md` section 1). Kept next to the
+// stylesheets for the same reason `ThemeColors` is: a colour picked in code
+// and a colour picked in QSS must not drift.
+//
+// Meaning is never carried by hue alone — every one of these is applied to a
+// word (`Error`, `Running`, `Disabled after crash`), so a greyscale
+// screenshot and a screen reader carry the same information. Each value
+// clears WCAG AA 4.5:1 against its theme's list background.
+struct SemanticColors
+{
+    QColor error;
+    QColor warning;
+    QColor info;
+    QColor ok;
+    QColor muted;
+};
+
+SemanticColors semanticColorsForTheme(const QString &themeName);
+
+// The same, for whatever theme is active — what a widget building rows wants.
+SemanticColors semanticColors();
+
 // Chrome-wide stylesheets (menus, tabs, tree, scrollbars, splitter). Editor
 // text colors are QPalette-driven, not QSS (A3) — kept separate here.
 QString darculaStyleSheet();

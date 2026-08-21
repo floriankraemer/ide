@@ -666,6 +666,29 @@ pub fn language_by_id(id: &str) -> Option<Language> {
     registry().language_by_id(id)
 }
 
+/// Re-scan `<config_dir>/languages` and swap in a registry built from the
+/// builtins plus what it finds (G2). Returns the load errors so the UI can
+/// show them; an empty vec means everything on disk loaded.
+///
+/// `config_dir` is a parameter, not resolved here: `syntax-core` has no
+/// `dirs` dependency and does not get one — the caller owns "where config
+/// lives", exactly as it does for `runtime::load`.
+///
+/// Safe to call with editors open. The scan (file I/O, `dlopen`, query
+/// compiles) happens *before* the write lock is taken, so a reload never
+/// blocks a parse for longer than the pointer swap. Live `Highlighter`s
+/// hold an `Arc<CompiledLanguage>` and keep parsing with the grammar they
+/// were built with; anything opened afterwards sees the new registry.
+pub fn reload(config_dir: &Path) -> Vec<crate::runtime::LanguageLoadError> {
+    let loaded = crate::runtime::load(config_dir, BUILTIN_LANGUAGES);
+    let rebuilt = Arc::new(LanguageRegistry::with_runtime(
+        BUILTIN_LANGUAGES,
+        &loaded.entries,
+    ));
+    *REGISTRY.write().expect("language registry lock poisoned") = rebuilt;
+    loaded.errors
+}
+
 /// Human-readable name for `language` (status bar, L3).
 pub fn language_name(language: Language) -> &'static str {
     language.name()
@@ -773,6 +796,104 @@ mod tests {
             registry.language_for_path(Path::new("makefile")),
             Language::PLAIN_TEXT
         );
+    }
+
+    /// G2, in one test on purpose: [`reload`] swaps the *process-wide*
+    /// registry, so splitting these into separate `#[test]` functions
+    /// would let them race each other inside the shared test binary.
+    ///
+    /// Everything here is scoped to a language id no builtin uses, so a
+    /// reload mid-flight cannot disturb the other tests in this module
+    /// either.
+    #[test]
+    fn reload_rebuilds_the_registry_around_live_highlighters() {
+        use crate::Highlighter;
+        use std::fs;
+
+        let config = tempfile::tempdir().unwrap();
+        let lang_dir = config.path().join("languages").join("g2test");
+        let queries_dir = lang_dir.join("queries");
+        fs::create_dir_all(&queries_dir).unwrap();
+        let manifest = |body: &str| fs::write(lang_dir.join("language.toml"), body).unwrap();
+        let highlights = |body: &str| fs::write(queries_dir.join("highlights.scm"), body).unwrap();
+
+        // An editor opened *before* any reload, on a builtin language.
+        let json = "{\n  \"a\": \"one\",\n  \"b\": 2\n}";
+        let mut open = Highlighter::new(language_by_id("json").expect("json"));
+        let before = open.set_text(json);
+        assert!(!before.is_empty(), "json highlights before the reload");
+        assert!(
+            !open.fold_ranges().is_empty(),
+            "json folds before the reload"
+        );
+
+        // 1. A language that did not exist at startup is picked up.
+        manifest("grammar = \"json\"\nextensions = [\"g2t\"]\n");
+        highlights("(string) @string\n");
+        assert_eq!(reload(config.path()), Vec::new());
+        assert_eq!(language_for_path(Path::new("x.g2t")).id(), "g2test");
+        let span_count = |language| {
+            let mut h = Highlighter::new(language);
+            h.set_text(json).len()
+        };
+        let with_strings = span_count(language_by_id("g2test").expect("g2test"));
+        assert!(with_strings > 0, "the runtime query highlights something");
+
+        // 2. Editing a query file and reloading picks the edit up — same
+        //    id, different spans, no restart.
+        highlights("(number) @number\n");
+        assert_eq!(reload(config.path()), Vec::new());
+        let with_numbers = span_count(language_by_id("g2test").expect("g2test"));
+        assert!(with_numbers > 0 && with_numbers != with_strings);
+
+        // 3. The `Highlighter` opened before either reload is untouched:
+        //    it parses, edits incrementally and folds with the grammar it
+        //    was built with (decision 3).
+        assert_eq!(open.set_text(json), before);
+        let at = json.find("one").expect("fixture") + 3;
+        let edited = json.replace("one", "onex");
+        let after_edit = open.edit(&edited, at, at, at + 1);
+        assert!(!after_edit.is_empty(), "still highlighting after a reload");
+        assert!(
+            !open.fold_ranges().is_empty(),
+            "still folding after a reload"
+        );
+
+        // 4. Load errors come back through the return value.
+        let broken = config.path().join("languages").join("g2broken");
+        fs::create_dir_all(&broken).unwrap();
+        fs::write(broken.join("language.toml"), "this is not toml =\n").unwrap();
+        let errors = reload(config.path());
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].id, "g2broken");
+        assert!(matches!(
+            errors[0].kind,
+            crate::runtime::LoadErrorKind::MalformedManifest(_)
+        ));
+        // The good language still loaded alongside the broken one.
+        assert!(language_by_id("g2test").is_some());
+
+        // 5. Reloading while another thread parses must not deadlock: no
+        //    registry lock may be held across a parse (`index-core`
+        //    resolves languages from background indexing threads).
+        std::thread::scope(|scope| {
+            let path = config.path();
+            scope.spawn(move || {
+                for _ in 0..20 {
+                    reload(path);
+                }
+            });
+            let rust = language_by_id("rust").expect("rust");
+            for _ in 0..20 {
+                let mut h = Highlighter::new(rust);
+                assert!(!h.set_text("fn main() { let x = 1; }").is_empty());
+            }
+        });
+
+        // Leave the global registry as we found it.
+        let empty = tempfile::tempdir().unwrap();
+        assert_eq!(reload(empty.path()), Vec::new());
+        assert!(language_by_id("g2test").is_none());
     }
 
     #[test]

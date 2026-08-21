@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::catalog::ServerConfig;
+use crate::completion::{parse_completion, parse_trigger_characters, CompletionList};
 use crate::framing::{read_message, write_message};
 use crate::hover::{parse_hover, HoverText};
 use crate::navigation::{parse_definition, DefinitionTarget};
@@ -28,6 +29,10 @@ pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 /// Hover is speculative and mouse-driven: an answer that arrives seconds
 /// after the dwell is not worth showing, so it gets its own short deadline.
 pub const HOVER_TIMEOUT: Duration = Duration::from_secs(2);
+/// Completion is asked for per keystroke and the popup is only useful while
+/// the word it describes is still being typed, so it gets the shortest
+/// deadline of all: a list that lands later is discarded anyway.
+pub const COMPLETION_TIMEOUT: Duration = Duration::from_secs(3);
 /// Go to Definition is an explicit gesture and the user is waiting for it,
 /// but a jump that lands half a minute later is a bug, not a jump.
 pub const DEFINITION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -50,7 +55,13 @@ const HEALTHY_SESSION: Duration = Duration::from_secs(30);
 pub enum LspEvent {
     /// The server finished `initialize`/`initialized` and accepts requests.
     /// `restarts` is 0 for the first launch and counts respawns after that.
-    ServerReady { language_id: String, restarts: u32 },
+    ServerReady {
+        language_id: String,
+        restarts: u32,
+        /// The characters this server wants completion requested after, from
+        /// its `initialize` result — `.` in most languages, `:` in Rust.
+        trigger_characters: Vec<String>,
+    },
     /// The server's stdout hit EOF or errored, i.e. it died. A respawn follows
     /// after `retry_in` unless the restart budget is used up.
     ServerExited {
@@ -425,6 +436,25 @@ impl LspManager {
         Ok(parse_definition(&result))
     }
 
+    /// `textDocument/completion` for a position in an open document, parsed
+    /// across both response shapes. Ordering and filtering are the caller's
+    /// next step ([`crate::completion::filter`]), not the manager's.
+    pub fn completion(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<CompletionList, LspError> {
+        let language_id = self.language_of(uri)?;
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/completion",
+            position_params(uri, line, character),
+            COMPLETION_TIMEOUT,
+        )?;
+        Ok(parse_completion(&result))
+    }
+
     /// The version last sent for a document, if it is open.
     pub fn document_version(&self, uri: &str) -> Option<i32> {
         self.documents.lock().unwrap().get(uri).map(|d| d.version)
@@ -501,13 +531,14 @@ fn spawn_supervisor(
 
         loop {
             match connect(&server, &cfg, &root_uri) {
-                Ok(stdout) => {
+                Ok((stdout, trigger_characters)) => {
                     if let Some(tx) = ready.take() {
                         let _ = tx.send(Ok(()));
                     }
                     let _ = events.send(LspEvent::ServerReady {
                         language_id: cfg.language_id.clone(),
                         restarts,
+                        trigger_characters,
                     });
                     let started = Instant::now();
                     read_loop(&server, &cfg.language_id, stdout, &events);
@@ -568,7 +599,7 @@ fn connect(
     server: &Server,
     cfg: &ServerConfig,
     root_uri: &str,
-) -> Result<BufReader<std::process::ChildStdout>, LspError> {
+) -> Result<(BufReader<std::process::ChildStdout>, Vec<String>), LspError> {
     let mut child = Command::new(&cfg.command)
         .args(&cfg.args)
         .stdin(Stdio::piped())
@@ -603,7 +634,7 @@ fn connect(
         &serde_json::to_vec(&init).map_err(io::Error::from)?,
     )?;
 
-    loop {
+    let triggers = loop {
         let Some(body) = read_message(&mut stdout)? else {
             return Err(LspError::Disconnected {
                 method: "initialize".into(),
@@ -614,11 +645,13 @@ fn connect(
             if let Some(error) = message.get("error") {
                 return Err(response_error(error));
             }
-            break;
+            // What the server can do is read here, once, and published with
+            // `ServerReady` — nothing else ever sees the raw result.
+            break parse_trigger_characters(message.get("result").unwrap_or(&Value::Null));
         }
         // Anything else before the response (log messages, server requests)
         // is dropped: the client isn't observable yet.
-    }
+    };
 
     let initialized = json!({"jsonrpc": "2.0", "method": "initialized", "params": {}});
     write_message(
@@ -628,7 +661,7 @@ fn connect(
     stdin.flush()?;
 
     *server.conn.lock().unwrap() = Some(Conn { stdin, child });
-    Ok(stdout)
+    Ok((stdout, triggers))
 }
 
 /// Read and dispatch until the server's stdout ends (i.e. it died).
@@ -744,6 +777,17 @@ fn client_capabilities() -> Value {
             // and `linkSupport` opts into the richer `LocationLink` reply.
             "hover": {"contentFormat": ["markdown", "plaintext"]},
             "definition": {"linkSupport": true},
+            // L5: `snippetSupport: false` is the honest answer — snippet
+            // items are inserted as their plain text, with no tabstops (see
+            // `completion::strip_snippet`), so a server that would send
+            // placeholder-heavy items is told to prefer plain ones.
+            "completion": {
+                "completionItem": {
+                    "snippetSupport": false,
+                    "documentationFormat": ["plaintext", "markdown"],
+                },
+                "contextSupport": false,
+            },
         },
         "general": {"positionEncodings": ["utf-16"]},
     })

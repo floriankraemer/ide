@@ -8,8 +8,12 @@
 #include <QVector>
 #include <QWidget>
 
+class QCompleter;
 class QEvent;
+class QFocusEvent;
+class QKeyEvent;
 class QMouseEvent;
+class QStandardItemModel;
 class QPaintEvent;
 class QResizeEvent;
 
@@ -46,6 +50,34 @@ struct DiagnosticSpan
     int start;
     int end;
     QColor color;
+};
+
+// One completion candidate as the popup shows it (Task L5), view-local for
+// the same reason FoldRange and DiagnosticSpan are: converted from the FFI
+// type by main_window.cpp, so this widget stays decoupled from the cxx-qt
+// generated header. Nothing here is decided by the view — `insert` is the
+// text the server said to type (`lsp_core::completion` already resolved
+// textEdit/insertText/label precedence and flattened any snippet), and the
+// order of the vector is the server's `sortText` order.
+struct CompletionEntry
+{
+    QString label;
+    QString kind;
+    QString detail;
+    QString documentation;
+    QString insert;
+    // When true, the server named the span to replace, in protocol units:
+    // 0-based lines, UTF-16 characters. When false, the word the caret is
+    // in is replaced instead.
+    bool hasRange;
+    int startLine;
+    int startCharacter;
+    int endLine;
+    int endCharacter;
+    // How many UTF-16 characters before the caret the typed word occupies —
+    // what gets replaced when `hasRange` is false. Derived from the same
+    // text the request was made about, in `lsp_core::completion`.
+    int prefixLength;
 };
 
 // Line-number gutter (Qt's classic Code Editor Example pattern). Q_OBJECT is
@@ -95,6 +127,17 @@ public:
     // diagnostic has.
     void setDiagnosticSpans(const QVector<DiagnosticSpan> &spans);
 
+    // L5: show these candidates, or hide the popup when the vector is
+    // empty. Called with whatever `LanguageService::completionItems` last
+    // returned — this widget neither filters nor orders (that is
+    // `lsp_core::completion`), it only paints and inserts.
+    void showCompletions(const QVector<CompletionEntry> &items);
+
+    // Re-asks for the candidates matching whatever word the caret is in
+    // now, by emitting completionFilterChanged. Called when an answer
+    // arrives and after every keystroke the popup survives.
+    void refreshCompletions();
+
     // S2: explicit override for the current-line band, "#rrggbb" or empty
     // for "derive it from the editor palette" (the same empty-means-theme
     // contract the editor background/foreground overrides use).
@@ -118,6 +161,23 @@ signals:
     // must not be shown any more.
     void hoverCanceled();
 
+    // L5: something happened that might want completions — a keystroke, or
+    // Ctrl+Space (`explicitRequest`). `position` is a document (UTF-16)
+    // position at the caret and `textBeforeCursor` is the current line up
+    // to it; whether that is worth a request at all is decided in
+    // `lsp_core::completion`, not here, so this fires on every keystroke.
+    void completionRequested(int position, const QString &textBeforeCursor, bool explicitRequest);
+
+    // L5: the caret moved within the word being completed, so the visible
+    // candidates are stale. Carries the current line up to the caret — the
+    // word inside it is picked out by `lsp_core::completion`, not here —
+    // and the narrowed list comes back via showCompletions().
+    void completionFilterChanged(const QString &textBeforeCursor);
+
+    // L5: the popup closed, or the caret left the word — nothing in flight
+    // is wanted.
+    void completionCanceled();
+
 protected:
     void resizeEvent(QResizeEvent *event) override;
     void changeEvent(QEvent *event) override;
@@ -131,6 +191,10 @@ protected:
     bool viewportEvent(QEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
     void leaveEvent(QEvent *event) override;
+    // L5: Ctrl+Space, the keys the popup owns while it is open, and the
+    // per-keystroke completion request.
+    void keyPressEvent(QKeyEvent *event) override;
+    void focusOutEvent(QFocusEvent *event) override;
 
 private slots:
     void updateLineNumberAreaWidth(int newBlockCount);
@@ -156,6 +220,14 @@ private:
     void cancelHover();
     void clearHoverSpan();
 
+    // The current line up to the caret — what `lsp_core::completion` reads
+    // both the typed word and the trigger character out of.
+    QString textBeforeCursor() const;
+    // Types `entry`, replacing either the range the server named or the
+    // word the caret is in.
+    void insertCompletion(const CompletionEntry &entry);
+    void hideCompletionPopup();
+
     bool foldStartingAt(int blockNumber, FoldRange *out) const;
     void toggleFold(int blockNumber);
     void setBlocksVisible(int fromBlockExclusive, int toBlockInclusive, bool visible);
@@ -173,6 +245,13 @@ private:
     // Whether a hover answer is still outstanding, so an idle mouse move
     // doesn't cross the FFI seam to cancel nothing.
     bool hoverPending_ = false;
+    // L5: the popup. QCompleter is used in UnfilteredPopupCompletion mode —
+    // its own prefix matching is deliberately bypassed, because filtering
+    // and ordering belong to the server (`filterText`/`sortText`) and are
+    // done in `lsp_core::completion` before the model is ever filled.
+    QCompleter *completer_;
+    QStandardItemModel *completionModel_;
+    QVector<CompletionEntry> completionEntries_;
 };
 
 // No Q_OBJECT: forwards paint events to CodeEditor, uses no signals/slots.
