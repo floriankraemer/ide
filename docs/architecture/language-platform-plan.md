@@ -16,7 +16,7 @@ per `CLAUDE.md`.
 | R2 | open | |
 | R3 | open | |
 | T1 | open | |
-| T2 | done | `4718cfd` |
+| T2 | done | `76352ce` |
 | T3 | open | |
 | T4 | open | |
 | I1 | open | |
