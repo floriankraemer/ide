@@ -1,35 +1,34 @@
-; Markdown inline grammar highlights.scm — tree-sitter-md 0.5.3's own
-; `tree-sitter-markdown-inline/queries/highlights.scm` (MIT), unchanged.
+; Markdown inline grammar highlights.scm — adapted from tree-sitter-md
+; 0.5.3's own `tree-sitter-markdown-inline/queries/highlights.scm` (MIT).
 ;
-; As in markdown/highlights.scm, the `@text.*` capture names have no entry
-; in `syntax_core::SCOPES` and therefore yield no spans today; they are
-; left as upstream wrote them so that adding a `markup`/`text` family to
-; the taxonomy later is a table edit and not a rewrite of every query.
+; As in markdown/highlights.scm, the upstream `@text.*` capture names are
+; spelled as the current `@markup.*` family that `syntax_core::SCOPES`
+; knows — the same captures under their newer names.
 
-[
-  (code_span)
-  (link_title)
-] @text.literal
+(code_span) @markup.raw
+(link_title) @markup.link.label
 
 [
   (emphasis_delimiter)
   (code_span_delimiter)
 ] @punctuation.delimiter
 
-(emphasis) @text.emphasis
+(emphasis) @markup.italic
 
-(strong_emphasis) @text.strong
+(strong_emphasis) @markup.bold
+
+(strikethrough) @markup.strikethrough
 
 [
   (link_destination)
   (uri_autolink)
-] @text.uri
+] @markup.link.url
 
 [
   (link_label)
   (link_text)
   (image_description)
-] @text.reference
+] @markup.link.label
 
 [
   (backslash_escape)

@@ -57,7 +57,34 @@ impl ScopeStyle {
             underline: false,
         }
     }
+
+    const fn bold(self) -> Self {
+        Self { bold: true, ..self }
+    }
+
+    const fn italic(self) -> Self {
+        Self {
+            italic: true,
+            ..self
+        }
+    }
+
+    const fn underline(self) -> Self {
+        Self {
+            underline: true,
+            ..self
+        }
+    }
 }
+
+/// Emphasis is a shape, not a colour: the `markup.italic`/`markup.bold`
+/// entries carry no `fg` and inherit whatever the surrounding prose uses.
+const PLAIN: ScopeStyle = ScopeStyle {
+    fg: None,
+    bold: false,
+    italic: false,
+    underline: false,
+};
 
 /// A named colour table: base scope entries plus optional per-language ones.
 pub struct Theme {
@@ -76,6 +103,30 @@ const DARCULA: &[(&str, ScopeStyle)] = &[
     ("number", ScopeStyle::fg(Rgb::new(0x68, 0x97, 0xbb))),
     ("function", ScopeStyle::fg(Rgb::new(0xff, 0xc6, 0x6d))),
     ("type", ScopeStyle::fg(Rgb::new(0xa9, 0xb7, 0xc6))),
+    (
+        "markup.heading",
+        ScopeStyle::fg(Rgb::new(0xff, 0xc6, 0x6d)).bold(),
+    ),
+    (
+        "markup.link",
+        ScopeStyle::fg(Rgb::new(0x58, 0x9d, 0xf6)).underline(),
+    ),
+    (
+        "markup.link.url",
+        ScopeStyle::fg(Rgb::new(0x68, 0x97, 0xbb)),
+    ),
+    ("markup.raw", ScopeStyle::fg(Rgb::new(0x6a, 0x87, 0x59))),
+    ("markup.list", ScopeStyle::fg(Rgb::new(0xcc, 0x78, 0x32))),
+    (
+        "markup.quote",
+        ScopeStyle::fg(Rgb::new(0x80, 0x80, 0x80)).italic(),
+    ),
+    ("markup.italic", PLAIN.italic()),
+    ("markup.bold", PLAIN.bold()),
+    (
+        "markup.strikethrough",
+        ScopeStyle::fg(Rgb::new(0x80, 0x80, 0x80)),
+    ),
 ];
 
 // The `light` theme paints on `#ffffff` (see `colorsForTheme` in
@@ -90,6 +141,30 @@ const LIGHT: &[(&str, ScopeStyle)] = &[
     ("number", ScopeStyle::fg(Rgb::new(0x17, 0x50, 0xeb))),  // 6.2:1
     ("function", ScopeStyle::fg(Rgb::new(0x79, 0x5e, 0x26))), // 6.1:1
     ("type", ScopeStyle::fg(Rgb::new(0x0f, 0x5b, 0x8f))),    // 7.2:1
+    (
+        "markup.heading",
+        ScopeStyle::fg(Rgb::new(0x00, 0x33, 0xb3)).bold(),
+    ),
+    (
+        "markup.link",
+        ScopeStyle::fg(Rgb::new(0x17, 0x50, 0xeb)).underline(),
+    ),
+    (
+        "markup.link.url",
+        ScopeStyle::fg(Rgb::new(0x0f, 0x5b, 0x8f)),
+    ),
+    ("markup.raw", ScopeStyle::fg(Rgb::new(0x06, 0x7d, 0x17))),
+    ("markup.list", ScopeStyle::fg(Rgb::new(0x79, 0x5e, 0x26))),
+    (
+        "markup.quote",
+        ScopeStyle::fg(Rgb::new(0x5f, 0x6b, 0x7a)).italic(),
+    ),
+    ("markup.italic", PLAIN.italic()),
+    ("markup.bold", PLAIN.bold()),
+    (
+        "markup.strikethrough",
+        ScopeStyle::fg(Rgb::new(0x5f, 0x6b, 0x7a)),
+    ),
 ];
 
 // VS Code Dark+, likewise from `vscodeDarkColorForKind`.
@@ -100,6 +175,30 @@ const VSCODE_DARK: &[(&str, ScopeStyle)] = &[
     ("number", ScopeStyle::fg(Rgb::new(0xb5, 0xce, 0xa8))),
     ("function", ScopeStyle::fg(Rgb::new(0xdc, 0xdc, 0xaa))),
     ("type", ScopeStyle::fg(Rgb::new(0x4e, 0xc9, 0xb0))),
+    (
+        "markup.heading",
+        ScopeStyle::fg(Rgb::new(0x56, 0x9c, 0xd6)).bold(),
+    ),
+    (
+        "markup.link",
+        ScopeStyle::fg(Rgb::new(0x37, 0x94, 0xff)).underline(),
+    ),
+    (
+        "markup.link.url",
+        ScopeStyle::fg(Rgb::new(0xce, 0x91, 0x78)),
+    ),
+    ("markup.raw", ScopeStyle::fg(Rgb::new(0xce, 0x91, 0x78))),
+    ("markup.list", ScopeStyle::fg(Rgb::new(0x67, 0x96, 0xe6))),
+    (
+        "markup.quote",
+        ScopeStyle::fg(Rgb::new(0x6a, 0x99, 0x55)).italic(),
+    ),
+    ("markup.italic", PLAIN.italic()),
+    ("markup.bold", PLAIN.bold()),
+    (
+        "markup.strikethrough",
+        ScopeStyle::fg(Rgb::new(0x80, 0x80, 0x80)),
+    ),
 ];
 
 /// The built-in themes, keyed by the same names the chrome themes use.
