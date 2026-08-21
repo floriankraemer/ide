@@ -1,0 +1,7 @@
+# YAML has no reserved words. Its only word-like literals are `true`/`false`
+# and `null`, which the grammar parses as `boolean_scalar` and `null_scalar`
+# and which highlights.scm captures as `@boolean` and `@constant.builtin` —
+# what they actually are. Neither resolves to `keyword` (they are not under
+# it in the scope hierarchy), and capturing them as `@keyword` just to
+# satisfy this harness would put a lie in the taxonomy every theme reads.
+keyword

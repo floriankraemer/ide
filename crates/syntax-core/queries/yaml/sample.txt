@@ -1,0 +1,7 @@
+# Service definition used as the highlighting fixture.
+name: "ide-syntax"
+enabled: true
+retries: 3
+tags:
+  - build
+  - test

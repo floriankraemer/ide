@@ -1,0 +1,4 @@
+# Harness fixture (X1): must contain a keyword, a string and a comment.
+class Greeter:
+    def greet(self, name):
+        return f"hello, {name}"

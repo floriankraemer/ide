@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+# Greet every entry the caller points us at.
+set -euo pipefail
+
+greet() {
+  local name="$1"
+  if [ -d "$name" ]; then
+    echo "directory $name"
+  else
+    echo "not a directory"
+  fi
+}
+
+for entry in ./*; do
+  greet "$entry"
+done

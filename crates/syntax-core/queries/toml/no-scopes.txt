@@ -1,0 +1,7 @@
+# TOML has no reserved words at all. Its only word-like literals are `true`
+# and `false`, which the grammar parses as `boolean` and highlights.scm
+# captures as `@boolean` — what they actually are. `boolean` is a sibling of
+# `keyword` in the scope table, not a child, so no hierarchical fallback
+# turns it into one, and capturing booleans as `@keyword` purely to satisfy
+# this harness would corrupt the taxonomy every theme is built on.
+keyword

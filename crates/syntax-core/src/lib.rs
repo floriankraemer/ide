@@ -751,10 +751,7 @@ mod tests {
                 combined.occurrences,
                 identifier_occurrences(language, source)
             );
-            assert_eq!(
-                combined.supertype_edges,
-                supertype_edges(language, source)
-            );
+            assert_eq!(combined.supertype_edges, supertype_edges(language, source));
         }
         // Not vacuous: the Rust fixture really does exercise all three.
         let combined = analyze_file(rust(), rust_source);

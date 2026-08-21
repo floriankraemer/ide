@@ -115,6 +115,114 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         grammar: || tree_sitter_php::LANGUAGE_PHP_ONLY.into(),
         queries: queries!("php"),
     },
+    LanguageDef {
+        id: "python",
+        name: "Python",
+        extensions: &["py", "pyi", "pyw"],
+        filenames: &[],
+        grammar: || tree_sitter_python::LANGUAGE.into(),
+        queries: queries!("python"),
+    },
+    // C precedes C++ deliberately: both claim `.h`, and first match wins,
+    // so a bare header opens as C (`first_match_wins_in_catalog_order`
+    // pins that). C++ stays reachable through its own extensions.
+    LanguageDef {
+        id: "c",
+        name: "C",
+        extensions: &["c", "h"],
+        filenames: &[],
+        grammar: || tree_sitter_c::LANGUAGE.into(),
+        queries: queries!("c"),
+    },
+    LanguageDef {
+        id: "cpp",
+        name: "C++",
+        extensions: &["cpp", "cc", "cxx", "hpp", "hh", "hxx", "ipp"],
+        filenames: &[],
+        grammar: || tree_sitter_cpp::LANGUAGE.into(),
+        queries: queries!("cpp"),
+    },
+    LanguageDef {
+        id: "go",
+        name: "Go",
+        extensions: &["go"],
+        filenames: &[],
+        grammar: || tree_sitter_go::LANGUAGE.into(),
+        queries: queries!("go"),
+    },
+    LanguageDef {
+        id: "typescript",
+        name: "TypeScript",
+        // `.ts` is also MPEG transport stream; in a code editor
+        // TypeScript is the only useful reading.
+        extensions: &["ts", "mts", "cts"],
+        filenames: &[],
+        grammar: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        queries: queries!("typescript"),
+    },
+    LanguageDef {
+        id: "tsx",
+        name: "TSX",
+        // A separate row, not a `.tsx` extension on `typescript`: TSX is
+        // its own grammar (`<T>x` is a type assertion in .ts and a JSX
+        // element in .tsx), and `grammar` is per row.
+        extensions: &["tsx"],
+        filenames: &[],
+        grammar: || tree_sitter_typescript::LANGUAGE_TSX.into(),
+        queries: queries!("tsx"),
+    },
+    LanguageDef {
+        id: "javascript",
+        name: "JavaScript",
+        // The grammar includes JSX, so `.jsx` needs no separate row.
+        extensions: &["js", "mjs", "cjs", "jsx"],
+        filenames: &[],
+        grammar: || tree_sitter_javascript::LANGUAGE.into(),
+        queries: queries!("javascript"),
+    },
+    LanguageDef {
+        id: "bash",
+        name: "Bash",
+        extensions: &["sh", "bash", "zsh", "ksh"],
+        // Shell dotfiles are extensionless by convention; without these
+        // rows the file a user edits most often would open as plain text.
+        filenames: &[
+            ".bashrc",
+            ".bash_profile",
+            ".bash_logout",
+            ".bash_aliases",
+            ".profile",
+            ".zshrc",
+            ".zshenv",
+            ".zprofile",
+            ".zlogin",
+            ".zlogout",
+        ],
+        grammar: || tree_sitter_bash::LANGUAGE.into(),
+        queries: queries!("bash"),
+    },
+    LanguageDef {
+        id: "yaml",
+        name: "YAML",
+        extensions: &["yaml", "yml"],
+        filenames: &[],
+        grammar: || tree_sitter_yaml::LANGUAGE.into(),
+        queries: queries!("yaml"),
+    },
+    LanguageDef {
+        id: "toml",
+        name: "TOML",
+        extensions: &["toml"],
+        // `Cargo.lock` is TOML but claiming `.lock` outright would be
+        // wrong — most lock files are not.
+        filenames: &["Cargo.lock"],
+        // `tree-sitter-toml-ng`, not `tree-sitter-toml`: the latter is
+        // pinned to the tree-sitter 0.20 runtime and its `language()`
+        // returns that crate's `Language`, which is a different type from
+        // the 0.26 one this workspace uses.
+        grammar: || tree_sitter_toml_ng::LANGUAGE.into(),
+        queries: queries!("toml"),
+    },
 ];
 
 /// An opaque handle to a language in the registry.
