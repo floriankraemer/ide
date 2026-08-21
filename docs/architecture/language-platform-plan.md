@@ -23,9 +23,9 @@ per `CLAUDE.md`.
 | R4a | done | `7ed7b79` |
 | R4b | done | `7ed7b79` |
 | R4c | done | `7ed7b79` |
-| R4d | open | |
-| R5 | open | |
-| R6 | open | |
+| R4d | done | `b7c7512` |
+| R5 | done | `64a4243` |
+| R6 | done | `e2a37e4` |
 | G1a | done | `01f1685` |
 | G1b | done | `f4f2687` |
 | G2 | open | |
