@@ -35,7 +35,10 @@ fn a_caret_off_any_identifier_skips_every_query_but_the_first() {
 
     let hit_walks = walks_during(|| {
         let hit = index_core::resolve_declaration_in_buffer(path, SOURCE, on_identifier);
-        assert_eq!(hit.name, "helper", "test source must resolve on the hit path");
+        assert_eq!(
+            hit.name, "helper",
+            "test source must resolve on the hit path"
+        );
     });
     let miss_walks = walks_during(|| {
         let miss = index_core::resolve_declaration_in_buffer(path, SOURCE, off_identifier);
