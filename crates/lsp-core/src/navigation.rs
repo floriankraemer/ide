@@ -161,7 +161,10 @@ mod tests {
         // No server was asked at all.
         assert_eq!(definition_outcome(None), DefinitionOutcome::Index);
         // A server exists but knows nothing here.
-        assert_eq!(definition_outcome(Some(Ok(vec![]))), DefinitionOutcome::Index);
+        assert_eq!(
+            definition_outcome(Some(Ok(vec![]))),
+            DefinitionOutcome::Index
+        );
         // Configured but not currently running (starting, or in backoff).
         assert_eq!(
             definition_outcome(Some(Err(LspError::NotRunning("rust".into())))),

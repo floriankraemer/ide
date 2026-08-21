@@ -38,6 +38,12 @@ tree-sitter-swift = "0.7.3"
 tree-sitter-scala = "0.26.2"
 tree-sitter-zig = "1.1.2"
 tree-sitter-haskell = "0.23.1"
+# Markup tranche (R4d). tree-sitter-md ships two grammars: the block
+# grammar and the inline one it injects into its own `(inline)` nodes.
+tree-sitter-md = "0.5.3"
+tree-sitter-html = "0.23.2"
+tree-sitter-css = "0.25"
+tree-sitter-xml = "0.7"
 streaming-iterator = "0.1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

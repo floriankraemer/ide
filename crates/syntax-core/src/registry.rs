@@ -131,10 +131,14 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "PHP",
         extensions: &["php"],
         filenames: &[],
-        // `php_only` (body-only grammar), not `LANGUAGE_PHP` (embedded
-        // HTML) — v1 design decision, see the plan doc.
-        grammar: || tree_sitter_php::LANGUAGE_PHP_ONLY.into(),
-        queries: queries!("php"),
+        // `LANGUAGE_PHP` (the grammar that also parses the markup around
+        // `<?php … ?>`), not `LANGUAGE_PHP_ONLY`. The body-only grammar
+        // was the v1 choice because there was no HTML row to hand the
+        // markup to; R4d added one, so a real-world `.php` file — a
+        // template with PHP embedded in it — now highlights instead of
+        // parsing as one long error. See php/injections.scm.
+        grammar: || tree_sitter_php::LANGUAGE_PHP.into(),
+        queries: queries!("php", injections),
     },
     LanguageDef {
         id: "python",
@@ -375,6 +379,61 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         filenames: &[],
         grammar: || tree_sitter_fsharp::LANGUAGE_FSHARP.into(),
         queries: queries!("fsharp"),
+    },
+    // The markup tranche (R4d). These four are the languages injections
+    // exist for: an HTML file without its `<script>`/`<style>` regions,
+    // or a Markdown file without its fenced blocks, is mostly uncoloured.
+    LanguageDef {
+        id: "markdown",
+        name: "Markdown",
+        extensions: &["md", "markdown", "mdown", "mkd"],
+        filenames: &[],
+        // `tree-sitter-md` is two grammars. This is the block one; it
+        // leaves every run of prose as one opaque `(inline)` node and
+        // injects the `markdown_inline` row over it (markdown/
+        // injections.scm).
+        grammar: || tree_sitter_md::LANGUAGE.into(),
+        queries: queries!("markdown", injections),
+    },
+    LanguageDef {
+        id: "markdown_inline",
+        name: "Markdown (inline)",
+        // Deliberately pattern-less: no file is written in the inline
+        // grammar, it is only ever reached by injection from the
+        // `markdown` row above. `declared_patterns_resolve_back_to_a_claimant`
+        // allows that precisely because another catalog row injects this id.
+        extensions: &[],
+        filenames: &[],
+        grammar: || tree_sitter_md::INLINE_LANGUAGE.into(),
+        queries: queries!("markdown_inline", injections),
+    },
+    LanguageDef {
+        id: "html",
+        name: "HTML",
+        extensions: &["html", "htm", "xhtml"],
+        filenames: &[],
+        grammar: || tree_sitter_html::LANGUAGE.into(),
+        queries: queries!("html", injections),
+    },
+    LanguageDef {
+        id: "css",
+        name: "CSS",
+        extensions: &["css"],
+        filenames: &[],
+        grammar: || tree_sitter_css::LANGUAGE.into(),
+        queries: queries!("css"),
+    },
+    LanguageDef {
+        id: "xml",
+        name: "XML",
+        // `LANGUAGE_XML`, not the crate's second `LANGUAGE_DTD` grammar:
+        // a `.dtd` file is rare enough in an editor that it does not earn
+        // a catalog row, and pointing the `xml` row at it would break
+        // every actual XML document.
+        extensions: &["xml", "xsd", "xsl", "xslt", "svg", "rss", "wsdl"],
+        filenames: &[],
+        grammar: || tree_sitter_xml::LANGUAGE_XML.into(),
+        queries: queries!("xml"),
     },
 ];
 

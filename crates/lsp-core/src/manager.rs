@@ -390,7 +390,12 @@ impl LspManager {
     /// `textDocument/hover` for a position in an open document, already
     /// reduced to the one text the tooltip shows. `Ok(None)` means the server
     /// has nothing to say here, which is not an error.
-    pub fn hover(&self, uri: &str, line: u32, character: u32) -> Result<Option<HoverText>, LspError> {
+    pub fn hover(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Option<HoverText>, LspError> {
         let language_id = self.language_of(uri)?;
         let result = self.request_with_timeout(
             &language_id,

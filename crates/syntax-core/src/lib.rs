@@ -578,6 +578,56 @@ impl InjectionRegion {
     }
 }
 
+/// Fence tags and language names people actually write, mapped onto the
+/// catalog ids they mean.
+///
+/// A Markdown fence is tagged by a human (` ```js `), not by a query
+/// author, and injection resolution matches a registry id exactly. The
+/// usual tree-sitter answer — `((#eq? @lang "js") (#set! injection.language
+/// "javascript"))` — cannot work here, because span extraction does not
+/// evaluate predicates: such a pattern would match every fence and
+/// relabel all of them. So the normalisation lives here, in the one place
+/// every injected language name passes through, rather than being
+/// repeated (and silently broken) in each `injections.scm`.
+///
+/// Deliberately short: only aliases that are genuinely common in the
+/// wild, and only onto ids the catalog actually has. An unknown name
+/// still resolves to nothing and the region is left unhighlighted, which
+/// is the correct outcome for a language we do not ship.
+const INJECTION_LANGUAGE_ALIASES: &[(&str, &str)] = &[
+    ("c++", "cpp"),
+    ("c#", "csharp"),
+    ("cjs", "javascript"),
+    ("cs", "csharp"),
+    ("cts", "typescript"),
+    ("cxx", "cpp"),
+    ("golang", "go"),
+    ("htm", "html"),
+    ("js", "javascript"),
+    ("jsx", "javascript"),
+    ("md", "markdown"),
+    ("mjs", "javascript"),
+    ("mts", "typescript"),
+    ("py", "python"),
+    ("rs", "rust"),
+    ("sh", "bash"),
+    ("shell", "bash"),
+    ("ts", "typescript"),
+    ("yml", "yaml"),
+    ("zsh", "bash"),
+];
+
+/// [`INJECTION_LANGUAGE_ALIASES`] applied to an already-trimmed,
+/// already-lowercased injected language name. A name that is not an alias
+/// is returned unchanged — including one that is not a catalog id at all,
+/// which resolution then fails on as before.
+fn canonical_injection_language(name: &str) -> &str {
+    INJECTION_LANGUAGE_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == name)
+        .map_or(name, |(_, id)| *id)
+}
+
 /// The injected regions `query` finds in `tree`.
 ///
 /// Both standard spellings of the language name are supported: an
@@ -616,7 +666,10 @@ fn injection_regions(query: &Query, tree: &tree_sitter::Tree, text: &str) -> Vec
                 _ => {}
             }
         }
-        let Some(language) = language.filter(|l| !l.is_empty()) else {
+        let Some(language) = language
+            .map(|l| canonical_injection_language(l.trim()).to_string())
+            .filter(|l| !l.is_empty())
+        else {
             continue;
         };
         if ranges.is_empty() {
@@ -1294,7 +1347,11 @@ mod tests {
 
     // --- PHP (Task B) ---
 
-    const PHP_SNIPPET: &str = "class Greeter {\n    public string $name;\n\n    public function __construct(string $name) {\n        $this->name = $name;\n    }\n\n    public function greet(): string {\n        // say hi\n        return \"Hello, \" . $this->name;\n    }\n}\n";
+    // Opens with `<?php`: the catalog row uses `LANGUAGE_PHP` (R4d), the
+    // grammar for a whole template file, so a snippet without the opening
+    // tag is not PHP code at all — it is markup that happens to look like
+    // it. See php/injections.scm.
+    const PHP_SNIPPET: &str = "<?php\nclass Greeter {\n    public string $name;\n\n    public function __construct(string $name) {\n        $this->name = $name;\n    }\n\n    public function greet(): string {\n        // say hi\n        return \"Hello, \" . $this->name;\n    }\n}\n";
 
     #[test]
     fn php_class_keyword_is_highlighted() {
@@ -1341,7 +1398,7 @@ mod tests {
 
     #[test]
     fn php_parameter_used_twice_is_one_definition_and_one_reference() {
-        let text = "function add($x) { return $x + $x; }";
+        let text = "<?php\nfunction add($x) { return $x + $x; }";
         let occurrences = identifier_occurrences(php(), text);
         let names: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "$x").collect();
         assert_eq!(names.len(), 3, "1 definition + 2 references: {names:?}");
@@ -1731,19 +1788,14 @@ mod tests {
 
     // ---- injections (I1) -------------------------------------------
     //
-    // The catalog ships no `injections.scm` yet: the languages that
-    // genuinely need one (HTML, Markdown, CSS) arrive in R4d, and PHP —
-    // the one catalog language that *looks* like it should inject — cannot,
-    // because the row deliberately uses `LANGUAGE_PHP_ONLY`, whose grammar
-    // has no production for text outside `<?php ... ?>` (it parses such a
-    // file into an `ERROR` node, so there is no node to capture as
-    // `@injection.content`). Injecting HTML into PHP means switching that
-    // row to `LANGUAGE_PHP` once an HTML row exists — an R4d decision.
+    // The shipped queries that use the mechanism (Markdown, HTML, PHP)
+    // are exercised end to end in `tests/language_catalog.rs`, against
+    // their real fixtures.
     //
-    // So the mechanism is proved here against synthetic hosts built from
-    // real grammars: Rust injecting JSON (cross-language, both spellings
-    // of the language name) and JSON injecting itself (nesting, and the
-    // depth bound). Same code path the shipped queries will take.
+    // What is proved here is the mechanism's edges, against synthetic
+    // hosts built from real grammars: Rust injecting JSON (cross-language,
+    // both spellings of the language name), JSON injecting itself
+    // (nesting, and the depth bound), and an unknown language name.
 
     /// A catalog language's compiled grammar and highlights, plus an
     /// `injections.scm` it does not ship. Rebuilt rather than cloned

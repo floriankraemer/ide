@@ -1715,11 +1715,11 @@ use std::rc::Rc;
 
 use app_core::{AppError, AppSession, TabId};
 use cxx_qt::Threading;
-use syntax_core::theme;
 use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QVariant,
 };
 use ffi::{FfiEditorColors, FfiEditorFont, FfiOpenResult, FfiResult, FfiWindowGeometry, Roles};
+use syntax_core::theme;
 
 thread_local! {
     /// The single `AppSession` both QObject adapters share. cxx-qt
@@ -4222,9 +4222,7 @@ impl ffi::LanguageService {
             let html = lsp_core::to_tooltip_html(&hover);
             let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
                 if service.hover.borrow().accept(token) {
-                    service
-                        .as_mut()
-                        .hover_ready(QString::from(html.as_str()));
+                    service.as_mut().hover_ready(QString::from(html.as_str()));
                 }
             });
         });
@@ -4234,12 +4232,7 @@ impl ffi::LanguageService {
         self.hover.borrow_mut().cancel();
     }
 
-    pub fn resolve_definition(
-        mut self: Pin<&mut Self>,
-        path: &QString,
-        line: u32,
-        character: u32,
-    ) {
+    pub fn resolve_definition(mut self: Pin<&mut Self>, path: &QString, line: u32, character: u32) {
         let uri = lsp_core::uri_from_path(&path.to_string());
         let qt_thread = self.as_mut().qt_thread();
         let queued = self.push_job(move |manager| {

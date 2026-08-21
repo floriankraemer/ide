@@ -105,7 +105,9 @@ fn main() {
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
                 let contents = match line {
-                    0 => json!({"kind": "markdown", "value": "```rust\nfn main()\n```\nThe **entry** point."}),
+                    0 => {
+                        json!({"kind": "markdown", "value": "```rust\nfn main()\n```\nThe **entry** point."})
+                    }
                     1 => json!({"language": "rust", "value": "fn main()"}),
                     2 => json!(["plain hover", {"language": "rust", "value": "fn main()"}]),
                     _ => Value::Null,

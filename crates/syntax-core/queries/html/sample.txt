@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<!-- Harness fixture (X1): the keyword comes from the injected JavaScript. -->
+<html lang="en">
+  <head>
+    <style>
+      /* injected CSS */
+      body { color: #222; }
+    </style>
+    <script>
+      // injected JavaScript
+      const greeting = "hello";
+    </script>
+  </head>
+  <body></body>
+</html>
