@@ -5,6 +5,8 @@
 //! crate only classifies bytes of already-loaded text into spans.
 
 mod registry;
+pub mod runtime;
+pub mod theme;
 
 use std::sync::Arc;
 
@@ -252,7 +254,12 @@ pub fn identifier_occurrences(language: Language, text: &str) -> Vec<Occurrence>
     ) else {
         return Vec::new();
     };
+    occurrences_from_tree(query, &tree, text)
+}
 
+/// [`identifier_occurrences`]'s body against an already-parsed tree, so
+/// [`analyze_file`] can reuse one parse across all three extractions.
+fn occurrences_from_tree(query: &Query, tree: &tree_sitter::Tree, text: &str) -> Vec<Occurrence> {
     let mut by_range: std::collections::BTreeMap<(usize, usize), bool> =
         std::collections::BTreeMap::new();
     let mut cursor = QueryCursor::new();
@@ -318,7 +325,12 @@ pub fn outline(language: Language, text: &str) -> Vec<SymbolNode> {
     else {
         return Vec::new();
     };
+    outline_from_tree(query, &tree, text)
+}
 
+/// [`outline`]'s body against an already-parsed tree, so [`analyze_file`]
+/// can reuse one parse across all three extractions.
+fn outline_from_tree(query: &Query, tree: &tree_sitter::Tree, text: &str) -> Vec<SymbolNode> {
     let mut raw: Vec<RawSymbol> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
@@ -374,7 +386,16 @@ pub fn supertype_edges(language: Language, text: &str) -> Vec<SupertypeEdge> {
     ) else {
         return Vec::new();
     };
+    supertype_edges_from_tree(query, &tree, text)
+}
 
+/// [`supertype_edges`]'s body against an already-parsed tree, so
+/// [`analyze_file`] can reuse one parse across all three extractions.
+fn supertype_edges_from_tree(
+    query: &Query,
+    tree: &tree_sitter::Tree,
+    text: &str,
+) -> Vec<SupertypeEdge> {
     let mut edges: Vec<SupertypeEdge> = Vec::new();
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
@@ -401,6 +422,54 @@ pub fn supertype_edges(language: Language, text: &str) -> Vec<SupertypeEdge> {
     }
     edges.sort_by_key(|e| (e.type_start, e.supertype_name.clone()));
     edges
+}
+
+/// Everything [`index-core`](../index_core/index.html) extracts from one
+/// file, from a single parse: what [`outline`],
+/// [`identifier_occurrences`] and [`supertype_edges`] each return, but
+/// with the buffer parsed once instead of three times.
+pub struct FileAnalysis {
+    pub outline: Vec<SymbolNode>,
+    pub occurrences: Vec<Occurrence>,
+    pub supertype_edges: Vec<SupertypeEdge>,
+}
+
+/// Parse `text` as `language` once and run all three extraction queries
+/// against that one tree. Equivalent to calling [`outline`],
+/// [`identifier_occurrences`] and [`supertype_edges`] separately -- same
+/// results, a third of the parsing. Each field is empty when its query is
+/// absent for the language, and all three are empty when the language has
+/// no grammar or the parse fails, matching the individual entry points.
+pub fn analyze_file(language: Language, text: &str) -> FileAnalysis {
+    let empty = || FileAnalysis {
+        outline: Vec::new(),
+        occurrences: Vec::new(),
+        supertype_edges: Vec::new(),
+    };
+    let Some(compiled) = registry::compiled(language) else {
+        return empty();
+    };
+    let Some(tree) = parse_once(&compiled.grammar, text) else {
+        return empty();
+    };
+
+    FileAnalysis {
+        outline: compiled
+            .tags
+            .as_ref()
+            .map(|q| outline_from_tree(q, &tree, text))
+            .unwrap_or_default(),
+        occurrences: compiled
+            .locals
+            .as_ref()
+            .map(|q| occurrences_from_tree(q, &tree, text))
+            .unwrap_or_default(),
+        supertype_edges: compiled
+            .inherits
+            .as_ref()
+            .map(|q| supertype_edges_from_tree(q, &tree, text))
+            .unwrap_or_default(),
+    }
 }
 
 /// Nests `raw` definitions by AST byte-range containment: a classic
@@ -660,6 +729,38 @@ mod tests {
     fn find<'a>(spans: &'a [HighlightSpan], name: &str) -> Option<&'a HighlightSpan> {
         let wanted = scope(name);
         spans.iter().find(|s| s.scope == wanted)
+    }
+
+    #[test]
+    fn analyze_file_matches_the_three_separate_entry_points() {
+        let rust_source = r#"
+            pub trait Greeter { fn greet(&self) -> String; }
+            pub struct Loud { volume: u8 }
+            impl Greeter for Loud {
+                fn greet(&self) -> String { let n = self.volume; format!("{n}") }
+            }
+        "#;
+        for (language, source) in [
+            (rust(), rust_source),
+            (json(), "{\"a\": [1, 2]}"),
+            (Language::PLAIN_TEXT, "just words"),
+        ] {
+            let combined = analyze_file(language, source);
+            assert_eq!(combined.outline, outline(language, source));
+            assert_eq!(
+                combined.occurrences,
+                identifier_occurrences(language, source)
+            );
+            assert_eq!(
+                combined.supertype_edges,
+                supertype_edges(language, source)
+            );
+        }
+        // Not vacuous: the Rust fixture really does exercise all three.
+        let combined = analyze_file(rust(), rust_source);
+        assert!(!combined.outline.is_empty());
+        assert!(!combined.occurrences.is_empty());
+        assert!(!combined.supertype_edges.is_empty());
     }
 
     #[test]

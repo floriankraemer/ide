@@ -213,18 +213,44 @@ pub struct LanguageRegistry {
 
 impl LanguageRegistry {
     fn new(builtins: &'static [LanguageDef]) -> Self {
+        Self::with_runtime(builtins, &[])
+    }
+
+    /// The catalog with `runtime` entries layered over it by id — the
+    /// same shape of override as a user keymap over `ACTIONS`.
+    ///
+    /// A runtime entry whose id matches a builtin replaces it *in place*,
+    /// so overriding a language cannot change which one wins an extension
+    /// collision (decision 4); a new id is appended, and therefore loses
+    /// any collision against a builtin. Runtime entries are produced by
+    /// [`crate::runtime::load`], which has already rejected anything that
+    /// does not parse or compile.
+    pub fn with_runtime(
+        builtins: &'static [LanguageDef],
+        runtime: &[&'static LanguageDef],
+    ) -> Self {
+        let mut defs: Vec<&'static LanguageDef> = builtins.iter().collect();
+        for &entry in runtime {
+            match defs.iter().position(|d| d.id == entry.id) {
+                Some(index) => defs[index] = entry,
+                None => defs.push(entry),
+            }
+        }
         let mut entries = vec![Entry {
             def: None,
             compiled: OnceLock::new(),
         }];
-        entries.extend(builtins.iter().map(|def| Entry {
+        entries.extend(defs.into_iter().map(|def| Entry {
             def: Some(def),
             compiled: OnceLock::new(),
         }));
         Self { entries }
     }
 
-    fn def(&self, language: Language) -> Option<&'static LanguageDef> {
+    /// The catalog entry behind `language` in *this* registry, or `None`
+    /// for plain text. Prefer this over [`Language::def`] when holding a
+    /// registry that is not the global one.
+    pub fn def(&self, language: Language) -> Option<&'static LanguageDef> {
         self.entries.get(usize::from(language.0))?.def
     }
 
