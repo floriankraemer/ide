@@ -4820,10 +4820,17 @@ impl ffi::LanguageService {
     }
 
     /// The enabled server for this path's language, if the catalog plus the
-    /// user's settings name one. Both halves of that answer are `lsp-core`'s.
+    /// user's settings name one. *Which* language the file is comes from
+    /// `syntax-core`'s registry — the single source of file detection — and
+    /// `lsp-core` answers only what the protocol calls it and what to launch
+    /// (ADR-0018).
     fn config_for_path(&self, path: &str) -> Option<lsp_core::ServerConfig> {
-        let language_id = lsp_core::language_id_for_path(Path::new(path))?;
-        lsp_core::enabled_server(&self.configs.borrow(), language_id).cloned()
+        let language_id = syntax_core::language_for_path(Path::new(path)).id();
+        lsp_core::enabled_server(
+            &self.configs.borrow(),
+            lsp_core::lsp_language_id(&language_id),
+        )
+        .cloned()
     }
 
     /// Queue work for the worker thread. Returns false when there is no

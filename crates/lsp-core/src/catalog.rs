@@ -66,16 +66,10 @@ pub const SERVERS: &[ServerDef] = &[
         command: "typescript-language-server",
         args: &["--stdio"],
     },
-    // The JSX dialects are separate LSP language ids, but the same server
-    // handles all four — it keys JSX parsing off the id it is told.
+    // `typescriptreact` is a separate LSP language id, but the same server
+    // handles it — it keys JSX parsing off the id it is told.
     ServerDef {
         language_id: "typescriptreact",
-        name: "TypeScript Language Server",
-        command: "typescript-language-server",
-        args: &["--stdio"],
-    },
-    ServerDef {
-        language_id: "javascriptreact",
         name: "TypeScript Language Server",
         command: "typescript-language-server",
         args: &["--stdio"],
@@ -222,52 +216,30 @@ pub fn enabled_server<'a>(
         .find(|c| c.language_id == language_id && c.enabled)
 }
 
-/// File extension -> LSP language id, for deciding which server (if any) a
-/// newly opened file belongs to.
+/// Catalog language id -> LSP language id, for the few languages whose
+/// protocol identifier is not their grammar id.
 ///
-/// Deliberately its own table rather than a reuse of `syntax-core`'s
-/// language detection: these are the identifiers the *protocol* defines
-/// (`textDocument/didOpen`'s `languageId`), servers key their behaviour off
-/// them, and they are not the editor's tree-sitter grammar names. Only
-/// languages the catalog above knows about are listed — an extension with no
-/// entry simply has no server.
-const EXTENSIONS: &[(&str, &str)] = &[
-    ("rs", "rust"),
-    ("py", "python"),
-    ("pyi", "python"),
-    ("go", "go"),
-    ("c", "c"),
-    ("h", "c"),
-    ("cc", "cpp"),
-    ("cpp", "cpp"),
-    ("cxx", "cpp"),
-    ("hpp", "cpp"),
-    ("hh", "cpp"),
-    ("ts", "typescript"),
-    // `typescriptreact`/`javascriptreact`, not `typescript`/`javascript`:
-    // these are the identifiers the LSP specification defines for JSX
-    // dialects, and servers key JSX parsing off them.
+/// This is all that is left of what used to be a second extension table:
+/// *which* language a file is belongs to `syntax-core`'s registry — the one
+/// source of truth for file detection, extended with every language tranche
+/// — while *what the protocol calls it* is genuinely LSP's business and
+/// lives here. See ADR-0018.
+const LSP_LANGUAGE_IDS: &[(&str, &str)] = &[
+    // `.tsx` is its own grammar in the catalog (`tsx`); LSP names the JSX
+    // dialect `typescriptreact`, and servers key JSX parsing off that.
     ("tsx", "typescriptreact"),
-    ("js", "javascript"),
-    ("jsx", "javascriptreact"),
-    ("mjs", "javascript"),
-    ("json", "json"),
-    ("yaml", "yaml"),
-    ("yml", "yaml"),
-    ("sh", "bash"),
-    ("bash", "bash"),
-    ("lua", "lua"),
-    ("php", "php"),
-    ("cs", "csharp"),
 ];
 
-/// The LSP language id for a file path, by extension (case-insensitive).
-pub fn language_id_for_path(path: &std::path::Path) -> Option<&'static str> {
-    let extension = path.extension()?.to_str()?.to_ascii_lowercase();
-    EXTENSIONS
+/// The LSP `languageId` for a catalog language id.
+///
+/// Identity for all but the handful of protocol divergences above, so an
+/// unknown or future catalog id passes through unchanged rather than
+/// vanishing — a language the catalog knows is never invisible here.
+pub fn lsp_language_id(catalog_id: &str) -> &str {
+    LSP_LANGUAGE_IDS
         .iter()
-        .find(|(ext, _)| *ext == extension)
-        .map(|(_, language_id)| *language_id)
+        .find(|(id, _)| *id == catalog_id)
+        .map_or(catalog_id, |(_, lsp_id)| *lsp_id)
 }
 
 #[cfg(test)]
@@ -369,23 +341,46 @@ mod tests {
     }
 
     #[test]
-    fn language_ids_come_from_the_extension_case_insensitively() {
-        use std::path::Path;
-        assert_eq!(language_id_for_path(Path::new("/p/main.rs")), Some("rust"));
-        assert_eq!(
-            language_id_for_path(Path::new("/p/App.TSX")),
-            Some("typescriptreact")
-        );
-        assert_eq!(language_id_for_path(Path::new("/p/README.md")), None);
-        assert_eq!(language_id_for_path(Path::new("/p/Makefile")), None);
+    fn protocol_ids_diverge_only_where_the_table_says_so() {
+        assert_eq!(lsp_language_id("rust"), "rust");
+        assert_eq!(lsp_language_id("tsx"), "typescriptreact");
+        // A language with no shipped server still resolves to an id, so a
+        // user-configured server for it can be found.
+        assert_eq!(lsp_language_id("haskell"), "haskell");
     }
 
+    /// The regression guard for issue #20: every language the editor can
+    /// detect must be reachable by the server lookup, not just the dozen
+    /// that once had rows in a hand-maintained extension table.
     #[test]
-    fn every_mapped_extension_names_a_catalog_language() {
-        for (ext, language_id) in EXTENSIONS {
+    fn every_catalog_language_is_visible_to_the_server_lookup() {
+        for def in syntax_core::BUILTIN_LANGUAGES {
+            let language_id = lsp_language_id(def.id).to_string();
+            assert!(!language_id.is_empty(), "{} has no LSP id", def.id);
+
+            let resolved = resolve_servers(&[ServerOverride {
+                language_id: language_id.clone(),
+                command: Some("some-server".into()),
+                ..Default::default()
+            }]);
+            let found = enabled_server(&resolved, &language_id)
+                .unwrap_or_else(|| panic!("{} resolves to no server", def.id));
+            assert_eq!(found.command, "some-server");
+        }
+    }
+
+    /// The other direction: a shipped server keyed by an id nothing can
+    /// ever detect would never start.
+    #[test]
+    fn every_shipped_server_is_keyed_by_a_reachable_language_id() {
+        for def in SERVERS {
+            let reachable = syntax_core::BUILTIN_LANGUAGES
+                .iter()
+                .any(|l| lsp_language_id(l.id) == def.language_id);
             assert!(
-                default_server(language_id).is_some(),
-                "{ext} maps to unknown language {language_id}"
+                reachable,
+                "no catalog language resolves to {:?}, so its server never starts",
+                def.language_id
             );
         }
     }

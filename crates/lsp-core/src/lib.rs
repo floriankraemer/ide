@@ -18,7 +18,7 @@ pub mod manager;
 pub mod navigation;
 
 pub use catalog::{
-    default_server, enabled_server, language_id_for_path, resolve_servers, ServerConfig, ServerDef,
+    default_server, enabled_server, lsp_language_id, resolve_servers, ServerConfig, ServerDef,
     ServerOverride, SERVERS,
 };
 pub use completion::{
