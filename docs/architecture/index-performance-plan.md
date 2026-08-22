@@ -11,19 +11,31 @@ A fresh session should read this table (and `git log`) before picking up work, p
 | IP1 — cheap wins: line-start table, size cap, binary sniff, walker stat reuse, writer threads | done | this change |
 | IP2 — parallel file processing | done | this change |
 | IP3 — packed symbol documents (schema change) | done | this change |
-| IP4 — sidecar stamps, batched reindex | open | |
-| IP5 — progress indicator in the status bar | open | |
+| IP4 — sidecar stamps, batched reindex | done | this change |
+| IP5 — progress indicator in the status bar | done | this change |
 
 ### Measurements
 
-Same corpus each time: this workspace's `crates/` directory copied to a temp dir, 281 files, ~1.8 MiB of source.
-Taken with `cargo test --release -p index-core --test index_build_bench -- --ignored --nocapture` inside `linux-builder`.
+Taken with `cargo test --release -p index-core --test index_build_bench -- --ignored --nocapture` inside `linux-builder`, which copies the corpus to a temp directory first.
+
+**Small corpus** — this workspace's `crates/`, 281 files, ~1.8 MiB.
 
 | After | Cold build | Warm open | Index size |
 |---|---|---|---|
 | baseline (`640b7b4`) | 4.03 s | 5.8 ms | 3702 KiB |
 | IP1 + IP2 | 1.46 s | 7.7 ms | 4374 KiB |
 | IP3 | 0.61 s | 7.8 ms | 2344 KiB |
+| IP4 | 0.67 s | 6.9 ms | 2438 KiB |
+
+**Real repository** — WordPress `wp-includes`, 2119 files, 56 MiB, run with `IDE_BENCH_ROOT`.
+This is where the quadratic position scan actually hurt: WordPress has several very large PHP files, and the cost grew with the square of their size.
+
+| After | Cold build | Warm open | Index size |
+|---|---|---|---|
+| baseline (`640b7b4`) | 481 s | 39 ms | 97882 KiB |
+| all of IP1–IP4 | 4.9 s | 27 ms | 38660 KiB |
+
+Eight minutes to five seconds. The small corpus understates the change by roughly two orders of magnitude, which is worth remembering before trusting it as the only benchmark.
 
 ## Context
 
@@ -52,7 +64,12 @@ The build was also slower than the work it does justifies, for reasons that were
 6. **One symbol document per (file, name).**
    The five per-occurrence fields are multi-valued and index-aligned; `symbol_docs` appends all five per row and `collect_symbol_matches` zips them back apart. Because a packed document matches `sym_is_definition:1` when *any* row is a definition, every definition query re-filters the expanded rows — that flag is correctness, not an optimisation.
 4. **A binary file is dropped entirely**, as before — the sniff just decides it before reading the whole thing rather than after.
-5. **Progress is Qt-free.**
+5. **A pass that changes nothing writes nothing.**
+   `dirty` is computed from documents actually added and terms actually deleted, not from how many files the walk looked at.
+   Without that, files past the size cap — which contribute no documents but are never "unchanged" — made every reopen commit, reload the reader, and rewrite the sidecar. A test pins the index directory as byte-identical across a no-op reopen.
+7. **Whether a watched path is re-indexed or dropped is decided in Rust.**
+   The view hands over the whole coalesced batch; splitting it on "does this file still exist" is a rule about index contents, and it was an `if` in C++.
+8. **Progress is Qt-free.**
    `index-core` takes a `&(dyn Fn(IndexProgress) + Sync)`; the adapter is what knows about Qt threads and throttling. `open_or_build`/`build` keep their old signatures and delegate with a no-op, so no existing caller changed.
 
 ## Verification

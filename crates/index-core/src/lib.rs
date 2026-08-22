@@ -4,7 +4,8 @@
 //! Qt-free by design (see `docs/architecture/layering.md`) — this crate only
 //! moves bytes and offsets around. Wiring it into a background
 //! `std::thread` + `CxxQtThread::queue()`, and driving re-indexing off
-//! `project_model::ProjectWatcher`, is `ui-shell`'s job (task H).
+//! `project_model::ProjectWatcher`, is `ui-shell`'s job; progress crosses
+//! that seam as [`IndexProgress`], not as anything Qt-shaped.
 //!
 //! # Two-stage search
 //!
@@ -24,7 +25,9 @@
 //! field (`"text"`, `"symbol"`, `"inherit"`): the **text** schema above
 //! (`path` + `content`); the **symbol/reference** schema (`sym_name`/
 //! `sym_kind`/`path`/`sym_line`/`sym_col`/`sym_container`/
-//! `sym_is_definition`), fed by
+//! `sym_is_definition`) — one document per (file, name), carrying every
+//! occurrence of that name in that file as index-aligned multi-valued
+//! fields, so a definition query has to re-filter the expanded rows — fed by
 //! `syntax_core::outline()` (definitions, with kind + container) and
 //! `syntax_core::identifier_occurrences()` (every occurrence, references
 //! included) — see [`TextIndex::find_definitions`]/[`find_usages`]/
@@ -36,7 +39,7 @@
 //! queries filter on it. Kept in the same index (not co-located ones)
 //! because tantivy's schema model makes this straightforward — no extra
 //! `IndexWriter`/`IndexReader` pairs, no extra on-disk directories, one
-//! `build()`/`reindex_file()` walk populates all three. They also share the
+//! `build()`/`sync_paths()` walk populates all three. They also share the
 //! `path` term, so `delete_term(path)` drops every document a file
 //! produced, whatever its shape.
 //!
@@ -83,6 +86,15 @@ const EXTRACTION_VERSION_FILE: &str = "extraction.version";
 /// Tantivy's own writer-lock file inside the index directory. Named here so
 /// an error can point at the exact path rather than at the project root.
 const WRITER_LOCK_FILE: &str = ".tantivy-writer.lock";
+
+/// Sidecar file holding `mtime<TAB>size<TAB>path` for every indexed file.
+///
+/// Recovering those stamps from the index itself means deserialising every
+/// stored document, which is the whole cost of opening a project that has not
+/// changed. A stale or missing sidecar is safe by construction: a stamp that
+/// is missing or does not match makes the file be re-read, so the worst it
+/// can cause is work, never a stale index.
+const STAMPS_FILE: &str = "stamps.tsv";
 
 /// File the lock probe below takes and releases. Never read.
 const LOCK_PROBE_FILE: &str = ".ide-lock-probe";
@@ -450,6 +462,50 @@ fn stamp_of(path: &Path) -> FileStamp {
     match fs::metadata(path) {
         Ok(meta) => stamp_from(&meta),
         Err(_) => FileStamp::default(),
+    }
+}
+
+/// Read the stamp sidecar. `None` when it is absent or unreadable — the
+/// caller then falls back to recovering stamps from the index itself.
+fn read_stamps(index_dir: &Path) -> Option<HashMap<String, FileStamp>> {
+    let raw = fs::read_to_string(index_dir.join(STAMPS_FILE)).ok()?;
+    let mut stamps = HashMap::new();
+    for line in raw.lines() {
+        // Path last, so a path containing a tab still round-trips.
+        let mut parts = line.splitn(3, '\t');
+        let (Some(mtime), Some(size), Some(path)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return None;
+        };
+        let (Ok(mtime_secs), Ok(size_bytes)) = (mtime.parse(), size.parse()) else {
+            return None;
+        };
+        stamps.insert(
+            path.to_string(),
+            FileStamp {
+                mtime_secs,
+                size_bytes,
+            },
+        );
+    }
+    Some(stamps)
+}
+
+/// Replace the stamp sidecar. Written to a temporary name and renamed, so a
+/// crash mid-write leaves the previous file rather than a truncated one.
+/// Failures are silent on purpose: the sidecar is a cache, and losing it
+/// costs one slow open.
+fn write_stamps(index_dir: &Path, stamps: &[(String, FileStamp)]) {
+    let mut out = String::with_capacity(stamps.len() * 48);
+    for (key, stamp) in stamps {
+        out.push_str(&format!(
+            "{}\t{}\t{}\n",
+            stamp.mtime_secs, stamp.size_bytes, key
+        ));
+    }
+    let temp = index_dir.join(format!("{STAMPS_FILE}.tmp"));
+    if fs::write(&temp, out).is_ok() {
+        let _ = fs::rename(&temp, index_dir.join(STAMPS_FILE));
     }
 }
 
@@ -1071,6 +1127,11 @@ pub fn resolve_replacements(
 /// verification on top (see module docs for the two-stage design).
 pub struct TextIndex {
     root: PathBuf,
+    /// Where this index actually lives. Usually `<root>/.ide-index/`, but
+    /// [`index_dir_for`] falls back to the user's cache directory on a
+    /// filesystem that cannot take an advisory lock, so it cannot be
+    /// re-derived from the root without probing for a lock all over again.
+    index_dir: PathBuf,
     index: Index,
     writer: IndexWriter,
     reader: IndexReader,
@@ -1115,6 +1176,7 @@ impl TextIndex {
         let reader = index.reader()?;
         let mut this = Self {
             root: project_root.to_path_buf(),
+            index_dir: index_dir.clone(),
             index,
             writer,
             reader,
@@ -1145,8 +1207,18 @@ impl TextIndex {
     ) -> Result<Self, IndexError> {
         match Self::open_existing(project_root) {
             Ok(mut index) => {
-                let stamps = index.indexed_stamps()?;
+                let sidecar = read_stamps(&index.index_dir);
+                let stamps = match sidecar {
+                    Some(ref stamps) => stamps.clone(),
+                    None => index.indexed_stamps()?,
+                };
                 index.sync_from_disk(&stamps, progress)?;
+                if sidecar.is_none() {
+                    // The pass only rewrites the sidecar when it changed
+                    // something; a missing or damaged one has to be healed
+                    // here, or every open pays the slow fallback forever.
+                    index.write_current_stamps();
+                }
                 Ok(index)
             }
             // A busy lock is never answered by rebuilding: `build` wipes the
@@ -1188,6 +1260,7 @@ impl TextIndex {
         let reader = index.reader()?;
         Ok(Self {
             root: project_root.to_path_buf(),
+            index_dir: index_dir.clone(),
             index,
             writer,
             reader,
@@ -1248,8 +1321,8 @@ impl TextIndex {
         known: &HashMap<String, FileStamp>,
         progress: &(dyn Fn(IndexProgress) + Sync),
     ) -> Result<(), IndexError> {
-        let index_dir = self.root.join(INDEX_DIR_NAME);
-        let mut unchanged: Vec<(PathBuf, String)> = Vec::new();
+        let index_dir = self.index_dir.clone();
+        let mut unchanged: Vec<(PathBuf, String, FileStamp)> = Vec::new();
         let mut stale: Vec<(PathBuf, String, FileStamp)> = Vec::new();
 
         for entry in ignore::WalkBuilder::new(&self.root).build() {
@@ -1269,7 +1342,7 @@ impl TextIndex {
             let key = path.to_string_lossy().into_owned();
             let stamp = stamp_from(&metadata);
             if known.get(&key) == Some(&stamp) {
-                unchanged.push((path.to_path_buf(), key));
+                unchanged.push((path.to_path_buf(), key, stamp));
             } else {
                 stale.push((path.to_path_buf(), key, stamp));
             }
@@ -1278,37 +1351,42 @@ impl TextIndex {
         let total = stale.len();
         progress(IndexProgress { done: 0, total });
 
-        // On a from-scratch build there is nothing to delete, and a
-        // `delete_term` per file is not free.
-        let fresh = known.is_empty();
         let done = AtomicUsize::new(0);
+        // Whether this pass actually changed the index, as opposed to merely
+        // looking at files. A file the index has no record of has nothing to
+        // delete, and a file past the size cap contributes no documents, so
+        // neither makes the pass dirty — which is what keeps a reopen of an
+        // unchanged project from committing and reloading for nothing.
+        let mutated = AtomicBool::new(false);
         let writer = &self.writer;
         let fields = &self.fields;
-        let indexed: Vec<Option<(PathBuf, String)>> = stale
+        let indexed: Vec<Option<(PathBuf, String, FileStamp)>> = stale
             .into_par_iter()
             .map(|(path, key, stamp)| {
-                if !fresh {
+                if known.contains_key(&key) {
                     writer.delete_term(Term::from_field_text(fields.path, key.as_str()));
+                    mutated.store(true, Ordering::Relaxed);
                 }
                 let documents = file_docs(fields, &key, &path, stamp);
                 let indexable = documents.is_some();
                 for document in documents.unwrap_or_default() {
                     writer.add_document(document)?;
+                    mutated.store(true, Ordering::Relaxed);
                 }
                 progress(IndexProgress {
                     done: done.fetch_add(1, Ordering::Relaxed) + 1,
                     total,
                 });
-                Ok(indexable.then_some((path, key)))
+                Ok(indexable.then_some((path, key, stamp)))
             })
             .collect::<Result<Vec<_>, IndexError>>()?;
 
-        let mut seen = unchanged;
+        let mut seen: Vec<(PathBuf, String, FileStamp)> = unchanged;
         seen.extend(indexed.into_iter().flatten());
 
         let live: std::collections::HashSet<&str> =
-            seen.iter().map(|(_, key)| key.as_str()).collect();
-        let mut dirty = total > 0;
+            seen.iter().map(|(_, key, _)| key.as_str()).collect();
+        let mut dirty = mutated.into_inner();
         for key in known.keys() {
             if !live.contains(key.as_str()) {
                 self.writer
@@ -1322,9 +1400,17 @@ impl TextIndex {
             self.reader.reload()?;
         }
 
+        if dirty {
+            let stamps: Vec<(String, FileStamp)> = seen
+                .iter()
+                .map(|(_, key, stamp)| (key.clone(), *stamp))
+                .collect();
+            write_stamps(&index_dir, &stamps);
+        }
+
         self.files = seen
             .into_iter()
-            .map(|(path, _)| FileEntry {
+            .map(|(path, _, _)| FileEntry {
                 relative: relative_display(&self.root, &path),
                 path,
             })
@@ -1350,6 +1436,16 @@ impl TextIndex {
         Ok(true)
     }
 
+    /// Rewrite the stamp sidecar from the file list currently in memory.
+    fn write_current_stamps(&self) {
+        let stamps: Vec<(String, FileStamp)> = self
+            .files
+            .iter()
+            .map(|f| (f.path.to_string_lossy().into_owned(), stamp_of(&f.path)))
+            .collect();
+        write_stamps(&self.index_dir, &stamps);
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }
@@ -1362,7 +1458,7 @@ impl TextIndex {
     /// files, which produces more events, forever. Every mutating entry point
     /// filters through here so no caller can reintroduce that loop.
     pub fn is_index_internal(&self, path: &Path) -> bool {
-        path.starts_with(self.root.join(INDEX_DIR_NAME))
+        path.starts_with(&self.index_dir)
     }
 
     /// Number of files currently held in the file-name tier.
@@ -1385,6 +1481,40 @@ impl TextIndex {
         self.writer.commit()?;
         self.reader.reload()?;
         self.track_file(path, indexable);
+        Ok(())
+    }
+
+    /// Bring a batch of paths up to date in one pass: each path that still
+    /// exists is re-indexed, each that does not is dropped, and the whole
+    /// batch shares a single commit and reader reload.
+    ///
+    /// This is what the filesystem watcher should call. One save can produce
+    /// several events, and a commit per event is both the expensive part and
+    /// a write lock the whole application waits behind.
+    pub fn sync_paths(&mut self, paths: &[PathBuf]) -> Result<(), IndexError> {
+        let mut touched: Vec<(PathBuf, bool)> = Vec::with_capacity(paths.len());
+        for path in paths {
+            if self.is_index_internal(path) {
+                continue;
+            }
+            if path.exists() {
+                let indexable = self.write_file_doc(path, stamp_of(path))?;
+                touched.push((path.clone(), indexable));
+            } else {
+                let key = path.to_string_lossy().into_owned();
+                self.writer
+                    .delete_term(Term::from_field_text(self.fields.path, &key));
+                touched.push((path.clone(), false));
+            }
+        }
+        if touched.is_empty() {
+            return Ok(());
+        }
+        self.writer.commit()?;
+        self.reader.reload()?;
+        for (path, present) in touched {
+            self.track_file(&path, present);
+        }
         Ok(())
     }
 
@@ -2756,6 +2886,96 @@ mod tests {
         index.remove_file(&file).unwrap();
 
         assert_eq!(index.search("findme", false, true).unwrap().len(), 0);
+    }
+
+    // --- stamp sidecar and batched watcher updates (IP4) ---
+
+    #[test]
+    fn the_stamp_sidecar_carries_the_same_answer_as_reading_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "fn add() {}\n");
+        write(dir.path(), "src/other.rs", "fn other() {}\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+        let from_index = index.indexed_stamps().unwrap();
+        let index_dir = index.index_dir.clone();
+        drop(index);
+
+        let from_sidecar = read_stamps(&index_dir).expect("sidecar written by the build");
+        assert_eq!(from_sidecar, from_index);
+    }
+
+    #[test]
+    fn a_missing_sidecar_still_opens_correctly_from_the_index_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "fn add() {}\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+        let index_dir = index.index_dir.clone();
+        drop(index);
+
+        fs::write(index_dir.join(STAMPS_FILE), "not a stamp file at all").unwrap();
+        assert!(read_stamps(&index_dir).is_none());
+
+        // The unparseable sidecar sends the open down the tantivy fallback,
+        // and the result is the same index either way.
+        let index = TextIndex::open_or_build(dir.path()).unwrap();
+        assert_eq!(index.indexed_file_count(), 1);
+        assert_eq!(index.find_definitions_exact("add").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sync_paths_applies_a_whole_watcher_batch_in_one_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = write(dir.path(), "src/kept.rs", "fn kept() {}\n");
+        let doomed = write(dir.path(), "src/doomed.rs", "fn doomed() {}\n");
+        let mut index = TextIndex::build(dir.path()).unwrap();
+
+        fs::write(&kept, "fn renamed() {}\n").unwrap();
+        fs::remove_file(&doomed).unwrap();
+        let added = write(dir.path(), "src/added.rs", "fn added() {}\n");
+
+        index
+            .sync_paths(&[kept.clone(), doomed.clone(), added.clone()])
+            .unwrap();
+
+        assert_eq!(index.find_definitions_exact("kept").unwrap().len(), 0);
+        assert_eq!(index.find_definitions_exact("renamed").unwrap().len(), 1);
+        assert_eq!(index.find_definitions_exact("doomed").unwrap().len(), 0);
+        assert_eq!(index.find_definitions_exact("added").unwrap().len(), 1);
+        assert_eq!(index.indexed_file_count(), 2);
+    }
+
+    #[test]
+    fn reopening_an_unchanged_project_writes_nothing_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "fn add() {}\n");
+        write(dir.path(), "src/other.rs", "fn other() {}\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+        let index_dir = index.index_dir.clone();
+        drop(index);
+
+        let listing = |dir: &Path| {
+            let mut entries: Vec<(String, u64)> = fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .map(|e| {
+                    (
+                        e.file_name().to_string_lossy().into_owned(),
+                        e.metadata().map(|m| m.len()).unwrap_or(0),
+                    )
+                })
+                .collect();
+            entries.sort();
+            entries
+        };
+        let before = listing(&index_dir);
+
+        let index = TextIndex::open_or_build(dir.path()).unwrap();
+        assert_eq!(index.indexed_file_count(), 2);
+        drop(index);
+
+        // No commit, no new segment, no rewritten sidecar: a project that did
+        // not change costs a walk and a stat per file, and nothing else.
+        assert_eq!(listing(&index_dir), before);
     }
 
     // --- packed symbol documents, size cap, binary sniff (IP1/IP3) ---

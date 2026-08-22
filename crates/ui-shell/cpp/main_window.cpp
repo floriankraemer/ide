@@ -51,6 +51,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QProgressBar>
 #include <QStatusBar>
 #include <QTextCursor>
 #include <QToolButton>
@@ -3136,13 +3137,10 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     reindexTimer->setSingleShot(true);
     reindexTimer->setInterval(300);
     QObject::connect(reindexTimer, &QTimer::timeout, searchModel, [searchModel, dirtyPaths]() {
-        for (const QString &path : std::as_const(*dirtyPaths)) {
-            if (QFileInfo::exists(path)) {
-                searchModel->reindexFile(path);
-            } else {
-                searchModel->removeIndexedFile(path);
-            }
-        }
+        // The whole window goes over as one call: whether a path is
+        // re-indexed or dropped is decided in Rust from whether it still
+        // exists, and the batch shares a single commit.
+        searchModel->syncIndexedFiles(QStringList(dirtyPaths->values()));
         dirtyPaths->clear();
     });
     QObject::connect(treeModel,
@@ -3432,6 +3430,56 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     };
     QObject::connect(languageService, &LanguageService::diagnosticsChanged, window,
                       updateProblemsButton);
+    // The project index builds on a background thread for seconds to minutes
+    // after a folder is opened. Until this existed the only way to find that
+    // out was to run a search and be told to try again later.
+    // Two plain permanent widgets rather than a laid-out container: the
+    // status bar already spaces its own children, and a container's label
+    // stretches to fill whatever room is going, which pushed the bar a
+    // hand's width away from its own caption.
+    auto *indexLabel = new QLabel(statusBar);
+    auto *indexBar = new QProgressBar(statusBar);
+    indexLabel->setVisible(false);
+    indexBar->setVisible(false);
+    indexBar->setTextVisible(false);
+    indexBar->setFixedWidth(90);
+    indexBar->setFixedHeight(statusBar->fontMetrics().height());
+    QObject::connect(searchModel, &SearchModel::indexProgress, window,
+                      [indexLabel, indexBar](quint32 done, quint32 total) {
+                          const QString text =
+                              QObject::tr("Indexing... %1/%2").arg(done).arg(total);
+                          // Reserve the width of the widest reading this run
+                          // will ever show — `total/total`. Without it the
+                          // label is sized for "565/2223" one frame and
+                          // "1204/2223" the next, and clips while it catches
+                          // up.
+                          indexLabel->setMinimumWidth(indexLabel->fontMetrics().horizontalAdvance(
+                              QObject::tr("Indexing... %1/%2").arg(total).arg(total)));
+                          indexLabel->setStyleSheet(QString());
+                          indexLabel->setText(text);
+                          indexBar->setRange(0, static_cast<int>(total));
+                          indexBar->setValue(static_cast<int>(done));
+                          indexLabel->setVisible(true);
+                          indexBar->setVisible(true);
+                      });
+    QObject::connect(searchModel, &SearchModel::indexReady, window,
+                      [indexLabel, indexBar]() {
+                          indexLabel->setMinimumWidth(0);
+                          indexLabel->setVisible(false);
+                          indexBar->setVisible(false);
+                      });
+    QObject::connect(searchModel, &SearchModel::indexFailed, window,
+                      [indexLabel, indexBar](const QString &message) {
+                          indexLabel->setMinimumWidth(0);
+                          indexBar->setVisible(false);
+                          indexLabel->setStyleSheet(QStringLiteral("color: %1;")
+                                                       .arg(severityColor(FfiSeverity::Error).name()));
+                          indexLabel->setText(QObject::tr("Index failed: %1").arg(message));
+                          indexLabel->setVisible(true);
+                      });
+
+    statusBar->addPermanentWidget(indexLabel);
+    statusBar->addPermanentWidget(indexBar);
     statusBar->addPermanentWidget(problemsButton);
     statusBar->addPermanentWidget(languageLabel);
     statusBar->addPermanentWidget(positionLabel);
