@@ -10,6 +10,7 @@
 //! ```
 
 pub mod catalog;
+pub mod code_action;
 pub mod completion;
 pub mod diagnostics;
 pub mod framing;
@@ -21,6 +22,10 @@ pub mod workspace_edit;
 pub use catalog::{
     default_server, enabled_server, lsp_language_id, resolve_servers, ServerConfig, ServerDef,
     ServerOverride, SERVERS,
+};
+pub use code_action::{
+    filter_by_kind, kind_matches, needs_unfiltered_retry, parse_code_actions,
+    steps as action_steps, ActionStep, CodeActionItem, CommandRef,
 };
 pub use completion::{
     completion_prefix, filter as filter_completions, kind_name, parse_completion, should_request,
