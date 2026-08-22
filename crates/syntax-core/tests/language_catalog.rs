@@ -435,3 +435,142 @@ fn naming_conventions_are_painted_and_only_where_they_apply() {
         }
     }
 }
+
+// ---- capture vocabulary (the third, unguarded link) ------------------
+
+/// Capture names that are **legitimately not scopes, permanently**.
+///
+/// Nothing here is a bug: these are markers other tools read out of a
+/// `highlights.scm`, and dropping them from the highlight stream is the
+/// correct behaviour. Every entry needs a comment saying why it is not a
+/// scope. Do **not** put a capture here because it is currently broken —
+/// that is `KNOWN_DEAD_CAPTURES` below, and confusing the two is exactly
+/// the failure this test exists to prevent.
+///
+/// This list is checked **one-directionally**, and the asymmetry with
+/// `KNOWN_DEAD_CAPTURES` is the documentation: an entry here will never
+/// resolve, ever, so there is nothing to detect and nothing to prune.
+const NOT_A_SCOPE: &[&str] = &[
+    // nvim-treesitter's prose-checking marker: it tells a spell checker
+    // which nodes hold natural language. It never carries a colour, in
+    // any editor, by design.
+    "spell",
+];
+
+/// Capture names that **should** resolve and do not — live bugs.
+///
+/// A capture whose name reaches no [`Scope`] produces no span at all, so
+/// no palette can rescue it: the text simply renders unhighlighted. The
+/// entries below were inherited with the upstream query ports and are
+/// being repaired under the language-platform work; **this list is
+/// expected to shrink to nothing.** Never add to it to make a red build
+/// green — fix the `.scm` capture (or the scope taxonomy) instead.
+///
+/// Checked **bidirectionally**, unlike `NOT_A_SCOPE`: a capture listed
+/// here that *does* resolve fails the test too, telling the repair to
+/// delete its own entry as part of landing. A one-directional tolerance
+/// would stay silently satisfied after the fix, and the list would rot
+/// into a record of things that used to be broken instead of shrinking to
+/// nothing. Same shape as `every_theme_colours_every_scope_not_unstyled_by_design`,
+/// which asserts equality rather than tolerating the unstyled scopes, and
+/// the same lesson as #17.
+///
+/// Keyed by language id so a name dead in one language cannot silently
+/// excuse the same name in another.
+const KNOWN_DEAD_CAPTURES: &[(&str, &[&str])] = &[
+    (
+        "scala",
+        &[
+            "conditional",
+            "exception",
+            "float",
+            "include",
+            "method",
+            "method.call",
+            "namespace",
+            "none",
+            "parameter",
+            "repeat",
+            "storageclass",
+        ],
+    ),
+    (
+        "css",
+        &[
+            "charset",
+            "import",
+            "keyframes",
+            "media",
+            "namespace",
+            "supports",
+        ],
+    ),
+];
+
+fn known_dead(id: &str, capture: &str) -> bool {
+    KNOWN_DEAD_CAPTURES
+        .iter()
+        .any(|(lang, names)| *lang == id && names.contains(&capture))
+}
+
+/// Every capture name in every shipped `highlights.scm` must resolve to a
+/// [`Scope`].
+///
+/// This is the link `every_shipped_query_compiles` and
+/// `every_theme_colours_every_scope_not_unstyled_by_design` leave open. A
+/// query compiles happily with a capture name no scope matches, and a
+/// theme cannot be missing a colour for a scope that never enters the
+/// highlight stream — the span is dropped at resolution time and the text
+/// renders as plain foreground. That is strictly worse than an unthemed
+/// scope, and until this test nothing failed.
+///
+/// **`highlights.scm` only.** The other query files use separate capture
+/// vocabularies on purpose (`@fold`, `@definition.*`/`@reference`/`@name`,
+/// `@supertype`, `@injection.content`) and are correct as they are.
+///
+/// Names come from the compiled `Query`, not the file text, so a capture
+/// inside a comment or a string cannot fool it; resolution is the
+/// registry's own `Scope::resolve` walk (`@keyword.coroutine` resolves via
+/// `keyword`), read back off `CompiledLanguage::highlight_scopes`.
+#[test]
+fn every_highlights_capture_resolves_to_a_scope() {
+    let registry = registry();
+    for language in catalog_languages() {
+        let id = language.id();
+        let id = id.as_str();
+        let Some(compiled) = registry.compiled(language) else {
+            continue;
+        };
+        let compiled = compiled.unwrap_or_else(|err| panic!("language `{id}`: {err}"));
+        let Some(highlights) = compiled.highlights.as_ref() else {
+            continue;
+        };
+        for (index, capture) in highlights.capture_names().iter().enumerate() {
+            if compiled.highlight_scopes[index].is_some() {
+                assert!(
+                    !known_dead(id, capture),
+                    "language `{id}`: `@{capture}` has been repaired — it \
+                     resolves to a scope now, so delete its entry from \
+                     `KNOWN_DEAD_CAPTURES` (language `{id}`) in {}. That list \
+                     must shrink to nothing; leaving a repaired capture in it \
+                     turns it into a record of old bugs nobody prunes.",
+                    file!()
+                );
+                continue;
+            }
+            assert!(
+                NOT_A_SCOPE.contains(capture) || known_dead(id, capture),
+                "language `{id}`: `@{capture}` in \
+                 queries/{id}/highlights.scm resolves to no scope, so it \
+                 produces no span at all and the text renders unhighlighted. \
+                 Fix it: rename the capture to a name in `syntax_core::SCOPES` \
+                 (or a dotted child of one, e.g. `@keyword.coroutine`), or add \
+                 that name to `SCOPES` in crates/syntax-core/src/lib.rs and \
+                 give it a colour in every theme. Only if the capture is \
+                 deliberately not a highlight scope, add it to `NOT_A_SCOPE` \
+                 in {} with a comment saying why.",
+                file!()
+            );
+        }
+    }
+}
