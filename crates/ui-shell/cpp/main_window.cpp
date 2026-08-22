@@ -2077,14 +2077,25 @@ public:
                 &RefactorController::onIndexRenameReady);
         connect(searchModel_, &SearchModel::indexRenameFailed, this,
                 [this](const QString &message) { report(message); });
+        // The count the user cares about is every file that changed, not
+        // just the ones written to disk: a refactoring confined to open
+        // editors writes nothing, and reporting "0 file(s)" for it reads as
+        // a failure.
         connect(searchModel_, &SearchModel::refactorFilesFinished, this,
                 [this](quint32 files, quint32 skipped) {
+                    const int changed = static_cast<int>(files) + bufferFiles_;
+                    bufferFiles_ = 0;
                     if (skipped > 0) {
-                        report(tr("Refactored %n file(s); %1 could not be changed.", "", files)
+                        report(tr("Refactored %n file(s); %1 could not be changed.", "", changed)
                                  .arg(skipped));
                         return;
                     }
-                    report(tr("Refactored %n file(s).", "", files));
+                    if (files == 0 && changed > 0) {
+                        report(tr("Refactored %n open file(s) — save to write the changes.", "",
+                                  changed));
+                        return;
+                    }
+                    report(tr("Refactored %n file(s).", "", changed));
                 });
         connect(searchModel_, &SearchModel::refactorFilesFailed, this,
                 [this](const QString &message) { report(tr("Refactoring failed: %1").arg(message)); });
@@ -2203,6 +2214,7 @@ private:
                       "applied."));
             return;
         }
+        bufferFiles_ = countBufferFiles(edits);
         editorTabs_->applyBufferEdits(edits);
         // Files nobody has open are rewritten and re-indexed by the index
         // worker; it ignores the buffer edits in the same vector.
@@ -2249,10 +2261,12 @@ private:
         // prompt about a change it made itself. Taking them also removes
         // them from the plan, so the disk pass below cannot apply them
         // twice.
+        bufferFiles_ = 0;
         for (const QString &path : editorTabs_->openPaths()) {
             const ::rust::Vec<FfiTextEdit> edits =
               searchModel_->takeIndexRenameBufferEdits(path);
             if (!edits.empty()) {
+                ++bufferFiles_;
                 editorTabs_->applyBufferEdits(edits);
             }
         }
@@ -2290,6 +2304,18 @@ private:
         menu.exec(QCursor::pos());
     }
 
+    // How many distinct files a batch of edits changes in their buffers.
+    static int countBufferFiles(const ::rust::Vec<FfiTextEdit> &edits)
+    {
+        QSet<QString> paths;
+        for (const FfiTextEdit &edit : edits) {
+            if (edit.in_buffer) {
+                paths.insert(edit.path);
+            }
+        }
+        return paths.size();
+    }
+
     // One line of an edit, for the preview. A multi-line insertion is shown
     // by its first line: the dialog says what is changing and where, not
     // what the new text is in full.
@@ -2312,6 +2338,9 @@ private:
     QString pendingName_;
     QString nothingFound_;
     int revision_ = 0;
+    // Files changed in their buffers by the refactoring being applied, so
+    // the outcome can be reported as a whole rather than as the disk half.
+    int bufferFiles_ = 0;
 };
 
 // Go to Declaration (N2/N8/L4): turns a resolution — from the language
