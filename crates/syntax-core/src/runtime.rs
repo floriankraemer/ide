@@ -984,20 +984,38 @@ mod tests {
         })
     }
 
+    /// Compile `source` into a shared object the loader tests can `dlopen`.
+    ///
+    /// Published by `rename` from a per-caller temporary rather than
+    /// written in place. `cc -o out` creates `out` and *then* fills it, so
+    /// the previous `out.exists()` fast path handed a concurrent caller a
+    /// path to a file that existed but was not yet a valid library — the
+    /// test then `dlopen`ed a truncated object and failed intermittently,
+    /// only ever under parallel runs. `rename` within one directory is
+    /// atomic, so a reader sees either no file or a finished one, and two
+    /// callers racing to build the same name both produce a complete
+    /// library rather than interleaving writes into one.
     fn compile_shared_object(name: &str, source: &Path, extra: &[String]) -> PathBuf {
+        static NEXT_TEMP: AtomicUsize = AtomicUsize::new(0);
+
         let out = fixture_dir().join(format!("lib{name}.so"));
         if out.exists() {
             return out;
         }
+        let tmp = fixture_dir().join(format!(
+            "lib{name}.{}.building",
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
         let status = Command::new("cc")
             .args(["-shared", "-fPIC", "-O0"])
             .args(extra)
             .arg(source)
             .arg("-o")
-            .arg(&out)
+            .arg(&tmp)
             .status()
             .expect("a C compiler is available in the builder image");
         assert!(status.success(), "cc failed for {}", source.display());
+        std::fs::rename(&tmp, &out).expect("publish the built library atomically");
         out
     }
 
