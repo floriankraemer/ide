@@ -263,6 +263,7 @@ fn main() {
         .cpp_file("cpp/language_servers_page.cpp")
         .cpp_file("cpp/problems_panel.cpp")
         .cpp_file("cpp/search_results_panel.cpp")
+        .cpp_file("cpp/refactor_preview_dialog.cpp")
         .cpp_file("cpp/search_everywhere_dialog.cpp")
         .cpp_file("cpp/splash_screen.cpp")
         .cpp_file("cpp/theme.cpp")
