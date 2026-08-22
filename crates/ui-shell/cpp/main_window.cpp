@@ -8,6 +8,7 @@
 #include "syntax_colors_page.h"
 #include "search_everywhere_dialog.h"
 #include "problems_panel.h"
+#include "refactor_preview_dialog.h"
 #include "search_results_panel.h"
 #include "splash_screen.h"
 #include "syntax_highlighter.h"
@@ -313,6 +314,115 @@ public:
     {
         auto *editor = currentEditor();
         return editor ? lspPosition(editor, documentPosition) : QPair<quint32, quint32>{0, 0};
+    }
+
+    // The caret, as a document position — what the refactoring gestures ask
+    // about when there is no explicit selection.
+    int caretPosition() const
+    {
+        auto *editor = currentEditor();
+        return editor ? editor->textCursor().position() : 0;
+    }
+
+    // RF10: the editor's own revision counter, which is what
+    // `lsp_core::EditGate` compares an arriving refactoring against. Zero
+    // when no tab is open, which no live buffer ever reports.
+    int documentRevision() const
+    {
+        auto *editor = currentEditor();
+        return editor ? static_cast<int>(editor->document()->revision()) : 0;
+    }
+
+    // The selection, or the caret twice when there is none, as the protocol
+    // line/character pairs a code-action request is made about.
+    QPair<QPair<quint32, quint32>, QPair<quint32, quint32>> selectionRange() const
+    {
+        auto *editor = currentEditor();
+        if (!editor) {
+            return {{0, 0}, {0, 0}};
+        }
+        const QTextCursor cursor = editor->textCursor();
+        return {lspPosition(editor, cursor.selectionStart()),
+                lspPosition(editor, cursor.selectionEnd())};
+    }
+
+    // Whether any open tab has unsaved changes. The name-based rename
+    // refuses to run in that case, because the index it reads is on disk —
+    // `index_core::plan_index_rename` owns that rule, this only answers the
+    // question it asks.
+    bool hasUnsavedChanges() const
+    {
+        for (QTabWidget *group : groups_) {
+            for (int i = 0; i < group->count(); ++i) {
+                auto *editor = qobject_cast<CodeEditor *>(group->widget(i));
+                if (editor && editor->document()->isModified()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    // RF10: splice a refactoring's edits into the buffers that are open.
+    //
+    // One edit block per file, so one Ctrl+Z undoes the whole refactoring in
+    // that file, and the edits are applied in the order Rust handed them
+    // over — already sorted last-first, so each range still addresses the
+    // text it was computed against. Nothing is decided here: which edits are
+    // buffer edits at all was decided by `lsp_core::plan_edit`.
+    void applyBufferEdits(const ::rust::Vec<FfiTextEdit> &edits)
+    {
+        QHash<QString, CodeEditor *> editors;
+        for (const FfiTextEdit &edit : edits) {
+            if (!edit.in_buffer) {
+                continue;
+            }
+            const QString path = edit.path;
+            CodeEditor *editor = editors.value(path);
+            if (!editor) {
+                editor = editorForPath(path);
+                if (!editor) {
+                    continue;
+                }
+                editors.insert(path, editor);
+                editor->textCursor().beginEditBlock();
+            }
+            QTextCursor cursor(editor->document());
+            cursor.setPosition(positionAt(editor, edit.start_line, edit.start_character));
+            cursor.setPosition(positionAt(editor, edit.end_line, edit.end_character),
+                                QTextCursor::KeepAnchor);
+            cursor.insertText(edit.new_text);
+        }
+        for (CodeEditor *editor : editors) {
+            editor->textCursor().endEditBlock();
+        }
+    }
+
+    // The editor showing `path`, or nullptr when it is not open.
+    CodeEditor *editorForPath(const QString &path) const
+    {
+        for (QTabWidget *group : groups_) {
+            for (int i = 0; i < group->count(); ++i) {
+                auto *editor = qobject_cast<CodeEditor *>(group->widget(i));
+                if (editor && editor->property("lspPath").toString() == path) {
+                    return editor;
+                }
+            }
+        }
+        return nullptr;
+    }
+
+    // A protocol position as a document position. The inverse of
+    // `lspPosition`, and a re-expression for the same reason: both count
+    // UTF-16 code units within a block.
+    static int positionAt(QPlainTextEdit *editor, quint32 line, quint32 character)
+    {
+        const QTextBlock block = editor->document()->findBlockByNumber(static_cast<int>(line));
+        if (!block.isValid()) {
+            return editor->document()->characterCount() - 1;
+        }
+        const int within = qMin(static_cast<int>(character), block.length() - 1);
+        return block.position() + within;
     }
 
     // The word under the caret, used by the caret-driven Find Usages and
@@ -1869,6 +1979,268 @@ private:
     DocumentManager *docManager_ = nullptr;
 };
 
+// RF11: every refactoring gesture, in one place.
+//
+// It contains no refactoring logic and no rules about when a refactoring is
+// safe. What it does is ask, then paint what came back: whether a preview is
+// required is `lsp_core::EditPlan::touches_other_files`, whether a rename may
+// go ahead at all is `lsp_core::rename`'s and `index_core`'s to say, and
+// which sites of a name-based rename start ticked is decided before the
+// dialog is built. Every branch below is on a flag or a signal, never on a
+// judgement made here.
+class RefactorController : public QObject
+{
+public:
+    RefactorController(LanguageService *languageService, SearchModel *searchModel,
+                        EditorTabs *editorTabs, QMainWindow *window)
+      : QObject(window)
+      , languageService_(languageService)
+      , searchModel_(searchModel)
+      , editorTabs_(editorTabs)
+      , window_(window)
+    {
+        connect(languageService_, &LanguageService::renamePrepared, this,
+                &RefactorController::askForNewName);
+        connect(languageService_, &LanguageService::renameRejected, this,
+                [this](const QString &reason) { report(reason); });
+        connect(languageService_, &LanguageService::refactorReady, this,
+                &RefactorController::onRefactorReady);
+        connect(languageService_, &LanguageService::refactorFallback, this,
+                &RefactorController::askIndexToRename);
+        connect(languageService_, &LanguageService::refactorFailed, this,
+                [this](const QString &message) { report(tr("Refactoring failed: %1").arg(message)); });
+        connect(languageService_, &LanguageService::codeActionsReady, this,
+                &RefactorController::onCodeActionsReady);
+
+        connect(searchModel_, &SearchModel::indexRenameReady, this,
+                &RefactorController::onIndexRenameReady);
+        connect(searchModel_, &SearchModel::indexRenameFailed, this,
+                [this](const QString &message) { report(message); });
+        connect(searchModel_, &SearchModel::refactorFilesFinished, this,
+                [this](quint32 files, quint32 skipped) {
+                    if (skipped > 0) {
+                        report(tr("Refactored %n file(s); %1 could not be changed.", "", files)
+                                 .arg(skipped));
+                        return;
+                    }
+                    report(tr("Refactored %n file(s).", "", files));
+                });
+        connect(searchModel_, &SearchModel::refactorFilesFailed, this,
+                [this](const QString &message) { report(tr("Refactoring failed: %1").arg(message)); });
+    }
+
+    // Shift+F6. Asks the server whether the symbol can be renamed at all;
+    // a server that does not implement the question answers "go ahead",
+    // which is `lsp_core::rename::prepare_outcome`'s rule.
+    void renameSymbol()
+    {
+        if (editorTabs_->currentPath().isEmpty()) {
+            return;
+        }
+        pendingWord_ = editorTabs_->wordUnderCursor();
+        languageService_->prepareRename(editorTabs_->currentPath(),
+                                         caret().first,
+                                         caret().second);
+    }
+
+    // Ctrl+Alt+M and its siblings: ask for a kind family, then offer
+    // whatever the server actually has.
+    void extract(const QString &kind, const QString &nothingFound)
+    {
+        if (editorTabs_->currentPath().isEmpty()) {
+            return;
+        }
+        nothingFound_ = nothingFound;
+        const auto range = editorTabs_->selectionRange();
+        languageService_->codeActionsAt(editorTabs_->currentPath(),
+                                         range.first.first,
+                                         range.first.second,
+                                         range.second.first,
+                                         range.second.second,
+                                         kind);
+    }
+
+private:
+    QPair<quint32, quint32> caret() const
+    {
+        return editorTabs_->lspPositionAt(editorTabs_->caretPosition());
+    }
+
+    void askForNewName(const QString &placeholder)
+    {
+        const QString suggestion = placeholder.isEmpty() ? pendingWord_ : placeholder;
+        bool accepted = false;
+        const QString newName = QInputDialog::getText(window_,
+                                                       tr("Rename"),
+                                                       tr("New name:"),
+                                                       QLineEdit::Normal,
+                                                       suggestion,
+                                                       &accepted);
+        if (!accepted || newName.isEmpty() || newName == suggestion) {
+            return;
+        }
+        pendingName_ = newName;
+        revision_ = editorTabs_->documentRevision();
+        languageService_->renameAt(editorTabs_->currentPath(),
+                                    caret().first,
+                                    caret().second,
+                                    newName,
+                                    revision_);
+    }
+
+    // ADR-0016's fallback, reached only when `lsp_core` said no server
+    // answered — never from a condition evaluated here.
+    void askIndexToRename()
+    {
+        if (pendingName_.isEmpty()) {
+            return;
+        }
+        searchModel_->planIndexRename(editorTabs_->currentPath(),
+                                       editorTabs_->currentContent(),
+                                       editorTabs_->byteOffsetAt(editorTabs_->caretPosition()),
+                                       pendingName_,
+                                       editorTabs_->hasUnsavedChanges());
+    }
+
+    void onRefactorReady(const FfiRefactorSummary &summary)
+    {
+        // A refactoring confined to the file the user is looking at applies
+        // straight away and is undone with Ctrl+Z. Anything wider is shown
+        // first — and which of the two this is was decided in Rust.
+        if (!summary.touches_other_files) {
+            applyPending();
+            return;
+        }
+
+        QList<RefactorPreviewDialog::Row> rows;
+        for (const FfiTextEdit &edit : languageService_->pendingEdits()) {
+            rows.append({edit.path, static_cast<int>(edit.start_line),
+                          previewText(edit.new_text), true, true});
+        }
+        RefactorPreviewDialog dialog(summary.title,
+                                      tr("%n change(s) across %1 file(s). Changes to files that "
+                                         "are not open are written to disk and cannot be undone.",
+                                         "", static_cast<int>(summary.edit_count))
+                                        .arg(summary.document_count),
+                                      rows,
+                                      window_);
+        if (dialog.exec() != QDialog::Accepted) {
+            languageService_->cancelRefactor();
+            return;
+        }
+        for (const QString &path : dialog.excludedPaths()) {
+            languageService_->excludeFromRefactor(path);
+        }
+        applyPending();
+    }
+
+    void applyPending()
+    {
+        const ::rust::Vec<FfiTextEdit> edits = languageService_->takePendingEdits(revision_);
+        if (edits.empty()) {
+            report(tr("The file changed while the refactoring was being prepared; nothing was "
+                      "applied."));
+            return;
+        }
+        editorTabs_->applyBufferEdits(edits);
+        // Files nobody has open are rewritten and re-indexed by the index
+        // worker; it ignores the buffer edits in the same vector.
+        searchModel_->applyFileEdits(edits);
+    }
+
+    void onIndexRenameReady(const QString &name, bool ambiguous)
+    {
+        QList<RefactorPreviewDialog::Row> rows;
+        for (const FfiRenameSite &site : searchModel_->indexRenameSites()) {
+            rows.append({site.path, static_cast<int>(site.line) - 1,
+                          site.is_definition ? tr("declaration of %1").arg(name)
+                                             : tr("use of %1").arg(name),
+                          site.resolved, site.checked});
+        }
+        if (rows.isEmpty()) {
+            report(tr("No occurrences of \"%1\" were found.").arg(name));
+            return;
+        }
+
+        // The honesty this dialog exists for: with no language server this
+        // is name matching, and the user has to be told so before it writes.
+        const QString explanation =
+          ambiguous
+            ? tr("No language server answered, so these sites were found by name. More than one "
+                 "symbol in this project is called \"%1\", so the uncertain sites are unticked. "
+                 "Files that are not open are written to disk and cannot be undone.")
+                .arg(name)
+            : tr("No language server answered, so these sites were found by name. Files that are "
+                 "not open are written to disk and cannot be undone.");
+
+        RefactorPreviewDialog dialog(tr("Rename %1 to %2").arg(name, pendingName_),
+                                      explanation,
+                                      rows,
+                                      window_);
+        if (dialog.exec() != QDialog::Accepted) {
+            return;
+        }
+        for (const QString &path : dialog.excludedPaths()) {
+            searchModel_->excludeFromIndexRename(path);
+        }
+        searchModel_->applyIndexRename();
+    }
+
+    void onCodeActionsReady()
+    {
+        const ::rust::Vec<FfiCodeAction> actions = languageService_->codeActions();
+        if (actions.empty()) {
+            report(nothingFound_);
+            return;
+        }
+        revision_ = editorTabs_->documentRevision();
+        if (actions.size() == 1 && QString(actions[0].disabled_reason).isEmpty()) {
+            languageService_->applyCodeAction(0, revision_);
+            return;
+        }
+
+        // Several offers, or one the server marked unavailable: show them
+        // rather than choosing. A disabled row is listed greyed with its
+        // reason, because a menu that changes shape with the caret reads as
+        // a bug.
+        QMenu menu(window_);
+        for (std::size_t i = 0; i < actions.size(); ++i) {
+            const QString reason = actions[i].disabled_reason;
+            QAction *entry = menu.addAction(reason.isEmpty()
+                                              ? QString(actions[i].title)
+                                              : tr("%1 — %2").arg(QString(actions[i].title), reason));
+            entry->setEnabled(reason.isEmpty());
+            const quint32 index = static_cast<quint32>(i);
+            connect(entry, &QAction::triggered, this,
+                    [this, index]() { languageService_->applyCodeAction(index, revision_); });
+        }
+        menu.exec(QCursor::pos());
+    }
+
+    // One line of an edit, for the preview. A multi-line insertion is shown
+    // by its first line: the dialog says what is changing and where, not
+    // what the new text is in full.
+    static QString previewText(const QString &newText)
+    {
+        const QString first = newText.split(QLatin1Char('\n')).value(0).trimmed();
+        if (first.isEmpty()) {
+            return tr("(removed)");
+        }
+        return first.size() > 80 ? first.left(77) + QStringLiteral("...") : first;
+    }
+
+    void report(const QString &message) { window_->statusBar()->showMessage(message, 6000); }
+
+    LanguageService *languageService_;
+    SearchModel *searchModel_;
+    EditorTabs *editorTabs_;
+    QMainWindow *window_;
+    QString pendingWord_;
+    QString pendingName_;
+    QString nothingFound_;
+    int revision_ = 0;
+};
+
 // Go to Declaration (N2/N8/L4): turns a resolution — from the language
 // server or from the index — into either a jump or a chooser.
 //
@@ -2986,6 +3358,43 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QAction *findInFilesAction = registerAction(editMenu, QStringLiteral("edit.findInFiles"),
                                                  QObject::tr("Find in Files..."), appSettings,
                                                  *actions);
+
+    // RF11: the Refactor menu. Every entry routes through the one
+    // RefactorController, so there is a single place that turns a server's
+    // answer into an edit.
+    auto *refactorer = new RefactorController(languageService, searchModel, editorTabs, window);
+    QMenu *refactorMenu = window->menuBar()->addMenu(QObject::tr("Re&factor"));
+    QAction *renameAction = registerAction(refactorMenu, QStringLiteral("refactor.rename"),
+                                            QObject::tr("Rename..."), appSettings, *actions);
+    QObject::connect(renameAction, &QAction::triggered, window,
+                      [refactorer]() { refactorer->renameSymbol(); });
+
+    refactorMenu->addSeparator();
+    QAction *extractMethodAction =
+      registerAction(refactorMenu, QStringLiteral("refactor.extractMethod"),
+                      QObject::tr("Extract Method..."), appSettings, *actions);
+    QObject::connect(extractMethodAction, &QAction::triggered, window, [refactorer]() {
+        refactorer->extract(
+          QStringLiteral("refactor.extract"),
+          QObject::tr("The language server offers no method extraction for this selection."));
+    });
+
+    QAction *extractClassAction =
+      registerAction(refactorMenu, QStringLiteral("refactor.extractClass"),
+                      QObject::tr("Extract Class..."), appSettings, *actions);
+    QObject::connect(extractClassAction, &QAction::triggered, window, [refactorer]() {
+        refactorer->extract(
+          QStringLiteral("refactor.extract.class"),
+          QObject::tr("The language server offers no class extraction for this selection."));
+    });
+
+    QAction *refactorThisAction =
+      registerAction(refactorMenu, QStringLiteral("refactor.refactorThis"),
+                      QObject::tr("Refactor This..."), appSettings, *actions);
+    QObject::connect(refactorThisAction, &QAction::triggered, window, [refactorer]() {
+        refactorer->extract(QString(),
+                            QObject::tr("The language server offers no refactorings here."));
+    });
 
     QMenu *viewMenu = window->menuBar()->addMenu(QObject::tr("&View"));
     QAction *classViewAction = registerAction(viewMenu, QStringLiteral("view.classView"),

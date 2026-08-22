@@ -165,6 +165,35 @@ pub const ACTIONS: &[ActionDef] = &[
         category: "View",
         default_shortcut: "Ctrl+G",
     },
+    // Refactoring (RF11). Defaults follow JetBrains, which is where these
+    // gestures come from: Shift+F6 for rename, Ctrl+Alt+M for extract
+    // method, and Ctrl+Alt+Shift+T for the "what can you do here" menu.
+    // Extract Class ships unbound — JetBrains has no default for it either,
+    // and inventing one risks colliding with a binding a user already has.
+    ActionDef {
+        id: "refactor.rename",
+        label: "Rename...",
+        category: "Refactor",
+        default_shortcut: "Shift+F6",
+    },
+    ActionDef {
+        id: "refactor.extractMethod",
+        label: "Extract Method...",
+        category: "Refactor",
+        default_shortcut: "Ctrl+Alt+M",
+    },
+    ActionDef {
+        id: "refactor.extractClass",
+        label: "Extract Class...",
+        category: "Refactor",
+        default_shortcut: "",
+    },
+    ActionDef {
+        id: "refactor.refactorThis",
+        label: "Refactor This...",
+        category: "Refactor",
+        default_shortcut: "Ctrl+Alt+Shift+T",
+    },
     // Code navigation (N8). Defaults follow JetBrains, the closest
     // reference for these gestures: Ctrl+B for the declaration a
     // Ctrl+Click also reaches, Alt+F7 for usages, Ctrl+Alt+B/Ctrl+Alt+U
