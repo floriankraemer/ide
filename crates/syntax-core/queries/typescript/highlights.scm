@@ -122,11 +122,15 @@
 ; queries/highlights.scm (MIT, (c) 2017 GitHub). Upstream's
 ; `; inherits: javascript` directive is not implemented by this crate's
 ; query loader, so the JavaScript half above is included verbatim instead.
-; The upstream `#match? "^[A-Z]"` rule that types capitalized identifiers
-; is still absent — not because predicates go unevaluated here (they are
-; evaluated, see queries/go/highlights.scm) but because it has not been
-; ported back; the naming-conventions block at the end of this file
-; covers capitalized identifiers instead.
+; Upstream's `((identifier) @type (#match? @type "^[A-Z]"))` is
+; deliberately not ported. It captures exactly the same nodes as the
+; @constructor rule in the naming-conventions block at the end of this
+; file, so with same-node captures resolving first-pattern-wins the two
+; cannot coexist: one of them is simply dead. @constructor is the better
+; of the two here, because real types already have their own node
+; ((type_identifier) @type, above) and what is left for the (identifier)
+; fallback is capitalized names in value position — classes being
+; constructed or called.
 
 (type_identifier) @type
 (predefined_type) @type.builtin

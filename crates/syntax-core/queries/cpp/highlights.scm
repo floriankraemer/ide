@@ -8,10 +8,15 @@
 ; section. Keep the two halves in sync by hand when C changes.
 ;
 ; Adapted from tree-sitter-c and tree-sitter-cpp (MIT, Copyright (c) 2014
-; Max Brunsfeld), minus the `#match?` and catch-all `(identifier)`
-; patterns — not because text predicates go unevaluated (they are
-; evaluated, see queries/go/highlights.scm) but because they have not been
-; ported back, apart from the naming-conventions block at the end.
+; Max Brunsfeld), minus the catch-all `(identifier)` pattern, which has not
+; been ported back. Text predicates are evaluated (see
+; queries/go/highlights.scm); the `#match?` patterns upstream carries are
+; ported in the naming-conventions block at the end, with one deliberate
+; exception: upstream's `((namespace_identifier) @type (#match? @type
+; "^[A-Z]"))` stays out because this file paints every namespace_identifier
+; @module instead. Upstream reached for @type only because its taxonomy has
+; no namespace scope; this crate's does, and @module is the truer name, so
+; porting the rule in would demote capitalized namespaces, not improve them.
 
 ; --- inlined from queries/c/highlights.scm -------------------------------
 

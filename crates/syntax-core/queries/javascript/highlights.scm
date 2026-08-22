@@ -1,10 +1,14 @@
 ; JavaScript highlights.scm — adapted from tree-sitter-javascript
 ; 0.25.0's queries/highlights.scm and highlights-jsx.scm (MIT,
-; (c) 2017 Max Brunsfeld). The predicate-guarded patterns (@constructor /
-; @constant / @variable.builtin by name regex, `require`) are still
-; absent: `#match?` and friends are evaluated here (see
-; queries/go/highlights.scm), so they would work as written, but only the
-; naming-conventions block at the end of this file has been ported back.
+; (c) 2017 Max Brunsfeld). The predicate-guarded patterns are ported back:
+; `require` and the builtin globals below, and @constructor / @constant in
+; the naming-conventions block at the end. `#match?` and friends are
+; evaluated here (see queries/go/highlights.scm).
+;
+; Upstream's separate @constant arm over (shorthand_property_identifier)
+; and (shorthand_property_identifier_pattern) is not ported: this file
+; captures neither node type at all, so it is a gap of its own rather than
+; a predicate casualty.
 
 ; Variables and properties
 
@@ -25,6 +29,23 @@
 (variable_declarator
   name: (identifier) @function
   value: [(function_expression) (arrow_function)])
+
+; Builtins
+;
+; Upstream guards both of these with `#is-not? local` as well. That is a
+; property predicate: this crate parses it but never applies it, so a
+; pattern carrying one is dropped whole. Re-authored without it — the cost
+; is that a local shadowing `window` or `console` still paints as the
+; builtin, which is far rarer than the globals themselves. They sit below
+; the definition patterns so `function require() {}` still reads as a
+; definition, and above the call pattern so `require(...)` beats
+; @function.call.
+
+((identifier) @function.builtin
+  (#eq? @function.builtin "require"))
+
+((identifier) @variable.builtin
+  (#match? @variable.builtin "^(arguments|module|console|window|document)$"))
 
 ; Function and method calls
 
