@@ -2888,6 +2888,15 @@ struct CentralWidgets
     ads::CDockWidget *problemsDock;
 };
 
+// ProjectTreeModel::Roles are offsets from Qt::UserRole, not role numbers —
+// cxx-qt cannot give a qenum explicit discriminants, so the variants would
+// otherwise collide with Qt::DecorationRole and friends. The Rust side adds
+// the same base before it matches on the role.
+int treeRole(ProjectTreeModel::Roles role)
+{
+    return Qt::UserRole + static_cast<int>(role);
+}
+
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
                                    DocumentManager *docManager, AppSettings *appSettings,
                                    SearchModel *searchModel, TerminalSession *terminalSession,
@@ -2913,14 +2922,6 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     auto *treeView = new QTreeView();
     treeView->setModel(treeModel);
     treeView->setHeaderHidden(true);
-    QTimer::singleShot(6000, treeView, [treeView, treeModel]() {
-        qDebug() << "DBG indentation" << treeView->indentation() << "rootDecorated" << treeView->rootIsDecorated()
-                 << "iconSize" << treeView->iconSize() << "style" << treeView->style()->objectName();
-        QModelIndex i0 = treeView->model()->index(0, 0, QModelIndex());
-        qDebug() << "DBG cols" << treeView->model()->columnCount(QModelIndex())
-                 << "row0" << treeView->model()->data(i0).toString() << treeView->visualRect(i0)
-                 << "deco" << treeView->model()->data(i0, Qt::DecorationRole);
-    });
     auto *treeDock = new ads::CDockWidget(dockManager, QObject::tr("Project"));
     treeDock->setWidget(treeView);
     dockManager->addDockWidget(ads::LeftDockWidgetArea, treeDock, editorArea);
@@ -3140,13 +3141,13 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
       treeModel,
       [treeModel, editorTabs](const QModelIndex &index) {
           const bool isDir =
-            treeModel->data(index, static_cast<int>(ProjectTreeModel::Roles::IsDir)).toBool();
+            treeModel->data(index, treeRole(ProjectTreeModel::Roles::IsDir)).toBool();
           if (isDir) {
               return;
           }
 
           const QString path =
-            treeModel->data(index, static_cast<int>(ProjectTreeModel::Roles::Path)).toString();
+            treeModel->data(index, treeRole(ProjectTreeModel::Roles::Path)).toString();
           editorTabs->openFile(path);
       });
 
@@ -3171,9 +3172,9 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
           QString targetDir = rootPath;
           if (hasItem) {
               itemPath =
-                treeModel->data(index, static_cast<int>(ProjectTreeModel::Roles::Path)).toString();
+                treeModel->data(index, treeRole(ProjectTreeModel::Roles::Path)).toString();
               itemIsDir =
-                treeModel->data(index, static_cast<int>(ProjectTreeModel::Roles::IsDir)).toBool();
+                treeModel->data(index, treeRole(ProjectTreeModel::Roles::IsDir)).toBool();
               targetDir = itemIsDir ? itemPath : QFileInfo(itemPath).absolutePath();
           }
 

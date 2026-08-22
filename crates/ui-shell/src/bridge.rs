@@ -521,14 +521,19 @@ mod ffi {
     }
 
     /// Extra data roles `data()` answers, alongside `Qt::DisplayRole` (0 —
-    /// the node's name, used for the tree view's label). cxx-qt's `qenum`
-    /// doesn't support explicit discriminants, so `Reserved` occupies 0
-    /// (matching, and never confused with, `Qt::DisplayRole`) purely to
-    /// push `Path`/`IsDir` off of it.
+    /// the node's name, used for the tree view's label).
+    ///
+    /// These are *offsets from `Qt::UserRole`*, not role numbers: cxx-qt's
+    /// `qenum` doesn't support explicit discriminants, so the variants can
+    /// only ever be 0, 1, 2..., which is squarely inside the range Qt
+    /// reserves for itself. Both sides add `Qt::UserRole` before the number
+    /// reaches `data()` — Rust through `user_role()` below, C++ through
+    /// `Qt::UserRole + static_cast<int>(...)`. Without that, `Path` would be
+    /// `Qt::DecorationRole` and the view would reserve icon width for the
+    /// `QString` it got back, pushing every label ~22px right of the branch
+    /// indicator that belongs to it.
     #[qenum(ProjectTreeModel)]
     enum Roles {
-        #[doc(hidden)]
-        Reserved,
         /// Absolute filesystem path of the node, as a `QString`.
         Path,
         /// Whether the node is a directory (`bool`).
@@ -2917,6 +2922,16 @@ impl Default for ProjectTreeModelRust {
     }
 }
 
+/// `Qt::UserRole` — the first role number Qt promises never to use itself.
+const QT_USER_ROLE: i32 = 0x0100;
+
+/// The role number a `Roles` variant actually travels as. See the `Roles`
+/// doc comment: the variants are offsets, because cxx-qt cannot give them
+/// discriminants of their own.
+const fn user_role(role: Roles) -> i32 {
+    QT_USER_ROLE + role.repr
+}
+
 impl ffi::ProjectTreeModel {
     /// Row count for `parent` — the number of children the arena node has.
     /// Files (and empty directories) simply have no children, so this
@@ -3006,15 +3021,15 @@ impl ffi::ProjectTreeModel {
         match role {
             // Qt::DisplayRole
             0 => QVariant::from(&QString::from(node.name.as_str())),
-            r if r == Roles::Path.repr => {
+            r if r == user_role(Roles::Path) => {
                 QVariant::from(&QString::from(node.path.to_string_lossy().as_ref()))
             }
-            r if r == Roles::IsDir.repr => QVariant::from(&node.is_dir),
-            // Never sent from C++ (only `Path`/`IsDir` are used as roles) —
-            // exists so `Roles::Reserved` (which only exists to push
-            // `Path`/`IsDir` off of 0, since cxx-qt's `qenum` doesn't
-            // support explicit discriminants) counts as used.
-            r if r == Roles::Reserved.repr => QVariant::default(),
+            r if r == user_role(Roles::IsDir) => QVariant::from(&node.is_dir),
+            // Every role Qt itself defines (decoration, edit, tooltip, size
+            // hint, ...) lands here and gets an invalid QVariant, which is
+            // what tells the view "this item has no icon, no tooltip, no
+            // size of its own" and keeps the label flush against its own
+            // branch indicator.
             _ => QVariant::default(),
         }
     }
@@ -3022,8 +3037,8 @@ impl ffi::ProjectTreeModel {
     pub fn role_names(&self) -> QHash<QHashPair_i32_QByteArray> {
         let mut roles = QHash::<QHashPair_i32_QByteArray>::default();
         roles.insert(0, QByteArray::from("display"));
-        roles.insert(Roles::Path.repr, QByteArray::from("path"));
-        roles.insert(Roles::IsDir.repr, QByteArray::from("isDir"));
+        roles.insert(user_role(Roles::Path), QByteArray::from("path"));
+        roles.insert(user_role(Roles::IsDir), QByteArray::from("isDir"));
         roles
     }
 
@@ -6494,3 +6509,24 @@ impl ffi::LanguageServerEditor {
 }
 
 pub use ffi::run_app;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Qt asks a model for `Qt::DecorationRole` (1), `Qt::EditRole` (2) and a
+    /// dozen more on every paint. A custom role sharing one of those numbers
+    /// answers a question Qt asked itself — a path `QString` handed back as
+    /// the decoration made the tree reserve icon width it never drew, so
+    /// every label sat well right of its own branch indicator.
+    #[test]
+    fn tree_roles_stay_out_of_the_range_qt_reserves() {
+        for (name, role) in [("Path", Roles::Path), ("IsDir", Roles::IsDir)] {
+            assert!(
+                user_role(role) >= QT_USER_ROLE,
+                "role {name} collides with a Qt-defined role"
+            );
+        }
+        assert_ne!(user_role(Roles::Path), user_role(Roles::IsDir));
+    }
+}
