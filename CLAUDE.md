@@ -15,6 +15,9 @@ make lint            # clippy -D warnings + rustfmt --check
 
 Go through the Makefile rather than a hand-written `docker run`: its `RUN_LINUX` mounts named volumes for the crate registry and the ccache object store, and a bare `docker run --rm` throws both away — re-downloading 390-odd crates and recompiling every C++ translation unit each time.
 
+Debug builds carry line tables only, so backtraces keep file and line but a debugger sees no variable or type information.
+When you need to step through something — usually the cxx-qt seam — build with `cargo build --profile debugging -p app`, which is `dev` plus full DWARF.
+
 `linux-builder` has the full Qt6 dev toolchain (`docker/Dockerfile`); the workspace is mounted rather than baked in, so edits are picked up without an image rebuild. For anything the Makefile has no target for, reuse `RUN_LINUX`'s mounts, e.g. `make shell` then `cargo build --release -p app`.
 
 ## Starting a session

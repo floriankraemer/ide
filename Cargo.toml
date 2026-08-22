@@ -23,3 +23,13 @@ members = [
 [profile.dev]
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
+
+# For actually attaching a debugger — mainly to the cxx-qt seam, where
+# variable and type information is the whole point. `dev` deliberately
+# doesn't carry it: full DWARF costs ~7s on every edit-one-cpp-file cycle
+# and doubles target/ (3.5 GB -> 6.9 GB), which is a bad default for a loop
+# you run all day and a debugger you attach occasionally.
+#   cargo build --profile debugging -p app
+[profile.debugging]
+inherits = "dev"
+debug = true
