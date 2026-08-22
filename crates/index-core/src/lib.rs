@@ -49,7 +49,7 @@ use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcherBuilder;
@@ -57,6 +57,7 @@ use grep_searcher::sinks::UTF8;
 use grep_searcher::Searcher;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Utf32Str};
+use rayon::prelude::*;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::{
@@ -88,8 +89,29 @@ const LOCK_PROBE_FILE: &str = ".ide-lock-probe";
 /// Ngram size used for the `content` field's tokenizer — see module docs.
 const NGRAM_SIZE: usize = 3;
 
-/// Heap tantivy may use before it flushes a segment.
-const WRITER_HEAP_BYTES: usize = 50_000_000;
+/// Heap tantivy may use per indexing thread before it flushes a segment.
+///
+/// The thread count matters more than the number itself: `Index::writer`
+/// derives its thread count by dividing the *total* budget by tantivy's
+/// 15 MB-per-thread minimum, so the old flat 50 MB total silently capped
+/// indexing at three threads no matter how many cores were available.
+const WRITER_HEAP_BYTES_PER_THREAD: usize = 32_000_000;
+
+/// Tantivy's own ceiling (`MAX_NUM_THREAD`); asking for more is rejected.
+const MAX_WRITER_THREADS: usize = 8;
+
+/// Files larger than this are indexed by name only — no content, no symbols.
+///
+/// A minified bundle or a multi-megabyte log is ngram(3)-tokenized byte by
+/// byte, so a handful of them can cost more than the entire rest of a
+/// project, and nobody is reading them in an editor anyway.
+// ponytail: a flat byte cap, in the same range as mainstream IDEs use. A
+// per-language cap, or "index the first N bytes", would be the upgrade if
+// something legitimate turns out to sit just above the line.
+const MAX_INDEXED_BYTES: u64 = 2 * 1024 * 1024;
+
+/// How much of a file is sniffed for a NUL byte before deciding it is binary.
+const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 /// How long to keep retrying the writer lock before reporting it busy. An
 /// instance that has just been closed still holds the lock for as long as
@@ -185,9 +207,13 @@ fn fallback_index_dir(project_root: &Path) -> Option<PathBuf> {
 /// [`IndexError::Locked`] — never as a reason to rebuild, since rebuilding
 /// deletes the very files the live writer is using.
 fn acquire_writer(index: &Index, index_dir: &Path) -> Result<IndexWriter, IndexError> {
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, MAX_WRITER_THREADS);
     let mut attempts = 0;
     loop {
-        match index.writer(WRITER_HEAP_BYTES) {
+        match index.writer_with_num_threads(threads, threads * WRITER_HEAP_BYTES_PER_THREAD) {
             Ok(writer) => return Ok(writer),
             Err(e @ tantivy::TantivyError::LockFailure(_, _)) => {
                 if attempts >= WRITER_LOCK_RETRIES {
@@ -409,9 +435,13 @@ struct FileStamp {
 }
 
 fn stamp_of(path: &Path) -> FileStamp {
-    let Ok(meta) = fs::metadata(path) else {
-        return FileStamp::default();
-    };
+    match fs::metadata(path) {
+        Ok(meta) => stamp_from(&meta),
+        Err(_) => FileStamp::default(),
+    }
+}
+
+fn stamp_from(meta: &fs::Metadata) -> FileStamp {
     let mtime_secs = meta
         .modified()
         .ok()
@@ -534,6 +564,47 @@ fn line_and_col_at(text: &str, offset: usize) -> (usize, usize) {
         .unwrap_or(0);
     (line, clamped - line_start)
 }
+
+/// Byte offset of the first byte of every line in `text`, ascending, always
+/// starting with 0.
+///
+/// Built once per file so that resolving a position costs a binary search
+/// instead of a scan from byte 0. [`line_and_col_at`] on its own is fine for
+/// the one-off callers, but the indexer resolves a position for *every*
+/// identifier occurrence in a file, which made symbol extraction quadratic in
+/// file size.
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(text.len() / 32 + 1);
+    starts.push(0);
+    starts.extend(
+        text.bytes()
+            .enumerate()
+            .filter(|(_, byte)| *byte == b'\n')
+            .map(|(i, _)| i + 1),
+    );
+    starts
+}
+
+/// Same result as [`line_and_col_at`], against a table from [`line_starts`].
+fn line_and_col_from(starts: &[usize], offset: usize) -> (usize, usize) {
+    let line = starts.partition_point(|&start| start <= offset).max(1);
+    (line, offset - starts[line - 1])
+}
+
+/// How far an index build has got.
+///
+/// `total` is the number of files this pass has to read — files whose stamp
+/// already matched are not counted, so a warm open with nothing to do reports
+/// `0/0` once and finishes. `done` never exceeds `total` and the last report
+/// of a pass always has `done == total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexProgress {
+    pub done: usize,
+    pub total: usize,
+}
+
+/// The progress callback for callers that do not want one.
+fn no_progress(_: IndexProgress) {}
 
 /// Where one project's index is in its lifecycle. Opening a project starts
 /// a build that takes seconds to minutes on a real repository, so "there is
@@ -993,6 +1064,15 @@ impl TextIndex {
     /// entries excluded unless explicitly un-ignored). Any existing index
     /// directory is replaced.
     pub fn build(project_root: &Path) -> Result<Self, IndexError> {
+        Self::build_with_progress(project_root, &no_progress)
+    }
+
+    /// [`build`](Self::build), reporting how far along it is. See
+    /// [`IndexProgress`].
+    pub fn build_with_progress(
+        project_root: &Path,
+        progress: &(dyn Fn(IndexProgress) + Sync),
+    ) -> Result<Self, IndexError> {
         let index_dir = index_dir_for(project_root);
         if index_dir.exists() {
             fs::remove_dir_all(&index_dir)?;
@@ -1020,7 +1100,7 @@ impl TextIndex {
             fields,
             files: Vec::new(),
         };
-        this.sync_from_disk(&HashMap::new())?;
+        this.sync_from_disk(&HashMap::new(), progress)?;
         Ok(this)
     }
 
@@ -1033,10 +1113,19 @@ impl TextIndex {
     /// This is what a project open should call: an unchanged repository costs
     /// one directory walk plus a `stat` per file, not a full re-index.
     pub fn open_or_build(project_root: &Path) -> Result<Self, IndexError> {
+        Self::open_or_build_with_progress(project_root, &no_progress)
+    }
+
+    /// [`open_or_build`](Self::open_or_build), reporting how far along it is.
+    /// See [`IndexProgress`].
+    pub fn open_or_build_with_progress(
+        project_root: &Path,
+        progress: &(dyn Fn(IndexProgress) + Sync),
+    ) -> Result<Self, IndexError> {
         match Self::open_existing(project_root) {
             Ok(mut index) => {
                 let stamps = index.indexed_stamps()?;
-                index.sync_from_disk(&stamps)?;
+                index.sync_from_disk(&stamps, progress)?;
                 Ok(index)
             }
             // A busy lock is never answered by rebuilding: `build` wipes the
@@ -1044,7 +1133,7 @@ impl TextIndex {
             // writer that holds the lock and leave two writers disagreeing
             // about `meta.json`.
             Err(err @ IndexError::Locked(_)) => Err(err),
-            Err(_) => Self::build(project_root),
+            Err(_) => Self::build_with_progress(project_root, progress),
         }
     }
 
@@ -1127,10 +1216,20 @@ impl TextIndex {
     /// Walk the project, re-indexing every file whose stamp differs from
     /// `known` and removing indexed files that no longer exist, then rebuild
     /// the in-memory file list. One commit for the whole pass.
-    fn sync_from_disk(&mut self, known: &HashMap<String, FileStamp>) -> Result<(), IndexError> {
+    ///
+    /// Two passes on purpose. The walk is cheap and single-threaded, and
+    /// finishing it before any file is read is what makes the number of files
+    /// to index known up front — a progress report without a total is a
+    /// spinner, not progress. The second pass is where all the cost is (read,
+    /// tree-sitter parse, document build) and it runs in parallel.
+    fn sync_from_disk(
+        &mut self,
+        known: &HashMap<String, FileStamp>,
+        progress: &(dyn Fn(IndexProgress) + Sync),
+    ) -> Result<(), IndexError> {
         let index_dir = self.root.join(INDEX_DIR_NAME);
-        let mut seen: Vec<(PathBuf, String)> = Vec::new();
-        let mut dirty = false;
+        let mut unchanged: Vec<(PathBuf, String)> = Vec::new();
+        let mut stale: Vec<(PathBuf, String, FileStamp)> = Vec::new();
 
         for entry in ignore::WalkBuilder::new(&self.root).build() {
             let Ok(entry) = entry else { continue };
@@ -1138,23 +1237,57 @@ impl TextIndex {
             if path.starts_with(&index_dir) {
                 continue;
             }
-            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            // The walker already stat'ed this entry; re-stat'ing it here was
+            // a second syscall per file for the same two numbers.
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_file() {
                 continue;
             }
             let key = path.to_string_lossy().into_owned();
-            let stamp = stamp_of(path);
+            let stamp = stamp_from(&metadata);
             if known.get(&key) == Some(&stamp) {
-                seen.push((path.to_path_buf(), key));
-                continue;
-            }
-            if self.write_file_doc(path, stamp)? {
-                dirty = true;
-                seen.push((path.to_path_buf(), key));
+                unchanged.push((path.to_path_buf(), key));
+            } else {
+                stale.push((path.to_path_buf(), key, stamp));
             }
         }
 
+        let total = stale.len();
+        progress(IndexProgress { done: 0, total });
+
+        // On a from-scratch build there is nothing to delete, and a
+        // `delete_term` per file is not free.
+        let fresh = known.is_empty();
+        let done = AtomicUsize::new(0);
+        let writer = &self.writer;
+        let fields = &self.fields;
+        let indexed: Vec<Option<(PathBuf, String)>> = stale
+            .into_par_iter()
+            .map(|(path, key, stamp)| {
+                if !fresh {
+                    writer.delete_term(Term::from_field_text(fields.path, key.as_str()));
+                }
+                let documents = file_docs(fields, &key, &path, stamp);
+                let indexable = documents.is_some();
+                for document in documents.unwrap_or_default() {
+                    writer.add_document(document)?;
+                }
+                progress(IndexProgress {
+                    done: done.fetch_add(1, Ordering::Relaxed) + 1,
+                    total,
+                });
+                Ok(indexable.then_some((path, key)))
+            })
+            .collect::<Result<Vec<_>, IndexError>>()?;
+
+        let mut seen = unchanged;
+        seen.extend(indexed.into_iter().flatten());
+
         let live: std::collections::HashSet<&str> =
             seen.iter().map(|(_, key)| key.as_str()).collect();
+        let mut dirty = total > 0;
         for key in known.keys() {
             if !live.contains(key.as_str()) {
                 self.writer
@@ -1187,17 +1320,12 @@ impl TextIndex {
         let key = path.to_string_lossy().into_owned();
         self.writer
             .delete_term(Term::from_field_text(self.fields.path, &key));
-        let Ok(content) = fs::read_to_string(path) else {
+        let Some(documents) = file_docs(&self.fields, &key, path, stamp) else {
             return Ok(false);
         };
-        index_symbols(&mut self.writer, &self.fields, &key, &content)?;
-        self.writer.add_document(doc!(
-            self.fields.path => key,
-            self.fields.doc_type => DOC_TYPE_TEXT,
-            self.fields.content => content,
-            self.fields.mtime_secs => stamp.mtime_secs,
-            self.fields.size_bytes => stamp.size_bytes,
-        ))?;
+        for document in documents {
+            self.writer.add_document(document)?;
+        }
         Ok(true)
     }
 
@@ -1916,19 +2044,54 @@ fn doc_type_query(field: tantivy::schema::Field, value: &str) -> Box<dyn tantivy
     ))
 }
 
-/// Index the definition/reference rows for one file's already-read
-/// `content` into the symbol/reference schema (see the module doc's "Two
-/// schemas, one index" section). Merges `outline()`'s definitions
-/// (kind + container) onto the matching `identifier_occurrences()` row by
-/// shared name-token byte range rather than indexing both separately, so a
-/// definition site appears exactly once in `find_usages` results, not
-/// twice.
-fn index_symbols(
-    writer: &mut IndexWriter,
+/// Every document one file contributes to the index, or `None` when the file
+/// is not indexable at all (unreadable, or not UTF-8 text) — those are
+/// dropped from the index *and* from the file-name tier, since neither text
+/// nor file search can serve them.
+///
+/// A file past [`MAX_INDEXED_BYTES`] still gets its stamped text document,
+/// with empty content and no symbols: it stays findable by name and stays in
+/// the warm-open stamp set, it just is not searchable by content.
+///
+/// Free-standing rather than a method so the indexing pass can run it on
+/// many files in parallel — it borrows nothing mutable.
+fn file_docs(
     fields: &Fields,
     path_key: &str,
-    content: &str,
-) -> Result<(), IndexError> {
+    path: &Path,
+    stamp: FileStamp,
+) -> Option<Vec<tantivy::TantivyDocument>> {
+    let text_doc = |content: String| {
+        doc!(
+            fields.path => path_key.to_string(),
+            fields.doc_type => DOC_TYPE_TEXT,
+            fields.content => content,
+            fields.mtime_secs => stamp.mtime_secs,
+            fields.size_bytes => stamp.size_bytes,
+        )
+    };
+
+    if stamp.size_bytes > MAX_INDEXED_BYTES {
+        return Some(vec![text_doc(String::new())]);
+    }
+    let bytes = fs::read(path).ok()?;
+    if bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
+        return None;
+    }
+    let content = String::from_utf8(bytes).ok()?;
+
+    let mut documents = symbol_docs(fields, path_key, &content);
+    documents.push(text_doc(content));
+    Some(documents)
+}
+
+/// The definition/reference rows for one file's already-read `content` as
+/// symbol/reference-schema documents (see the module doc's "Three schemas,
+/// one index" section). Merges `outline()`'s definitions (kind + container)
+/// onto the matching `identifier_occurrences()` row by shared name-token
+/// byte range rather than indexing both separately, so a definition site
+/// appears exactly once in `find_usages` results, not twice.
+fn symbol_docs(fields: &Fields, path_key: &str, content: &str) -> Vec<tantivy::TantivyDocument> {
     let language = language_for_path(Path::new(path_key));
 
     // One parse for all three extractions (outline, occurrences, supertype
@@ -1937,8 +2100,14 @@ fn index_symbols(
     let mut flat: BTreeMap<(usize, usize), FlatSymbol<'_>> = BTreeMap::new();
     flatten_outline(&analysis.outline, None, &mut flat);
 
+    // One table for the whole file: every occurrence and edge below resolves
+    // its position by binary search instead of counting newlines from byte 0.
+    let starts = line_starts(content);
+    let mut documents =
+        Vec::with_capacity(analysis.occurrences.len() + analysis.supertype_edges.len());
+
     for occurrence in analysis.occurrences {
-        let (line, col) = line_and_col_at(content, occurrence.start);
+        let (line, col) = line_and_col_from(&starts, occurrence.start);
         let mut document = doc!(
             fields.path => path_key.to_string(),
             fields.doc_type => DOC_TYPE_SYMBOL,
@@ -1953,21 +2122,21 @@ fn index_symbols(
                 document.add_text(fields.sym_container, container);
             }
         }
-        writer.add_document(document)?;
+        documents.push(document);
     }
 
     for edge in analysis.supertype_edges {
-        let (line, col) = line_and_col_at(content, edge.type_start);
-        writer.add_document(doc!(
+        let (line, col) = line_and_col_from(&starts, edge.type_start);
+        documents.push(doc!(
             fields.path => path_key.to_string(),
             fields.doc_type => DOC_TYPE_INHERIT,
             fields.inh_type => edge.type_name,
             fields.inh_supertype => edge.supertype_name,
             fields.sym_line => line as u64,
             fields.sym_col => col as u64,
-        ))?;
+        ));
     }
-    Ok(())
+    documents
 }
 
 /// Tier 1 of [`TextIndex::resolve_declaration`] on its own: declarations of

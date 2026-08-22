@@ -1191,6 +1191,7 @@ dependencies = [
  "grep-searcher",
  "ignore",
  "nucleo-matcher",
+ "rayon",
  "syntax-core",
  "tantivy",
  "tempfile",

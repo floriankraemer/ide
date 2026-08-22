@@ -28,8 +28,7 @@ ADR numbers 0006 and 0013–0015 were never used; the gaps are historical and in
 
 ## Plans
 
-All plan documents are complete; none has open tasks.
-They remain as historical records of how each feature phase was delivered.
+All plan documents are complete except the index performance plan; they remain as historical records of how each feature phase was delivered.
 
 - [MVP implementation plan](architecture/mvp-implementation-plan.md) — MVP editor shell; marked historical.
 - [Settings, docking, theming, MCP plan](architecture/settings-docking-theming-mcp-plan.md) — settings, docking, theming, MCP foundation, line numbers, tab reorder, syntax foundation.
@@ -39,6 +38,7 @@ They remain as historical records of how each feature phase was delivered.
 - [Code navigation plan](architecture/code-navigation-plan.md) — Go to Declaration, Find Usages, Go to Implementation, jump history.
 - [Language platform plan](architecture/language-platform-plan.md) — extensible tree-sitter languages, per-language theming, runtime grammars, LSP.
 - [Refactoring plan](architecture/refactoring-plan.md) — rename, extract via code actions, signature on hover.
+- [Index performance plan](architecture/index-performance-plan.md) — faster project index build and a status-bar indexing indicator.
 
 ## Design
 
