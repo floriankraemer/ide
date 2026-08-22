@@ -150,9 +150,11 @@ fn an_unimplemented_request_returns_the_servers_error() {
     let (manager, _rx) = LspManager::new("file:///workspace");
     manager.start(&stub_config()).expect("stub starts");
 
+    // Deliberately a method the stub has no arm for at all — `rename` and
+    // `codeAction` are implemented now (RF3), so they no longer test this.
     let err = manager
-        .request(LANG, "textDocument/rename", json!({}))
-        .expect_err("the stub implements no rename");
+        .request(LANG, "textDocument/formatting", json!({}))
+        .expect_err("the stub implements no formatting");
     assert!(
         matches!(err, LspError::Response { code: -32601, .. }),
         "got {err:?}"
@@ -434,4 +436,160 @@ fn completions_are_parsed_ordered_and_filtered() {
         .is_empty());
 
     manager.stop(LANG);
+}
+
+/// The refactoring requests RF3 taught the stub. These go through the
+/// generic `request` because the typed `LspManager` methods land with RF6 —
+/// what is being proven here is that the fixture answers each shape, so the
+/// parsers built on top of it can be tested offline.
+#[test]
+fn code_actions_are_answered_in_every_shape_the_parser_must_handle() {
+    let (manager, _rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+
+    let request = |line: u64| {
+        manager
+            .request(
+                LANG,
+                "textDocument/codeAction",
+                json!({
+                    "textDocument": {"uri": "file:///workspace/main.rs"},
+                    "range": {"start": {"line": line, "character": 0},
+                              "end": {"line": line, "character": 4}},
+                    "context": {"diagnostics": []},
+                }),
+            )
+            .expect("the stub answers")
+    };
+
+    let with_edit = request(0);
+    assert_eq!(with_edit[0]["kind"], "refactor.extract.function");
+    assert!(with_edit[0]["edit"]["documentChanges"].is_array());
+
+    let with_command = request(1);
+    assert_eq!(
+        with_command[0]["command"], "stub.plain",
+        "a bare Command has its command as a string",
+    );
+    assert_eq!(
+        with_command[1]["command"]["command"], "stub.applyEdit",
+        "a CodeAction has its command as an object",
+    );
+
+    assert!(
+        request(2)[0]["edit"].is_null(),
+        "an unresolved item carries neither an edit nor a command",
+    );
+    assert_eq!(
+        request(3)[0]["disabled"]["reason"],
+        "selection is not an expression"
+    );
+    assert!(request(9).is_null(), "no actions here");
+}
+
+#[test]
+fn an_unresolved_code_action_gains_its_edit_from_resolve() {
+    let (manager, _rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+
+    let unresolved = json!({"title": "Needs resolving", "kind": "refactor.inline",
+                            "data": {"token": 42}});
+    let resolved = manager
+        .request(LANG, "codeAction/resolve", unresolved)
+        .expect("the stub resolves it");
+
+    assert_eq!(
+        resolved["title"], "Needs resolving",
+        "the item comes back whole"
+    );
+    assert!(resolved["edit"]["changes"].is_object());
+}
+
+#[test]
+fn prepare_rename_and_rename_answer_in_every_shape() {
+    let (manager, _rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+
+    let at = |method: &'static str, line: u64, extra: serde_json::Value| {
+        let mut params = json!({
+            "textDocument": {"uri": "file:///workspace/main.rs"},
+            "position": {"line": line, "character": 5},
+        });
+        if let Some(object) = extra.as_object() {
+            for (key, value) in object {
+                params[key] = value.clone();
+            }
+        }
+        manager.request(LANG, method, params)
+    };
+
+    assert!(
+        at("textDocument/prepareRename", 0, json!({})).unwrap()["start"].is_object(),
+        "line 0 answers with a bare Range",
+    );
+    assert_eq!(
+        at("textDocument/prepareRename", 1, json!({})).unwrap()["placeholder"],
+        "old_name",
+    );
+    assert_eq!(
+        at("textDocument/prepareRename", 2, json!({})).unwrap()["defaultBehavior"],
+        true,
+    );
+    assert!(at("textDocument/prepareRename", 9, json!({}))
+        .unwrap()
+        .is_null());
+
+    let rename = json!({"newName": "renamed"});
+    let versioned = at("textDocument/rename", 0, rename.clone()).unwrap();
+    assert_eq!(
+        versioned["documentChanges"][0]["textDocument"]["version"],
+        1
+    );
+    assert_eq!(
+        versioned["documentChanges"][0]["edits"][0]["newText"],
+        "renamed",
+    );
+
+    let legacy = at("textDocument/rename", 1, rename.clone()).unwrap();
+    assert!(legacy["changes"]["file:///workspace/main.rs"].is_array());
+
+    assert!(at("textDocument/rename", 2, rename.clone())
+        .unwrap()
+        .is_null());
+    assert!(
+        at("textDocument/rename", 9, rename).is_err(),
+        "an un-renameable element answers with an error, not a null",
+    );
+}
+
+/// The command-driven refactoring shape: the server asks *us* to apply an
+/// edit in the middle of an `executeCommand` and blocks on the answer.
+///
+/// Today the client refuses every server request with `-32601`, so what this
+/// pins is that the round trip completes rather than deadlocking. RF5 makes
+/// the answer a real one; this test is what will show the difference.
+#[test]
+fn a_command_that_asks_the_client_to_apply_an_edit_completes() {
+    let (manager, _rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+
+    let answer = manager
+        .request(
+            LANG,
+            "workspace/executeCommand",
+            json!({"command": "stub.applyEdit",
+                   "arguments": ["file:///workspace/main.rs"]}),
+        )
+        .expect("the command completes without deadlocking");
+
+    assert!(
+        answer["clientApplied"].is_null(),
+        "the client refuses server requests until RF5, so it applied nothing",
+    );
+
+    // The session is still usable afterwards.
+    let echo = manager
+        .request(LANG, "stub/echo", json!({"tag": "after"}))
+        .expect("the session survives the round trip");
+    assert_eq!(echo["tag"], "after");
 }
