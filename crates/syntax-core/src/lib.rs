@@ -1563,6 +1563,34 @@ mod tests {
     }
 
     #[test]
+    fn php_type_positions_are_references() {
+        // extends clause, parameter type, and return type are `(name)`
+        // nodes PHP's deliberately non-catch-all query must list explicitly.
+        let text =
+            "<?php\nclass Circle extends Shape {}\nfunction f(Shape $x): Shape { return $x; }";
+        let occurrences = identifier_occurrences(lang("php"), text);
+        let shapes: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "Shape").collect();
+        assert_eq!(
+            shapes.len(),
+            3,
+            "extends + param type + return type: {shapes:?}"
+        );
+        assert!(shapes.iter().all(|o| !o.is_definition));
+    }
+
+    #[test]
+    fn zig_type_usage_is_a_reference_not_a_definition() {
+        // `(variable_declaration (identifier))` unanchored also matched the
+        // type in `var s: Shape`, misreporting the usage as a definition.
+        let text = "const Shape = struct {};\nvar s: Shape = undefined;";
+        let occurrences = identifier_occurrences(lang("zig"), text);
+        let shapes: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "Shape").collect();
+        assert_eq!(shapes.len(), 2, "definition + type usage: {shapes:?}");
+        assert!(shapes[0].is_definition);
+        assert!(!shapes[1].is_definition);
+    }
+
+    #[test]
     fn kotlin_class_name_is_a_definition_and_its_usage_a_reference() {
         let text = "class Shape\nclass Circle : Shape()\nval s: Shape? = null";
         let occurrences = identifier_occurrences(lang("kotlin"), text);

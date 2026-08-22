@@ -73,7 +73,8 @@ const INDEX_DIR_NAME: &str = ".ide-index";
 /// Bump when what gets *extracted* from a file changes (a query in
 /// `syntax-core/queries`, [`analyze`]'s rules) without the tantivy schema
 /// changing: an existing index is then rebuilt instead of serving symbols
-/// the old extraction missed. 2: Java/C/C++ `type_identifier` occurrences.
+/// the old extraction missed. 2: Java/C/C++ `type_identifier`, PHP type
+/// positions, Zig anchored variable names.
 const EXTRACTION_VERSION: u32 = 2;
 const EXTRACTION_VERSION_FILE: &str = "extraction.version";
 
