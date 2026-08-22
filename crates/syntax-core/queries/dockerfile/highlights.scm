@@ -5,10 +5,10 @@
 ; Two systematic differences from upstream; go/highlights.scm documents
 ; the predicate rules they follow:
 ;
-;   * the `((variable) @constant (#match? ...))` pattern is still absent —
-;     `#match?` is evaluated (see queries/go/highlights.scm), so it would
-;     work as written and only paint the expansions it names; it has just
-;     not been ported back;
+;   * upstream's `((variable) @constant (#match? ...))` pattern is ported
+;     back below. `#match?` is evaluated (see queries/go/highlights.scm),
+;     so only SCREAMING_CASE expansions take `@constant`; nothing else
+;     captures `(variable)`, so it needs no particular position;
 ;   * the decorative `@spell` capture on `(comment)` is dropped, and
 ;     `@label` on heredoc markers becomes `@string.special` — the standard
 ;     name in `syntax_core::SCOPES` for a delimiter that belongs to a
@@ -74,6 +74,9 @@
 )
 
 (expansion_operator) @operator
+
+((variable) @constant
+  (#match? @constant "^[A-Z][A-Z_0-9]*$"))
 
 (arg_pair
   name: (unquoted_string) @property)

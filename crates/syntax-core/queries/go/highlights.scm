@@ -1,8 +1,9 @@
 ; Go highlights.scm — adapted from tree-sitter-go 0.25.0's own
 ; queries/highlights.scm (MIT, (c) 2014 Max Brunsfeld). Upstream's
-; `#match?`-guarded `@function.builtin` pattern is still absent here —
-; not because predicates are unevaluated, but because nobody has ported
-; it back yet.
+; `#match?`-guarded `@function.builtin` pattern is ported back below,
+; moved above the general `(call_expression function: (identifier))` rule
+; so that first-pattern-wins resolution lets `len`/`make`/`append` paint
+; as builtins.
 ;
 ; This note is the canonical account of how predicates are treated; the
 ; other adapted files point at it.
@@ -28,6 +29,10 @@
 ; loses to them instead of stacking a second span under each.
 
 ; Function calls
+
+(call_expression
+  function: (identifier) @function.builtin
+  (#match? @function.builtin "^(append|cap|close|complex|copy|delete|imag|len|make|new|panic|print|println|real|recover)$"))
 
 (call_expression
   function: (identifier) @function)

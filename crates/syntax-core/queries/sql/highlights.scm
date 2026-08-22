@@ -4,15 +4,20 @@
 ; Two systematic differences from upstream; go/highlights.scm documents
 ; the predicate rules they follow:
 ;
-;   * every pattern guarded by a `#match?` predicate is still absent —
-;     not because predicates are unevaluated (they are, see
-;     queries/go/highlights.scm) but because the `@number` and `@float`
-;     patterns upstream layers over `(literal)` have not been ported back
-;     yet;
+;   * upstream's `#match?`-guarded numeric patterns over `(literal)` are
+;     ported back below. `#match?` is evaluated (see
+;     queries/go/highlights.scm), and since same-node captures resolve
+;     first-pattern-wins they must sit above the catch-all
+;     `(literal) @string` — otherwise `42` paints as a string. Upstream
+;     spells the regexes as Lua patterns (`%d`); the Rust binding matches
+;     with the `regex` crate, where `%d` is two literal characters, so
+;     they are rewritten as `[0-9]` classes;
 ;   * Neovim-flavoured capture names are rewritten to the standard ones in
 ;     `syntax_core::SCOPES` (`@field` -> `@variable.member`, `@parameter` ->
-;     `@variable.parameter`, `@conditional`/`@storageclass`/`@type.qualifier`
-;     -> `@keyword`), and the decorative `@spell` capture is dropped.
+;     `@variable.parameter`, `@float` -> `@number.float`,
+;     `@conditional`/`@storageclass`/`@type.qualifier` -> `@keyword`), and
+;     the decorative `@spell` capture is dropped.
+
 
 (object_reference
   name: (identifier) @type)
@@ -45,6 +50,12 @@
    value: (cast
     name: (keyword_cast) @function.call
     parameter: [(literal)]?)))
+
+((literal) @number
+  (#match? @number "^[-+]?[0-9]+$"))
+
+((literal) @number.float
+  (#match? @number.float "^[-+]?[0-9]*[.][0-9]*$"))
 
 (literal) @string
 (comment) @comment

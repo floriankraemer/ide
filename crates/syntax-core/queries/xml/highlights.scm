@@ -2,27 +2,26 @@
 ; `queries/xml/highlights.scm` (MIT,
 ; https://github.com/tree-sitter-grammars/tree-sitter-xml).
 ;
-; One upstream pattern is still absent:
-;
-;   ((EntityRef) @constant.builtin
-;    (#any-of? @constant.builtin "&amp;" "&lt;" ...))
-;
-; `#any-of?` is evaluated (see queries/go/highlights.scm), so it would
-; match only the entities it lists, and — since same-node captures resolve
-; first-pattern-wins — placing it before the `(EntityRef) @constant`
-; pattern below would give the builtins their own colour. It has simply
-; not been ported back, so the general `@constant` capture carries every
-; entity reference and the distinction is lost, which costs a shade of
+; Upstream's `#any-of?`-guarded `(EntityRef) @constant.builtin` pattern is
+; ported back below. `#any-of?` is evaluated (see
+; queries/go/highlights.scm) and same-node captures resolve
+; first-pattern-wins, so it is placed *above* the general
+; `(EntityRef) @constant` rule — upstream puts it after, relying on the
+; opposite convention — and the five predefined entities get their own
 ; colour.
 ;
-; Capture names upstream uses that `syntax_core::SCOPES` does not know
-; (`@markup`, `@markup.link`, `@markup.raw`, `@error`,
-; `@string.special.symbol` — which does resolve, up to `string.special`)
-; are left as written: an unknown name yields no spans rather than a wrong
-; colour, and keeping the file close to upstream keeps it updatable.
+; Capture names are otherwise left exactly as upstream writes them, on
+; purpose — keeping the file close to upstream keeps it updatable. They all
+; resolve: `@markup`, `@markup.link`, `@markup.raw` and `@markup.heading`
+; are in `syntax_core::SCOPES` outright, and `@string.special.symbol`
+; resolves by `Scope::resolve` walking the dotted name up to
+; `string.special`. (An earlier revision of this note also listed `@error`
+; as an unknown name in use here; it never appears in this file, and any
+; capture on it would produce no span at all rather than a wrong colour.)
 ;
 ; XML needs no `no-scopes.txt`: `<?xml …?>` gives a real `@keyword`,
 ; attribute values give strings and `<!-- … -->` gives comments.
+
 
 ;; XML declaration
 
@@ -114,6 +113,10 @@
 ] @attribute
 
 ;; Entities
+
+((EntityRef) @constant.builtin
+ (#any-of? @constant.builtin
+   "&amp;" "&lt;" "&gt;" "&quot;" "&apos;"))
 
 (EntityRef) @constant
 
