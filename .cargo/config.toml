@@ -1,3 +1,5 @@
+# Requires mold, which the builder image installs — building on a bare host
+# fails at link with a missing-mold error rather than anything obvious.
 # Host target only. The windows-gnu target's linker is the wrapped
 # x86_64-w64-mingw32-windows-gnu-cc from docker/Dockerfile, whose
 # --start-group shim exists precisely because lld/mold alternatives don't

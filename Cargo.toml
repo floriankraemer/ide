@@ -33,3 +33,8 @@ split-debuginfo = "unpacked"
 [profile.debugging]
 inherits = "dev"
 debug = true
+# Not inherited from dev: "unpacked" leaves the Rust DWARF in .dwo files
+# beside the objects, so a binary copied out of the container debugs
+# without symbols. This profile exists to be debugged, sometimes
+# elsewhere, so it carries its own.
+split-debuginfo = "off"
