@@ -22,10 +22,13 @@ use crate::apply_edit::{
     await_verdict, ApplyEditGate, RefactorSession, RefactorSessions, UNSOLICITED_REASON,
 };
 use crate::catalog::ServerConfig;
+use crate::code_action::{parse_code_actions, CodeActionItem, CommandRef};
 use crate::completion::{parse_completion, parse_trigger_characters, CompletionList};
 use crate::framing::{read_message, write_message};
 use crate::hover::{parse_hover, HoverText};
 use crate::navigation::{parse_definition, DefinitionTarget};
+use crate::rename::{parse_prepare_rename, PrepareRename};
+use crate::workspace_edit::{parse_workspace_edit, DocumentEdits};
 
 /// How long a request waits for its response before it is cancelled.
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
@@ -36,6 +39,12 @@ pub const HOVER_TIMEOUT: Duration = Duration::from_secs(2);
 /// the word it describes is still being typed, so it gets the shortest
 /// deadline of all: a list that lands later is discarded anyway.
 pub const COMPLETION_TIMEOUT: Duration = Duration::from_secs(3);
+/// Refactoring — code actions, rename, and the commands they run. Generous
+/// next to the others because a server may have to analyse a whole project
+/// to answer, and an Extract on a large file legitimately takes seconds; the
+/// user asked for this one and is waiting on it, unlike a hover they may
+/// already have moved past.
+pub const REFACTOR_TIMEOUT: Duration = Duration::from_secs(30);
 /// Go to Definition is an explicit gesture and the user is waiting for it,
 /// but a jump that lands half a minute later is a bug, not a jump.
 pub const DEFINITION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -462,6 +471,126 @@ impl LspManager {
         Ok(parse_definition(&result))
     }
 
+    /// `textDocument/codeAction` for a range of an open document.
+    ///
+    /// `only` narrows the request to a kind family (`refactor.extract`), or
+    /// is empty for "everything you have". It is only ever a hint — see
+    /// [`crate::code_action::needs_unfiltered_retry`] for what an empty
+    /// answer to a filtered request does and does not prove.
+    pub fn code_action(
+        &self,
+        uri: &str,
+        start: (u32, u32),
+        end: (u32, u32),
+        only: &[&str],
+    ) -> Result<Vec<CodeActionItem>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let mut context = json!({"diagnostics": []});
+        if !only.is_empty() {
+            context["only"] = json!(only);
+        }
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/codeAction",
+            json!({
+                "textDocument": {"uri": uri},
+                "range": {
+                    "start": {"line": start.0, "character": start.1},
+                    "end": {"line": end.0, "character": end.1},
+                },
+                "context": context,
+            }),
+            REFACTOR_TIMEOUT,
+        )?;
+        Ok(parse_code_actions(&result))
+    }
+
+    /// `codeAction/resolve` for an item the server sent without an edit.
+    ///
+    /// The item goes back exactly as it arrived — its `data` is the server's
+    /// own bookkeeping, and editing it would break the round trip.
+    pub fn resolve_code_action(
+        &self,
+        language_id: &str,
+        item: &CodeActionItem,
+    ) -> Result<Vec<CodeActionItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "codeAction/resolve",
+            item.raw.clone(),
+            REFACTOR_TIMEOUT,
+        )?;
+        Ok(parse_code_actions(&json!([result])))
+    }
+
+    /// `workspace/executeCommand`: ask the server to carry out a command a
+    /// code action named.
+    ///
+    /// This is the request during which a server may ask us to apply an edit
+    /// (`crate::apply_edit`), so the caller must be holding a
+    /// [`LspManager::begin_refactor`] guard — without one the edit that
+    /// results is refused as unsolicited, and the refactoring quietly does
+    /// nothing.
+    pub fn execute_command(
+        &self,
+        language_id: &str,
+        command: &CommandRef,
+    ) -> Result<Value, LspError> {
+        self.request_with_timeout(
+            language_id,
+            "workspace/executeCommand",
+            json!({"command": command.command, "arguments": command.arguments}),
+            REFACTOR_TIMEOUT,
+        )
+    }
+
+    /// `textDocument/prepareRename`: may the symbol at this position be
+    /// renamed, and what should the input be prefilled with?
+    ///
+    /// `Ok(None)` is the server saying "not this element" — a refusal — while
+    /// an `Err` is it saying nothing at all, which most servers do because
+    /// they do not implement the request. [`crate::rename::prepare_outcome`]
+    /// is what tells those two apart.
+    pub fn prepare_rename(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Option<PrepareRename>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/prepareRename",
+            position_params(uri, line, character),
+            REFACTOR_TIMEOUT,
+        )?;
+        Ok(parse_prepare_rename(&result))
+    }
+
+    /// `textDocument/rename`, parsed into the documents it changes.
+    ///
+    /// An empty result means the server had no answer; whether that falls
+    /// back to the name-based index is
+    /// [`crate::rename::rename_outcome`]'s decision, not this method's.
+    pub fn rename(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        new_name: &str,
+    ) -> Result<Vec<DocumentEdits>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let mut params = position_params(uri, line, character);
+        params["newName"] = Value::String(new_name.to_string());
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/rename",
+            params,
+            REFACTOR_TIMEOUT,
+        )?;
+        parse_workspace_edit(&result).map_err(|e| LspError::Protocol(e.to_string()))
+    }
+
     /// `textDocument/completion` for a position in an open document, parsed
     /// across both response shapes. Ordering and filtering are the caller's
     /// next step ([`crate::completion::filter`]), not the manager's.
@@ -881,6 +1010,42 @@ fn client_capabilities() -> Value {
                     "documentationFormat": ["plaintext", "markdown"],
                 },
                 "contextSupport": false,
+            },
+            // RF6: code actions as literals rather than bare commands, so an
+            // action can carry its own edit; `resolveSupport` names `edit`
+            // only, because that is the one field we ask a server to fill in
+            // later. The kind list is the families the UI offers — servers
+            // may answer with any kind, and `code_action::kind_matches`
+            // classifies what arrives, so this list narrows requests without
+            // limiting what can come back.
+            "codeAction": {
+                "codeActionLiteralSupport": {"codeActionKind": {"valueSet": [
+                    "", "quickfix", "refactor", "refactor.extract",
+                    "refactor.inline", "refactor.rewrite", "source",
+                ]}},
+                "resolveSupport": {"properties": ["edit"]},
+                "dataSupport": true,
+                "isPreferredSupport": true,
+                "disabledSupport": true,
+            },
+            "rename": {"prepareSupport": true},
+        },
+        "workspace": {
+            // RF5: we answer `workspace/applyEdit`, which is how the
+            // command-driven refactorings reach us at all.
+            "applyEdit": true,
+            "executeCommand": {"dynamicRegistration": false},
+            "workspaceEdit": {
+                // Versions let a stale edit be caught before it is applied.
+                "documentChanges": true,
+                // Empty on purpose: file create/rename/delete is not
+                // supported, so a conforming server will not send one — and
+                // `workspace_edit::parse_workspace_edit` refuses the whole
+                // edit if one arrives anyway.
+                "resourceOperations": [],
+                // We apply all of an edit or none of it.
+                "failureHandling": "abort",
+                "normalizesLineEndings": false,
             },
         },
         "general": {"positionEncodings": ["utf-16"]},

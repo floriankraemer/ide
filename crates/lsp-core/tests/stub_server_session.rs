@@ -675,3 +675,133 @@ fn the_gate_refuses_a_late_claim_so_the_answer_is_never_a_lie() {
     );
     drop(gate_rx);
 }
+
+/// RF6: the typed refactoring requests, driven the way the UI will drive
+/// them. The stub varies its answers by position, so one test walks the
+/// shapes each parser has to survive.
+#[test]
+fn the_typed_rename_requests_reach_the_server_and_parse() {
+    let (manager, _rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    let uri = "file:///workspace/main.rs";
+    manager
+        .did_open(uri, LANG, "fn old_name() {}\n")
+        .expect("didOpen");
+
+    let prepared = manager
+        .prepare_rename(uri, 1, 5)
+        .expect("the stub answers")
+        .expect("line 1 is renameable");
+    assert_eq!(prepared.placeholder.as_deref(), Some("old_name"));
+    assert!(
+        manager.prepare_rename(uri, 9, 0).unwrap().is_none(),
+        "line 9 cannot be renamed",
+    );
+
+    let documents = manager
+        .rename(uri, 0, 5, "new_name")
+        .expect("rename answers");
+    assert_eq!(documents.len(), 1);
+    assert_eq!(documents[0].version, Some(1));
+    assert_eq!(documents[0].edits[0].new_text, "new_name");
+
+    // The legacy `changes` shape parses to the same thing, minus the version.
+    let legacy = manager
+        .rename(uri, 1, 5, "new_name")
+        .expect("rename answers");
+    assert_eq!(legacy[0].version, None);
+    assert_eq!(legacy[0].path, "/workspace/main.rs");
+
+    assert!(
+        manager.rename(uri, 2, 5, "new_name").unwrap().is_empty(),
+        "a null answer is no edits, which the caller resolves to the index",
+    );
+}
+
+#[test]
+fn the_typed_code_action_requests_reach_the_server_and_parse() {
+    let (manager, _rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    let uri = "file:///workspace/main.rs";
+    manager
+        .did_open(uri, LANG, "fn main() {}\n")
+        .expect("didOpen");
+
+    let extract = manager
+        .code_action(uri, (0, 0), (0, 4), &["refactor.extract"])
+        .expect("the stub answers");
+    assert_eq!(extract.len(), 1);
+    assert_eq!(
+        extract[0].kind.as_deref(),
+        Some("refactor.extract.function")
+    );
+    assert!(!extract[0].needs_resolve());
+
+    let unresolved = manager
+        .code_action(uri, (2, 0), (2, 4), &[])
+        .expect("the stub answers");
+    assert!(unresolved[0].needs_resolve());
+    let resolved = manager
+        .resolve_code_action(LANG, &unresolved[0])
+        .expect("resolve answers");
+    assert!(
+        !resolved[0].needs_resolve(),
+        "resolving fills in the edit the server withheld",
+    );
+
+    assert!(
+        manager
+            .code_action(uri, (9, 0), (9, 4), &[])
+            .unwrap()
+            .is_empty(),
+        "no actions here",
+    );
+}
+
+/// The capabilities are what a server reads to decide whether to offer these
+/// features at all, so they are asserted where they actually land: in the
+/// `initialize` the stub received.
+#[test]
+fn the_refactoring_capabilities_are_advertised() {
+    let (manager, _rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+
+    let capabilities = manager
+        .request(LANG, "stub/clientCapabilities", json!({}))
+        .expect("the stub hands back what we sent");
+
+    assert_eq!(capabilities["workspace"]["applyEdit"], true);
+    assert_eq!(
+        capabilities["workspace"]["workspaceEdit"]["documentChanges"], true,
+        "versions are what let a stale edit be caught before it is applied",
+    );
+    assert_eq!(
+        capabilities["workspace"]["workspaceEdit"]["resourceOperations"],
+        json!([]),
+        "file create/rename/delete is deliberately not supported",
+    );
+    assert_eq!(
+        capabilities["workspace"]["workspaceEdit"]["failureHandling"],
+        "abort",
+    );
+    assert!(capabilities["workspace"]["executeCommand"].is_object());
+    assert_eq!(
+        capabilities["textDocument"]["rename"]["prepareSupport"],
+        true
+    );
+    assert_eq!(
+        capabilities["textDocument"]["codeAction"]["resolveSupport"]["properties"],
+        json!(["edit"]),
+    );
+    assert_eq!(
+        capabilities["textDocument"]["codeAction"]["disabledSupport"], true,
+        "a disabled action is shown greyed, so servers may send them",
+    );
+    assert!(
+        capabilities["textDocument"]["codeAction"]["codeActionLiteralSupport"]["codeActionKind"]
+            ["valueSet"]
+            .as_array()
+            .expect("a kind list")
+            .contains(&json!("refactor.extract"))
+    );
+}
