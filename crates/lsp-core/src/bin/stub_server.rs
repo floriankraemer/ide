@@ -55,6 +55,9 @@ fn send(out: &Out, message: Value) {
 
 fn main() {
     let out: Out = Arc::new(Mutex::new(io::stdout()));
+    // What the client said it can do, kept so a test can assert the
+    // advertisement end to end rather than against a private function.
+    let client_capabilities: Arc<Mutex<Value>> = Arc::new(Mutex::new(Value::Null));
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let mut next_request_id = 9100i64;
     let mut input = BufReader::new(io::stdin());
@@ -81,18 +84,34 @@ fn main() {
         let params = message.get("params").cloned().unwrap_or(Value::Null);
 
         match (method, id) {
-            ("initialize", Some(id)) => send(
-                &out,
-                json!({"jsonrpc": "2.0", "id": id, "result": {
-                    "capabilities": {
-                        "textDocumentSync": 1,
-                        // L5: the same pair rust-analyzer advertises, so
-                        // `.` and (twice over) `::` are covered.
-                        "completionProvider": {"triggerCharacters": [".", ":"]},
-                    },
-                    "serverInfo": {"name": "stub_server", "version": "0.1.0"},
-                }}),
-            ),
+            ("initialize", Some(id)) => {
+                *client_capabilities.lock().expect("capabilities lock") =
+                    params.get("capabilities").cloned().unwrap_or(Value::Null);
+                send(
+                    &out,
+                    json!({"jsonrpc": "2.0", "id": id, "result": {
+                        "capabilities": {
+                            "textDocumentSync": 1,
+                            // L5: the same pair rust-analyzer advertises, so
+                            // `.` and (twice over) `::` are covered.
+                            "completionProvider": {"triggerCharacters": [".", ":"]},
+                        },
+                        "serverInfo": {"name": "stub_server", "version": "0.1.0"},
+                    }}),
+                )
+            }
+            // What this client advertised in `initialize`, handed back so a
+            // test can assert it.
+            ("stub/clientCapabilities", Some(id)) => {
+                let capabilities = client_capabilities
+                    .lock()
+                    .expect("capabilities lock")
+                    .clone();
+                send(
+                    &out,
+                    json!({"jsonrpc": "2.0", "id": id, "result": capabilities}),
+                );
+            }
             ("initialized", _) => {}
             ("shutdown", Some(id)) => {
                 send(&out, json!({"jsonrpc": "2.0", "id": id, "result": null}))
