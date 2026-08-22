@@ -1242,6 +1242,18 @@ mod ffi {
         #[cxx_name = "removeIndexedFile"]
         fn remove_indexed_file(self: Pin<&mut SearchModel>, path: &QString);
 
+        /// Bring a whole batch of changed paths up to date at once — the
+        /// watcher's coalesced window, handed over as one call.
+        ///
+        /// Whether a path is re-indexed or dropped is decided in Rust from
+        /// whether it still exists, not by the caller: that is a rule about
+        /// what the index holds, and the view has no business splitting the
+        /// batch. One commit and one write lock for the whole batch, rather
+        /// than one of each per file.
+        #[qinvokable]
+        #[cxx_name = "syncIndexedFiles"]
+        fn sync_indexed_files(self: Pin<&mut SearchModel>, paths: &QStringList);
+
         /// Record `path` as most-recently-opened: it feeds Search
         /// Everywhere's Recent tier and is persisted to `settings.toml`.
         #[qinvokable]
@@ -1306,6 +1318,15 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "indexFailed"]
         fn index_failed(self: Pin<&mut SearchModel>, message: QString);
+
+        /// How far the running index build has got. Emitted once with
+        /// `done == 0` as soon as the total is known, then at most every
+        /// [`PROGRESS_INTERVAL`] until `done == total` — a hop per file
+        /// would cost more than the indexing it reports on. Always followed
+        /// by exactly one `indexReady` or `indexFailed`.
+        #[qsignal]
+        #[cxx_name = "indexProgress"]
+        fn index_progress(self: Pin<&mut SearchModel>, done: u32, total: u32);
 
         /// Run Find-in-Files: `pattern` is a literal substring unless
         /// `is_regex` is set. Matches stream back as `searchBatch`
@@ -3937,6 +3958,11 @@ fn text_hit(m: index_core::SearchMatch, root: &std::path::Path) -> ffi::FfiSearc
     }
 }
 
+/// Shortest gap between two `indexProgress` emissions. A status bar cannot
+/// show more than a few updates a second anyway, and each one is a
+/// cross-thread hop.
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
 impl ffi::SearchModel {
     pub fn open_index(self: Pin<&mut Self>, root_path: &QString) {
         let root = std::path::PathBuf::from(root_path.to_string());
@@ -3956,19 +3982,62 @@ impl ffi::SearchModel {
             }
             *current = index_core::IndexSlot::Building(root.clone());
         }
-        std::thread::spawn(move || match index_core::TextIndex::open_or_build(&root) {
-            Ok(index) => {
-                *slot.write().unwrap() = index_core::IndexSlot::Ready(Box::new(index));
-                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
-                    model.as_mut().index_ready();
+        std::thread::spawn(move || {
+            // One cross-thread hop per file would cost more than the file
+            // took to index, so the closure reports at most every
+            // `PROGRESS_INTERVAL` — plus the first report of a pass (which
+            // carries the total) and the last (which says it is done).
+            let last = std::sync::Mutex::new(None::<std::time::Instant>);
+            let progress_thread = qt_thread.clone();
+            let progress = move |p: index_core::IndexProgress| {
+                {
+                    let mut last = last.lock().unwrap();
+                    let due = match *last {
+                        None => true,
+                        Some(at) => at.elapsed() >= PROGRESS_INTERVAL,
+                    };
+                    if !due && p.done != p.total {
+                        return;
+                    }
+                    *last = Some(std::time::Instant::now());
+                }
+                let (done, total) = (p.done as u32, p.total as u32);
+                let _ = progress_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model.as_mut().index_progress(done, total);
                 });
+            };
+            match index_core::TextIndex::open_or_build_with_progress(&root, &progress) {
+                Ok(index) => {
+                    *slot.write().unwrap() = index_core::IndexSlot::Ready(Box::new(index));
+                    let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                        model.as_mut().index_ready();
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    *slot.write().unwrap() = index_core::IndexSlot::Failed(message.clone());
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model.as_mut().index_failed(QString::from(message.as_str()));
+                    });
+                }
             }
-            Err(err) => {
-                let message = err.to_string();
-                *slot.write().unwrap() = index_core::IndexSlot::Failed(message.clone());
-                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                    model.as_mut().index_failed(QString::from(message.as_str()));
-                });
+        });
+    }
+
+    pub fn sync_indexed_files(self: Pin<&mut Self>, paths: &QStringList) {
+        let paths: Vec<std::path::PathBuf> = paths
+            .iter()
+            .map(|p| std::path::PathBuf::from(p.to_string()))
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            if let Some(index) = slot.write().unwrap().ready_mut() {
+                // A path that vanished or became unreadable is dropped by
+                // `sync_paths` itself, so there is nothing to report here.
+                let _ = index.sync_paths(&paths);
             }
         });
     }
