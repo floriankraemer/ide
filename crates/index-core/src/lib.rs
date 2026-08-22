@@ -70,6 +70,13 @@ use syntax_core::{analyze_file, language_for_path, SymbolKind, SymbolNode};
 /// Directory (relative to the project root) the tantivy index lives under.
 const INDEX_DIR_NAME: &str = ".ide-index";
 
+/// Tantivy's own writer-lock file inside the index directory. Named here so
+/// an error can point at the exact path rather than at the project root.
+const WRITER_LOCK_FILE: &str = ".tantivy-writer.lock";
+
+/// File the lock probe below takes and releases. Never read.
+const LOCK_PROBE_FILE: &str = ".ide-lock-probe";
+
 /// Ngram size used for the `content` field's tokenizer — see module docs.
 const NGRAM_SIZE: usize = 3;
 
@@ -83,6 +90,84 @@ const WRITER_HEAP_BYTES: usize = 50_000_000;
 const WRITER_LOCK_RETRIES: u32 = 10;
 const WRITER_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// Where this project's index lives.
+///
+/// Normally `<project_root>/.ide-index/`, which keeps a project's index with
+/// the project. But tantivy takes an advisory lock on a file in that
+/// directory, and some filesystems cannot do advisory locks at all — a
+/// Windows build reading a WSL tree over `\\wsl.localhost`, an SMB or NFS
+/// share, some FUSE mounts. There the lock attempt fails for a reason that
+/// has nothing to do with another instance, tantivy reports it as
+/// `LockBusy` all the same, and the project simply never indexes.
+///
+/// So the directory is probed first, and when it cannot host a lock the
+/// index goes to the user's cache directory instead, keyed by the project's
+/// path. Slightly worse (two projects at the same path collide, and the
+/// cache is not portable with the project) and much better than not working.
+pub fn index_dir_for(project_root: &Path) -> PathBuf {
+    index_dir_with(project_root, supports_file_locks)
+}
+
+/// [`index_dir_for`]'s rule, with the probe injected.
+///
+/// The probe is a parameter because the condition it detects cannot be
+/// created on a normal filesystem from inside a test: POSIX locks are held
+/// per process, so a test cannot make its own directory refuse a lock to
+/// itself. Injecting it tests the decision, which is the part with a choice
+/// in it; `supports_file_locks` is covered separately against a real
+/// directory.
+fn index_dir_with(project_root: &Path, can_lock: impl Fn(&Path) -> bool) -> PathBuf {
+    let in_project = project_root.join(INDEX_DIR_NAME);
+    if can_lock(&in_project) {
+        return in_project;
+    }
+    fallback_index_dir(project_root).unwrap_or(in_project)
+}
+
+/// Can a lock actually be taken in `dir`?
+///
+/// Creates the directory if needed and takes — then immediately releases —
+/// an exclusive lock on a probe file, using the same crate tantivy uses, so
+/// this tests the mechanism tantivy will rely on rather than a proxy for it.
+/// Any failure, including one that reports itself as "busy", counts as "no":
+/// the probe file is ours alone, so nothing else can legitimately hold it.
+fn supports_file_locks(dir: &Path) -> bool {
+    use fs4::FileExt;
+
+    if fs::create_dir_all(dir).is_err() {
+        return false;
+    }
+    let probe = dir.join(LOCK_PROBE_FILE);
+    let Ok(file) = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&probe)
+    else {
+        return false;
+    };
+    let locked = file.try_lock_exclusive().is_ok();
+    if locked {
+        let _ = file.unlock();
+    }
+    // Leaving the probe file behind would put a stray dotfile in every
+    // project; it has served its purpose the moment the lock was answered.
+    drop(file);
+    let _ = fs::remove_file(&probe);
+    locked
+}
+
+/// `<cache_dir>/ide/index/<sanitised-project-path>`, the home for an index
+/// whose project directory cannot hold one.
+fn fallback_index_dir(project_root: &Path) -> Option<PathBuf> {
+    let key: String = project_root
+        .to_string_lossy()
+        .chars()
+        .map(|ch| if ch.is_alphanumeric() { ch } else { '_' })
+        .collect();
+    Some(dirs::cache_dir()?.join("ide").join("index").join(key))
+}
+
 /// Acquire the index directory's single writer lock, retrying briefly (see
 /// [`WRITER_LOCK_RETRIES`]) before reporting it as held by someone else.
 ///
@@ -91,17 +176,26 @@ const WRITER_LOCK_RETRY_DELAY: std::time::Duration = std::time::Duration::from_m
 /// the same project cannot index it. That is reported as
 /// [`IndexError::Locked`] — never as a reason to rebuild, since rebuilding
 /// deletes the very files the live writer is using.
-fn acquire_writer(index: &Index, root: &Path) -> Result<IndexWriter, IndexError> {
+fn acquire_writer(index: &Index, index_dir: &Path) -> Result<IndexWriter, IndexError> {
     let mut attempts = 0;
     loop {
         match index.writer(WRITER_HEAP_BYTES) {
             Ok(writer) => return Ok(writer),
             Err(e @ tantivy::TantivyError::LockFailure(_, _)) => {
                 if attempts >= WRITER_LOCK_RETRIES {
+                    // Deliberately not "another instance is running": tantivy
+                    // maps *every* lock failure to LockBusy, including "this
+                    // filesystem does not support advisory locks", so the
+                    // cause is genuinely unknown here. Naming the lock file
+                    // is what lets the user check for themselves.
                     return Err(IndexError::Locked(format!(
-                        "another IDE instance is already indexing {} \
-                         (close it, then reopen the project): {e}",
-                        root.display()
+                        "could not acquire the index writer lock at {}. \
+                         Either another IDE instance has this project open, \
+                         or this filesystem does not support file locking \
+                         (a network share or a \\\\wsl.localhost path). \
+                         If no other instance is running, close the project \
+                         and reopen it: {e}",
+                        index_dir.join(WRITER_LOCK_FILE).display()
                     )));
                 }
                 attempts += 1;
@@ -891,7 +985,7 @@ impl TextIndex {
     /// entries excluded unless explicitly un-ignored). Any existing index
     /// directory is replaced.
     pub fn build(project_root: &Path) -> Result<Self, IndexError> {
-        let index_dir = project_root.join(INDEX_DIR_NAME);
+        let index_dir = index_dir_for(project_root);
         if index_dir.exists() {
             fs::remove_dir_all(&index_dir)?;
         }
@@ -904,7 +998,7 @@ impl TextIndex {
             NgramTokenizer::new(NGRAM_SIZE, NGRAM_SIZE, false)?,
         );
 
-        let writer = acquire_writer(&index, project_root)?;
+        let writer = acquire_writer(&index, &index_dir)?;
         let reader = index.reader()?;
         let mut this = Self {
             root: project_root.to_path_buf(),
@@ -943,7 +1037,7 @@ impl TextIndex {
     }
 
     fn open_existing(project_root: &Path) -> Result<Self, IndexError> {
-        let index_dir = project_root.join(INDEX_DIR_NAME);
+        let index_dir = index_dir_for(project_root);
         let (schema, fields) = build_schema();
         let index = Index::open_in_dir(&index_dir)?;
         if index.schema() != schema {
@@ -955,7 +1049,7 @@ impl TextIndex {
             "ngram3",
             NgramTokenizer::new(NGRAM_SIZE, NGRAM_SIZE, false)?,
         );
-        let writer = acquire_writer(&index, project_root)?;
+        let writer = acquire_writer(&index, &index_dir)?;
         let reader = index.reader()?;
         Ok(Self {
             root: project_root.to_path_buf(),
@@ -3221,6 +3315,96 @@ mod tests {
         assert!(
             plan.sites.is_empty(),
             "a file we could not read must not fall through to the disk pass",
+        );
+    }
+    #[test]
+    fn a_normal_directory_can_hold_the_index_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let index_dir = dir.path().join(INDEX_DIR_NAME);
+
+        assert!(supports_file_locks(&index_dir));
+        assert_eq!(index_dir_for(dir.path()), index_dir);
+        assert!(
+            !index_dir.join(LOCK_PROBE_FILE).exists(),
+            "the probe must not leave a file behind in the project",
+        );
+    }
+
+    #[test]
+    fn an_index_directory_that_cannot_lock_moves_the_index_out_of_the_project() {
+        // What a Windows build reading a WSL tree over \\wsl.localhost hits:
+        // the directory is there and writable, and no lock can be taken in
+        // it, so tantivy could never work there.
+        let dir = tempfile::tempdir().unwrap();
+
+        let chosen = index_dir_with(dir.path(), |_| false);
+        assert_ne!(
+            chosen,
+            dir.path().join(INDEX_DIR_NAME),
+            "the index must not stay where it cannot lock",
+        );
+        assert!(
+            chosen.starts_with(dirs::cache_dir().unwrap()),
+            "it belongs in the cache dir, got {chosen:?}",
+        );
+    }
+
+    #[test]
+    fn an_index_directory_that_can_lock_keeps_the_index_with_the_project() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            index_dir_with(dir.path(), |_| true),
+            dir.path().join(INDEX_DIR_NAME),
+        );
+    }
+
+    #[test]
+    fn a_project_whose_index_directory_cannot_even_be_created_still_gets_an_index() {
+        // A path that cannot hold a directory at all — here a regular file
+        // where .ide-index would go.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("project");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join(INDEX_DIR_NAME), "in the way").unwrap();
+
+        let chosen = index_dir_for(&root);
+        assert!(
+            chosen.starts_with(dirs::cache_dir().unwrap()),
+            "got {chosen:?}",
+        );
+    }
+
+    #[test]
+    fn two_projects_do_not_share_a_fallback_directory() {
+        let a = fallback_index_dir(Path::new("/home/x/alpha")).unwrap();
+        let b = fallback_index_dir(Path::new("/home/x/beta")).unwrap();
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn a_lock_held_by_someone_else_names_the_lock_file_it_could_not_take() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "a.rs", "fn main() {}\n");
+
+        // The first index holds the writer lock for as long as it lives.
+        let _live = TextIndex::build(dir.path()).unwrap();
+        let err = match TextIndex::open_or_build(dir.path()) {
+            Err(err) => err,
+            Ok(_) => panic!("a second writer cannot have the same index"),
+        };
+
+        let message = err.to_string();
+        assert!(
+            matches!(err, IndexError::Locked(_)),
+            "a held lock is never a reason to rebuild: {message}",
+        );
+        assert!(
+            message.contains(WRITER_LOCK_FILE),
+            "the message must name the lock file so the user can check it: {message}",
+        );
+        assert!(
+            message.contains("does not support file locking"),
+            "it must not claim another instance when it cannot know that: {message}",
         );
     }
 }
