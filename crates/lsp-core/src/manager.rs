@@ -18,6 +18,9 @@ use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::apply_edit::{
+    await_verdict, ApplyEditGate, RefactorSession, RefactorSessions, UNSOLICITED_REASON,
+};
 use crate::catalog::ServerConfig;
 use crate::completion::{parse_completion, parse_trigger_characters, CompletionList};
 use crate::framing::{read_message, write_message};
@@ -82,6 +85,20 @@ pub enum LspEvent {
         /// The document version the server diagnosed, when it reports one.
         version: Option<i32>,
         diagnostics: Vec<lsp_types::Diagnostic>,
+    },
+    /// The server is asking the editor to apply a `WorkspaceEdit`
+    /// (`workspace/applyEdit`) — the shape command-driven refactorings take.
+    ///
+    /// The server is blocked until `gate` is answered, so the receiver must
+    /// claim or refuse it rather than dropping it on the floor. `edit` is the
+    /// raw `WorkspaceEdit`, parsed by `crate::workspace_edit` on the UI side
+    /// where the set of open documents is known.
+    ApplyEdit {
+        language_id: String,
+        /// What the server calls this change, for the preview's title.
+        label: Option<String>,
+        edit: Value,
+        gate: ApplyEditGate,
     },
     /// Any other server-to-client notification, unparsed.
     Notification {
@@ -155,6 +172,10 @@ struct Server {
     pending: Mutex<HashMap<i64, Sender<Result<Value, LspError>>>>,
     next_id: AtomicI64,
     stopping: AtomicBool,
+    /// Whether the editor currently has a refactoring in flight — read by
+    /// `dispatch` to decide whether an inbound `workspace/applyEdit` was
+    /// asked for. Shared with the manager, not owned here.
+    sessions: Arc<RefactorSessions>,
 }
 
 impl Server {
@@ -227,6 +248,9 @@ pub struct LspManager {
     supervisors: Mutex<HashMap<String, JoinHandle<()>>>,
     documents: Mutex<HashMap<String, DocState>>,
     events: Sender<LspEvent>,
+    /// Refactorings the editor has in flight, which is what makes an inbound
+    /// `workspace/applyEdit` legitimate (`crate::apply_edit`).
+    sessions: Arc<RefactorSessions>,
 }
 
 impl LspManager {
@@ -241,6 +265,7 @@ impl LspManager {
             supervisors: Mutex::new(HashMap::new()),
             documents: Mutex::new(HashMap::new()),
             events,
+            sessions: Arc::new(RefactorSessions::default()),
         };
         (manager, rx)
     }
@@ -260,6 +285,7 @@ impl LspManager {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicI64::new(1),
             stopping: AtomicBool::new(false),
+            sessions: Arc::clone(&self.sessions),
         });
 
         let (ready_tx, ready_rx) = channel();
@@ -499,6 +525,23 @@ impl LspManager {
         self.servers.lock().unwrap().get(language_id).cloned()
     }
 
+    /// Mark a refactoring as in flight for as long as the returned guard
+    /// lives.
+    ///
+    /// This is what makes an inbound `workspace/applyEdit` legitimate: a
+    /// server may only rewrite the user's files while the user is asking it
+    /// to. Callers hold the guard across the whole gesture — including the
+    /// `workspace/executeCommand` that provokes the edit — and dropping it
+    /// closes the door again.
+    pub fn begin_refactor(&self) -> RefactorSession {
+        self.sessions.begin()
+    }
+
+    /// Whether a refactoring this client started is in flight right now.
+    pub fn refactor_active(&self) -> bool {
+        self.sessions.active()
+    }
+
     fn language_of(&self, uri: &str) -> Result<String, LspError> {
         self.documents
             .lock()
@@ -666,7 +709,7 @@ fn connect(
 
 /// Read and dispatch until the server's stdout ends (i.e. it died).
 fn read_loop(
-    server: &Server,
+    server: &Arc<Server>,
     language_id: &str,
     mut stdout: BufReader<std::process::ChildStdout>,
     events: &Sender<LspEvent>,
@@ -684,7 +727,7 @@ fn read_loop(
     }
 }
 
-fn dispatch(server: &Server, language_id: &str, message: Value, events: &Sender<LspEvent>) {
+fn dispatch(server: &Arc<Server>, language_id: &str, message: Value, events: &Sender<LspEvent>) {
     let method = message.get("method").and_then(Value::as_str);
     let id = message.get("id").and_then(Value::as_i64);
 
@@ -700,8 +743,48 @@ fn dispatch(server: &Server, language_id: &str, message: Value, events: &Sender<
             };
             let _ = tx.send(result);
         }
-        // Server-to-client request. We implement none of them yet, but the
-        // server blocks until it gets an answer, so answer honestly.
+        // `workspace/applyEdit` is the one server-to-client request we
+        // implement, and the only one that cannot be answered here: applying
+        // an edit needs the UI thread, and this is the thread that reads
+        // every message from this server — blocking it would stall
+        // diagnostics and every in-flight response behind one dialog.
+        //
+        // So the answer is made elsewhere and this arm only routes. An edit
+        // nobody asked for is refused immediately, without a thread and
+        // without troubling the UI: that is a server rewriting the user's
+        // files unprompted. A wanted one is handed to a short-lived thread
+        // that publishes it and waits on the gate, which is bounded — see
+        // `crate::apply_edit`. There is at most one such thread per
+        // refactoring gesture, because a gesture is what makes the request
+        // legitimate in the first place.
+        (Some("workspace/applyEdit"), Some(id)) => {
+            let params = message.get("params").cloned().unwrap_or(Value::Null);
+            if !server.sessions.active() {
+                let _ = server.send(&apply_edit_response(id, false, Some(UNSOLICITED_REASON)));
+                return;
+            }
+            let (gate, rx) = ApplyEditGate::new();
+            let _ = events.send(LspEvent::ApplyEdit {
+                language_id: language_id.to_string(),
+                label: params
+                    .get("label")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                edit: params.get("edit").cloned().unwrap_or(Value::Null),
+                gate: gate.clone(),
+            });
+            let server = Arc::clone(server);
+            thread::spawn(move || {
+                let verdict = await_verdict(rx, &gate);
+                let _ = server.send(&apply_edit_response(
+                    id,
+                    verdict.applied(),
+                    verdict.reason(),
+                ));
+            });
+        }
+        // Every other server-to-client request. The server blocks until it
+        // gets an answer, so answer honestly rather than not at all.
         // ponytail: a real handler (workspace/configuration, registerCapability)
         // lands with the features that need it.
         (Some(method), Some(id)) => {
@@ -727,6 +810,17 @@ fn dispatch(server: &Server, language_id: &str, message: Value, events: &Sender<
         }
         (None, None) => {}
     }
+}
+
+/// The `ApplyWorkspaceEditResult` the protocol expects: `applied`, plus a
+/// `failureReason` whenever it is false, so a server can tell the user why
+/// its refactoring did not happen.
+fn apply_edit_response(id: i64, applied: bool, reason: Option<&str>) -> Value {
+    let mut result = json!({"applied": applied});
+    if let Some(reason) = reason {
+        result["failureReason"] = Value::String(reason.to_string());
+    }
+    json!({"jsonrpc": "2.0", "id": id, "result": result})
 }
 
 fn publish_diagnostics(language_id: &str, params: &Value) -> Option<LspEvent> {

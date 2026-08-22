@@ -4969,6 +4969,16 @@ impl ffi::LanguageService {
                     0,
                 );
             }
+            // RF5: a server asking us to apply an edit. The surface that
+            // applies one lands with the refactoring UI, and until then no
+            // refactoring session is ever started — so `lsp-core` refuses
+            // these before they reach here and this arm cannot fire. It
+            // still refuses rather than dropping the gate, because a server
+            // left waiting on an answer that never comes is the one outcome
+            // the handshake exists to prevent.
+            lsp_core::LspEvent::ApplyEdit { gate, .. } => {
+                gate.refuse("the editor cannot apply server-driven edits yet");
+            }
             lsp_core::LspEvent::Notification { .. } => {}
         }
     }
