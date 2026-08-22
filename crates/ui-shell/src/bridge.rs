@@ -401,6 +401,25 @@ mod ffi {
         touches_other_files: bool,
     }
 
+    /// Why a name-based rename will not run, as a code rather than a
+    /// message (ADR-0003) — the view has to *act* differently on one of
+    /// these, not merely word it differently, and branching on a sentence
+    /// would break the first time it was reworded.
+    enum FfiRenameRefusal {
+        /// The caret is not on a symbol this index resolved.
+        Unresolved,
+        /// The new name is not an identifier.
+        InvalidName,
+        /// Files are open with unsaved changes, which the index cannot see.
+        /// The view offers to save them and try again.
+        UnsavedChanges,
+        /// The symbol resolved, but no occurrence of it was found.
+        NoSites,
+        /// The index could not answer at all — none built yet, or still
+        /// building.
+        Unavailable,
+    }
+
     /// One occurrence a name-based rename would rewrite, as the preview
     /// lists it. `resolved` and `checked` are `index_core`'s judgements
     /// about how much this rename knows — the dialog paints them, it does
@@ -1385,10 +1404,16 @@ mod ffi {
         #[cxx_name = "indexRenameReady"]
         fn index_rename_ready(self: Pin<&mut SearchModel>, name: QString, ambiguous: bool);
 
-        /// The rename will not be offered, and this is the reason to show.
+        /// The rename will not be offered. `reason` says which case it is,
+        /// so the view can offer to save and retry rather than only
+        /// reporting; `message` is the sentence to show.
         #[qsignal]
         #[cxx_name = "indexRenameFailed"]
-        fn index_rename_failed(self: Pin<&mut SearchModel>, message: QString);
+        fn index_rename_failed(
+            self: Pin<&mut SearchModel>,
+            reason: FfiRenameRefusal,
+            message: QString,
+        );
 
         /// The sites of the pending name-based rename, in project order.
         #[qinvokable]
@@ -4304,9 +4329,10 @@ impl ffi::SearchModel {
                 let reason = guard.unavailable_reason().unwrap_or_default();
                 drop(guard);
                 let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                    model
-                        .as_mut()
-                        .index_rename_failed(QString::from(reason.as_str()));
+                    model.as_mut().index_rename_failed(
+                        ffi::FfiRenameRefusal::Unavailable,
+                        QString::from(reason.as_str()),
+                    );
                 });
                 return;
             };
@@ -4337,18 +4363,20 @@ impl ffi::SearchModel {
                 // as a sentence saying why nothing will happen.
                 Ok(Err(refusal)) => {
                     let message = refusal.to_string();
+                    let reason = to_ffi_refusal(&refusal);
                     let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
                         model
                             .as_mut()
-                            .index_rename_failed(QString::from(message.as_str()));
+                            .index_rename_failed(reason, QString::from(message.as_str()));
                     });
                 }
                 Err(err) => {
                     let message = err.to_string();
                     let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                        model
-                            .as_mut()
-                            .index_rename_failed(QString::from(message.as_str()));
+                        model.as_mut().index_rename_failed(
+                            ffi::FfiRenameRefusal::Unavailable,
+                            QString::from(message.as_str()),
+                        );
                     });
                 }
             }
@@ -5182,6 +5210,16 @@ fn to_ffi_edits(plan: &lsp_core::EditPlan, excluded: &[String]) -> Vec<ffi::FfiT
             })
         })
         .collect()
+}
+
+/// `index_core`'s refusal as the code the view branches on.
+fn to_ffi_refusal(refusal: &index_core::RenameRefusal) -> ffi::FfiRenameRefusal {
+    match refusal {
+        index_core::RenameRefusal::Unresolved => ffi::FfiRenameRefusal::Unresolved,
+        index_core::RenameRefusal::InvalidName => ffi::FfiRenameRefusal::InvalidName,
+        index_core::RenameRefusal::UnsavedChanges => ffi::FfiRenameRefusal::UnsavedChanges,
+        index_core::RenameRefusal::NoSites => ffi::FfiRenameRefusal::NoSites,
+    }
 }
 
 fn to_ffi_severity(severity: lsp_core::Severity) -> ffi::FfiSeverity {

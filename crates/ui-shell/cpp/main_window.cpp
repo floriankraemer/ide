@@ -442,6 +442,23 @@ public:
         }
     }
 
+    // Save every tab with unsaved changes. The name-based rename needs this
+    // because the index it reads is on disk; false if any save failed, in
+    // which case the caller must not go ahead.
+    bool saveAllModified()
+    {
+        bool allSaved = true;
+        for (QTabWidget *group : groups_) {
+            for (int i = 0; i < group->count(); ++i) {
+                auto *editor = qobject_cast<QPlainTextEdit *>(group->widget(i));
+                if (editor && editor->document()->isModified() && !saveTab(group, i)) {
+                    allSaved = false;
+                }
+            }
+        }
+        return allSaved;
+    }
+
     // Every file open in a tab. Used by the name-based rename to splice the
     // ones the user can see instead of rewriting them on disk.
     QStringList openPaths() const
@@ -2079,20 +2096,27 @@ public:
         connect(languageService_, &LanguageService::renamePrepared, this,
                 &RefactorController::askForNewName);
         connect(languageService_, &LanguageService::renameRejected, this,
-                [this](const QString &reason) { report(reason); });
+                [this](const QString &reason) {
+                    QMessageBox::information(window_, tr("Rename"), reason);
+                });
         connect(languageService_, &LanguageService::refactorReady, this,
                 &RefactorController::onRefactorReady);
         connect(languageService_, &LanguageService::refactorFallback, this,
                 &RefactorController::askIndexToRename);
         connect(languageService_, &LanguageService::refactorFailed, this,
-                [this](const QString &message) { report(tr("Refactoring failed: %1").arg(message)); });
+                [this](const QString &message) {
+                    // The user's whole gesture failed, so it is said out
+                    // loud. The status bar is for outcomes they can already
+                    // see in the editor.
+                    QMessageBox::warning(window_, tr("Refactoring failed"), message);
+                });
         connect(languageService_, &LanguageService::codeActionsReady, this,
                 &RefactorController::onCodeActionsReady);
 
         connect(searchModel_, &SearchModel::indexRenameReady, this,
                 &RefactorController::onIndexRenameReady);
         connect(searchModel_, &SearchModel::indexRenameFailed, this,
-                [this](const QString &message) { report(message); });
+                &RefactorController::onRenameRefused);
         // The count the user cares about is every file that changed, not
         // just the ones written to disk: a refactoring confined to open
         // editors writes nothing, and reporting "0 file(s)" for it reads as
@@ -2188,6 +2212,36 @@ private:
                                        editorTabs_->byteOffsetAt(editorTabs_->caretPosition()),
                                        pendingName_,
                                        editorTabs_->hasUnsavedChanges());
+    }
+
+    // Why a name-based rename will not run. Three cases are a sentence; the
+    // unsaved-files case is a dead end the user can get out of, so it offers
+    // the way out instead of describing it.
+    //
+    // These used to go to the status bar, where a message the user did not
+    // happen to be looking at made a refused rename indistinguishable from a
+    // broken one.
+    void onRenameRefused(FfiRenameRefusal reason, const QString &message)
+    {
+        if (reason != FfiRenameRefusal::UnsavedChanges) {
+            QMessageBox::information(window_, tr("Rename"), message);
+            return;
+        }
+
+        const auto answer = QMessageBox::question(
+          window_,
+          tr("Rename"),
+          tr("%1\n\nSave all files and rename now?").arg(message),
+          QMessageBox::Save | QMessageBox::Cancel,
+          QMessageBox::Save);
+        if (answer != QMessageBox::Save) {
+            return;
+        }
+        if (!editorTabs_->saveAllModified()) {
+            // saveTab already said which file could not be written.
+            return;
+        }
+        askIndexToRename();
     }
 
     void onRefactorReady(const FfiRefactorSummary &summary)
