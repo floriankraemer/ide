@@ -10,6 +10,18 @@ table (`objdump -p`): no new runtime DLL dependency from this crate — `zstd-sy
 ripgrep crates are fully statically linked. The Linux `linux-builder` build was already
 verified clean as of task G1. The gate this ADR was pending on is closed.
 
+
+## Amendment: where the index lives when the project's filesystem cannot lock it
+
+Tantivy allows one `IndexWriter` per directory and enforces it with an advisory lock on `.tantivy-writer.lock` inside the index directory.
+Some filesystems cannot take advisory locks at all — a Windows build reading a WSL tree over `\\wsl.localhost`, SMB and NFS shares, some FUSE mounts — and tantivy reports every lock failure as `LockBusy`, including that one.
+The result was a project that could never be indexed, reported as "another IDE instance is already indexing" when no other instance existed.
+
+So `index_dir_for` probes the directory first, taking and releasing a lock with the same crate tantivy uses, and when the directory cannot host a lock the index goes to `<cache_dir>/ide/index/<project path>` instead.
+Two projects at the same path collide there and the index no longer travels with the project; both are better than a project that cannot be indexed.
+
+The error text no longer claims a cause it cannot know. It names the lock file and gives both possibilities, because the one thing the user can do — check whether another instance is running — needs the path.
+
 ## Context
 
 The language-folding/Class-View/terminal/search plan (task G, tracks G1→H and E1→J) calls for

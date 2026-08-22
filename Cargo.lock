@@ -1183,7 +1183,9 @@ dependencies = [
 name = "index-core"
 version = "0.1.0"
 dependencies = [
+ "dirs",
  "editor-core",
+ "fs4",
  "grep-matcher",
  "grep-regex",
  "grep-searcher",
