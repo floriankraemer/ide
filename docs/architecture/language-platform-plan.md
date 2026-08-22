@@ -215,8 +215,8 @@ Syntax Colors page).
 
 ### The recurring shape: assertions satisfied by something weaker than they claim
 
-Three defects found during this work were the same defect.
-Each was a test that passed while the property it claimed to establish was false, because the assertion could be satisfied by something strictly weaker than that property.
+Four defects found during this work were the same defect.
+In the first three, a test passed while the property it claimed to establish was false, because the assertion could be satisfied by something strictly weaker than that property.
 
 - [#17](https://github.com/floriankraemer/ide/issues/17): the harness accepted a *descendant* scope as proof of its ancestor.
   A `string.escape` span satisfied an assertion about `string`, so a language that had lost its `string` rule kept passing.
@@ -226,10 +226,22 @@ Each was a test that passed while the property it claimed to establish was false
 - The capture guard: the catalog test accepted a query *compiling* as proof that its captures *produced spans*.
   A capture naming a scope outside `SCOPES` resolves to nothing and yields no span at all, which is strictly worse than an uncoloured one — no palette can rescue it — and nothing failed.
 
+A fourth instance is a different flavour of the same failure, and worth keeping distinct because the fix for the other three does not catch it.
+Repairing [#32](https://github.com/floriankraemer/ide/issues/32), the injection-only predicate was applied to the wrong function: it landed on the Syntax Colors page's language list instead of the Language Servers page's.
+The reported bug — `Markdown (inline)` offered a server it can never use — was therefore unfixed, and a second bug was introduced, because `markdown_inline` *should* appear in the colour list: it never owns a file, but its spans are what colour a Markdown paragraph.
+Everything passed: the full suite, clippy, fmt, and a new unit test asserting the predicate returned false for that language.
+The test was correct and tested the right function.
+Nothing established that the right function was the one the bug was about.
+
+So the shape has two forms.
+An assertion can be **weaker than the property it claims**, which is the first three.
+Or it can be **attached to the wrong subject**, which no amount of strengthening the assertion detects — a perfectly rigorous test of the wrong thing stays green.
+Only rendering the page found the second, because only the picture is attached to the surface the bug was reported against rather than to the function someone believed was behind it.
+
 The instances are evidence.
 The lesson is the shape: **an assertion satisfied by something strictly weaker than the property it claims is not a guard, it is a guard-shaped hole.**
 
-The fix was the same shape in all three cases, and that is the transferable part.
+For the first three — the ones where the assertion was merely too weak — the fix was the same shape, and that is the transferable part.
 
 1. Assert **equality**, not sufficiency.
    Not "a span with this scope exists somewhere under here" but "the span at this position carries exactly this scope".
