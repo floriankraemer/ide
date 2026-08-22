@@ -75,8 +75,9 @@ const INDEX_DIR_NAME: &str = ".ide-index";
 /// `syntax-core/queries`, [`analyze`]'s rules) without the tantivy schema
 /// changing: an existing index is then rebuilt instead of serving symbols
 /// the old extraction missed. 2: Java/C/C++ `type_identifier`, PHP type
-/// positions, Zig anchored variable names.
-const EXTRACTION_VERSION: u32 = 2;
+/// positions, Zig anchored variable names. 3: one symbol document per
+/// (file, name) instead of one per occurrence.
+const EXTRACTION_VERSION: u32 = 3;
 const EXTRACTION_VERSION_FILE: &str = "extraction.version";
 
 /// Tantivy's own writer-lock file inside the index directory. Named here so
@@ -382,13 +383,24 @@ fn build_schema() -> (Schema, Fields) {
     // term matching; `find_definitions`' substring match is done in Rust
     // over the (already tantivy-narrowed-to-definitions) stored values,
     // per the plan doc's "exact substring match is the minimum bar".
+    //
+    // One symbol document now covers every occurrence of one name in one
+    // file, so `sym_name` is single-valued while the five row fields below
+    // are multi-valued and index-aligned: the nth value of each describes
+    // the same occurrence. `symbol_docs` appends all five per row so they
+    // cannot drift, and `collect_symbol_matches` zips them back apart.
     let sym_name = builder.add_text_field("sym_name", STRING | STORED);
-    let sym_kind = builder.add_text_field("sym_kind", STRING | STORED);
-    let sym_container = builder.add_text_field("sym_container", STRING | STORED);
-    let sym_line = builder.add_u64_field("sym_line", INDEXED | STORED);
+    // Stored, not indexed: nothing queries a kind or a container, they are
+    // only read back off a document that some other field already matched.
+    let sym_kind = builder.add_text_field("sym_kind", STORED);
+    let sym_container = builder.add_text_field("sym_container", STORED);
+    let sym_line = builder.add_u64_field("sym_line", STORED);
     // Byte column within the line. Without it a jump can only land at
     // column 0; Go to Declaration wants the caret *on* the identifier.
-    let sym_col = builder.add_u64_field("sym_col", INDEXED | STORED);
+    let sym_col = builder.add_u64_field("sym_col", STORED);
+    // Indexed, because `find_definitions` narrows on it. A packed document
+    // matches `sym_is_definition:1` when *any* of its rows is a definition,
+    // so the reader filters the rows again after expanding them.
     let sym_is_definition = builder.add_u64_field("sym_is_definition", INDEXED | STORED);
     // Supertype edges (`doc_type = "inherit"`): `inh_type` declares
     // `inh_supertype`. They reuse the shared `path` term, so an existing
@@ -530,6 +542,15 @@ pub struct Resolution {
 /// twice.
 struct FlatSymbol<'a> {
     kind: SymbolKind,
+    container: Option<&'a str>,
+}
+
+/// One occurrence's row inside a packed symbol document.
+struct SymbolRow<'a> {
+    line: usize,
+    col: usize,
+    is_definition: bool,
+    kind: Option<&'a str>,
     container: Option<&'a str>,
 }
 
@@ -1748,7 +1769,7 @@ impl TextIndex {
                 )),
             ),
         ]);
-        let mut matches = self.collect_symbol_matches(&searcher, &query)?;
+        let mut matches = self.collect_symbol_matches(&searcher, &query, true)?;
         matches.retain(|m| m.name.contains(name_query));
         matches.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
         Ok(matches)
@@ -1807,7 +1828,7 @@ impl TextIndex {
                 )),
             ),
         ]);
-        let mut matches = self.collect_symbol_matches(&searcher, &query)?;
+        let mut matches = self.collect_symbol_matches(&searcher, &query, false)?;
         matches.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
         Ok(matches)
     }
@@ -1841,7 +1862,7 @@ impl TextIndex {
                 )),
             ),
         ]);
-        let mut matches = self.collect_symbol_matches(&searcher, &query)?;
+        let mut matches = self.collect_symbol_matches(&searcher, &query, true)?;
         matches.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
         Ok(matches)
     }
@@ -1983,10 +2004,18 @@ impl TextIndex {
         Ok(matches)
     }
 
+    /// Expand every packed symbol document `query` matches back into one
+    /// [`SymbolMatch`] per occurrence.
+    ///
+    /// `definitions_only` is not an optimisation: a packed document matches
+    /// the `sym_is_definition:1` term when *any* of its rows is a definition,
+    /// so a definition query that did not filter the expanded rows would
+    /// report every reference in the same file as a definition too.
     fn collect_symbol_matches(
         &self,
         searcher: &tantivy::Searcher,
         query: &dyn tantivy::query::Query,
+        definitions_only: bool,
     ) -> Result<Vec<SymbolMatch>, IndexError> {
         let num_docs = searcher.num_docs() as usize;
         if num_docs == 0 {
@@ -1996,42 +2025,54 @@ impl TextIndex {
         let mut matches = Vec::with_capacity(top_docs.len());
         for (_score, doc_address) in top_docs {
             let retrieved: tantivy::TantivyDocument = searcher.doc(doc_address)?;
-            let get_str = |field| {
+            let all_u64 = |field| {
+                retrieved
+                    .get_all(field)
+                    .map(|v| v.as_u64().unwrap_or(0))
+                    .collect::<Vec<_>>()
+            };
+            let all_str = |field| {
+                retrieved
+                    .get_all(field)
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect::<Vec<_>>()
+            };
+            let first_str = |field| {
                 retrieved
                     .get_first(field)
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
             };
-            let Some(name) = get_str(self.fields.sym_name) else {
+            let Some(name) = first_str(self.fields.sym_name) else {
                 continue;
             };
-            let Some(path) = get_str(self.fields.path) else {
+            let Some(path) = first_str(self.fields.path) else {
                 continue;
             };
-            let line = retrieved
-                .get_first(self.fields.sym_line)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let col = retrieved
-                .get_first(self.fields.sym_col)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let is_definition = retrieved
-                .get_first(self.fields.sym_is_definition)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0)
-                == 1;
-            let kind = get_str(self.fields.sym_kind).and_then(|k| symbol_kind_from_str(&k));
-            let container = get_str(self.fields.sym_container);
-            matches.push(SymbolMatch {
-                name,
-                kind,
-                path: PathBuf::from(path),
-                line,
-                col,
-                is_definition,
-                container,
-            });
+            let lines = all_u64(self.fields.sym_line);
+            let cols = all_u64(self.fields.sym_col);
+            let definitions = all_u64(self.fields.sym_is_definition);
+            let kinds = all_str(self.fields.sym_kind);
+            let containers = all_str(self.fields.sym_container);
+
+            for (row, &line) in lines.iter().enumerate() {
+                let is_definition = definitions.get(row).copied().unwrap_or(0) == 1;
+                if definitions_only && !is_definition {
+                    continue;
+                }
+                matches.push(SymbolMatch {
+                    name: name.clone(),
+                    kind: kinds.get(row).and_then(|k| symbol_kind_from_str(k)),
+                    path: PathBuf::from(&path),
+                    line: line as usize,
+                    col: cols.get(row).copied().unwrap_or(0) as usize,
+                    is_definition,
+                    container: containers
+                        .get(row)
+                        .filter(|c| !c.is_empty())
+                        .map(|c| c.to_string()),
+                });
+            }
         }
         Ok(matches)
     }
@@ -2049,9 +2090,15 @@ fn doc_type_query(field: tantivy::schema::Field, value: &str) -> Box<dyn tantivy
 /// dropped from the index *and* from the file-name tier, since neither text
 /// nor file search can serve them.
 ///
-/// A file past [`MAX_INDEXED_BYTES`] still gets its stamped text document,
-/// with empty content and no symbols: it stays findable by name and stays in
-/// the warm-open stamp set, it just is not searchable by content.
+/// A file past [`MAX_INDEXED_BYTES`] contributes no documents at all but is
+/// still reported as indexable, so it stays in the file-name tier and stays
+/// findable by name — it is simply not searchable by content or by symbol.
+/// Deliberately no stamped, empty-content text document: that document would
+/// carry the file's path back into the candidate list whenever the ngram
+/// stage falls back to "every text doc", so Find in Files would reach into an
+/// over-cap file on some patterns and not others. The cost of leaving it out
+/// is that each open re-decides it, which is a size comparison against a
+/// stat the walk already did.
 ///
 /// Free-standing rather than a method so the indexing pass can run it on
 /// many files in parallel — it borrows nothing mutable.
@@ -2072,7 +2119,7 @@ fn file_docs(
     };
 
     if stamp.size_bytes > MAX_INDEXED_BYTES {
-        return Some(vec![text_doc(String::new())]);
+        return Some(Vec::new());
     }
     let bytes = fs::read(path).ok()?;
     if bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
@@ -2103,35 +2150,52 @@ fn symbol_docs(fields: &Fields, path_key: &str, content: &str) -> Vec<tantivy::T
     // One table for the whole file: every occurrence and edge below resolves
     // its position by binary search instead of counting newlines from byte 0.
     let starts = line_starts(content);
-    let mut documents =
-        Vec::with_capacity(analysis.occurrences.len() + analysis.supertype_edges.len());
 
-    for occurrence in analysis.occurrences {
+    // Group by name first: one document per (file, name) rather than one per
+    // occurrence. A file mentioning `self` two hundred times used to cost two
+    // hundred documents, each repeating the file's whole path.
+    let mut by_name: BTreeMap<String, Vec<SymbolRow<'_>>> = BTreeMap::new();
+    for occurrence in &analysis.occurrences {
         let (line, col) = line_and_col_from(&starts, occurrence.start);
+        let flat_symbol = flat.get(&(occurrence.start, occurrence.end));
+        by_name
+            .entry(occurrence.name.clone())
+            .or_default()
+            .push(SymbolRow {
+                line,
+                col,
+                is_definition: occurrence.is_definition,
+                kind: flat_symbol.map(|f| symbol_kind_to_str(f.kind)),
+                container: flat_symbol.and_then(|f| f.container),
+            });
+    }
+
+    let mut documents = Vec::with_capacity(by_name.len() + analysis.supertype_edges.len());
+    for (name, rows) in by_name {
         let mut document = doc!(
             fields.path => path_key.to_string(),
             fields.doc_type => DOC_TYPE_SYMBOL,
-            fields.sym_name => occurrence.name,
-            fields.sym_line => line as u64,
-            fields.sym_col => col as u64,
-            fields.sym_is_definition => occurrence.is_definition as u64,
+            fields.sym_name => name,
         );
-        if let Some(flat_symbol) = flat.get(&(occurrence.start, occurrence.end)) {
-            document.add_text(fields.sym_kind, symbol_kind_to_str(flat_symbol.kind));
-            if let Some(container) = flat_symbol.container {
-                document.add_text(fields.sym_container, container);
-            }
+        // All five, every row, in row order — that is the whole contract
+        // that keeps the parallel fields aligned when they are read back.
+        for row in rows {
+            document.add_u64(fields.sym_line, row.line as u64);
+            document.add_u64(fields.sym_col, row.col as u64);
+            document.add_u64(fields.sym_is_definition, row.is_definition as u64);
+            document.add_text(fields.sym_kind, row.kind.unwrap_or(""));
+            document.add_text(fields.sym_container, row.container.unwrap_or(""));
         }
         documents.push(document);
     }
 
-    for edge in analysis.supertype_edges {
+    for edge in &analysis.supertype_edges {
         let (line, col) = line_and_col_from(&starts, edge.type_start);
         documents.push(doc!(
             fields.path => path_key.to_string(),
             fields.doc_type => DOC_TYPE_INHERIT,
-            fields.inh_type => edge.type_name,
-            fields.inh_supertype => edge.supertype_name,
+            fields.inh_type => edge.type_name.clone(),
+            fields.inh_supertype => edge.supertype_name.clone(),
             fields.sym_line => line as u64,
             fields.sym_col => col as u64,
         ));
@@ -2692,6 +2756,152 @@ mod tests {
         index.remove_file(&file).unwrap();
 
         assert_eq!(index.search("findme", false, true).unwrap().len(), 0);
+    }
+
+    // --- packed symbol documents, size cap, binary sniff (IP1/IP3) ---
+
+    #[test]
+    fn line_and_col_from_a_table_matches_the_scanning_version() {
+        let text = "alpha\nbeta\n\ngamma delta\n";
+        let starts = line_starts(text);
+        for offset in 0..=text.len() {
+            assert_eq!(
+                line_and_col_from(&starts, offset),
+                line_and_col_at(text, offset),
+                "offset {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_document_carries_every_occurrence_of_a_name_with_its_rows_aligned() {
+        let dir = tempfile::tempdir().unwrap();
+        // `add` is defined on line 1 and referenced on lines 2 and 3, so all
+        // three occurrences pack into a single document.
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "fn add(x: i32) -> i32 { x }\nfn a() -> i32 { add(1) }\nfn b() -> i32 { add(2) }\n",
+        );
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let searcher = index.reader.searcher();
+        let query = BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                doc_type_query(index.fields.doc_type, DOC_TYPE_SYMBOL),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(index.fields.sym_name, "add"),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ]);
+        let docs = searcher.search(&query, &TopDocs::with_limit(10)).unwrap();
+        assert_eq!(docs.len(), 1, "one document per (file, name)");
+
+        let usages = index.find_usages("add").unwrap();
+        assert_eq!(
+            usages.iter().map(|u| u.line).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        // The rows stayed aligned: only the row on line 1 is the definition,
+        // and only it carries the kind the outline supplied.
+        assert_eq!(
+            usages.iter().map(|u| u.is_definition).collect::<Vec<_>>(),
+            vec![true, false, false]
+        );
+        assert_eq!(usages[0].kind, Some(SymbolKind::Function));
+        assert_eq!(usages[1].kind, None);
+        assert_eq!(usages[2].kind, None);
+    }
+
+    #[test]
+    fn a_definition_query_reports_only_the_definition_rows_of_a_packed_document() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "fn add(x: i32) -> i32 { x }\nfn a() -> i32 { add(1) }\n",
+        );
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let defs = index.find_definitions_exact("add").unwrap();
+        assert_eq!(defs.len(), 1, "{defs:?}");
+        assert_eq!(defs[0].line, 1);
+        assert!(defs[0].is_definition);
+
+        let substring = index.find_definitions("ad").unwrap();
+        assert_eq!(substring.len(), 1, "{substring:?}");
+        assert_eq!(substring[0].line, 1);
+    }
+
+    #[test]
+    fn a_file_past_the_size_cap_is_findable_by_name_but_not_by_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = format!(
+            "fn zqmarker_huge() {{}}\n// {}\n",
+            "x".repeat(MAX_INDEXED_BYTES as usize)
+        );
+        write(dir.path(), "src/big.rs", &big);
+        write(dir.path(), "src/small.rs", "fn small() {}\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        // Still in the file-name tier, and still stamped, so a warm open
+        // does not keep rediscovering it.
+        assert!(index
+            .find_files("big.rs", 10)
+            .iter()
+            .any(|m| m.path.ends_with("big.rs")));
+
+        // The documented ceiling: no content in the ngram index, so the
+        // candidate stage never nominates it, and no symbols at all.
+        let hits = index.search("zqmarker_huge", false, true).unwrap();
+        assert!(hits.is_empty(), "{hits:?}");
+        let defs = index.find_definitions_exact("zqmarker_huge").unwrap();
+        assert!(defs.is_empty(), "{defs:?}");
+    }
+
+    #[test]
+    fn a_binary_file_is_dropped_from_the_index_entirely() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "fn add() {}\n");
+        fs::write(dir.path().join("blob.bin"), b"MZ\x00\x00binary payload").unwrap();
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        assert!(
+            index.find_files("blob", 10).is_empty(),
+            "a binary file is not worth listing by name either"
+        );
+        assert_eq!(index.indexed_file_count(), 1);
+    }
+
+    #[test]
+    fn progress_counts_up_to_the_total_it_announced() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            write(dir.path(), &format!("src/f{i}.rs"), "fn f() {}\n");
+        }
+        let seen = std::sync::Mutex::new(Vec::new());
+        let index = TextIndex::build_with_progress(dir.path(), &|p: IndexProgress| {
+            seen.lock().unwrap().push((p.done, p.total));
+        })
+        .unwrap();
+        drop(index);
+
+        let seen = seen.into_inner().unwrap();
+        let total = seen[0].1;
+        assert_eq!(total, 5);
+        assert_eq!(
+            seen[0].0, 0,
+            "the total is announced before any file is read"
+        );
+        let mut done: Vec<usize> = seen.iter().map(|(d, _)| *d).collect();
+        done.sort();
+        assert_eq!(done, vec![0, 1, 2, 3, 4, 5]);
+        assert!(seen.iter().all(|(d, t)| *d <= *t && *t == total));
     }
 
     // --- symbol/reference schema (E1) ---

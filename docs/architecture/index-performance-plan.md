@@ -10,7 +10,7 @@ A fresh session should read this table (and `git log`) before picking up work, p
 | IP0 — build-time benchmark | done | this change |
 | IP1 — cheap wins: line-start table, size cap, binary sniff, walker stat reuse, writer threads | done | this change |
 | IP2 — parallel file processing | done | this change |
-| IP3 — packed symbol documents (schema change) | open | |
+| IP3 — packed symbol documents (schema change) | done | this change |
 | IP4 — sidecar stamps, batched reindex | open | |
 | IP5 — progress indicator in the status bar | open | |
 
@@ -23,6 +23,7 @@ Taken with `cargo test --release -p index-core --test index_build_bench -- --ign
 |---|---|---|---|
 | baseline (`640b7b4`) | 4.03 s | 5.8 ms | 3702 KiB |
 | IP1 + IP2 | 1.46 s | 7.7 ms | 4374 KiB |
+| IP3 | 0.61 s | 7.8 ms | 2344 KiB |
 
 ## Context
 
@@ -45,8 +46,11 @@ The build was also slower than the work it does justifies, for reasons that were
    The walk is cheap and stays single-threaded; splitting it out means the number of files needing work is known before any file is read, which is the difference between a progress bar and a spinner.
 2. **The tantivy writer is shared by reference, not locked.**
    `IndexWriter::add_document` and `delete_term` both take `&self`, so the parallel pass needs no mutex — reading, parsing and document building all happen on rayon workers while tantivy's own threads tokenize.
-3. **Oversized files stay findable by name.**
-   Past `MAX_INDEXED_BYTES` a file still gets its stamped text document, with empty content and no symbols. It stays in the file-name tier and in the warm-open stamp set; it is only not searchable by content. A documented ceiling, not an omission.
+3. **Oversized files stay findable by name, and by nothing else.**
+   Past `MAX_INDEXED_BYTES` a file contributes no documents at all, but still counts as indexable so it keeps its place in the file-name tier.
+   The tempting alternative — a stamped document with empty content — was tried and rejected: that document carries the file's path back into the candidate list whenever the ngram stage falls back to "every text doc", so Find in Files would reach into an over-cap file on some patterns and not on others. Consistency is worth re-deciding the file's size on each open, which is a comparison against a stat the walk already did.
+6. **One symbol document per (file, name).**
+   The five per-occurrence fields are multi-valued and index-aligned; `symbol_docs` appends all five per row and `collect_symbol_matches` zips them back apart. Because a packed document matches `sym_is_definition:1` when *any* row is a definition, every definition query re-filters the expanded rows — that flag is correctness, not an optimisation.
 4. **A binary file is dropped entirely**, as before — the sniff just decides it before reading the whole thing rather than after.
 5. **Progress is Qt-free.**
    `index-core` takes a `&(dyn Fn(IndexProgress) + Sync)`; the adapter is what knows about Qt threads and throttling. `open_or_build`/`build` keep their old signatures and delegate with a no-op, so no existing caller changed.
