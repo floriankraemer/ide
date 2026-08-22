@@ -2128,6 +2128,12 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
 
     QDialog dialog(parent);
     dialog.setWindowTitle(QObject::tr("Settings"));
+    // The pages' own minimums add up to roughly 740x510, which is enough to
+    // lay a page out but not enough to read one: the Languages tree needs
+    // room for four columns before Matches has anything to elide. Sized here
+    // rather than in the pages because the dialog is what the user sees, and
+    // one number beats four minimums fighting over the same window.
+    dialog.resize(960, 640);
 
     auto *categoryList = new QListWidget(&dialog);
     categoryList->addItem(QObject::tr("Appearance"));

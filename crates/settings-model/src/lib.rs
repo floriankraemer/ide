@@ -20,7 +20,7 @@ pub use languages::{
     explain, scan_manifests, toggle, LanguageAction, LanguageRow, LanguageSource, LanguageStatus,
     LanguageToggle, ManifestInfo, Problem,
 };
-pub use servers::{lsp_language_id, ServerDraft, ServerRow, ServerRowStatus};
+pub use servers::{can_have_server, lsp_language_id, ServerDraft, ServerRow, ServerRowStatus};
 pub use syntax_colors::{
     ordered_scopes, scope_family, scope_sample, unknown_scope_warning, unknown_scopes, Origin,
     SyntaxColorDraft, FAMILY_ORDER,

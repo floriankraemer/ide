@@ -5016,6 +5016,10 @@ impl ffi::SyntaxColorEditor {
         syntax_core::registry()
             .languages()
             .into_iter()
+            // Every language with queries can be themed, including the
+            // injection-only ones: `markdown_inline` never owns a file but
+            // its spans are what colour a Markdown paragraph, so its
+            // per-language overrides are reachable and worth offering.
             .filter(|language| *language != syntax_core::Language::PLAIN_TEXT)
             .map(|language| ffi::FfiLanguageOption {
                 id: QString::from(&language.id()),
@@ -5310,13 +5314,14 @@ pub struct LanguageServerEditorRust {
     saved: RefCell<Option<settings_model::ServerDraft>>,
 }
 
-/// Every language a row could be about: the editor's own languages, under
-/// the ids the *protocol* uses, plus whatever the server catalog adds.
+/// Every language a row could be about: the editor's own languages that a
+/// file can actually open in, under the ids the *protocol* uses, plus
+/// whatever the server catalog adds.
 fn server_page_languages() -> Vec<(String, String)> {
     syntax_core::registry()
         .languages()
         .into_iter()
-        .filter(|language| *language != syntax_core::Language::PLAIN_TEXT)
+        .filter(|language| settings_model::can_have_server(*language))
         .map(|language| {
             (
                 settings_model::lsp_language_id(&language.id()).to_string(),

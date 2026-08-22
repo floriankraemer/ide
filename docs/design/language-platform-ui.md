@@ -204,6 +204,12 @@ Not `OK`, not a green check, not `Loaded`.
 Thirty rows of green checks train the eye to skip the column, which is precisely the column that has to catch the eye on the one row that failed.
 This is the strongest "say nothing" call in the document and it should not be softened during implementation.
 
+It also fixes the column widths.
+An empty cell only catches the eye while it is on screen, so Status must never be reachable only by scrolling sideways.
+Matches is the single column that absorbs the leftover width and therefore the only one that elides — Bash and Dockerfile each enumerate a dozen filenames, and sizing that column to its longest content is what pushed Status off the right edge.
+Language, Source and Status size to their content, the last section does not stretch, and the sections therefore always sum to the viewport width.
+The settings dialog opens at 960x640 for the same reason: the pages' own minimums add up to about 740x510, which lays a page out but leaves Matches nothing to elide.
+
 | Status text | Colour | Meaning |
 |---|---|---|
 | *(empty)* | — | Loaded and available. |

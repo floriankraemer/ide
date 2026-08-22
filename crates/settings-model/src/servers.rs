@@ -65,6 +65,23 @@ impl ServerRow {
 /// removed one layer down.
 pub use lsp_core::lsp_language_id;
 
+/// Whether a language could ever have a language server attached to it.
+///
+/// An injection-only grammar declares no extensions and no filenames:
+/// `markdown_inline` is reached solely from the Markdown block grammar's
+/// injections, never by opening a file. Since suffix-aware resolution
+/// landed, `language_for_path` cannot return a language with no declared
+/// patterns, so "declares no patterns" and "no file can ever open in it"
+/// are the same statement — and a server that can never attach has no
+/// business being offered as `Not configured` on the page. Plain text is
+/// excluded for the older reason: "no highlighting" is not a language a
+/// server is configured for.
+pub fn can_have_server(language: syntax_core::Language) -> bool {
+    language
+        .def()
+        .is_some_and(|def| def.extensions().next().is_some() || def.filenames().next().is_some())
+}
+
 /// The page's draft: one row per language, committed on OK.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerDraft {
@@ -340,6 +357,27 @@ mod tests {
         assert_eq!(lsp_language_id("tsx"), "typescriptreact");
         assert_eq!(lsp_language_id("rust"), "rust");
         assert_eq!(lsp_language_id("csharp"), "csharp");
+    }
+
+    /// Injection-only grammars are not configurable servers.
+    ///
+    /// `markdown_inline` declares no extensions and no filenames, so no
+    /// file can ever open in it and no server could ever attach. The
+    /// predicate is on the property, not the id, so the next
+    /// injection-only grammar added to the catalog is excluded too.
+    #[test]
+    fn only_languages_a_file_can_open_in_can_have_a_server() {
+        let by_id = |wanted: &str| {
+            syntax_core::registry()
+                .languages()
+                .into_iter()
+                .find(|language| language.id() == wanted)
+                .unwrap_or_else(|| panic!("`{wanted}` is not in the registry"))
+        };
+        assert!(!can_have_server(by_id("markdown_inline")));
+        assert!(can_have_server(by_id("markdown")));
+        assert!(can_have_server(by_id("rust")));
+        assert!(!can_have_server(syntax_core::Language::PLAIN_TEXT));
     }
 
     /// Guards the *class* of bug, not one instance of it.

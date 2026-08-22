@@ -246,10 +246,21 @@ QWidget *buildLanguagesPage(QWidget *parent,
     tree->setColumnCount(4);
     tree->setHeaderLabels({QObject::tr("Language"), QObject::tr("Matches"), QObject::tr("Source"),
                            QObject::tr("Status")});
-    tree->header()->setSectionResizeMode(kLanguageColumn, QHeaderView::Stretch);
-    tree->header()->setSectionResizeMode(kMatchesColumn, QHeaderView::ResizeToContents);
+    // Matches is the one column allowed to absorb the leftover width, and
+    // therefore the one that elides: Bash and Dockerfile enumerate a dozen
+    // filenames each, and sizing to that longest content pushed Status off
+    // the right edge behind a horizontal scrollbar. Status is the column
+    // this page exists for — a healthy row leaves it empty precisely so the
+    // one row that failed catches the eye, which only works while it is on
+    // screen. Every other column sizes to its content and the last section
+    // does not stretch, so the sections always sum to the viewport and the
+    // horizontal scrollbar never appears.
+    tree->header()->setStretchLastSection(false);
+    tree->header()->setSectionResizeMode(kLanguageColumn, QHeaderView::ResizeToContents);
+    tree->header()->setSectionResizeMode(kMatchesColumn, QHeaderView::Stretch);
     tree->header()->setSectionResizeMode(kSourceColumn, QHeaderView::ResizeToContents);
     tree->header()->setSectionResizeMode(kStatusColumn, QHeaderView::ResizeToContents);
+    tree->setTextElideMode(Qt::ElideRight);
     tree->setRootIsDecorated(false);
     tree->setIndentation(12);
     layout->addWidget(tree, 1);
