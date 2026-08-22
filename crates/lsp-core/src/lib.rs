@@ -9,6 +9,7 @@
 //! cargo tree -p lsp-core -e normal | grep -i -e qt -e tokio   # must be empty
 //! ```
 
+pub mod apply_edit;
 pub mod catalog;
 pub mod code_action;
 pub mod completion;
@@ -19,6 +20,9 @@ pub mod manager;
 pub mod navigation;
 pub mod workspace_edit;
 
+pub use apply_edit::{
+    ApplyEditGate, ApplyEditVerdict, RefactorSession, RefactorSessions, APPLY_EDIT_TIMEOUT,
+};
 pub use catalog::{
     default_server, enabled_server, lsp_language_id, resolve_servers, ServerConfig, ServerDef,
     ServerOverride, SERVERS,

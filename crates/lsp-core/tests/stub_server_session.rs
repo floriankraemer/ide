@@ -4,6 +4,8 @@
 //! for integration tests, so nothing here guesses at the target directory.
 
 use std::sync::mpsc::Receiver;
+use std::sync::Arc;
+use std::thread;
 use std::time::{Duration, Instant};
 
 use lsp_core::catalog::ServerConfig;
@@ -565,13 +567,14 @@ fn prepare_rename_and_rename_answer_in_every_shape() {
 /// The command-driven refactoring shape: the server asks *us* to apply an
 /// edit in the middle of an `executeCommand` and blocks on the answer.
 ///
-/// Today the client refuses every server request with `-32601`, so what this
-/// pins is that the round trip completes rather than deadlocking. RF5 makes
-/// the answer a real one; this test is what will show the difference.
+/// With no refactoring in flight the request is refused outright — a server
+/// rewriting the user's files unprompted is what that rule exists to stop —
+/// and, crucially, refused without stalling anything.
 #[test]
-fn a_command_that_asks_the_client_to_apply_an_edit_completes() {
-    let (manager, _rx) = LspManager::new("file:///workspace");
+fn an_unsolicited_apply_edit_is_refused_without_troubling_the_editor() {
+    let (manager, rx) = LspManager::new("file:///workspace");
     manager.start(&stub_config()).expect("stub starts");
+    assert!(!manager.refactor_active());
 
     let answer = manager
         .request(
@@ -582,14 +585,93 @@ fn a_command_that_asks_the_client_to_apply_an_edit_completes() {
         )
         .expect("the command completes without deadlocking");
 
+    assert_eq!(
+        answer["clientApplied"], false,
+        "nobody asked for this edit, so the server is told it was not applied",
+    );
     assert!(
-        answer["clientApplied"].is_null(),
-        "the client refuses server requests until RF5, so it applied nothing",
+        !matches!(rx.try_recv(), Ok(LspEvent::ApplyEdit { .. })),
+        "an unsolicited edit must never reach the UI",
     );
 
-    // The session is still usable afterwards.
     let echo = manager
         .request(LANG, "stub/echo", json!({"tag": "after"}))
         .expect("the session survives the round trip");
     assert_eq!(echo["tag"], "after");
+}
+
+/// The whole handshake, end to end: a refactoring is in flight, the server
+/// asks for an edit mid-command, the editor claims it, and the command
+/// completes with the server told it was applied.
+#[test]
+fn an_edit_asked_for_during_a_refactoring_reaches_the_editor_and_is_applied() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    let manager = Arc::new(manager);
+    manager.start(&stub_config()).expect("stub starts");
+
+    // The guard is what makes the server's request legitimate. It is held
+    // across the command, exactly as a refactoring gesture would hold it.
+    let session = manager.begin_refactor();
+    assert!(manager.refactor_active());
+
+    let commanded = Arc::clone(&manager);
+    let command = thread::spawn(move || {
+        commanded.request(
+            LANG,
+            "workspace/executeCommand",
+            json!({"command": "stub.applyEdit",
+                   "arguments": ["file:///workspace/main.rs"]}),
+        )
+    });
+
+    // The editor's side: the edit arrives as an event, with the server still
+    // blocked on the gate.
+    let (label, edit, gate) = wait_for(&rx, "the applyEdit request", |event| match event {
+        LspEvent::ApplyEdit {
+            label, edit, gate, ..
+        } => Some((label.clone(), edit.clone(), gate.clone())),
+        _ => None,
+    });
+    assert_eq!(label.as_deref(), Some("Extract class"));
+    assert_eq!(
+        edit["documentChanges"][0]["textDocument"]["uri"], "file:///workspace/main.rs",
+        "the raw WorkspaceEdit is handed over for the UI side to parse",
+    );
+    // The invariant this whole design exists for: the server's read thread
+    // is not blocked while the edit waits, so everything else keeps working.
+    // A `didOpen` sent now must still come back with its diagnostics.
+    manager
+        .did_open("file:///workspace/other.rs", LANG, "fn other() {}\n")
+        .expect("the session is still usable mid-handshake");
+    wait_for(
+        &rx,
+        "diagnostics while an edit is pending",
+        |event| match event {
+            LspEvent::Diagnostics { uri, .. } if uri.ends_with("other.rs") => Some(()),
+            _ => None,
+        },
+    );
+
+    assert!(gate.claim(), "the editor takes the edit");
+
+    let answer = command.join().unwrap().expect("the command completes");
+    assert_eq!(
+        answer["clientApplied"], true,
+        "the server hears that its edit was applied",
+    );
+    drop(session);
+    assert!(!manager.refactor_active());
+}
+
+/// The gate is bounded: an editor that never answers must not park the
+/// server's thread for ever, and must not then be allowed to apply anything.
+#[test]
+fn the_gate_refuses_a_late_claim_so_the_answer_is_never_a_lie() {
+    let (gate, gate_rx) = lsp_core::ApplyEditGate::new();
+    assert!(gate.close(), "the wait gave up first");
+    assert!(
+        !gate.claim(),
+        "a UI arriving after the timeout must not apply text the server was told about",
+    );
+    drop(gate_rx);
 }
