@@ -450,6 +450,34 @@ fn naming_conventions_are_painted_and_only_where_they_apply() {
 /// This list is checked **one-directionally**, and the asymmetry with
 /// `KNOWN_DEAD_CAPTURES` is the documentation: an entry here will never
 /// resolve, ever, so there is nothing to detect and nothing to prune.
+/// Whether a capture is a **predicate operand** rather than a scope.
+///
+/// Tree-sitter's convention is that a capture whose name begins with `_`
+/// exists only so a predicate can refer to it — it is the test, not the
+/// paint. Upstream Haskell is the case in this tree:
+///
+/// ```scheme
+/// ((decl/signature name: (variable) @_name)
+///  . (function name: (variable) @variable)
+///  (#eq? @_name @variable))
+/// ```
+///
+/// `@_name` must **appear** (the `#eq?` references it by name) and must
+/// **never resolve** (the capture that gets coloured is `@variable`). So
+/// it is legitimately unresolvable, like [`NOT_A_SCOPE`], but it cannot be
+/// a list: every grammar invents its own operand names, and enumerating
+/// today's would mean the next grammar's `@_lhs` arrives unlisted and gets
+/// "repaired" into a real scope — which would paint every operator the
+/// predicate was there to filter.
+///
+/// A rule covers grammars nobody has ported yet, and the convention is
+/// tree-sitter's own rather than something invented here. Same reasoning as
+/// the suffix rule in language resolution: enumerate the cases you know and
+/// the one you do not know breaks silently.
+fn is_predicate_operand(capture: &str) -> bool {
+    capture.starts_with('_')
+}
+
 const NOT_A_SCOPE: &[&str] = &[
     // nvim-treesitter's prose-checking marker: it tells a spell checker
     // which nodes hold natural language. It never carries a colour, in
@@ -548,6 +576,16 @@ fn every_highlights_capture_resolves_to_a_scope() {
         for (index, capture) in highlights.capture_names().iter().enumerate() {
             if compiled.highlight_scopes[index].is_some() {
                 assert!(
+                    !is_predicate_operand(capture),
+                    "language `{id}`: `@{capture}` starts with `_`, which is \
+                     tree-sitter's convention for a capture that exists only \
+                     as a predicate operand — yet it resolves to a scope. \
+                     Either a real scope has been named `_something`, or the \
+                     convention has been violated. A predicate operand must \
+                     never carry a colour: the capture that gets painted is a \
+                     different one in the same pattern."
+                );
+                assert!(
                     !known_dead(id, capture),
                     "language `{id}`: `@{capture}` has been repaired — it \
                      resolves to a scope now, so delete its entry from \
@@ -559,7 +597,9 @@ fn every_highlights_capture_resolves_to_a_scope() {
                 continue;
             }
             assert!(
-                NOT_A_SCOPE.contains(capture) || known_dead(id, capture),
+                NOT_A_SCOPE.contains(capture)
+                    || is_predicate_operand(capture)
+                    || known_dead(id, capture),
                 "language `{id}`: `@{capture}` in \
                  queries/{id}/highlights.scm resolves to no scope, so it \
                  produces no span at all and the text renders unhighlighted. \
