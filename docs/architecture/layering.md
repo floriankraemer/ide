@@ -5,24 +5,16 @@ Hexagonal-lite with a humble Qt view: logic in Qt-free Rust, the view only displ
 
 ## Layers
 
-```mermaid
-graph TB
-    app["app (main)"] --> view
-    subgraph uishell["ui-shell"]
-        view["view: cpp/main_window.cpp<br/>widgets, layout, wiring"] --> adapter["adapter: src/bridge.rs<br/>thin QObject translation"]
-    end
-    adapter --> appcore["application: app-core<br/>AppSession, commands, AppError"]
-    appcore --> editorcore["domain: editor-core"]
-    appcore --> projectmodel["domain: project-model"]
-```
+The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `pty-core`, `terminal-core`, `mcp-server`), adapter + view (`ui-shell`), and the `app` binary.
+The building-block diagram lives in [overview.md §3](overview.md#3-building-block-view) — one diagram, one place.
 
 ## Allowed imports
 
 | Crate | May depend on | Qt/cxx-qt allowed |
 |-------|---------------|-------------------|
 | `editor-core` | (std, ropey, regex) | **No** |
-| `project-model` | (std, notify) | **No** |
-| `syntax-core` | (std, tree-sitter, tree-sitter-rust, tree-sitter-json, tree-sitter-c-sharp, tree-sitter-java, tree-sitter-php, streaming-iterator) | **No** |
+| `project-model` | (std, notify, dirs) | **No** |
+| `syntax-core` | (std, tree-sitter plus the bundled grammar crates — see `crates/syntax-core/Cargo.toml`, streaming-iterator, serde, toml, libloading, tree-sitter-language) | **No** |
 | `app-config` | (std, dirs, serde, toml, nucleo-matcher) | **No** |
 | `mcp-server` | `index-core`, `editor-core` (+ std, serde, serde_json, tokio, axum) | **No** |
 | `pty-core` | (std, portable-pty) | **No** |
@@ -31,7 +23,7 @@ graph TB
 | `index-core` | `syntax-core`, `editor-core` (+ std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore, nucleo-matcher, fs4, dirs) | **No** |
 | `settings-model` | `app-config`, `syntax-core`, `lsp-core` (+ std, serde, toml, tree-sitter) | **No** |
 | `app-core` | `editor-core`, `project-model` | **No** |
-| `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `settings-model`, `syntax-core`, `mcp-server`, `index-core`, `lsp-core`, `pty-core`, `terminal-core` | Yes (adapter + view live here) |
+| `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `settings-model`, `syntax-core`, `mcp-server`, `index-core`, `lsp-core`, `pty-core`, `terminal-core` (+ tokio, cxx, cxx-qt, cxx-qt-lib) | Yes (adapter + view live here) |
 | `app` | `ui-shell` | Yes |
 
 `editor-core`, `project-model`, and `app-core` MUST NOT depend on cxx-qt or Qt in any form — no direct dependency, no transitive dependency, no feature-gated dependency.
@@ -87,11 +79,8 @@ cargo tree -p lsp-core -e normal | grep -i tokio    # must be empty
 
 ## Known debt at time of writing
 
-None. The refactoring phase this document anticipated is complete:
-`app-core` exists (`AppSession`, `TabId`, `AppError`), `bridge.rs` is a
-thin adapter, and `main_window.cpp` is a humble view with no business
-rules. `cargo test --workspace` passes for the three Qt-free crates and
-`cargo tree` confirms no Qt leakage into any of them.
+- Stale `lib.rs` doc comments describe shipped work as future: `project-model` ("no filesystem watcher (that's Task 8)"), `editor-core` ("wraps TabList in a DocumentManager QObject later"), `terminal-core` and `pty-core` ("task F3, not yet built"), `index-core` ("is `ui-shell`'s job (task H)").
+- `settings-model/src/lib.rs` cites ADR-0016 where [ADR-0017](decisions/0017-settings-model-crate.md) is the crate's founding decision.
 
 No new code may reintroduce `QString` sentinel errors, int-index tab
 identity, or business rules in `bridge.rs`/`cpp/` — see the FFI seam

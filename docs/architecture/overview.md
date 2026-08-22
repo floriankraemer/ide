@@ -9,7 +9,7 @@ The project is a cross-platform IDE with a JetBrains-like layout.
 It is a Rust Cargo workspace with a Qt6 Widgets UI, bridged via `cxx-qt` per [ADR-0001](decisions/0001-core-tech-stack.md).
 
 It has grown past the original MVP (open a folder, browse a tree, edit and save tabs — see the [MVP proposal](../product/mvp-proposal.md)).
-Shipped since: a settings window and keymap, ADS-based docking, theming, tree-sitter syntax highlighting and folding, a Class View outline, an embedded terminal, a project-wide text and symbol index, find and replace, code navigation (Go to Declaration, Find Usages, Go to Implementation, jump history), a language platform with 31 tree-sitter grammars and an LSP client, and refactoring (rename, Extract Method/Class through code actions).
+Shipped since: a settings window and keymap, ADS-based docking, theming, tree-sitter syntax highlighting and folding, a Class View outline, an embedded terminal, a project-wide text and symbol index, find and replace, code navigation (Go to Declaration, Find Usages, Go to Implementation, jump history), a language platform with 29 bundled tree-sitter grammar crates covering roughly 35 languages (see `crates/syntax-core/Cargo.toml`) and an LSP client, and refactoring (rename, Extract Method/Class through code actions).
 
 ## 2. Quality goals
 
@@ -32,11 +32,10 @@ graph TB
         view["view: cpp/*.cpp<br/>widgets, layout, wiring"] --> adapter["adapter: src/bridge.rs<br/>thin QObject translation"]
     end
     adapter --> appcore["application: app-core<br/>AppSession, commands, AppError"]
-    adapter --> support["support: app-config, syntax-core,<br/>index-core, terminal-core, mcp-server"]
+    adapter --> support["support: app-config, syntax-core,<br/>index-core, lsp-core, settings-model,<br/>pty-core, terminal-core, mcp-server"]
     appcore --> editorcore["domain: editor-core"]
     appcore --> projectmodel["domain: project-model"]
     support --> editorcore
-    support --> projectmodel
 ```
 
 | Crate | Layer | Responsibility | Qt |
@@ -77,9 +76,7 @@ Artifacts land in `dist/`.
 
 The following are documented direction per ADR-0001 but have no code and no crates today; add them when the work starts, not before:
 
-- **LSP client** — language-server integration in the Rust core.
-  This is also the upgrade path past ADR-0011's deliberately name-based declaration resolution.
-- **Debugger adapter (DAP)** — same placement rationale as LSP.
+- **Debugger adapter (DAP)** — a Qt-free core crate, same placement rationale as the shipped LSP client (`lsp-core`, [ADR-0016](decisions/0016-lsp-client.md)).
 - **Plugin host** — hybrid model: native dylib loader (stable C ABI) for trusted, perf-critical integrations; sandboxed WASM runtime (wasmtime) with a narrower, capability-based API for third-party plugins.
 - **QML view** — the planned replacement for the Widgets view; the humble-view split exists so this swap stays cheap.
 

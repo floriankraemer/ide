@@ -70,6 +70,14 @@ use syntax_core::{analyze_file, language_for_path, SymbolKind, SymbolNode};
 /// Directory (relative to the project root) the tantivy index lives under.
 const INDEX_DIR_NAME: &str = ".ide-index";
 
+/// Bump when what gets *extracted* from a file changes (a query in
+/// `syntax-core/queries`, [`analyze`]'s rules) without the tantivy schema
+/// changing: an existing index is then rebuilt instead of serving symbols
+/// the old extraction missed. 2: Java/C/C++ `type_identifier`, PHP type
+/// positions, Zig anchored variable names.
+const EXTRACTION_VERSION: u32 = 2;
+const EXTRACTION_VERSION_FILE: &str = "extraction.version";
+
 /// Tantivy's own writer-lock file inside the index directory. Named here so
 /// an error can point at the exact path rather than at the project root.
 const WRITER_LOCK_FILE: &str = ".tantivy-writer.lock";
@@ -993,6 +1001,10 @@ impl TextIndex {
 
         let (schema, fields) = build_schema();
         let index = Index::create_in_dir(&index_dir, schema)?;
+        fs::write(
+            index_dir.join(EXTRACTION_VERSION_FILE),
+            EXTRACTION_VERSION.to_string(),
+        )?;
         index.tokenizers().register(
             "ngram3",
             NgramTokenizer::new(NGRAM_SIZE, NGRAM_SIZE, false)?,
@@ -1038,6 +1050,19 @@ impl TextIndex {
 
     fn open_existing(project_root: &Path) -> Result<Self, IndexError> {
         let index_dir = index_dir_for(project_root);
+        // The (mtime, size) stamps only detect changed *files*. When the
+        // extraction itself changes — a locals.scm learns a node kind it
+        // used to drop — every stamp still matches and the stale symbols
+        // would be served forever. The version file is the switch that
+        // forces the rebuild instead.
+        let stored_version = fs::read_to_string(index_dir.join(EXTRACTION_VERSION_FILE))
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok());
+        if stored_version != Some(EXTRACTION_VERSION) {
+            return Err(IndexError::Tantivy(
+                "index extraction version mismatch".to_string(),
+            ));
+        }
         let (schema, fields) = build_schema();
         let index = Index::open_in_dir(&index_dir)?;
         if index.schema() != schema {
@@ -2205,6 +2230,27 @@ mod tests {
     }
 
     #[test]
+    fn an_index_from_an_older_extraction_is_rebuilt_not_reused() {
+        let dir = tempfile::tempdir().unwrap();
+        let content = "final class ConfigurationException extends BcCheckException {}\n";
+        write(dir.path(), "src/A.java", content);
+        drop(TextIndex::build(dir.path()).unwrap());
+        // An index written before this extraction version existed has no
+        // version file at all — same as one whose number no longer matches.
+        fs::remove_file(index_dir_for(dir.path()).join(EXTRACTION_VERSION_FILE)).unwrap();
+
+        let index = TextIndex::open_or_build(dir.path()).unwrap();
+        let usages = index.find_usages("BcCheckException").unwrap();
+        assert_eq!(usages.len(), 1, "rebuild must re-extract: {usages:?}");
+        assert_eq!(
+            fs::read_to_string(index_dir_for(dir.path()).join(EXTRACTION_VERSION_FILE))
+                .unwrap()
+                .trim(),
+            EXTRACTION_VERSION.to_string()
+        );
+    }
+
+    #[test]
     fn open_or_build_reuses_the_index_and_applies_the_delta() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "stable.txt", "unchanged marker\n");
@@ -2699,6 +2745,50 @@ mod tests {
         // The inner shadowing binding is nearest, so it comes first.
         assert_eq!(resolution.candidates[0].line, 4);
         assert_eq!(resolution.candidates[0].path, file);
+    }
+
+    #[test]
+    fn a_java_type_in_an_extends_clause_resolves_and_plans_a_rename() {
+        // The user's actual gesture: caret on `BcCheckException` in the
+        // extends clause of another file, then Rename. The name is a
+        // `type_identifier` in tree-sitter-java, which the occurrence query
+        // once missed entirely — the caret "was not on a symbol".
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/BcCheckException.java",
+            "public class BcCheckException extends RuntimeException {}\n",
+        );
+        let content = "final class ConfigurationException extends BcCheckException {}\n";
+        let file = write(dir.path(), "src/ConfigurationException.java", content);
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let caret = content.find("BcCheckException").unwrap();
+        let resolution = index.resolve_declaration(&file, content, caret).unwrap();
+        assert_eq!(resolution.tier, ResolutionTier::Project, "{resolution:?}");
+        assert_eq!(
+            resolution.candidates[0].path,
+            dir.path().join("src/BcCheckException.java")
+        );
+
+        let usages = index.find_usages("BcCheckException").unwrap();
+        let definitions = index.find_definitions_exact("BcCheckException").unwrap();
+        let plan = plan_index_rename(
+            &resolution,
+            &usages,
+            &definitions,
+            "BcConfigException",
+            false,
+        )
+        .unwrap();
+        let paths: Vec<&Path> = plan.sites.iter().map(|s| s.path.as_path()).collect();
+        assert!(
+            paths.contains(&dir.path().join("src/BcCheckException.java").as_path())
+                && paths.contains(&file.as_path()),
+            "both the declaration and the extends clause must be sites: {plan:?}"
+        );
+        assert!(!plan.ambiguous);
+        assert!(plan.sites.iter().all(|s| s.checked));
     }
 
     #[test]

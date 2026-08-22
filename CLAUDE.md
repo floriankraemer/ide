@@ -2,6 +2,8 @@
 
 Cross-platform IDE: Rust core + Qt6 Widgets via cxx-qt (QML planned later).
 Architecture authority: `docs/architecture/layering.md` and the ADRs in `docs/architecture/decisions/`. Read them before structural work.
+Docs index: `docs/README.md` lists every architecture, decision, plan, design, and product doc with a one-line summary.
+Orientation for a cold start: `docs/architecture/overview.md` (what the system is) and `docs/architecture/project-structure.md` (where things live).
 
 ## Development environment
 
@@ -22,29 +24,40 @@ When you need to step through something — usually the cxx-qt seam — build wi
 
 ## Starting a session
 
-Before starting work, read the Progress table of the newest plan doc in `docs/architecture/` (currently `refactoring-plan.md`) and `git log` to find the next open task. Update the task's row (status + commit hash) in the same commit that finishes it — status and code must never drift apart.
+Before starting work, read the Progress table of the newest plan doc in `docs/architecture/` (see the plan list in `docs/README.md`) and `git log` to find the next open task. Update the task's row (status + commit hash) in the same commit that finishes it — status and code must never drift apart.
 
 Check `git status`/`git log` before starting; if another session's work is uncommitted or mid-flight, don't overwrite it — coordinate or work on a different task instead.
 
 ## Project map
 
-- `crates/editor-core` — domain: rope `Document`, `TabList`, binary detection. Qt-free.
-- `crates/project-model` — domain: `ProjectSession`, directory tree, filesystem watcher. Qt-free.
-- `crates/app-core` — application layer: `AppSession`, commands, `TabId`, `AppError`. Qt-free.
-- `crates/ui-shell` — adapter (`src/bridge.rs` cxx-qt QObjects) + view (`cpp/main_window.cpp` Qt Widgets).
+Domain (Qt-free):
+- `crates/editor-core` — rope `Document`, `TabList`, load/save/dirty state, find/replace matching.
+- `crates/project-model` — `ProjectSession`, directory tree, filesystem watcher, last-project persistence.
+
+Application (Qt-free):
+- `crates/app-core` — `AppSession`, commands, `TabId`, `AppError`.
+
+Support (Qt-free):
+- `crates/app-config` — settings, theme, fonts/colors, recents, window state (TOML).
+- `crates/syntax-core` — tree-sitter platform: highlighting, language registry, runtime grammars, theme.
+- `crates/index-core` — project index: text search, symbols, declaration resolution.
+- `crates/lsp-core` — blocking LSP client: framing, `LspManager`, server catalog, feature modules.
+- `crates/settings-model` — rules behind the language-platform settings pages.
+- `crates/pty-core` — cross-platform PTY transport.
+- `crates/terminal-core` — VT100 grid state over `alacritty_terminal`.
+- `crates/mcp-server` — local Streamable-HTTP JSON-RPC MCP server over the shared index.
+
+Adapter + view:
+- `crates/ui-shell` — adapter (`src/bridge.rs` cxx-qt QObjects) + view (`cpp/` Qt Widgets).
+
+Main:
 - `crates/app` — main entry point.
 
 ## Hard layering rules
 
-| Crate | May depend on |
-|---|---|
-| editor-core | (std + small utility crates only) |
-| project-model | (std + notify, dirs) |
-| app-core | editor-core, project-model |
-| ui-shell | app-core, editor-core, project-model, cxx-qt |
-| app | ui-shell |
+The authoritative per-crate import table lives in `docs/architecture/layering.md`; check it before adding any dependency.
 
-- `editor-core`, `project-model`, `app-core` MUST NOT depend on cxx-qt/Qt in any form.
+- Every crate except `ui-shell` and `app` MUST NOT depend on cxx-qt/Qt in any form.
 - Business rules and orchestration live ONLY in Qt-free crates.
 - `bridge.rs` QObjects: translation only — slot → `AppSession` call → signal/model refresh. No rules, no owned domain state.
 - `cpp/` is a humble view: widget construction, layout, dialogs, signal wiring only. Never add an `if` that encodes a business decision to C++.
@@ -64,6 +77,7 @@ Check `git status`/`git log` before starting; if another session's work is uncom
 ## Docs
 
 - Structural change (new crate, moved responsibility, new dependency) ⇒ update `docs/architecture/layering.md` and add/update an ADR (numbering continues from the last).
+- New ADR, plan, design, or product doc ⇒ add its line to the index in `docs/README.md`.
 - Keep `docs/architecture/overview.md` truthful to the code; fix drift when you see it.
 - Long markdown files: one full sentence per line.
 

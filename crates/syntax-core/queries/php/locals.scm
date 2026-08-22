@@ -25,3 +25,10 @@
 (member_call_expression name: (name) @reference)
 (scoped_call_expression name: (name) @reference)
 (object_creation_expression (name) @reference)
+; Type positions: `extends`/`implements` lists and the `(named_type (name))`
+; wrapper around parameter, return, and property types. Without these a
+; caret on `extends Shape` or a `Shape $x` parameter type found no
+; occurrence at all — "no symbol under the caret".
+(base_clause (name) @reference)
+(class_interface_clause (name) @reference)
+(named_type (name) @reference)

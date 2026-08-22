@@ -13,3 +13,8 @@
 (variable_declarator name: (identifier) @definition)
 
 (identifier) @reference
+; Type usages (`extends Foo`, a field's type, `new Foo()`) are
+; `type_identifier` nodes, not `identifier` — without this catch-all they
+; are not occurrences at all, and Go to Declaration / Rename on a type use
+; reports "no symbol under the caret".
+(type_identifier) @reference
