@@ -1,7 +1,14 @@
 DOCKER ?= docker
 DOCKERFILE := docker/Dockerfile
 LINUX_IMAGE := ide-linux-builder
-RUN_LINUX = $(DOCKER) run --rm -v "$(CURDIR)":/workspace -w /workspace $(LINUX_IMAGE)
+# Named volumes, not bind mounts: the crate registry and the ccache object
+# store must outlive `--rm`, and neither belongs in the source tree. Without
+# them every container start re-downloads the registry and recompiles every
+# C++ translation unit from scratch.
+DOCKER_MOUNTS = -v "$(CURDIR)":/workspace -w /workspace \
+	-v ide-cargo-registry:/usr/local/cargo/registry \
+	-v ide-ccache:/ccache
+RUN_LINUX = $(DOCKER) run --rm $(DOCKER_MOUNTS) $(LINUX_IMAGE)
 
 .PHONY: help all test lint build build-linux build-windows linux-image shell clean
 
@@ -36,7 +43,7 @@ build-windows: ## Export dist/windows/ (first run builds the MXE toolchain, hour
 		--output type=local,dest=dist/ .
 
 shell: linux-image ## Open a bash shell in the builder image
-	$(DOCKER) run --rm -it -v "$(CURDIR)":/workspace -w /workspace $(LINUX_IMAGE) bash
+	$(DOCKER) run --rm -it $(DOCKER_MOUNTS) $(LINUX_IMAGE) bash
 
 clean: ## cargo clean + remove dist/
 	$(RUN_LINUX) cargo clean

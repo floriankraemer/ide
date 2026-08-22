@@ -1,0 +1,6 @@
+# Host target only. The windows-gnu target's linker is the wrapped
+# x86_64-w64-mingw32-windows-gnu-cc from docker/Dockerfile, whose
+# --start-group shim exists precisely because lld/mold alternatives don't
+# work there — see the comment on that stage before touching this.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-fuse-ld=mold"]
