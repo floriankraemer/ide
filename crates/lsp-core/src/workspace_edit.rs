@@ -271,6 +271,143 @@ fn byte_offset(text: &str, offsets: &[usize], line: u32, character: u32) -> Opti
     Some(start + line_text.len())
 }
 
+/// Where each document a `WorkspaceEdit` touches has to be applied.
+///
+/// The split is a rule, not a view detail: a document the user has open is
+/// spliced into the live `QPlainTextEdit` so one Ctrl+Z undoes the whole
+/// refactoring, while a document that is not open is rewritten on disk and
+/// re-indexed. The view is told which pile each document is in; it never
+/// decides.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct EditPlan {
+    /// Documents open in a tab, to be spliced in the buffer.
+    pub buffers: Vec<DocumentEdits>,
+    /// Documents not open, to be rewritten on disk.
+    pub files: Vec<DocumentEdits>,
+    /// Whether anything outside the file the gesture started in is touched.
+    /// This is what decides "apply straight away" from "show the preview
+    /// first", so it is answered here rather than counted in C++.
+    pub touches_other_files: bool,
+}
+
+impl EditPlan {
+    /// How many documents the plan changes in total.
+    pub fn document_count(&self) -> usize {
+        self.buffers.len() + self.files.len()
+    }
+
+    /// How many individual edits the plan makes.
+    pub fn edit_count(&self) -> usize {
+        self.buffers
+            .iter()
+            .chain(self.files.iter())
+            .map(|doc| doc.edits.len())
+            .sum()
+    }
+
+    /// Nothing to do — a rename that changed no text, or an edit whose
+    /// documents all resolved to nothing.
+    pub fn is_empty(&self) -> bool {
+        self.buffers.is_empty() && self.files.is_empty()
+    }
+}
+
+/// Split `docs` into what the buffers apply and what the disk applies, after
+/// checking that every document is still the one the server was looking at.
+///
+/// `open_paths` are the files currently open in a tab, `current_path` is the
+/// file the gesture started in (empty when there is none), and `versions`
+/// answers what version this client last sent for a URI — [`
+/// crate::LspManager::document_version`] in production.
+///
+/// The version rule: an entry naming a version other than the one we last
+/// sent rejects the **whole** edit, not just that document. `None` is
+/// accepted, because the protocol uses it for "unversioned, don't care".
+/// Rejecting wholesale is the same reasoning `apply_to_text` uses within a
+/// file — half of an extract-method is a corrupted program, and a rename
+/// that reaches four files out of five is worse than one that reaches none.
+///
+/// The edits of each document come back in descending order, ready to apply.
+pub fn plan(
+    docs: Vec<DocumentEdits>,
+    open_paths: &[String],
+    current_path: &str,
+    versions: &dyn Fn(&str) -> Option<i32>,
+) -> Result<EditPlan, EditError> {
+    let mut out = EditPlan::default();
+    for mut doc in docs {
+        if let Some(expected) = doc.version {
+            if versions(&doc.uri) != Some(expected) {
+                return Err(EditError::StaleVersion {
+                    uri: doc.uri.clone(),
+                });
+            }
+        }
+        // A document the server named but made no edits to changes nothing,
+        // and would otherwise show up in the preview as an empty row.
+        if doc.edits.is_empty() {
+            continue;
+        }
+        if doc.path != current_path {
+            out.touches_other_files = true;
+        }
+        doc.edits = descending(std::mem::take(&mut doc.edits));
+        if open_paths.contains(&doc.path) {
+            out.buffers.push(doc);
+        } else {
+            out.files.push(doc);
+        }
+    }
+    Ok(out)
+}
+
+/// Decides whether an edit computed against a buffer may still be applied to
+/// it.
+///
+/// The sibling of [`crate::HoverTracker`], and needed for the same reason
+/// with worse consequences: a refactoring is answered on a worker thread,
+/// and a hover that lands late merely shows stale text, while an edit that
+/// lands late rewrites the wrong bytes. Every request records the editor's
+/// document revision; an answer is accepted only if the buffer has not moved
+/// since.
+///
+/// This is not redundant with the version check in [`plan`]. That one
+/// compares what the *server* was told; this one compares what the *editor*
+/// actually holds, and the two can differ because `didChange` is debounced —
+/// the buffer can move without the server hearing about it yet.
+#[derive(Debug, Default)]
+pub struct EditGate {
+    pending: Option<i64>,
+}
+
+impl EditGate {
+    /// Record the buffer revision a refactoring request is being made
+    /// against, invalidating any request already in flight.
+    pub fn begin(&mut self, revision: i64) {
+        self.pending = Some(revision);
+    }
+
+    /// The gesture was abandoned: nothing in flight may be applied.
+    pub fn cancel(&mut self) {
+        self.pending = None;
+    }
+
+    /// May an answer be applied to a buffer now at `revision`?
+    ///
+    /// True only for the revision the request was made against — an edit is
+    /// consumed once, so this also refuses a second application of the same
+    /// answer.
+    pub fn accept(&mut self, revision: i64) -> bool {
+        match self.pending {
+            Some(pending) if pending == revision => {
+                self.pending = None;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -500,5 +637,199 @@ mod tests {
             sorted.iter().map(|e| e.start_line).collect::<Vec<_>>(),
             vec![4, 2, 0],
         );
+    }
+    fn doc(path: &str, version: Option<i32>, edits: Vec<TextEdit>) -> DocumentEdits {
+        DocumentEdits {
+            uri: format!("file://{path}"),
+            path: path.to_string(),
+            version,
+            edits,
+        }
+    }
+
+    fn no_versions(_: &str) -> Option<i32> {
+        None
+    }
+
+    #[test]
+    fn open_documents_go_to_the_buffers_and_the_rest_to_disk() {
+        let docs = vec![
+            doc("/a/open.rs", None, vec![edit(0, 0, 0, 1, "x")]),
+            doc("/a/closed.rs", None, vec![edit(0, 0, 0, 1, "y")]),
+        ];
+
+        let plan = plan(
+            docs,
+            &["/a/open.rs".to_string()],
+            "/a/open.rs",
+            &no_versions,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.buffers
+                .iter()
+                .map(|d| d.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/a/open.rs"],
+        );
+        assert_eq!(
+            plan.files
+                .iter()
+                .map(|d| d.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/a/closed.rs"],
+        );
+        assert!(plan.touches_other_files);
+        assert_eq!(plan.document_count(), 2);
+        assert_eq!(plan.edit_count(), 2);
+    }
+
+    #[test]
+    fn an_edit_confined_to_the_current_file_touches_nothing_else() {
+        let plan = plan(
+            vec![doc("/a/main.rs", None, vec![edit(0, 0, 0, 1, "x")])],
+            &["/a/main.rs".to_string()],
+            "/a/main.rs",
+            &no_versions,
+        )
+        .unwrap();
+
+        assert!(
+            !plan.touches_other_files,
+            "a same-file edit applies without a preview",
+        );
+        assert!(plan.files.is_empty());
+    }
+
+    #[test]
+    fn with_nothing_open_every_document_is_written_to_disk() {
+        let plan = plan(
+            vec![doc("/a/main.rs", None, vec![edit(0, 0, 0, 1, "x")])],
+            &[],
+            "",
+            &no_versions,
+        )
+        .unwrap();
+
+        assert!(plan.buffers.is_empty());
+        assert_eq!(plan.files.len(), 1);
+        assert!(plan.touches_other_files);
+    }
+
+    #[test]
+    fn a_matching_version_is_accepted_and_an_absent_one_is_not_checked() {
+        let plan = plan(
+            vec![
+                doc("/a/versioned.rs", Some(4), vec![edit(0, 0, 0, 1, "x")]),
+                doc("/a/unversioned.rs", None, vec![edit(0, 0, 0, 1, "y")]),
+            ],
+            &[],
+            "",
+            &|uri| (uri == "file:///a/versioned.rs").then_some(4),
+        )
+        .unwrap();
+
+        assert_eq!(plan.document_count(), 2);
+    }
+
+    #[test]
+    fn one_stale_version_rejects_the_whole_edit() {
+        let result = plan(
+            vec![
+                doc("/a/fresh.rs", Some(2), vec![edit(0, 0, 0, 1, "x")]),
+                doc("/a/stale.rs", Some(2), vec![edit(0, 0, 0, 1, "y")]),
+            ],
+            &[],
+            "",
+            &|uri| (uri == "file:///a/fresh.rs").then_some(2),
+        );
+
+        assert_eq!(
+            result,
+            Err(EditError::StaleVersion {
+                uri: "file:///a/stale.rs".into()
+            }),
+            "a document we never sent that version for is stale, not skippable",
+        );
+    }
+
+    #[test]
+    fn a_document_with_no_edits_is_dropped_rather_than_listed() {
+        let plan = plan(
+            vec![
+                doc("/a/main.rs", None, vec![edit(0, 0, 0, 1, "x")]),
+                doc("/a/untouched.rs", None, vec![]),
+            ],
+            &[],
+            "/a/main.rs",
+            &no_versions,
+        )
+        .unwrap();
+
+        assert_eq!(plan.document_count(), 1);
+        assert!(
+            !plan.touches_other_files,
+            "a document nothing happens to must not force a preview",
+        );
+    }
+
+    #[test]
+    fn an_empty_edit_plans_to_nothing() {
+        let plan = plan(Vec::new(), &[], "", &no_versions).unwrap();
+        assert!(plan.is_empty());
+        assert_eq!(plan.edit_count(), 0);
+    }
+
+    #[test]
+    fn planned_edits_come_back_ready_to_apply_back_to_front() {
+        let plan = plan(
+            vec![doc(
+                "/a/main.rs",
+                None,
+                vec![edit(0, 0, 0, 1, "a"), edit(5, 0, 5, 1, "b")],
+            )],
+            &[],
+            "/a/main.rs",
+            &no_versions,
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.files[0]
+                .edits
+                .iter()
+                .map(|e| e.start_line)
+                .collect::<Vec<_>>(),
+            vec![5, 0],
+        );
+    }
+
+    #[test]
+    fn the_gate_accepts_only_the_revision_the_request_was_made_against() {
+        let mut gate = EditGate::default();
+        gate.begin(11);
+
+        assert!(!gate.accept(12), "the buffer moved, so the edit is stale");
+        gate.begin(11);
+        assert!(gate.accept(11));
+    }
+
+    #[test]
+    fn the_gate_answers_once_and_forgets_a_cancelled_request() {
+        let mut gate = EditGate::default();
+        gate.begin(3);
+        assert!(gate.accept(3));
+        assert!(!gate.accept(3), "an answer must not be applied twice");
+
+        gate.begin(4);
+        gate.cancel();
+        assert!(!gate.accept(4));
+    }
+
+    #[test]
+    fn the_gate_refuses_an_answer_nobody_asked_for() {
+        let mut gate = EditGate::default();
+        assert!(!gate.accept(0));
     }
 }

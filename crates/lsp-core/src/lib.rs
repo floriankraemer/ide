@@ -33,5 +33,6 @@ pub use hover::{parse_hover, to_tooltip_html, HoverText, HoverTracker};
 pub use manager::{LspError, LspEvent, LspManager, DEFAULT_REQUEST_TIMEOUT};
 pub use navigation::{definition_outcome, parse_definition, DefinitionOutcome, DefinitionTarget};
 pub use workspace_edit::{
-    apply_to_text, descending, parse_workspace_edit, DocumentEdits, EditError, TextEdit,
+    apply_to_text, descending, parse_workspace_edit, plan as plan_edit, DocumentEdits, EditError,
+    EditGate, EditPlan, TextEdit,
 };
