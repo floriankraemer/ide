@@ -91,6 +91,23 @@ namespace {
 // view presents as information rather than as an error.
 constexpr int kErrBinaryFile = 3;
 
+// The SyntaxHighlighter onTabOpened attached to `document`, if any.
+//
+// QSyntaxHighlighter parents itself to the document it attaches to, so that —
+// not the editor widget — is where the instance can be found again.
+// SyntaxHighlighter deliberately has no Q_OBJECT (it only overrides a plain
+// virtual), and Qt 6.7+ static_asserts that findChild's type has one, so the
+// lookup is a plain dynamic_cast over the document's children instead.
+SyntaxHighlighter *highlighterOf(QTextDocument *document)
+{
+    for (QObject *child : document->children()) {
+        if (auto *highlighter = dynamic_cast<SyntaxHighlighter *>(child)) {
+            return highlighter;
+        }
+    }
+    return nullptr;
+}
+
 // Moves `editor`'s caret to (1-based) `line`, `column` characters into it,
 // and centres the view on it — the shared tail of every jump the IDE makes
 // (Find in Files, Class View, Go to Line).
@@ -624,7 +641,7 @@ public:
     void reloadHighlighterLanguages()
     {
         forEachEditor([](QPlainTextEdit *editor) {
-            if (auto *highlighter = editor->document()->findChild<SyntaxHighlighter *>()) {
+            if (auto *highlighter = highlighterOf(editor->document())) {
                 highlighter->reloadLanguage();
                 highlighter->rehighlight();
             }
@@ -639,13 +656,7 @@ public:
     void refreshHighlighting()
     {
         forEachEditor([](QPlainTextEdit *editor) {
-            // QSyntaxHighlighter parents itself to the document it attaches
-            // to, so that — not the editor widget — is where onTabOpened's
-            // instance can be found again. SyntaxHighlighter has no
-            // Q_OBJECT of its own, so this matches on QSyntaxHighlighter's
-            // metaobject — sound because onTabOpened attaches no other
-            // QSyntaxHighlighter subclass to an editor document.
-            if (auto *highlighter = editor->document()->findChild<SyntaxHighlighter *>()) {
+            if (auto *highlighter = highlighterOf(editor->document())) {
                 highlighter->invalidatePalette();
                 highlighter->rehighlight();
             }
