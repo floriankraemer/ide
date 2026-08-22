@@ -4,61 +4,125 @@
 //! wraps [`highlight`] behind a `QSyntaxHighlighter` adapter later. This
 //! crate only classifies bytes of already-loaded text into spans.
 
-use std::sync::LazyLock;
+mod registry;
+pub mod runtime;
+pub mod theme;
+
+use std::sync::Arc;
 
 use streaming_iterator::StreamingIterator;
 use tree_sitter::{Parser, Query, QueryCursor};
 
-/// Languages this crate can highlight. Rust/JSON from the original
-/// syntax-highlighting-foundation plan, plus C#/Java/PHP (Task B), plus a
-/// no-op fallback.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Language {
-    Rust,
-    Json,
-    CSharp,
-    Java,
-    Php,
-    PlainText,
-}
+pub use registry::{
+    language_by_id, language_for_path, language_name, registry, reload, CompiledLanguage, Def,
+    Language, LanguageDef, LanguageRegistry, OwnedLanguageDef, QuerySet, BUILTIN_LANGUAGES,
+};
 
-/// Map a file extension (no leading dot, e.g. `"rs"`, as returned by
-/// `Path::extension()`) to the [`Language`] used to highlight it. Anything
-/// unrecognized falls back to `PlainText`.
-pub fn language_for_extension(extension: &str) -> Language {
-    match extension {
-        "rs" => Language::Rust,
-        "json" => Language::Json,
-        "cs" => Language::CSharp,
-        "java" => Language::Java,
-        "php" => Language::Php,
-        _ => Language::PlainText,
+/// The highlighting vocabulary: the standard tree-sitter capture names
+/// that upstream `queries/highlights.scm` files actually emit.
+///
+/// **Static and closed, deliberately.** Runtime-loaded grammars never
+/// intern new entries — an unknown capture falls back up its dotted path
+/// (see [`Scope::resolve`]) or is dropped. Interning would let this table
+/// and the view's format table (indexed by the same ids) drift apart, and
+/// a stale id is a wrong colour, not a compile error. Adding a scope means
+/// editing this list and nothing else: the seam carries a bare id and the
+/// view range-guards it.
+///
+/// Append-friendly but *not* reorder-friendly while a build is in flight:
+/// ids are only meaningful within one build (they are never persisted —
+/// [`Scope::name`] is what T2 writes to disk).
+pub static SCOPES: &[&str] = &[
+    "attribute",
+    "boolean",
+    "character",
+    "comment",
+    "comment.documentation",
+    "constant",
+    "constant.builtin",
+    "constructor",
+    "embedded",
+    "escape",
+    "function",
+    "function.builtin",
+    "function.call",
+    "function.macro",
+    "function.method",
+    "keyword",
+    "label",
+    "markup",
+    "markup.bold",
+    "markup.heading",
+    "markup.heading.1",
+    "markup.heading.2",
+    "markup.heading.3",
+    "markup.heading.4",
+    "markup.heading.5",
+    "markup.heading.6",
+    "markup.italic",
+    "markup.link",
+    "markup.link.label",
+    "markup.link.url",
+    "markup.list",
+    "markup.quote",
+    "markup.raw",
+    "markup.raw.block",
+    "markup.strikethrough",
+    "module",
+    "number",
+    "number.float",
+    "operator",
+    "property",
+    "punctuation",
+    "punctuation.bracket",
+    "punctuation.delimiter",
+    "punctuation.special",
+    "string",
+    "string.escape",
+    "string.regexp",
+    "string.special",
+    "tag",
+    "type",
+    "type.builtin",
+    "type.definition",
+    "variable",
+    "variable.builtin",
+    "variable.member",
+    "variable.parameter",
+];
+
+/// A handle into [`SCOPES`] — an index, not an enum, so adding a scope is
+/// a one-line table edit and never a bridge or C++ change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct Scope(u16);
+
+impl Scope {
+    /// The scope a query capture name maps to, with hierarchical fallback:
+    /// `a.b.c` → `a.b` → `a` → `None`.
+    ///
+    /// This is what makes upstream `.scm` files usable unmodified — a
+    /// grammar we never saw can emit `@keyword.coroutine` and still get
+    /// keyword colouring. Resolution is done once per query at
+    /// compile time (see `registry::capture_scopes`), never per span.
+    pub fn resolve(capture_name: &str) -> Option<Scope> {
+        let mut candidate = capture_name;
+        loop {
+            if let Some(index) = SCOPES.iter().position(|s| *s == candidate) {
+                return Some(Scope(index as u16));
+            }
+            candidate = candidate.rsplit_once('.')?.0;
+        }
     }
-}
 
-/// Human-readable name for `language` (status bar, L3).
-pub fn language_name(language: Language) -> &'static str {
-    match language {
-        Language::Rust => "Rust",
-        Language::Json => "JSON",
-        Language::CSharp => "C#",
-        Language::Java => "Java",
-        Language::Php => "PHP",
-        Language::PlainText => "Plain Text",
+    /// The canonical capture name, e.g. `"function.method"`.
+    pub fn name(self) -> &'static str {
+        SCOPES[usize::from(self.0)]
     }
-}
 
-/// Coarse token categories, kept to what tree-sitter's stock Rust/JSON
-/// grammars naturally distinguish — not a general-purpose taxonomy.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TokenKind {
-    Keyword,
-    String,
-    Comment,
-    Number,
-    Function,
-    Type,
-    Other,
+    /// The raw table index, as it crosses the FFI seam.
+    pub fn id(self) -> u16 {
+        self.0
+    }
 }
 
 /// A classified byte range within the highlighted text.
@@ -66,7 +130,7 @@ pub enum TokenKind {
 pub struct HighlightSpan {
     pub start: usize,
     pub end: usize,
-    pub kind: TokenKind,
+    pub scope: Scope,
 }
 
 /// One occurrence of an identifier-like node (byte range `start..end` into
@@ -147,326 +211,6 @@ pub struct SupertypeEdge {
     pub type_end: usize,
 }
 
-/// A `highlights.scm` query, compiled once per language and reused across
-/// calls. Grammar + query text are bundled into the binary via
-/// `include_str!`/`LANGUAGE` constants so highlighting works identically
-/// under `cargo test` and in the packaged app — no runtime file loading.
-struct QueryLanguage {
-    grammar: tree_sitter::Language,
-    query: Query,
-}
-
-fn rust_query_language() -> &'static QueryLanguage {
-    static RUST: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/rust/highlights.scm"))
-            .expect("rust highlights.scm must compile against tree-sitter-rust's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &RUST
-}
-
-fn json_query_language() -> &'static QueryLanguage {
-    static JSON: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/json/highlights.scm"))
-            .expect("json highlights.scm must compile against tree-sitter-json's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JSON
-}
-
-fn csharp_query_language() -> &'static QueryLanguage {
-    static CSHARP: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        // Pinned to 0.21.3, not `LANGUAGE`/`.into()` like the other
-        // grammars: see the version-pin comment on the `tree-sitter-c-sharp`
-        // dependency in Cargo.toml. This older release's binding exposes a
-        // `language()` fn returning `tree_sitter::Language` directly.
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
-        let query = Query::new(&grammar, include_str!("../queries/csharp/highlights.scm"))
-            .expect("csharp highlights.scm must compile against tree-sitter-c-sharp's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &CSHARP
-}
-
-fn java_query_language() -> &'static QueryLanguage {
-    static JAVA: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/java/highlights.scm"))
-            .expect("java highlights.scm must compile against tree-sitter-java's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JAVA
-}
-
-fn php_query_language() -> &'static QueryLanguage {
-    static PHP: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        // `php_only` (body-only grammar), not `LANGUAGE_PHP` (embedded
-        // HTML) — v1 design decision, see the plan doc.
-        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
-        let query = Query::new(&grammar, include_str!("../queries/php/highlights.scm"))
-            .expect("php highlights.scm must compile against tree-sitter-php's php_only grammar");
-        QueryLanguage { grammar, query }
-    });
-    &PHP
-}
-
-fn query_language_for(language: Language) -> Option<&'static QueryLanguage> {
-    match language {
-        Language::Rust => Some(rust_query_language()),
-        Language::Json => Some(json_query_language()),
-        Language::CSharp => Some(csharp_query_language()),
-        Language::Java => Some(java_query_language()),
-        Language::Php => Some(php_query_language()),
-        Language::PlainText => None,
-    }
-}
-
-fn rust_locals_query_language() -> &'static QueryLanguage {
-    static RUST_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/rust/locals.scm"))
-            .expect("rust locals.scm must compile against tree-sitter-rust's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &RUST_LOCALS
-}
-
-fn json_locals_query_language() -> &'static QueryLanguage {
-    static JSON_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/json/locals.scm"))
-            .expect("json locals.scm must compile against tree-sitter-json's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JSON_LOCALS
-}
-
-fn csharp_locals_query_language() -> &'static QueryLanguage {
-    static CSHARP_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
-        let query = Query::new(&grammar, include_str!("../queries/csharp/locals.scm"))
-            .expect("csharp locals.scm must compile against tree-sitter-c-sharp's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &CSHARP_LOCALS
-}
-
-fn java_locals_query_language() -> &'static QueryLanguage {
-    static JAVA_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/java/locals.scm"))
-            .expect("java locals.scm must compile against tree-sitter-java's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JAVA_LOCALS
-}
-
-fn php_locals_query_language() -> &'static QueryLanguage {
-    static PHP_LOCALS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
-        let query = Query::new(&grammar, include_str!("../queries/php/locals.scm"))
-            .expect("php locals.scm must compile against tree-sitter-php's php_only grammar");
-        QueryLanguage { grammar, query }
-    });
-    &PHP_LOCALS
-}
-
-fn locals_query_language_for(language: Language) -> Option<&'static QueryLanguage> {
-    match language {
-        Language::Rust => Some(rust_locals_query_language()),
-        Language::Json => Some(json_locals_query_language()),
-        Language::CSharp => Some(csharp_locals_query_language()),
-        Language::Java => Some(java_locals_query_language()),
-        Language::Php => Some(php_locals_query_language()),
-        Language::PlainText => None,
-    }
-}
-
-fn rust_folds_query_language() -> &'static QueryLanguage {
-    static RUST_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/rust/folds.scm"))
-            .expect("rust folds.scm must compile against tree-sitter-rust's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &RUST_FOLDS
-}
-
-fn json_folds_query_language() -> &'static QueryLanguage {
-    static JSON_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/json/folds.scm"))
-            .expect("json folds.scm must compile against tree-sitter-json's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JSON_FOLDS
-}
-
-fn csharp_folds_query_language() -> &'static QueryLanguage {
-    static CSHARP_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
-        let query = Query::new(&grammar, include_str!("../queries/csharp/folds.scm"))
-            .expect("csharp folds.scm must compile against tree-sitter-c-sharp's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &CSHARP_FOLDS
-}
-
-fn java_folds_query_language() -> &'static QueryLanguage {
-    static JAVA_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/java/folds.scm"))
-            .expect("java folds.scm must compile against tree-sitter-java's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JAVA_FOLDS
-}
-
-fn php_folds_query_language() -> &'static QueryLanguage {
-    static PHP_FOLDS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
-        let query = Query::new(&grammar, include_str!("../queries/php/folds.scm"))
-            .expect("php folds.scm must compile against tree-sitter-php's php_only grammar");
-        QueryLanguage { grammar, query }
-    });
-    &PHP_FOLDS
-}
-
-fn folds_query_language_for(language: Language) -> Option<&'static QueryLanguage> {
-    match language {
-        Language::Rust => Some(rust_folds_query_language()),
-        Language::Json => Some(json_folds_query_language()),
-        Language::CSharp => Some(csharp_folds_query_language()),
-        Language::Java => Some(java_folds_query_language()),
-        Language::Php => Some(php_folds_query_language()),
-        Language::PlainText => None,
-    }
-}
-
-fn rust_tags_query_language() -> &'static QueryLanguage {
-    static RUST_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/rust/tags.scm"))
-            .expect("rust tags.scm must compile against tree-sitter-rust's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &RUST_TAGS
-}
-
-fn json_tags_query_language() -> &'static QueryLanguage {
-    static JSON_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/json/tags.scm"))
-            .expect("json tags.scm must compile against tree-sitter-json's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JSON_TAGS
-}
-
-fn csharp_tags_query_language() -> &'static QueryLanguage {
-    static CSHARP_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
-        let query = Query::new(&grammar, include_str!("../queries/csharp/tags.scm"))
-            .expect("csharp tags.scm must compile against tree-sitter-c-sharp's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &CSHARP_TAGS
-}
-
-fn java_tags_query_language() -> &'static QueryLanguage {
-    static JAVA_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/java/tags.scm"))
-            .expect("java tags.scm must compile against tree-sitter-java's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JAVA_TAGS
-}
-
-fn php_tags_query_language() -> &'static QueryLanguage {
-    static PHP_TAGS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
-        let query = Query::new(&grammar, include_str!("../queries/php/tags.scm"))
-            .expect("php tags.scm must compile against tree-sitter-php's php_only grammar");
-        QueryLanguage { grammar, query }
-    });
-    &PHP_TAGS
-}
-
-fn tags_query_language_for(language: Language) -> Option<&'static QueryLanguage> {
-    match language {
-        Language::Rust => Some(rust_tags_query_language()),
-        Language::Json => Some(json_tags_query_language()),
-        Language::CSharp => Some(csharp_tags_query_language()),
-        Language::Java => Some(java_tags_query_language()),
-        Language::Php => Some(php_tags_query_language()),
-        Language::PlainText => None,
-    }
-}
-
-fn rust_inherits_query_language() -> &'static QueryLanguage {
-    static RUST_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/rust/inherits.scm"))
-            .expect("rust inherits.scm must compile against tree-sitter-rust's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &RUST_INHERITS
-}
-
-fn json_inherits_query_language() -> &'static QueryLanguage {
-    static JSON_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_json::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/json/inherits.scm"))
-            .expect("json inherits.scm must compile against tree-sitter-json's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JSON_INHERITS
-}
-
-fn csharp_inherits_query_language() -> &'static QueryLanguage {
-    static CSHARP_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_c_sharp::language();
-        let query = Query::new(&grammar, include_str!("../queries/csharp/inherits.scm"))
-            .expect("csharp inherits.scm must compile against tree-sitter-c-sharp's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &CSHARP_INHERITS
-}
-
-fn java_inherits_query_language() -> &'static QueryLanguage {
-    static JAVA_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
-        let query = Query::new(&grammar, include_str!("../queries/java/inherits.scm"))
-            .expect("java inherits.scm must compile against tree-sitter-java's grammar");
-        QueryLanguage { grammar, query }
-    });
-    &JAVA_INHERITS
-}
-
-fn php_inherits_query_language() -> &'static QueryLanguage {
-    static PHP_INHERITS: LazyLock<QueryLanguage> = LazyLock::new(|| {
-        let grammar: tree_sitter::Language = tree_sitter_php::LANGUAGE_PHP_ONLY.into();
-        let query = Query::new(&grammar, include_str!("../queries/php/inherits.scm"))
-            .expect("php inherits.scm must compile against tree-sitter-php's php_only grammar");
-        QueryLanguage { grammar, query }
-    });
-    &PHP_INHERITS
-}
-
-fn inherits_query_language_for(language: Language) -> Option<&'static QueryLanguage> {
-    match language {
-        Language::Rust => Some(rust_inherits_query_language()),
-        Language::Json => Some(json_inherits_query_language()),
-        Language::CSharp => Some(csharp_inherits_query_language()),
-        Language::Java => Some(java_inherits_query_language()),
-        Language::Php => Some(php_inherits_query_language()),
-        Language::PlainText => None,
-    }
-}
-
 /// Map a `tags.scm` `@definition.<kind>` capture name onto [`SymbolKind`]
 /// — the part after the dot is the kind name verbatim (lowercased).
 fn symbol_kind_for_capture(capture_name: &str) -> Option<SymbolKind> {
@@ -482,20 +226,13 @@ fn symbol_kind_for_capture(capture_name: &str) -> Option<SymbolKind> {
     }
 }
 
-/// Map a query capture name (`@keyword`, `@string`, ...) onto the existing
-/// `TokenKind` taxonomy. Captures with no mapping (there are none today,
-/// since every capture in our `.scm` files is one of these six) are
-/// dropped, mirroring the old hand-matcher's `_ => None` arm.
-fn token_kind_for_capture(capture_name: &str) -> Option<TokenKind> {
-    match capture_name {
-        "keyword" => Some(TokenKind::Keyword),
-        "string" => Some(TokenKind::String),
-        "comment" => Some(TokenKind::Comment),
-        "number" => Some(TokenKind::Number),
-        "function" => Some(TokenKind::Function),
-        "type" => Some(TokenKind::Type),
-        _ => None,
-    }
+/// One-shot full parse of `text` with `grammar`, for the stateless
+/// extraction entry points. `Highlighter` keeps its own persistent tree
+/// instead.
+fn parse_once(grammar: &tree_sitter::Language, text: &str) -> Option<tree_sitter::Tree> {
+    let mut parser = Parser::new();
+    parser.set_language(grammar).ok()?;
+    parser.parse(text, None)
 }
 
 /// Highlight `text` as `language`, returning spans in document order.
@@ -523,27 +260,32 @@ pub fn highlight(language: Language, text: &str) -> Vec<HighlightSpan> {
 /// `rust/locals.scm`), so captures are folded by node byte-range with OR:
 /// each identifier node appears exactly once in the result, with
 /// `is_definition` true if any capture on it was `@definition`.
-/// [`Language::PlainText`] (or a language with no `locals.scm`) yields an
+/// [`Language::PLAIN_TEXT`] (or a language with no `locals.scm`) yields an
 /// empty vec.
 pub fn identifier_occurrences(language: Language, text: &str) -> Vec<Occurrence> {
-    let Some(ql) = locals_query_language_for(language) else {
+    let Some(compiled) = registry::compiled(language) else {
         return Vec::new();
     };
-    let mut parser = Parser::new();
-    if parser.set_language(&ql.grammar).is_err() {
-        return Vec::new();
-    }
-    let Some(tree) = parser.parse(text, None) else {
+    let (Some(query), Some(tree)) = (
+        compiled.locals.as_ref(),
+        parse_once(&compiled.grammar, text),
+    ) else {
         return Vec::new();
     };
+    occurrences_from_tree(query, &tree, text)
+}
 
+/// [`identifier_occurrences`]'s body against an already-parsed tree, so
+/// [`analyze_file`] can reuse one parse across all three extractions.
+fn occurrences_from_tree(query: &Query, tree: &tree_sitter::Tree, text: &str) -> Vec<Occurrence> {
+    count_query_walk();
     let mut by_range: std::collections::BTreeMap<(usize, usize), bool> =
         std::collections::BTreeMap::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&ql.query, tree.root_node(), text.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
     while let Some(m) = matches.next() {
         for capture in m.captures {
-            let capture_name = ql.query.capture_names()[capture.index as usize];
+            let capture_name = query.capture_names()[capture.index as usize];
             let is_definition = match capture_name {
                 "definition" => true,
                 "reference" => false,
@@ -592,28 +334,31 @@ struct RawSymbol {
 /// byte-range containment rather than from an explicit parent capture —
 /// simpler to get right than threading parent pointers through every
 /// query, and correct by construction since a tree-sitter node's range
-/// always fully contains its descendants' ranges. [`Language::PlainText`]
+/// always fully contains its descendants' ranges. [`Language::PLAIN_TEXT`]
 /// (or a language with an empty `tags.scm`, i.e. JSON) yields an empty vec.
 pub fn outline(language: Language, text: &str) -> Vec<SymbolNode> {
-    let Some(ql) = tags_query_language_for(language) else {
+    let Some(compiled) = registry::compiled(language) else {
         return Vec::new();
     };
-    let mut parser = Parser::new();
-    if parser.set_language(&ql.grammar).is_err() {
-        return Vec::new();
-    }
-    let Some(tree) = parser.parse(text, None) else {
+    let (Some(query), Some(tree)) = (compiled.tags.as_ref(), parse_once(&compiled.grammar, text))
+    else {
         return Vec::new();
     };
+    outline_from_tree(query, &tree, text)
+}
 
+/// [`outline`]'s body against an already-parsed tree, so [`analyze_file`]
+/// can reuse one parse across all three extractions.
+fn outline_from_tree(query: &Query, tree: &tree_sitter::Tree, text: &str) -> Vec<SymbolNode> {
+    count_query_walk();
     let mut raw: Vec<RawSymbol> = Vec::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&ql.query, tree.root_node(), text.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
     while let Some(m) = matches.next() {
         let mut definition: Option<(SymbolKind, usize, usize)> = None;
         let mut name: Option<(usize, usize)> = None;
         for capture in m.captures {
-            let capture_name = ql.query.capture_names()[capture.index as usize];
+            let capture_name = query.capture_names()[capture.index as usize];
             if capture_name == "name" {
                 name = Some((capture.node.start_byte(), capture.node.end_byte()));
             } else if let Some(kind) = symbol_kind_for_capture(capture_name) {
@@ -644,7 +389,7 @@ pub fn outline(language: Language, text: &str) -> Vec<SymbolNode> {
 /// `@type` and one declared supertype's name token as `@supertype`. A
 /// declaration listing several supertypes matches the pattern once per
 /// supertype, so each pair arrives as its own edge with no extra work
-/// here. [`Language::PlainText`] (or a language with an empty
+/// here. [`Language::PLAIN_TEXT`] (or a language with an empty
 /// `inherits.scm`, i.e. JSON) yields an empty vec.
 ///
 /// Name-based like the rest of this crate (ADR-0008): an edge records the
@@ -652,25 +397,34 @@ pub fn outline(language: Language, text: &str) -> Vec<SymbolNode> {
 /// Comparable` and a same-named interface in another namespace are
 /// indistinguishable here by design.
 pub fn supertype_edges(language: Language, text: &str) -> Vec<SupertypeEdge> {
-    let Some(ql) = inherits_query_language_for(language) else {
+    let Some(compiled) = registry::compiled(language) else {
         return Vec::new();
     };
-    let mut parser = Parser::new();
-    if parser.set_language(&ql.grammar).is_err() {
-        return Vec::new();
-    }
-    let Some(tree) = parser.parse(text, None) else {
+    let (Some(query), Some(tree)) = (
+        compiled.inherits.as_ref(),
+        parse_once(&compiled.grammar, text),
+    ) else {
         return Vec::new();
     };
+    supertype_edges_from_tree(query, &tree, text)
+}
 
+/// [`supertype_edges`]'s body against an already-parsed tree, so
+/// [`analyze_file`] can reuse one parse across all three extractions.
+fn supertype_edges_from_tree(
+    query: &Query,
+    tree: &tree_sitter::Tree,
+    text: &str,
+) -> Vec<SupertypeEdge> {
+    count_query_walk();
     let mut edges: Vec<SupertypeEdge> = Vec::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&ql.query, tree.root_node(), text.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
     while let Some(m) = matches.next() {
         let mut type_span: Option<(usize, usize)> = None;
         let mut supertype_span: Option<(usize, usize)> = None;
         for capture in m.captures {
-            match ql.query.capture_names()[capture.index as usize] {
+            match query.capture_names()[capture.index as usize] {
                 "type" => type_span = Some((capture.node.start_byte(), capture.node.end_byte())),
                 "supertype" => {
                     supertype_span = Some((capture.node.start_byte(), capture.node.end_byte()))
@@ -689,6 +443,108 @@ pub fn supertype_edges(language: Language, text: &str) -> Vec<SupertypeEdge> {
     }
     edges.sort_by_key(|e| (e.type_start, e.supertype_name.clone()));
     edges
+}
+
+/// How many extraction query walks this process has run, for tests that
+/// need to assert *which* work a code path did rather than how long it
+/// took (see index-core's go-to-definition early-out). A relaxed counter
+/// bumped once per query walk — not per match — so it costs nothing on
+/// the hot paths it measures.
+#[doc(hidden)]
+pub static QUERY_WALKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn count_query_walk() {
+    QUERY_WALKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// One parsed buffer whose extraction queries the caller drives
+/// individually — parse once, then ask for outline / occurrences /
+/// supertype edges only as each is actually needed.
+///
+/// [`analyze_file`] is the "I need all three" shorthand over this. Prefer
+/// the handle wherever a cheap query can decide that the expensive ones
+/// are pointless: go-to-definition looks at [`Self::occurrences`] first
+/// and, if the caret is not on an identifier, returns without ever
+/// running the `tags` walk. Each query walk costs roughly as much as the
+/// parse itself, so skipping one is not a micro-optimisation.
+pub struct ParsedFile<'text> {
+    compiled: Arc<CompiledLanguage>,
+    tree: tree_sitter::Tree,
+    text: &'text str,
+}
+
+impl<'text> ParsedFile<'text> {
+    /// Parse `text` as `language`. `None` when the language has no grammar
+    /// (plain text, a query that would not compile) or the parse fails —
+    /// the same conditions under which the one-shot entry points return
+    /// empty results.
+    pub fn parse(language: Language, text: &'text str) -> Option<Self> {
+        let compiled = registry::compiled(language)?;
+        let tree = parse_once(&compiled.grammar, text)?;
+        Some(Self {
+            compiled,
+            tree,
+            text,
+        })
+    }
+
+    /// Same result as [`outline`], without re-parsing.
+    pub fn outline(&self) -> Vec<SymbolNode> {
+        self.compiled
+            .tags
+            .as_ref()
+            .map(|q| outline_from_tree(q, &self.tree, self.text))
+            .unwrap_or_default()
+    }
+
+    /// Same result as [`identifier_occurrences`], without re-parsing.
+    pub fn occurrences(&self) -> Vec<Occurrence> {
+        self.compiled
+            .locals
+            .as_ref()
+            .map(|q| occurrences_from_tree(q, &self.tree, self.text))
+            .unwrap_or_default()
+    }
+
+    /// Same result as [`supertype_edges`], without re-parsing.
+    pub fn supertype_edges(&self) -> Vec<SupertypeEdge> {
+        self.compiled
+            .inherits
+            .as_ref()
+            .map(|q| supertype_edges_from_tree(q, &self.tree, self.text))
+            .unwrap_or_default()
+    }
+}
+
+/// Everything [`index-core`](../index_core/index.html) extracts from one
+/// file, from a single parse: what [`outline`],
+/// [`identifier_occurrences`] and [`supertype_edges`] each return, but
+/// with the buffer parsed once instead of three times.
+pub struct FileAnalysis {
+    pub outline: Vec<SymbolNode>,
+    pub occurrences: Vec<Occurrence>,
+    pub supertype_edges: Vec<SupertypeEdge>,
+}
+
+/// Parse `text` as `language` once and run all three extraction queries
+/// against that one tree. Equivalent to calling [`outline`],
+/// [`identifier_occurrences`] and [`supertype_edges`] separately -- same
+/// results, a third of the parsing. Each field is empty when its query is
+/// absent for the language, and all three are empty when the language has
+/// no grammar or the parse fails, matching the individual entry points.
+pub fn analyze_file(language: Language, text: &str) -> FileAnalysis {
+    let Some(parsed) = ParsedFile::parse(language, text) else {
+        return FileAnalysis {
+            outline: Vec::new(),
+            occurrences: Vec::new(),
+            supertype_edges: Vec::new(),
+        };
+    };
+    FileAnalysis {
+        outline: parsed.outline(),
+        occurrences: parsed.occurrences(),
+        supertype_edges: parsed.supertype_edges(),
+    }
 }
 
 /// Nests `raw` definitions by AST byte-range containment: a classic
@@ -740,23 +596,313 @@ fn build_symbol_tree(mut raw: Vec<RawSymbol>, text: &str) -> Vec<SymbolNode> {
     roots
 }
 
-fn spans_from_tree(ql: &QueryLanguage, tree: &tree_sitter::Tree, text: &str) -> Vec<HighlightSpan> {
-    let mut spans = Vec::new();
+/// True when tree-sitter parsed a predicate on `pattern` that it does not
+/// itself evaluate, so the pattern would match *unguarded*.
+///
+/// `QueryCursor::matches` filters on the standard text predicates
+/// (`#eq?`, `#not-eq?`, `#match?`, `#not-match?`, `#any-of?`,
+/// `#not-any-of?` and their `#any-*` variants) — that is where predicate
+/// evaluation actually happens, and it is why guarded patterns are safe to
+/// ship. Two other kinds are parsed but never applied:
+///
+///   * property predicates — `#is? local` / `#is-not? local`, which depend
+///     on a locals-scope resolver this crate does not have;
+///   * general predicates — anything tree-sitter does not know at all,
+///     which is where nvim-treesitter's `#lua-match?`, `#has-ancestor?`
+///     and friends land.
+///
+/// A pattern carrying one of those is *dropped*, not silently unguarded.
+/// Failing closed is the only safe default: Ruby's `(identifier) @method
+/// (#is-not? local)` unguarded paints every identifier in the file. It
+/// also makes pasting an upstream `.scm` file safe — an unsupported guard
+/// costs that one pattern's highlighting, never a wrong repaint of the
+/// whole document.
+///
+/// `#set!` is a directive, not a predicate; it lands in the query's
+/// property *settings* and is simply ignored here.
+fn pattern_is_guarded_by_an_unevaluated_predicate(query: &Query, pattern: usize) -> bool {
+    !query.property_predicates(pattern).is_empty() || !query.general_predicates(pattern).is_empty()
+}
+
+/// Document order for a highlight stream: by `start`, and on a tie the
+/// wider span first. The view applies formats in stream order, so the
+/// narrower — more specific — span has to come last to stay visible: an
+/// `@markup.heading` over `# Title` must not repaint the `#` its own
+/// `@punctuation.special` claimed.
+fn sort_spans(spans: &mut [HighlightSpan]) {
+    spans.sort_by(|a, b| a.start.cmp(&b.start).then(b.end.cmp(&a.end)));
+}
+
+/// `capture_scopes` is the query's capture index -> [`Scope`] table,
+/// resolved once when the query was compiled — the per-span hot path only
+/// indexes it.
+///
+/// Overlapping captures on the *same* node resolve first-pattern-wins, the
+/// standard tree-sitter highlighting convention: a file lists its specific
+/// patterns first and its naming-convention catch-alls (CamelCase is a
+/// type, SCREAMING_CASE is a constant) last, and the specific one wins.
+/// Without this the view would paint whichever span happened to be sorted
+/// last, since it applies formats in order and the later write wins.
+fn spans_from_tree(
+    query: &Query,
+    capture_scopes: &[Option<Scope>],
+    tree: &tree_sitter::Tree,
+    text: &str,
+) -> Vec<HighlightSpan> {
+    // (span, pattern index) — the pattern index is only needed to break
+    // same-node ties and is dropped again below.
+    let mut spans: Vec<(HighlightSpan, usize)> = Vec::new();
     let mut cursor = QueryCursor::new();
-    let mut matches = cursor.matches(&ql.query, tree.root_node(), text.as_bytes());
+    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
     while let Some(m) = matches.next() {
+        if pattern_is_guarded_by_an_unevaluated_predicate(query, m.pattern_index) {
+            continue;
+        }
         for capture in m.captures {
-            let capture_name = ql.query.capture_names()[capture.index as usize];
-            if let Some(kind) = token_kind_for_capture(capture_name) {
-                spans.push(HighlightSpan {
-                    start: capture.node.start_byte(),
-                    end: capture.node.end_byte(),
-                    kind,
-                });
+            if let Some(Some(scope)) = capture_scopes.get(capture.index as usize) {
+                spans.push((
+                    HighlightSpan {
+                        start: capture.node.start_byte(),
+                        end: capture.node.end_byte(),
+                        scope: *scope,
+                    },
+                    m.pattern_index,
+                ));
             }
         }
     }
-    spans.sort_by_key(|span| (span.start, span.end));
+    // Widest first on a tie, so the narrower — more specific — span is
+    // applied last and stays visible; among spans over the *same* node,
+    // the earlier pattern wins.
+    spans.sort_by(|(a, ap), (b, bp)| {
+        a.start
+            .cmp(&b.start)
+            .then(b.end.cmp(&a.end))
+            .then(ap.cmp(bp))
+    });
+    spans.dedup_by_key(|(span, _)| (span.start, span.end));
+    spans.into_iter().map(|(span, _)| span).collect()
+}
+
+/// How deep injected regions are followed: the host document is depth 0,
+/// and a tree is only asked for its own injections while its depth is
+/// below this bound. So up to three nested injected trees are parsed
+/// (Markdown → HTML → CSS is exactly the limit), and a fourth level is
+/// left unhighlighted rather than followed.
+///
+/// A bound, not recursion to exhaustion: injection queries are data —
+/// a runtime grammar (G1a/G1b) or a hostile file can describe a region
+/// that injects itself, and an unbounded walk on that input hangs the
+/// editor. Three levels covers every real nesting anyone has reported.
+pub const MAX_INJECTION_DEPTH: usize = 3;
+
+/// One injected region found by an `injections.scm` match: the language
+/// it is written in, and the byte ranges of its `@injection.content`
+/// captures. Several ranges in one match are parsed as *one* tree (that
+/// is what `Parser::set_included_ranges` is for), so a language split
+/// across several nodes still sees one continuous document.
+struct InjectionRegion {
+    language: String,
+    ranges: Vec<tree_sitter::Range>,
+}
+
+impl InjectionRegion {
+    /// True when the injected region *contains* `span` — the host span has
+    /// nothing left to say about those bytes, so it is dropped in favour of
+    /// the injected language's own spans.
+    ///
+    /// Containment rather than mere overlap, because a host span can
+    /// legitimately *enclose* an injected region: Markdown hands every run
+    /// of prose to the inline grammar, so a heading, a list item or a fenced
+    /// block always encloses an injection, and dropping on overlap left the
+    /// whole markup family unpaintable. An enclosing span is sorted before
+    /// the spans inside it (see [`spans_with_injections`]), so the injected
+    /// language still wins on the bytes it claims.
+    fn contains(&self, span: &HighlightSpan) -> bool {
+        self.ranges
+            .iter()
+            .any(|r| span.start >= r.start_byte && span.end <= r.end_byte)
+    }
+}
+
+/// Fence tags and language names people actually write, mapped onto the
+/// catalog ids they mean.
+///
+/// A Markdown fence is tagged by a human (` ```js `), not by a query
+/// author, and injection resolution matches a registry id exactly. The
+/// usual tree-sitter answer is one `((#eq? @lang "js") (#set!
+/// injection.language "javascript"))` pattern per alias per host language
+/// — a table that would have to be written out, and kept in step, in
+/// every `injections.scm` that can host a fence. So the normalisation
+/// lives here instead: one place, which every injected language name
+/// passes through.
+///
+/// Deliberately short: only aliases that are genuinely common in the
+/// wild, and only onto ids the catalog actually has. An unknown name
+/// still resolves to nothing and the region is left unhighlighted, which
+/// is the correct outcome for a language we do not ship.
+const INJECTION_LANGUAGE_ALIASES: &[(&str, &str)] = &[
+    ("c++", "cpp"),
+    ("c#", "csharp"),
+    ("cjs", "javascript"),
+    ("cs", "csharp"),
+    ("cts", "typescript"),
+    ("cxx", "cpp"),
+    ("golang", "go"),
+    ("htm", "html"),
+    ("js", "javascript"),
+    ("jsx", "javascript"),
+    ("md", "markdown"),
+    ("mjs", "javascript"),
+    ("mts", "typescript"),
+    ("py", "python"),
+    ("rs", "rust"),
+    ("sh", "bash"),
+    ("shell", "bash"),
+    ("ts", "typescript"),
+    ("yml", "yaml"),
+    ("zsh", "bash"),
+];
+
+/// [`INJECTION_LANGUAGE_ALIASES`] applied to an already-trimmed,
+/// already-lowercased injected language name. A name that is not an alias
+/// is returned unchanged — including one that is not a catalog id at all,
+/// which resolution then fails on as before.
+fn canonical_injection_language(name: &str) -> &str {
+    INJECTION_LANGUAGE_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == name)
+        .map_or(name, |(_, id)| *id)
+}
+
+/// The injected regions `query` finds in `tree`.
+///
+/// Both standard spellings of the language name are supported: an
+/// `@injection.language` capture (the node's text names the language) and
+/// a `(#set! injection.language "css")` pattern directive. The directive
+/// wins when a pattern somehow carries both, since it is the literal the
+/// query author wrote rather than text read out of the document.
+fn injection_regions(query: &Query, tree: &tree_sitter::Tree, text: &str) -> Vec<InjectionRegion> {
+    let capture_names = query.capture_names();
+    let mut regions = Vec::new();
+    let mut cursor = QueryCursor::new();
+    let mut matches = cursor.matches(query, tree.root_node(), text.as_bytes());
+    while let Some(m) = matches.next() {
+        // Same rule as `spans_from_tree`: a guard tree-sitter cannot
+        // evaluate takes its pattern down rather than shipping unguarded.
+        // Here the cost of getting that wrong is parsing an arbitrary
+        // region as the wrong language, not just a wrong colour.
+        if pattern_is_guarded_by_an_unevaluated_predicate(query, m.pattern_index) {
+            continue;
+        }
+        let mut language = query
+            .property_settings(m.pattern_index)
+            .iter()
+            .find(|p| &*p.key == "injection.language")
+            .and_then(|p| p.value.as_deref())
+            .map(str::to_string);
+        let mut ranges = Vec::new();
+        for capture in m.captures {
+            match capture_names[capture.index as usize] {
+                "injection.content" => {
+                    let range = capture.node.range();
+                    if range.end_byte > range.start_byte {
+                        ranges.push(range);
+                    }
+                }
+                "injection.language" if language.is_none() => {
+                    language = capture
+                        .node
+                        .utf8_text(text.as_bytes())
+                        .ok()
+                        .map(|name| name.trim().trim_matches(['"', '\'', '`']).to_lowercase());
+                }
+                _ => {}
+            }
+        }
+        let Some(language) = language
+            .map(|l| canonical_injection_language(l.trim()).to_string())
+            .filter(|l| !l.is_empty())
+        else {
+            continue;
+        };
+        if ranges.is_empty() {
+            continue;
+        }
+        // `set_included_ranges` rejects ranges that are not ascending and
+        // disjoint, and query captures arrive in match order, not
+        // document order.
+        ranges.sort_by_key(|r| r.start_byte);
+        ranges.dedup_by_key(|r| r.start_byte);
+        regions.push(InjectionRegion { language, ranges });
+    }
+    regions
+}
+
+/// Highlight spans for `tree` plus every language injected into it, as one
+/// stream sorted by `(start, end)`.
+///
+/// The sort is a contract, not a convenience: the view binary-searches
+/// this stream by `start` (`syntax_highlighter.cpp`), so an out-of-order
+/// span silently mis-colours the document rather than failing loudly.
+/// Ties on `start` are ordered widest-first, because the view applies
+/// formats in stream order and the narrower, more specific span has to be
+/// the one that ends up visible.
+///
+/// Injected spans win: a host span *inside* an injected region is dropped
+/// before the injected spans are merged in, so `<script>`'s JS is coloured
+/// as JS and not left under whatever the host grammar made of it. A host
+/// span that *encloses* an injected region survives (a Markdown heading
+/// encloses the inline run it is made of) and is sorted first, so the view
+/// paints it and then paints the injected spans over it.
+///
+/// `resolve` maps an injected language name onto a compiled language. It
+/// is a parameter rather than a direct registry call so the recursion can
+/// be driven by synthetic languages in tests — [`MAX_INJECTION_DEPTH`] is
+/// only worth having if something proves it holds.
+fn spans_with_injections(
+    compiled: &CompiledLanguage,
+    tree: &tree_sitter::Tree,
+    text: &str,
+    depth: usize,
+    resolve: &dyn Fn(&str) -> Option<Arc<CompiledLanguage>>,
+) -> Vec<HighlightSpan> {
+    let mut spans = compiled.highlights.as_ref().map_or_else(Vec::new, |query| {
+        spans_from_tree(query, &compiled.highlight_scopes, tree, text)
+    });
+    let regions = match compiled.injections.as_ref() {
+        Some(query) if depth < MAX_INJECTION_DEPTH => injection_regions(query, tree, text),
+        _ => Vec::new(),
+    };
+    if regions.is_empty() {
+        return spans;
+    }
+    spans.retain(|span| !regions.iter().any(|region| region.contains(span)));
+    for region in regions {
+        let Some(inner) = resolve(&region.language) else {
+            continue;
+        };
+        let mut parser = Parser::new();
+        if parser.set_language(&inner.grammar).is_err()
+            || parser.set_included_ranges(&region.ranges).is_err()
+        {
+            continue;
+        }
+        // `set_included_ranges` over the *whole* document, not a
+        // substring: byte offsets in the sub-tree are already document
+        // offsets, so nothing has to be shifted back afterwards.
+        let Some(subtree) = parser.parse(text, None) else {
+            continue;
+        };
+        spans.extend(spans_with_injections(
+            &inner,
+            &subtree,
+            text,
+            depth + 1,
+            resolve,
+        ));
+    }
+    sort_spans(&mut spans);
     spans
 }
 
@@ -788,11 +934,13 @@ fn point_at(text: &str, offset: usize) -> tree_sitter::Point {
 /// parse on every change (upgrade over the v1 ceiling documented on
 /// [`highlight`]'s predecessor — decision A6/A1).
 ///
-/// [`Language::PlainText`] is a valid, cheap no-op: `set_text`/`edit` just
+/// [`Language::PLAIN_TEXT`] is a valid, cheap no-op: `set_text`/`edit` just
 /// track the text and return no spans, so callers don't need to special
 /// case unrecognized extensions.
 pub struct Highlighter {
-    language: Language,
+    /// Held as an `Arc`, not looked up per call: a registry reload must
+    /// not invalidate an open editor's grammar mid-session.
+    compiled: Option<Arc<CompiledLanguage>>,
     parser: Option<Parser>,
     tree: Option<tree_sitter::Tree>,
     text: String,
@@ -800,16 +948,17 @@ pub struct Highlighter {
 
 impl Highlighter {
     /// Create a highlighter for `language`. Cheap: the query/grammar are
-    /// process-wide statics (see [`query_language_for`]), so this only
+    /// process-wide, compiled once and shared behind an `Arc`, so this only
     /// allocates a `Parser` and an empty text buffer.
     pub fn new(language: Language) -> Self {
-        let parser = query_language_for(language).and_then(|ql| {
+        let compiled = registry::compiled(language);
+        let parser = compiled.as_ref().and_then(|compiled| {
             let mut parser = Parser::new();
-            parser.set_language(&ql.grammar).ok()?;
+            parser.set_language(&compiled.grammar).ok()?;
             Some(parser)
         });
         Self {
-            language,
+            compiled,
             parser,
             tree: None,
             text: String::new(),
@@ -856,8 +1005,23 @@ impl Highlighter {
         self.reparse()
     }
 
+    /// Reparse the host tree incrementally, then re-derive every injected
+    /// region from scratch.
+    ///
+    /// Only the host tree is persistent. Injected sub-trees are rebuilt on
+    /// every reparse, because an edit can move, split, delete or create a
+    /// region outright (typing `</script>` re-languages everything after
+    /// it), and a sub-tree kept across that is not stale in a way the user
+    /// forgives — it is the wrong language on screen. The cost is one full
+    /// parse per injected region per keystroke, bounded by how much of the
+    /// document is injected; a document with no `injections.scm` pays
+    /// nothing at all and behaves exactly as before.
+    ///
+    /// ponytail: re-derive per edit; make injected sub-trees incremental
+    /// (edit each, keyed by region identity) only if profiling on a real
+    /// HTML/Markdown file says it matters.
     fn reparse(&mut self) -> Vec<HighlightSpan> {
-        let Some(ql) = query_language_for(self.language) else {
+        let Some(compiled) = self.compiled.clone() else {
             return Vec::new();
         };
         let Some(parser) = self.parser.as_mut() else {
@@ -866,7 +1030,13 @@ impl Highlighter {
         let Some(new_tree) = parser.parse(&self.text, self.tree.as_ref()) else {
             return Vec::new();
         };
-        let spans = spans_from_tree(ql, &new_tree, &self.text);
+        // Resolved through the registry per reparse rather than cached: a
+        // lookup is an `Arc` clone plus a `OnceLock` read, and reading
+        // through means a live registry reload (G2) also reaches injected
+        // grammars. The host grammar stays pinned, as decision 3 requires.
+        let spans = spans_with_injections(&compiled, &new_tree, &self.text, 0, &|id| {
+            language_by_id(id).and_then(registry::compiled)
+        });
         self.tree = Some(new_tree);
         spans
     }
@@ -874,19 +1044,21 @@ impl Highlighter {
     /// Foldable regions (Task C) in document order, from the current
     /// incremental tree — i.e. whatever `set_text`/`edit` last left behind.
     /// Does not reparse: call after `set_text`/`edit`, not instead of it.
-    /// Empty for [`Language::PlainText`], a language with no `folds.scm`,
+    /// Empty for [`Language::PLAIN_TEXT`], a language with no `folds.scm`,
     /// or before the first `set_text`/`edit` call.
     pub fn fold_ranges(&self) -> Vec<FoldRange> {
-        let (Some(ql), Some(tree)) = (folds_query_language_for(self.language), self.tree.as_ref())
-        else {
+        let (Some(query), Some(tree)) = (
+            self.compiled.as_ref().and_then(|c| c.folds.as_ref()),
+            self.tree.as_ref(),
+        ) else {
             return Vec::new();
         };
         let mut ranges = Vec::new();
         let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(&ql.query, tree.root_node(), self.text.as_bytes());
+        let mut matches = cursor.matches(query, tree.root_node(), self.text.as_bytes());
         while let Some(m) = matches.next() {
             for capture in m.captures {
-                let capture_name = ql.query.capture_names()[capture.index as usize];
+                let capture_name = query.capture_names()[capture.index as usize];
                 if capture_name == "fold" {
                     ranges.push(FoldRange {
                         start: capture.node.start_byte(),
@@ -903,114 +1075,219 @@ impl Highlighter {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
 
-    fn find(spans: &[HighlightSpan], kind: TokenKind) -> Option<&HighlightSpan> {
-        spans.iter().find(|s| s.kind == kind)
+    fn lang(id: &str) -> Language {
+        language_by_id(id).expect("catalog language")
+    }
+    fn rust() -> Language {
+        lang("rust")
+    }
+    fn json() -> Language {
+        lang("json")
+    }
+    fn csharp() -> Language {
+        lang("csharp")
+    }
+    fn java() -> Language {
+        lang("java")
+    }
+    fn php() -> Language {
+        lang("php")
+    }
+
+    fn scope(name: &str) -> Scope {
+        Scope::resolve(name).unwrap_or_else(|| panic!("no such scope: {name}"))
+    }
+
+    fn find<'a>(spans: &'a [HighlightSpan], name: &str) -> Option<&'a HighlightSpan> {
+        let wanted = scope(name);
+        spans.iter().find(|s| s.scope == wanted)
+    }
+
+    #[test]
+    fn analyze_file_matches_the_three_separate_entry_points() {
+        let rust_source = r#"
+            pub trait Greeter { fn greet(&self) -> String; }
+            pub struct Loud { volume: u8 }
+            impl Greeter for Loud {
+                fn greet(&self) -> String { let n = self.volume; format!("{n}") }
+            }
+        "#;
+        for (language, source) in [
+            (rust(), rust_source),
+            (json(), "{\"a\": [1, 2]}"),
+            (Language::PLAIN_TEXT, "just words"),
+        ] {
+            let combined = analyze_file(language, source);
+            assert_eq!(combined.outline, outline(language, source));
+            assert_eq!(
+                combined.occurrences,
+                identifier_occurrences(language, source)
+            );
+            assert_eq!(combined.supertype_edges, supertype_edges(language, source));
+        }
+        // Not vacuous: the Rust fixture really does exercise all three.
+        let combined = analyze_file(rust(), rust_source);
+        assert!(!combined.outline.is_empty());
+        assert!(!combined.occurrences.is_empty());
+        assert!(!combined.supertype_edges.is_empty());
+    }
+
+    #[test]
+    fn scope_names_are_unique_and_every_dotted_scope_has_its_root() {
+        let mut sorted: Vec<&str> = SCOPES.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), SCOPES.len(), "duplicate scope name");
+        for name in SCOPES {
+            if let Some((parent, _)) = name.rsplit_once('.') {
+                assert!(
+                    SCOPES.contains(&parent),
+                    "{name} has no parent scope {parent}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn markdown_markup_captures_resolve_to_the_markup_family() {
+        let source = "# Title\n\nA [label](https://example.com) and *emphasis*.\n";
+        let spans = highlight(lang("markdown"), source);
+        let text_of = |name: &str| {
+            spans
+                .iter()
+                .find(|span| span.scope.name() == name)
+                .map(|span| &source[span.start..span.end])
+        };
+        assert_eq!(text_of("markup.heading.1"), Some("# Title\n"));
+        assert_eq!(text_of("markup.link.label"), Some("label"));
+        assert_eq!(text_of("markup.link.url"), Some("https://example.com"));
+        assert_eq!(text_of("markup.italic"), Some("*emphasis*"));
+    }
+
+    #[test]
+    fn an_unknown_capture_falls_back_up_its_dotted_path() {
+        // Exact hit.
+        assert_eq!(scope("function.method").name(), "function.method");
+        // One level up: `function.method` is in the table, its `.static`
+        // refinement is not.
+        assert_eq!(scope("function.method.static").name(), "function.method");
+        // All the way to the root: no `keyword.*` entry exists at all.
+        assert_eq!(scope("keyword.conditional.ternary").name(), "keyword");
+    }
+
+    #[test]
+    fn a_fully_unknown_capture_is_dropped() {
+        assert_eq!(Scope::resolve("nonsense"), None);
+        assert_eq!(Scope::resolve("nonsense.and.more"), None);
+        assert_eq!(Scope::resolve(""), None);
     }
 
     #[test]
     fn extension_maps_to_language() {
-        assert_eq!(language_for_extension("rs"), Language::Rust);
-        assert_eq!(language_for_extension("json"), Language::Json);
-        assert_eq!(language_for_extension("cs"), Language::CSharp);
-        assert_eq!(language_for_extension("java"), Language::Java);
-        assert_eq!(language_for_extension("php"), Language::Php);
-        assert_eq!(language_for_extension("txt"), Language::PlainText);
-        assert_eq!(language_for_extension(""), Language::PlainText);
+        assert_eq!(language_for_path(Path::new("a.rs")), rust());
+        assert_eq!(language_for_path(Path::new("a.json")), json());
+        assert_eq!(language_for_path(Path::new("a.cs")), csharp());
+        assert_eq!(language_for_path(Path::new("a.java")), java());
+        assert_eq!(language_for_path(Path::new("a.php")), php());
+        assert_eq!(language_for_path(Path::new("a.txt")), Language::PLAIN_TEXT);
+        assert_eq!(language_for_path(Path::new("a")), Language::PLAIN_TEXT);
     }
 
     #[test]
     fn language_name_covers_every_language() {
-        assert_eq!(language_name(Language::Rust), "Rust");
-        assert_eq!(language_name(Language::Json), "JSON");
-        assert_eq!(language_name(Language::CSharp), "C#");
-        assert_eq!(language_name(Language::Java), "Java");
-        assert_eq!(language_name(Language::Php), "PHP");
-        assert_eq!(language_name(Language::PlainText), "Plain Text");
+        assert_eq!(language_name(rust()), "Rust");
+        assert_eq!(language_name(json()), "JSON");
+        assert_eq!(language_name(csharp()), "C#");
+        assert_eq!(language_name(java()), "Java");
+        assert_eq!(language_name(php()), "PHP");
+        assert_eq!(language_name(Language::PLAIN_TEXT), "Plain Text");
     }
 
     #[test]
     fn plain_text_yields_no_spans() {
-        assert!(highlight(Language::PlainText, "fn foo() {}").is_empty());
+        assert!(highlight(Language::PLAIN_TEXT, "fn foo() {}").is_empty());
     }
 
     #[test]
     fn rust_fn_keyword_is_highlighted() {
         let text = "fn foo() {}";
-        let spans = highlight(Language::Rust, text);
-        let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        let spans = highlight(rust(), text);
+        let span = find(&spans, "keyword").expect("expected a Keyword span");
         assert_eq!(&text[span.start..span.end], "fn");
     }
 
     #[test]
     fn rust_function_name_is_highlighted() {
         let text = "fn foo() {}";
-        let spans = highlight(Language::Rust, text);
-        let span = find(&spans, TokenKind::Function).expect("expected a Function span");
+        let spans = highlight(rust(), text);
+        let span = find(&spans, "function").expect("expected a Function span");
         assert_eq!(&text[span.start..span.end], "foo");
     }
 
     #[test]
     fn rust_string_literal_is_highlighted() {
         let text = "fn foo() { let s = \"hi\"; }";
-        let spans = highlight(Language::Rust, text);
-        let span = find(&spans, TokenKind::String).expect("expected a String span");
+        let spans = highlight(rust(), text);
+        let span = find(&spans, "string").expect("expected a String span");
         assert_eq!(&text[span.start..span.end], "\"hi\"");
     }
 
     #[test]
     fn rust_comment_is_highlighted() {
         let text = "fn foo() { // hello\n}";
-        let spans = highlight(Language::Rust, text);
-        let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
+        let spans = highlight(rust(), text);
+        let span = find(&spans, "comment").expect("expected a Comment span");
         assert!(&text[span.start..span.end].starts_with("// hello"));
     }
 
     #[test]
     fn rust_number_is_highlighted() {
         let text = "fn foo() { let x = 42; }";
-        let spans = highlight(Language::Rust, text);
-        let span = find(&spans, TokenKind::Number).expect("expected a Number span");
+        let spans = highlight(rust(), text);
+        let span = find(&spans, "number").expect("expected a Number span");
         assert_eq!(&text[span.start..span.end], "42");
     }
 
     #[test]
     fn rust_type_is_highlighted() {
         let text = "fn foo() { let x: i32 = 42; }";
-        let spans = highlight(Language::Rust, text);
-        let span = find(&spans, TokenKind::Type).expect("expected a Type span");
+        let spans = highlight(rust(), text);
+        let span = find(&spans, "type").expect("expected a Type span");
         assert_eq!(&text[span.start..span.end], "i32");
     }
 
     #[test]
     fn json_string_key_is_highlighted() {
         let text = "{\"key\": \"value\"}";
-        let spans = highlight(Language::Json, text);
-        let span = find(&spans, TokenKind::String).expect("expected a String span");
+        let spans = highlight(json(), text);
+        let span = find(&spans, "string").expect("expected a String span");
         assert_eq!(&text[span.start..span.end], "\"key\"");
     }
 
     #[test]
     fn json_number_is_highlighted() {
         let text = "{\"n\": 42}";
-        let spans = highlight(Language::Json, text);
-        let span = find(&spans, TokenKind::Number).expect("expected a Number span");
+        let spans = highlight(json(), text);
+        let span = find(&spans, "number").expect("expected a Number span");
         assert_eq!(&text[span.start..span.end], "42");
     }
 
     #[test]
     fn json_boolean_is_highlighted_as_keyword() {
         let text = "{\"b\": true}";
-        let spans = highlight(Language::Json, text);
-        let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        let spans = highlight(json(), text);
+        let span = find(&spans, "keyword").expect("expected a Keyword span");
         assert_eq!(&text[span.start..span.end], "true");
     }
 
     #[test]
     fn spans_are_within_text_bounds() {
         let text = "fn foo() { let x: i32 = 42; \"s\"; }";
-        for span in highlight(Language::Rust, text) {
+        for span in highlight(rust(), text) {
             assert!(span.start <= span.end);
             assert!(span.end <= text.len());
         }
@@ -1023,22 +1300,22 @@ mod tests {
         let old_text = "fn foo() { let x = 42; }";
         let new_text = "fn foo() { let xy = 42; }";
 
-        let mut incremental = Highlighter::new(Language::Rust);
+        let mut incremental = Highlighter::new(rust());
         incremental.set_text(old_text);
         let incremental_spans = incremental.edit(new_text, 16, 16, 17);
 
-        let fresh_spans = highlight(Language::Rust, new_text);
+        let fresh_spans = highlight(rust(), new_text);
 
         assert_eq!(incremental_spans, fresh_spans_sorted(fresh_spans.clone()));
         // The number literal, well away from the edit, is still classified
         // correctly and at its new (shifted) position.
-        let number = find(&incremental_spans, TokenKind::Number)
-            .expect("expected a Number span after the edit");
+        let number =
+            find(&incremental_spans, "number").expect("expected a Number span after the edit");
         assert_eq!(&new_text[number.start..number.end], "42");
     }
 
     fn fresh_spans_sorted(mut spans: Vec<HighlightSpan>) -> Vec<HighlightSpan> {
-        spans.sort_by_key(|span| (span.start, span.end));
+        sort_spans(&mut spans);
         spans
     }
 
@@ -1048,40 +1325,40 @@ mod tests {
         let old_text = "fn foo() { let s = \"hi\"; let n = 1; }";
         let new_text = "fn foo() { let s = \"hxi\"; let n = 1; }";
 
-        let mut highlighter = Highlighter::new(Language::Rust);
+        let mut highlighter = Highlighter::new(rust());
         highlighter.set_text(old_text);
         // Byte 21 is right after the opening quote + "h": edit "i" -> "xi".
         let spans = highlighter.edit(new_text, 21, 21, 22);
 
-        let keyword = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        let keyword = find(&spans, "keyword").expect("expected a Keyword span");
         assert_eq!(&new_text[keyword.start..keyword.end], "fn");
 
-        let function = find(&spans, TokenKind::Function).expect("expected a Function span");
+        let function = find(&spans, "function").expect("expected a Function span");
         assert_eq!(&new_text[function.start..function.end], "foo");
 
-        let string = find(&spans, TokenKind::String).expect("expected a String span");
+        let string = find(&spans, "string").expect("expected a String span");
         assert_eq!(&new_text[string.start..string.end], "\"hxi\"");
 
-        let number = find(&spans, TokenKind::Number).expect("expected a Number span");
+        let number = find(&spans, "number").expect("expected a Number span");
         assert_eq!(&new_text[number.start..number.end], "1");
     }
 
     #[test]
     fn highlighter_handles_plain_text_as_a_no_op() {
-        let mut highlighter = Highlighter::new(Language::PlainText);
+        let mut highlighter = Highlighter::new(Language::PLAIN_TEXT);
         assert!(highlighter.set_text("hello").is_empty());
         assert!(highlighter.edit("hello world", 5, 5, 11).is_empty());
     }
 
     #[test]
     fn plain_text_has_no_identifier_occurrences() {
-        assert!(identifier_occurrences(Language::PlainText, "fn foo() {}").is_empty());
+        assert!(identifier_occurrences(Language::PLAIN_TEXT, "fn foo() {}").is_empty());
     }
 
     #[test]
     fn rust_function_and_parameter_are_definitions_used_twice_in_body() {
         let text = "fn add(x: i32) -> i32 { x + x }";
-        let occurrences = identifier_occurrences(Language::Rust, text);
+        let occurrences = identifier_occurrences(rust(), text);
 
         let by_name = |name: &str| -> Vec<&Occurrence> {
             occurrences.iter().filter(|o| o.name == name).collect()
@@ -1121,7 +1398,7 @@ mod tests {
     #[test]
     fn rust_struct_name_is_a_definition() {
         let text = "struct Point { x: i32 }";
-        let occurrences = identifier_occurrences(Language::Rust, text);
+        let occurrences = identifier_occurrences(rust(), text);
         let point = occurrences
             .iter()
             .find(|o| o.name == "Point")
@@ -1136,31 +1413,31 @@ mod tests {
 
     #[test]
     fn csharp_class_keyword_is_highlighted() {
-        let spans = highlight(Language::CSharp, CSHARP_SNIPPET);
-        let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        let spans = highlight(csharp(), CSHARP_SNIPPET);
+        let span = find(&spans, "keyword").expect("expected a Keyword span");
         assert_eq!(&CSHARP_SNIPPET[span.start..span.end], "class");
     }
 
     #[test]
     fn csharp_string_literal_is_highlighted() {
-        let spans = highlight(Language::CSharp, CSHARP_SNIPPET);
-        let span = find(&spans, TokenKind::String).expect("expected a String span");
+        let spans = highlight(csharp(), CSHARP_SNIPPET);
+        let span = find(&spans, "string").expect("expected a String span");
         assert_eq!(&CSHARP_SNIPPET[span.start..span.end], "\"Hello, \"");
     }
 
     #[test]
     fn csharp_comment_is_highlighted() {
-        let spans = highlight(Language::CSharp, CSHARP_SNIPPET);
-        let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
+        let spans = highlight(csharp(), CSHARP_SNIPPET);
+        let span = find(&spans, "comment").expect("expected a Comment span");
         assert!(&CSHARP_SNIPPET[span.start..span.end].starts_with("// say hi"));
     }
 
     #[test]
     fn csharp_class_name_is_highlighted_as_type() {
-        let spans = highlight(Language::CSharp, CSHARP_SNIPPET);
+        let spans = highlight(csharp(), CSHARP_SNIPPET);
         let type_span = spans
             .iter()
-            .find(|s| s.kind == TokenKind::Type && &CSHARP_SNIPPET[s.start..s.end] == "Greeter");
+            .find(|s| s.scope == scope("type") && &CSHARP_SNIPPET[s.start..s.end] == "Greeter");
         assert!(
             type_span.is_some(),
             "expected `Greeter` highlighted as a Type"
@@ -1169,7 +1446,7 @@ mod tests {
 
     #[test]
     fn csharp_method_definition_is_recognized() {
-        let occurrences = identifier_occurrences(Language::CSharp, CSHARP_SNIPPET);
+        let occurrences = identifier_occurrences(csharp(), CSHARP_SNIPPET);
         let greet = occurrences
             .iter()
             .find(|o| o.name == "Greet")
@@ -1180,7 +1457,7 @@ mod tests {
     #[test]
     fn csharp_parameter_used_twice_is_one_definition_and_one_reference() {
         let text = "class C { void M(string name) { name = name; } }";
-        let occurrences = identifier_occurrences(Language::CSharp, text);
+        let occurrences = identifier_occurrences(csharp(), text);
         let names: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "name").collect();
         assert_eq!(names.len(), 3, "1 definition + 2 references: {names:?}");
         assert_eq!(names.iter().filter(|o| o.is_definition).count(), 1);
@@ -1193,31 +1470,31 @@ mod tests {
 
     #[test]
     fn java_class_keyword_is_highlighted() {
-        let spans = highlight(Language::Java, JAVA_SNIPPET);
-        let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        let spans = highlight(java(), JAVA_SNIPPET);
+        let span = find(&spans, "keyword").expect("expected a Keyword span");
         assert_eq!(&JAVA_SNIPPET[span.start..span.end], "public");
     }
 
     #[test]
     fn java_string_literal_is_highlighted() {
-        let spans = highlight(Language::Java, JAVA_SNIPPET);
-        let span = find(&spans, TokenKind::String).expect("expected a String span");
+        let spans = highlight(java(), JAVA_SNIPPET);
+        let span = find(&spans, "string").expect("expected a String span");
         assert_eq!(&JAVA_SNIPPET[span.start..span.end], "\"Hello, \"");
     }
 
     #[test]
     fn java_comment_is_highlighted() {
-        let spans = highlight(Language::Java, JAVA_SNIPPET);
-        let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
+        let spans = highlight(java(), JAVA_SNIPPET);
+        let span = find(&spans, "comment").expect("expected a Comment span");
         assert!(&JAVA_SNIPPET[span.start..span.end].starts_with("// say hi"));
     }
 
     #[test]
     fn java_class_name_is_highlighted_as_type() {
-        let spans = highlight(Language::Java, JAVA_SNIPPET);
+        let spans = highlight(java(), JAVA_SNIPPET);
         let type_span = spans
             .iter()
-            .find(|s| s.kind == TokenKind::Type && &JAVA_SNIPPET[s.start..s.end] == "Greeter");
+            .find(|s| s.scope == scope("type") && &JAVA_SNIPPET[s.start..s.end] == "Greeter");
         assert!(
             type_span.is_some(),
             "expected `Greeter` highlighted as a Type"
@@ -1226,7 +1503,7 @@ mod tests {
 
     #[test]
     fn java_method_definition_is_recognized() {
-        let occurrences = identifier_occurrences(Language::Java, JAVA_SNIPPET);
+        let occurrences = identifier_occurrences(java(), JAVA_SNIPPET);
         let greet = occurrences
             .iter()
             .find(|o| o.name == "greet")
@@ -1237,7 +1514,7 @@ mod tests {
     #[test]
     fn java_parameter_used_twice_is_one_definition_and_one_reference() {
         let text = "class C { void m(String name) { name = name; } }";
-        let occurrences = identifier_occurrences(Language::Java, text);
+        let occurrences = identifier_occurrences(java(), text);
         let names: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "name").collect();
         assert_eq!(names.len(), 3, "1 definition + 2 references: {names:?}");
         assert_eq!(names.iter().filter(|o| o.is_definition).count(), 1);
@@ -1246,35 +1523,39 @@ mod tests {
 
     // --- PHP (Task B) ---
 
-    const PHP_SNIPPET: &str = "class Greeter {\n    public string $name;\n\n    public function __construct(string $name) {\n        $this->name = $name;\n    }\n\n    public function greet(): string {\n        // say hi\n        return \"Hello, \" . $this->name;\n    }\n}\n";
+    // Opens with `<?php`: the catalog row uses `LANGUAGE_PHP` (R4d), the
+    // grammar for a whole template file, so a snippet without the opening
+    // tag is not PHP code at all — it is markup that happens to look like
+    // it. See php/injections.scm.
+    const PHP_SNIPPET: &str = "<?php\nclass Greeter {\n    public string $name;\n\n    public function __construct(string $name) {\n        $this->name = $name;\n    }\n\n    public function greet(): string {\n        // say hi\n        return \"Hello, \" . $this->name;\n    }\n}\n";
 
     #[test]
     fn php_class_keyword_is_highlighted() {
-        let spans = highlight(Language::Php, PHP_SNIPPET);
-        let span = find(&spans, TokenKind::Keyword).expect("expected a Keyword span");
+        let spans = highlight(php(), PHP_SNIPPET);
+        let span = find(&spans, "keyword").expect("expected a Keyword span");
         assert_eq!(&PHP_SNIPPET[span.start..span.end], "class");
     }
 
     #[test]
     fn php_string_literal_is_highlighted() {
-        let spans = highlight(Language::Php, PHP_SNIPPET);
-        let span = find(&spans, TokenKind::String).expect("expected a String span");
+        let spans = highlight(php(), PHP_SNIPPET);
+        let span = find(&spans, "string").expect("expected a String span");
         assert_eq!(&PHP_SNIPPET[span.start..span.end], "\"Hello, \"");
     }
 
     #[test]
     fn php_comment_is_highlighted() {
-        let spans = highlight(Language::Php, PHP_SNIPPET);
-        let span = find(&spans, TokenKind::Comment).expect("expected a Comment span");
+        let spans = highlight(php(), PHP_SNIPPET);
+        let span = find(&spans, "comment").expect("expected a Comment span");
         assert!(&PHP_SNIPPET[span.start..span.end].starts_with("// say hi"));
     }
 
     #[test]
     fn php_class_name_is_highlighted_as_type() {
-        let spans = highlight(Language::Php, PHP_SNIPPET);
+        let spans = highlight(php(), PHP_SNIPPET);
         let type_span = spans
             .iter()
-            .find(|s| s.kind == TokenKind::Type && &PHP_SNIPPET[s.start..s.end] == "Greeter");
+            .find(|s| s.scope == scope("type") && &PHP_SNIPPET[s.start..s.end] == "Greeter");
         assert!(
             type_span.is_some(),
             "expected `Greeter` highlighted as a Type"
@@ -1283,7 +1564,7 @@ mod tests {
 
     #[test]
     fn php_method_definition_is_recognized() {
-        let occurrences = identifier_occurrences(Language::Php, PHP_SNIPPET);
+        let occurrences = identifier_occurrences(php(), PHP_SNIPPET);
         let greet = occurrences
             .iter()
             .find(|o| o.name == "greet")
@@ -1293,8 +1574,8 @@ mod tests {
 
     #[test]
     fn php_parameter_used_twice_is_one_definition_and_one_reference() {
-        let text = "function add($x) { return $x + $x; }";
-        let occurrences = identifier_occurrences(Language::Php, text);
+        let text = "<?php\nfunction add($x) { return $x + $x; }";
+        let occurrences = identifier_occurrences(php(), text);
         let names: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "$x").collect();
         assert_eq!(names.len(), 3, "1 definition + 2 references: {names:?}");
         assert_eq!(names.iter().filter(|o| o.is_definition).count(), 1);
@@ -1305,20 +1586,20 @@ mod tests {
 
     #[test]
     fn plain_text_has_no_fold_ranges() {
-        let mut highlighter = Highlighter::new(Language::PlainText);
+        let mut highlighter = Highlighter::new(Language::PLAIN_TEXT);
         highlighter.set_text("hello");
         assert!(highlighter.fold_ranges().is_empty());
     }
 
     #[test]
     fn fold_ranges_are_empty_before_any_parse() {
-        assert!(Highlighter::new(Language::Rust).fold_ranges().is_empty());
+        assert!(Highlighter::new(rust()).fold_ranges().is_empty());
     }
 
     #[test]
     fn rust_function_body_is_foldable() {
         let text = "fn add(x: i32, y: i32) -> i32 {\n    x + y\n}";
-        let mut highlighter = Highlighter::new(Language::Rust);
+        let mut highlighter = Highlighter::new(rust());
         highlighter.set_text(text);
         let ranges = highlighter.fold_ranges();
         let body = ranges
@@ -1331,7 +1612,7 @@ mod tests {
     #[test]
     fn rust_struct_body_is_foldable() {
         let text = "struct Point {\n    x: i32,\n    y: i32,\n}";
-        let mut highlighter = Highlighter::new(Language::Rust);
+        let mut highlighter = Highlighter::new(rust());
         highlighter.set_text(text);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1345,7 +1626,7 @@ mod tests {
     #[test]
     fn json_object_is_foldable() {
         let text = "{\"a\": 1, \"b\": [1, 2, 3]}";
-        let mut highlighter = Highlighter::new(Language::Json);
+        let mut highlighter = Highlighter::new(json());
         highlighter.set_text(text);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1360,7 +1641,7 @@ mod tests {
 
     #[test]
     fn csharp_method_body_is_foldable() {
-        let mut highlighter = Highlighter::new(Language::CSharp);
+        let mut highlighter = Highlighter::new(csharp());
         highlighter.set_text(CSHARP_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1373,7 +1654,7 @@ mod tests {
 
     #[test]
     fn csharp_class_body_is_foldable() {
-        let mut highlighter = Highlighter::new(Language::CSharp);
+        let mut highlighter = Highlighter::new(csharp());
         highlighter.set_text(CSHARP_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1387,7 +1668,7 @@ mod tests {
 
     #[test]
     fn java_method_body_is_foldable() {
-        let mut highlighter = Highlighter::new(Language::Java);
+        let mut highlighter = Highlighter::new(java());
         highlighter.set_text(JAVA_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1400,7 +1681,7 @@ mod tests {
 
     #[test]
     fn java_class_body_is_foldable() {
-        let mut highlighter = Highlighter::new(Language::Java);
+        let mut highlighter = Highlighter::new(java());
         highlighter.set_text(JAVA_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1414,7 +1695,7 @@ mod tests {
 
     #[test]
     fn php_method_body_is_foldable() {
-        let mut highlighter = Highlighter::new(Language::Php);
+        let mut highlighter = Highlighter::new(php());
         highlighter.set_text(PHP_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1427,7 +1708,7 @@ mod tests {
 
     #[test]
     fn php_class_body_is_foldable() {
-        let mut highlighter = Highlighter::new(Language::Php);
+        let mut highlighter = Highlighter::new(php());
         highlighter.set_text(PHP_SNIPPET);
         let ranges = highlighter.fold_ranges();
         assert!(
@@ -1444,7 +1725,7 @@ mod tests {
         let old_text = "fn foo() {\n    1\n}";
         let new_text = "fn foo() {\n    1 + 2\n}";
 
-        let mut highlighter = Highlighter::new(Language::Rust);
+        let mut highlighter = Highlighter::new(rust());
         highlighter.set_text(old_text);
         // Insert " + 2" right after "1" (byte offset 15..15 -> 15..19).
         highlighter.edit(new_text, 15, 15, 19);
@@ -1461,7 +1742,7 @@ mod tests {
     #[test]
     fn json_object_keys_are_references_not_definitions() {
         let text = "{\"key\": \"value\", \"other\": 1}";
-        let occurrences = identifier_occurrences(Language::Json, text);
+        let occurrences = identifier_occurrences(json(), text);
 
         assert!(
             occurrences.iter().all(|o| !o.is_definition),
@@ -1475,19 +1756,19 @@ mod tests {
 
     #[test]
     fn plain_text_has_no_outline() {
-        assert!(outline(Language::PlainText, "anything").is_empty());
+        assert!(outline(Language::PLAIN_TEXT, "anything").is_empty());
     }
 
     #[test]
     fn json_has_no_outline() {
         let text = "{\"key\": \"value\", \"nested\": {\"a\": 1}}";
-        assert!(outline(Language::Json, text).is_empty());
+        assert!(outline(json(), text).is_empty());
     }
 
     #[test]
     fn rust_outline_nests_fields_under_struct_and_methods_under_impl() {
         let text = "struct Point {\n    x: i32,\n    y: i32,\n}\n\nimpl Point {\n    fn new() -> Point { Point { x: 0, y: 0 } }\n    fn dist(&self) -> f64 { 0.0 }\n}\n";
-        let roots = outline(Language::Rust, text);
+        let roots = outline(rust(), text);
 
         let point_struct = roots
             .iter()
@@ -1529,7 +1810,7 @@ mod tests {
 
     #[test]
     fn csharp_outline_nests_methods_under_class() {
-        let occurrences = outline(Language::CSharp, CSHARP_SNIPPET);
+        let occurrences = outline(csharp(), CSHARP_SNIPPET);
         let greeter = occurrences
             .iter()
             .find(|s| s.kind == SymbolKind::Class && s.name == "Greeter")
@@ -1544,7 +1825,7 @@ mod tests {
     #[test]
     fn csharp_outline_captures_auto_properties_as_fields() {
         const SNIPPET: &str = "class Person {\n    public string Name { get; set; }\n}\n";
-        let roots = outline(Language::CSharp, SNIPPET);
+        let roots = outline(csharp(), SNIPPET);
         let person = roots
             .iter()
             .find(|s| s.kind == SymbolKind::Class && s.name == "Person")
@@ -1556,7 +1837,7 @@ mod tests {
 
     #[test]
     fn java_outline_nests_methods_under_class() {
-        let roots = outline(Language::Java, JAVA_SNIPPET);
+        let roots = outline(java(), JAVA_SNIPPET);
         let greeter = roots
             .iter()
             .find(|s| s.kind == SymbolKind::Class && s.name == "Greeter")
@@ -1570,7 +1851,7 @@ mod tests {
 
     #[test]
     fn php_outline_nests_methods_under_class() {
-        let roots = outline(Language::Php, PHP_SNIPPET);
+        let roots = outline(php(), PHP_SNIPPET);
         let greeter = roots
             .iter()
             .find(|s| s.kind == SymbolKind::Class && s.name == "Greeter")
@@ -1597,7 +1878,7 @@ mod tests {
     #[test]
     fn rust_impl_trait_for_type_is_a_supertype_edge() {
         let text = "trait Shape {}\nstruct Circle;\nimpl Shape for Circle {}\n";
-        let edges = supertype_edges(Language::Rust, text);
+        let edges = supertype_edges(rust(), text);
         assert_eq!(supertypes_of(&edges, "Circle"), vec!["Shape"]);
         let edge = edges
             .iter()
@@ -1608,20 +1889,20 @@ mod tests {
 
     #[test]
     fn rust_inherent_impl_is_not_a_supertype_edge() {
-        let edges = supertype_edges(Language::Rust, "struct Circle;\nimpl Circle {}\n");
+        let edges = supertype_edges(rust(), "struct Circle;\nimpl Circle {}\n");
         assert!(edges.is_empty());
     }
 
     #[test]
     fn rust_supertrait_is_a_supertype_edge() {
-        let edges = supertype_edges(Language::Rust, "trait Shape: Drawable {}\n");
+        let edges = supertype_edges(rust(), "trait Shape: Drawable {}\n");
         assert_eq!(supertypes_of(&edges, "Shape"), vec!["Drawable"]);
     }
 
     #[test]
     fn java_extends_and_implements_are_separate_edges() {
         let text = "class Circle extends Shape implements Drawable, Sized {}\n";
-        let edges = supertype_edges(Language::Java, text);
+        let edges = supertype_edges(java(), text);
         assert_eq!(
             supertypes_of(&edges, "Circle"),
             vec!["Drawable", "Shape", "Sized"]
@@ -1630,27 +1911,27 @@ mod tests {
 
     #[test]
     fn java_interface_extends_is_a_supertype_edge() {
-        let edges = supertype_edges(Language::Java, "interface Drawable extends Shape {}\n");
+        let edges = supertype_edges(java(), "interface Drawable extends Shape {}\n");
         assert_eq!(supertypes_of(&edges, "Drawable"), vec!["Shape"]);
     }
 
     #[test]
     fn csharp_base_list_entries_are_supertype_edges() {
-        let edges = supertype_edges(Language::CSharp, "class Circle : Shape, IDrawable {}\n");
+        let edges = supertype_edges(csharp(), "class Circle : Shape, IDrawable {}\n");
         assert_eq!(supertypes_of(&edges, "Circle"), vec!["IDrawable", "Shape"]);
     }
 
     #[test]
     fn php_extends_and_implements_are_supertype_edges() {
         let text = "<?php\nclass Circle extends Shape implements Drawable {}\n";
-        let edges = supertype_edges(Language::Php, text);
+        let edges = supertype_edges(php(), text);
         assert_eq!(supertypes_of(&edges, "Circle"), vec!["Drawable", "Shape"]);
     }
 
     #[test]
     fn json_and_plain_text_have_no_supertype_edges() {
-        assert!(supertype_edges(Language::Json, "{\"a\": 1}").is_empty());
-        assert!(supertype_edges(Language::PlainText, "class A extends B {}").is_empty());
+        assert!(supertype_edges(json(), "{\"a\": 1}").is_empty());
+        assert!(supertype_edges(Language::PLAIN_TEXT, "class A extends B {}").is_empty());
     }
 
     #[test]
@@ -1660,7 +1941,7 @@ mod tests {
         // were definitions to the outline but not to
         // `identifier_occurrences`, so nothing could navigate to them.
         let text = "pub trait Shape {\n    fn area(&self) -> f64;\n}\n\npub struct Circle {\n    radius: f64,\n}\n\nimpl Shape for Circle {\n    fn area(&self) -> f64 {\n        self.radius\n    }\n}\n";
-        let occurrences = identifier_occurrences(Language::Rust, text);
+        let occurrences = identifier_occurrences(rust(), text);
         let defined = |name: &str| {
             occurrences
                 .iter()
@@ -1679,5 +1960,385 @@ mod tests {
                 .any(|o| o.name == "radius" && !o.is_definition),
             "self.radius is a reference"
         );
+    }
+
+    // ---- injections (I1) -------------------------------------------
+    //
+    // The shipped queries that use the mechanism (Markdown, HTML, PHP)
+    // are exercised end to end in `tests/language_catalog.rs`, against
+    // their real fixtures.
+    //
+    // What is proved here is the mechanism's edges, against synthetic
+    // hosts built from real grammars: Rust injecting JSON (cross-language,
+    // both spellings of the language name), JSON injecting itself
+    // (nesting, and the depth bound), and an unknown language name.
+
+    /// A catalog language's compiled grammar and highlights, plus an
+    /// `injections.scm` it does not ship. Rebuilt rather than cloned
+    /// because `Query` is not `Clone`.
+    fn with_injections(language: Language, injections: &str) -> Arc<CompiledLanguage> {
+        let def = language.def().expect("catalog language");
+        let grammar = (def.grammar())();
+        let highlights = Query::new(&grammar, def.queries().highlights.expect("highlights.scm"))
+            .expect("highlights.scm compiles");
+        let highlight_scopes = highlights
+            .capture_names()
+            .iter()
+            .map(|name| Scope::resolve(name))
+            .collect();
+        Arc::new(CompiledLanguage {
+            highlights: Some(highlights),
+            highlight_scopes,
+            injections: Some(Query::new(&grammar, injections).expect("injections.scm compiles")),
+            locals: None,
+            folds: None,
+            tags: None,
+            inherits: None,
+            grammar,
+        })
+    }
+
+    fn parse_with(compiled: &CompiledLanguage, text: &str) -> tree_sitter::Tree {
+        parse_once(&compiled.grammar, text).expect("parse")
+    }
+
+    fn from_registry(id: &str) -> Option<Arc<CompiledLanguage>> {
+        language_by_id(id).and_then(registry::compiled)
+    }
+
+    fn scopes_at<'a>(spans: &'a [HighlightSpan], text: &'a str, name: &str) -> Vec<&'a str> {
+        let wanted = scope(name);
+        spans
+            .iter()
+            .filter(|s| s.scope == wanted)
+            .map(|s| &text[s.start..s.end])
+            .collect()
+    }
+
+    /// `#set! injection.language` spelling: a Rust raw string holding JSON.
+    #[test]
+    fn a_set_directive_names_the_injected_language() {
+        let host = with_injections(
+            rust(),
+            r#"((raw_string_literal (string_content) @injection.content)
+                (#set! injection.language "json"))"#,
+        );
+        let text = r####"const C: &str = r#"{"k": true}"#;"####;
+        let tree = parse_with(&host, text);
+        let spans = spans_with_injections(&host, &tree, text, 0, &from_registry);
+
+        // `true` as a keyword inside a Rust string literal is something
+        // only the injected JSON grammar can produce.
+        assert!(
+            scopes_at(&spans, text, "keyword").contains(&"true"),
+            "region not highlighted as JSON: {spans:?}"
+        );
+        assert!(
+            scopes_at(&spans, text, "string").contains(&"\"k\""),
+            "JSON key not highlighted as a JSON string"
+        );
+        // The host's own `@string` *encloses* the injected region (it takes
+        // in the `r#"` delimiters), so it is kept — and sorted ahead of the
+        // spans it encloses, which is what lets the view paint JSON over
+        // it. A host span sitting *inside* the region is what gets dropped.
+        let host_string = spans
+            .iter()
+            .position(|span| {
+                span.scope.name() == "string" && text[span.start..span.end].starts_with("r#\"")
+            })
+            .expect("the enclosing host string span is kept");
+        let injected = spans
+            .iter()
+            .position(|span| {
+                span.scope.name() == "keyword" && &text[span.start..span.end] == "true"
+            })
+            .expect("the injected JSON keyword");
+        assert!(
+            host_string < injected,
+            "the enclosing host span must be painted before the spans inside it"
+        );
+        // The host still highlights everything outside the region.
+        assert!(scopes_at(&spans, text, "keyword").contains(&"const"));
+    }
+
+    /// `@injection.language` capture spelling: the node's *text* names the
+    /// language, the way `(#match?)`-free upstream queries do it.
+    #[test]
+    fn an_injection_language_capture_names_the_injected_language() {
+        let host = with_injections(
+            rust(),
+            "(macro_invocation
+               macro: (identifier) @injection.language
+               (token_tree (token_tree) @injection.content))",
+        );
+        let text = r#"fn f() { json!({"k": true}); }"#;
+        let tree = parse_with(&host, text);
+        let spans = spans_with_injections(&host, &tree, text, 0, &from_registry);
+
+        assert!(
+            scopes_at(&spans, text, "string").contains(&"\"k\""),
+            "macro body not parsed as JSON: {spans:?}"
+        );
+    }
+
+    #[test]
+    fn merged_spans_stay_sorted_by_start_offset() {
+        let host = with_injections(
+            rust(),
+            r#"((raw_string_literal (string_content) @injection.content)
+                (#set! injection.language "json"))"#,
+        );
+        let text = r####"fn f() { let a = r#"{"x": 1}"#; let b = r#"[2, 3]"#; }"####;
+        let tree = parse_with(&host, text);
+        let spans = spans_with_injections(&host, &tree, text, 0, &from_registry);
+
+        assert!(
+            spans.len() > 4,
+            "expected host and injected spans: {spans:?}"
+        );
+        assert!(
+            spans
+                .windows(2)
+                .all(|w| (w[0].start, w[0].end) <= (w[1].start, w[1].end)),
+            "merged stream is not sorted; the view binary-searches it: {spans:?}"
+        );
+    }
+
+    /// An unknown injected language is skipped, not fatal — a runtime
+    /// grammar can name a language this build does not have.
+    #[test]
+    fn an_unknown_injected_language_leaves_the_host_spans_alone() {
+        let host = with_injections(
+            rust(),
+            r#"((raw_string_literal) @injection.content
+                (#set! injection.language "klingon"))"#,
+        );
+        let text = r####"const C: &str = r#"{"k": true}"#;"####;
+        let tree = parse_with(&host, text);
+        let spans = spans_with_injections(&host, &tree, text, 0, &from_registry);
+
+        assert!(scopes_at(&spans, text, "keyword").contains(&"const"));
+        assert!(!scopes_at(&spans, text, "keyword").contains(&"true"));
+    }
+
+    /// A host with no `injections.scm` must produce byte-identical output
+    /// to the pre-I1 single-tree path.
+    #[test]
+    fn a_document_without_injections_is_unchanged() {
+        let compiled = registry::compiled(rust()).expect("rust compiles");
+        let text = "fn main() { let s = \"hi\"; /* c */ }";
+        let tree = parse_with(&compiled, text);
+        let merged = spans_with_injections(&compiled, &tree, text, 0, &from_registry);
+        let single = spans_from_tree(
+            compiled.highlights.as_ref().unwrap(),
+            &compiled.highlight_scopes,
+            &tree,
+            text,
+        );
+        assert_eq!(merged, single);
+        assert_eq!(merged, highlight(rust(), text));
+    }
+
+    /// Nesting: injections are followed through injected trees, and the
+    /// walk stops at [`MAX_INJECTION_DEPTH`] instead of running forever.
+    ///
+    /// A chain of four synthetic languages over the JSON grammar, each
+    /// injecting the next into any nested object. `l4` is what the
+    /// depth-3 tree would ask for, so "`l4` was never resolved" is the
+    /// bound, stated as an observation rather than a constant.
+    #[test]
+    fn nesting_is_followed_and_bounded() {
+        let injects = |next: &str| {
+            with_injections(
+                json(),
+                &format!(r#"((object) @injection.content (#set! injection.language "{next}"))"#),
+            )
+        };
+        let host = injects("l1");
+        let chain = [
+            ("l1", injects("l2")),
+            ("l2", injects("l3")),
+            ("l3", injects("l4")),
+        ];
+        // Nested deeper than the bound, so the bound stops the walk, not
+        // the document.
+        let text = r#"{"a":{"b":{"c":{"d":{"e":true}}}}}"#;
+        let tree = parse_with(&host, text);
+
+        let asked = std::cell::RefCell::new(Vec::new());
+        let resolve = |id: &str| {
+            asked.borrow_mut().push(id.to_string());
+            chain
+                .iter()
+                .find(|(name, _)| *name == id)
+                .map(|(_, compiled)| compiled.clone())
+        };
+        let spans = spans_with_injections(&host, &tree, text, 0, &resolve);
+
+        let asked = asked.into_inner();
+        assert!(
+            asked.contains(&"l3".to_string()),
+            "nesting stopped early: {asked:?}"
+        );
+        assert!(
+            !asked.contains(&"l4".to_string()),
+            "recursed past MAX_INJECTION_DEPTH = {MAX_INJECTION_DEPTH}: {asked:?}"
+        );
+        assert!(
+            spans
+                .windows(2)
+                .all(|w| (w[0].start, w[0].end) <= (w[1].start, w[1].end)),
+            "nested merge is not sorted: {spans:?}"
+        );
+        assert!(scopes_at(&spans, text, "keyword").contains(&"true"));
+    }
+
+    /// Injections survive an incremental edit, and `fold_ranges` still
+    /// reads off the host tree.
+    #[test]
+    fn incremental_editing_still_works_with_a_host_tree() {
+        let mut highlighter = Highlighter::new(rust());
+        let before = "fn main() {\n    let x = 1;\n}\n";
+        highlighter.set_text(before);
+        let after = "fn main() {\n    let x = 2;\n}\n";
+        let start = before.find('1').unwrap();
+        let spans = highlighter.edit(after, start, start + 1, start + 1);
+        assert!(scopes_at(&spans, after, "keyword").contains(&"fn"));
+        assert!(!highlighter.fold_ranges().is_empty());
+    }
+
+    // --- Query predicates -------------------------------------------
+    //
+    // `spans_from_tree`'s contract: text predicates guard their pattern,
+    // predicates tree-sitter cannot evaluate drop it, and same-node
+    // captures resolve first-pattern-wins.
+
+    /// Runs one hand-written highlights query, bypassing the shipped
+    /// `.scm` file, so a predicate can be tested in isolation.
+    fn spans_of(language: Language, highlights: &str, text: &str) -> Vec<HighlightSpan> {
+        let def = language.def().expect("catalog language");
+        let grammar = (def.grammar())();
+        let query = Query::new(&grammar, highlights).expect("query compiles");
+        let scopes: Vec<Option<Scope>> = query
+            .capture_names()
+            .iter()
+            .map(|name| Scope::resolve(name))
+            .collect();
+        let tree = parse_once(&grammar, text).expect("parse");
+        spans_from_tree(&query, &scopes, &tree, text)
+    }
+
+    #[test]
+    fn a_match_predicate_guards_its_pattern() {
+        let text = "FOO = Bar + baz\n";
+        let spans = spans_of(
+            lang("python"),
+            r#"((identifier) @constant (#match? @constant "^[A-Z][A-Z0-9_]+$"))"#,
+            text,
+        );
+        // The guard holds: the SCREAMING_CASE name matches and neither the
+        // CamelCase nor the lowercase one does.
+        assert_eq!(scopes_at(&spans, text, "constant"), vec!["FOO"]);
+    }
+
+    #[test]
+    fn a_not_match_predicate_guards_its_pattern() {
+        let text = "FOO = Bar + baz\n";
+        let spans = spans_of(
+            lang("python"),
+            r#"((identifier) @variable (#not-match? @variable "^[A-Z]"))"#,
+            text,
+        );
+        assert_eq!(scopes_at(&spans, text, "variable"), vec!["baz"]);
+    }
+
+    #[test]
+    fn eq_and_any_of_predicates_guard_their_patterns() {
+        let text = "alpha = beta + gamma\n";
+        let spans = spans_of(
+            lang("python"),
+            r#"((identifier) @constant (#eq? @constant "beta"))"#,
+            text,
+        );
+        assert_eq!(scopes_at(&spans, text, "constant"), vec!["beta"]);
+
+        let spans = spans_of(
+            lang("python"),
+            r#"((identifier) @constant (#any-of? @constant "alpha" "gamma"))"#,
+            text,
+        );
+        assert_eq!(scopes_at(&spans, text, "constant"), vec!["alpha", "gamma"]);
+    }
+
+    /// A predicate tree-sitter parses but never applies must take its
+    /// pattern down with it. Shipping such a pattern unguarded is the
+    /// failure mode this protects against — `#is-not? local` unguarded
+    /// paints every identifier in the file.
+    #[test]
+    fn a_predicate_tree_sitter_cannot_evaluate_drops_its_pattern() {
+        let text = "FOO = Bar + baz\n";
+        for guard in [
+            // Property predicate: needs a locals resolver we do not have.
+            r#"((identifier) @constant (#is-not? local))"#,
+            // General predicate: nvim-treesitter flavour, unknown to
+            // tree-sitter itself.
+            r#"((identifier) @constant (#lua-match? @constant "^%u+$"))"#,
+        ] {
+            let spans = spans_of(lang("python"), guard, text);
+            assert!(
+                spans.is_empty(),
+                "{guard} shipped unguarded and produced {spans:?}"
+            );
+        }
+    }
+
+    /// `#set!` is a directive, not a predicate: it must not disarm the
+    /// pattern it sits on (injection resolution relies on this).
+    #[test]
+    fn a_set_directive_does_not_drop_its_pattern() {
+        let text = "alpha = 1\n";
+        let spans = spans_of(
+            lang("python"),
+            r#"((identifier) @constant (#set! priority 100))"#,
+            text,
+        );
+        assert_eq!(scopes_at(&spans, text, "constant"), vec!["alpha"]);
+    }
+
+    #[test]
+    fn same_node_captures_resolve_first_pattern_wins() {
+        let text = "class Widget:\n    pass\n";
+        let spans = spans_of(
+            lang("python"),
+            r#"
+            (class_definition name: (identifier) @type)
+            ((identifier) @constant (#match? @constant "^[A-Z]"))
+            "#,
+            text,
+        );
+        assert_eq!(scopes_at(&spans, text, "type"), vec!["Widget"]);
+        assert!(
+            scopes_at(&spans, text, "constant").is_empty(),
+            "the later catch-all beat the specific pattern: {spans:?}"
+        );
+    }
+
+    /// End-to-end through the shipped `python/highlights.scm`: the two
+    /// naming conventions every mainstream editor paints.
+    #[test]
+    fn shipped_queries_paint_the_naming_conventions() {
+        let text = "MAX_RETRIES = 3\nvalue = Widget\nname = other\n";
+        let spans = highlight(lang("python"), text);
+        assert!(
+            scopes_at(&spans, text, "constant").contains(&"MAX_RETRIES"),
+            "SCREAMING_CASE is not a constant: {spans:?}"
+        );
+        assert!(
+            scopes_at(&spans, text, "type").contains(&"Widget"),
+            "CamelCase is not a type: {spans:?}"
+        );
+        // The lowercase names are untouched by the convention patterns.
+        assert!(!scopes_at(&spans, text, "type").contains(&"value"));
+        assert!(!scopes_at(&spans, text, "constant").contains(&"name"));
     }
 }

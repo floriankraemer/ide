@@ -4,16 +4,54 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tree-sitter = "0.24"
-tree-sitter-rust = "0.23"
-tree-sitter-json = "0.24"
-# Pinned below tree-sitter-c-sharp's/tree-sitter-php's latest crates.io
-# releases: those ship grammars built at ABI 15, newer than what
-# tree-sitter 0.24's runtime accepts (ABI 13..=14, see
-# TREE_SITTER_LANGUAGE_VERSION in tree-sitter's api.h). 0.21.3/0.23.11 are
-# the newest versions confirmed to load against tree-sitter 0.24 (verified
-# with `Parser::set_language` at grammar-selection time, Task B).
-tree-sitter-c-sharp = "0.21.3"
+tree-sitter = "0.26"
+tree-sitter-rust = "0.24.2"
+tree-sitter-json = "0.24.8"
+tree-sitter-c-sharp = "0.23.5"
 tree-sitter-java = "0.23.5"
-tree-sitter-php = "0.23.11"
+tree-sitter-php = "0.24.2"
+# Batch 1 languages. tree-sitter-toml-ng rather than tree-sitter-toml:
+# the latter is stuck at 0.20 and pulls in a second tree-sitter runtime,
+# whose Language type cannot satisfy this catalog's grammar fn.
+tree-sitter-python = "0.25"
+tree-sitter-c = "0.24.2"
+tree-sitter-cpp = "0.23.4"
+tree-sitter-go = "0.25"
+tree-sitter-typescript = "0.23.2"
+tree-sitter-javascript = "0.25"
+tree-sitter-bash = "0.25.1"
+tree-sitter-yaml = "0.7.2"
+tree-sitter-toml-ng = "0.7.0"
+# Batch 2 languages (R5).
+tree-sitter-sequel = "0.3.11"
+tree-sitter-ruby = "0.23.1"
+tree-sitter-lua = "0.5"
+tree-sitter-make = "1.1.1"
+# camdencheek/tree-sitter-dockerfile 0.2 pins the tree-sitter 0.20 runtime
+# and would drag a second one into the build (same trap as tree-sitter-toml).
+# wharflab's fork is on the modern tree-sitter-language shape.
+tree-sitter-containerfile = "0.9.2"
+# Batch 3 (R6) languages.
+tree-sitter-fsharp = "0.3.11"
+tree-sitter-kotlin-ng = "1.1.0"
+tree-sitter-swift = "0.7.3"
+tree-sitter-scala = "0.26.2"
+tree-sitter-zig = "1.1.2"
+tree-sitter-haskell = "0.23.1"
+# Markup tranche (R4d). tree-sitter-md ships two grammars: the block
+# grammar and the inline one it injects into its own `(inline)` nodes.
+tree-sitter-md = "0.5.3"
+tree-sitter-html = "0.23.2"
+tree-sitter-css = "0.25"
+tree-sitter-xml = "0.7"
 streaming-iterator = "0.1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# Runtime grammar dylibs (G1b). `tree-sitter-language` is the sanctioned
+# public way to turn a `tree_sitter_<id>` symbol into a `Language`; it is
+# already in the tree as a tree-sitter dependency.
+libloading = "0.9"
+tree-sitter-language = "0.1"
+
+[dev-dependencies]
+tempfile = "3"

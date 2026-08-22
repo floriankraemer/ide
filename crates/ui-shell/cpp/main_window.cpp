@@ -3,7 +3,11 @@
 #include "code_editor.h"
 #include "find_bar.h"
 #include "keymap_page.h"
+#include "language_servers_page.h"
+#include "languages_page.h"
+#include "syntax_colors_page.h"
 #include "search_everywhere_dialog.h"
+#include "problems_panel.h"
 #include "search_results_panel.h"
 #include "splash_screen.h"
 #include "syntax_highlighter.h"
@@ -21,7 +25,11 @@
 #include <QElapsedTimer>
 #include <QKeyEvent>
 #include <QSet>
+#include <QTextBlock>
 #include <QTimer>
+#include <QToolButton>
+#include <QToolTip>
+#include <QVector>
 #include <QTreeWidget>
 #include <QColor>
 #include <QColorDialog>
@@ -66,7 +74,6 @@
 #include <QSplitter>
 #include <QTabBar>
 #include <QTabWidget>
-#include <QtGui/QSyntaxHighlighter>
 #include <QtGui/QTextDocument>
 #include <QTreeView>
 #include <QTreeWidget>
@@ -119,11 +126,25 @@ void moveCursorToLine(QPlainTextEdit *editor, int line, int column)
 // TabId still maps to exactly one editor widget. ADS still sees the whole
 // tree as the single "Editor" dock widget, so D4's dock save/restore is
 // untouched by splitting.
+// A document (UTF-16) position as the line/character pair LSP speaks: both
+// 0-based, characters counted in UTF-16 code units — which is exactly what
+// QTextCursor counts, so this is a re-expression, not a conversion (unlike
+// byteOffsetAt, which the byte-addressed index needs).
+QPair<quint32, quint32> lspPosition(QPlainTextEdit *editor, int documentPosition)
+{
+    QTextCursor cursor(editor->document());
+    cursor.setPosition(documentPosition);
+    return {static_cast<quint32>(cursor.blockNumber()),
+            static_cast<quint32>(cursor.positionInBlock())};
+}
+
 class EditorTabs : public QObject
 {
 public:
-    EditorTabs(DocumentManager *docManager, QSplitter *root, QWidget *window)
+    EditorTabs(DocumentManager *docManager, LanguageService *languageService, QSplitter *root,
+                QWidget *window)
       : docManager_(docManager)
+      , languageService_(languageService)
       , root_(root)
       , window_(window)
     {
@@ -147,6 +168,26 @@ public:
                     setActiveGroup(group, group->currentIndex());
                 }
                 return;
+            }
+        });
+
+        // L3: one tooltip for the whole window. The answer is asynchronous,
+        // so it is shown where the pointer is when it arrives — safe only
+        // because `lsp_core::HoverTracker` has already dropped everything
+        // the user has moved on from, so whatever reaches here is still
+        // about the word under the cursor.
+        connect(languageService_, &LanguageService::hoverReady, this, [](const QString &html) {
+            QToolTip::showText(QCursor::pos(), html);
+        });
+
+        // L5: a completion answer landed. Only a still-current one is ever
+        // signalled (`lsp_core::CompletionTracker`), so the visible editor
+        // simply re-reads the candidates for the word it is on.
+        connect(languageService_, &LanguageService::completionReady, this, [this]() {
+            auto *editor = qobject_cast<CodeEditor *>(
+                activeGroup_ ? activeGroup_->currentWidget() : nullptr);
+            if (editor) {
+                editor->refreshCompletions();
             }
         });
 
@@ -249,6 +290,14 @@ public:
           editor->toPlainText().left(documentPosition).toUtf8().size());
     }
 
+    // L3/L4: the same document position as the line/character pair the
+    // language server speaks.
+    QPair<quint32, quint32> lspPositionAt(int documentPosition) const
+    {
+        auto *editor = currentEditor();
+        return editor ? lspPosition(editor, documentPosition) : QPair<quint32, quint32>{0, 0};
+    }
+
     // The word under the caret, used by the caret-driven Find Usages and
     // the type-hierarchy jumps. Empty when no tab is open or the caret is
     // not on a word.
@@ -332,6 +381,52 @@ public:
         if (navigationChanged_) {
             navigationChanged_();
         }
+    }
+
+    // Task L2: repaint every open editor's squiggles from whatever the
+    // language servers have published. Called on the service's
+    // diagnosticsChanged signal — the store is the single source, so no
+    // per-editor bookkeeping of "which diagnostics are mine" exists here.
+    void applyDiagnostics()
+    {
+        forEachEditor([this](QPlainTextEdit *editor) {
+            auto *codeEditor = qobject_cast<CodeEditor *>(editor);
+            const QString path = editor->property("lspPath").toString();
+            if (!codeEditor) {
+                return;
+            }
+            QVector<DiagnosticSpan> spans;
+            if (!path.isEmpty()) {
+                const QTextDocument *document = editor->document();
+                for (const FfiDiagnostic &row : languageService_->diagnosticsForFile(path)) {
+                    // LSP line/character are UTF-16 code units, which is what
+                    // QTextBlock/QTextCursor count too — so this is arithmetic,
+                    // not a re-encoding (contrast SyntaxHighlighter, which has
+                    // to map tree-sitter's UTF-8 byte offsets).
+                    const QTextBlock startBlock =
+                      document->findBlockByNumber(static_cast<int>(row.line) - 1);
+                    if (!startBlock.isValid()) {
+                        continue;
+                    }
+                    const QTextBlock endBlock =
+                      document->findBlockByNumber(static_cast<int>(row.end_line) - 1);
+                    const int start =
+                      startBlock.position()
+                      + qMin(static_cast<int>(row.column), startBlock.length() - 1);
+                    int end = start;
+                    if (endBlock.isValid()) {
+                        end = endBlock.position()
+                              + qMin(static_cast<int>(row.end_column), endBlock.length() - 1);
+                    }
+                    if (end <= start) {
+                        // A zero-width range still has to be visible.
+                        end = qMin(start + 1, startBlock.position() + startBlock.length() - 1);
+                    }
+                    spans.append(DiagnosticSpan{start, end, severityColor(row.severity)});
+                }
+            }
+            codeEditor->setDiagnosticSpans(spans);
+        });
     }
 
     // The current editor's find bar, or nothing when no tab is open.
@@ -448,6 +543,14 @@ public:
             QMessageBox::critical(window_, tr("Cannot save file"), result.message);
             return;
         }
+        // The tab now backs a different file: the server has to be told about
+        // both halves of that move.
+        const QString previous = editor->property("lspPath").toString();
+        if (!previous.isEmpty()) {
+            languageService_->documentClosed(previous);
+        }
+        editor->setProperty("lspPath", path);
+        languageService_->documentOpened(path, editor->toPlainText());
         editor->document()->setModified(false);
         renderTabText(activeGroup_, index, docManager_->tabTitle(tabId), false);
     }
@@ -500,16 +603,50 @@ public:
         forEachEditor([this](QPlainTextEdit *editor) { applyEditorAppearance(editor); });
     }
 
-    // Token colors follow the theme (see syntax_highlighter.cpp), and a
-    // QSyntaxHighlighter only re-runs when its document changes — so a live
-    // theme switch has to ask every open editor to re-highlight itself.
+    // L6: the language-server settings were committed and stale servers
+    // were stopped, so every open document has to be announced again — to a
+    // replacement server for the languages that changed, and to nobody at
+    // all for the ones that did not (reopenDocument drops those).
+    void reannounceDocuments()
+    {
+        forEachEditor([this](QPlainTextEdit *editor) {
+            const QString path = editor->property("lspPath").toString();
+            if (!path.isEmpty()) {
+                languageService_->reopenDocument(path, editor->toPlainText());
+            }
+        });
+    }
+
+    // A language was turned off or back on, so which language each open
+    // file resolves to may have changed — and that is bound when the
+    // highlighter is built, not on every repaint. Asking each one to
+    // re-resolve is cheaper than tearing tabs down and rebuilding them.
+    void reloadHighlighterLanguages()
+    {
+        forEachEditor([](QPlainTextEdit *editor) {
+            if (auto *highlighter = editor->document()->findChild<SyntaxHighlighter *>()) {
+                highlighter->reloadLanguage();
+                highlighter->rehighlight();
+            }
+        });
+    }
+
+    // Token colors are resolved by syntax_core::theme from the active
+    // theme (and the user's syntax colours) and then cached per
+    // highlighter, and a QSyntaxHighlighter only re-runs when its document
+    // changes — so a live theme switch has to drop that cache and ask every
+    // open editor to re-highlight itself.
     void refreshHighlighting()
     {
         forEachEditor([](QPlainTextEdit *editor) {
             // QSyntaxHighlighter parents itself to the document it attaches
             // to, so that — not the editor widget — is where onTabOpened's
-            // instance can be found again.
-            if (auto *highlighter = editor->document()->findChild<QSyntaxHighlighter *>()) {
+            // instance can be found again. SyntaxHighlighter has no
+            // Q_OBJECT of its own, so this matches on QSyntaxHighlighter's
+            // metaobject — sound because onTabOpened attaches no other
+            // QSyntaxHighlighter subclass to an editor document.
+            if (auto *highlighter = editor->document()->findChild<SyntaxHighlighter *>()) {
+                highlighter->invalidatePalette();
                 highlighter->rehighlight();
             }
         });
@@ -900,6 +1037,12 @@ private:
             return false;
         }
         editor->document()->setModified(false);
+        const QString path = editor->property("lspPath").toString();
+        if (!path.isEmpty()) {
+            // Servers that only re-analyse on save (and linters behind them)
+            // need this; the buffer itself already went across as didChange.
+            languageService_->documentSaved(path);
+        }
         return true;
     }
 
@@ -991,12 +1134,12 @@ private:
         editor->setFont(editorFont_);
         applyEditorAppearance(editor);
         // Y2: self-parents to editor->document(), no manual lifetime
-        // management needed. PlainText (unrecognized/no extension) yields
+        // management needed. Plain text (a file no language claims) yields
         // no spans from the incremental highlighter, so this is a
         // harmless no-op then. `editor` (Task C) lets it push fold ranges
         // to the gutter on the same revision-change hook that already
         // drives highlighting.
-        new SyntaxHighlighter(editor->document(), docManager_->tabExtension(tabId), editor);
+        new SyntaxHighlighter(editor->document(), docManager_->tabFileName(tabId), editor);
         // Find (F3): one bar per editor, floated over it, hidden until
         // Ctrl+F/Ctrl+R. Parented to the editor, so it dies with the tab.
         new FindBar(editor, docManager_);
@@ -1009,6 +1152,63 @@ private:
                 declarationRequested_(position);
             }
         });
+
+        // L3: the pointer dwelled over an identifier. Asking is free of the
+        // UI thread (LanguageService answers from its worker), and a file
+        // with no server never got an lspPath, so nothing is asked for it.
+        connect(editor, &CodeEditor::hoverRequested, this, [this, editor](int position) {
+            const QString path = editor->property("lspPath").toString();
+            if (path.isEmpty()) {
+                return;
+            }
+            const QPair<quint32, quint32> at = lspPosition(editor, position);
+            languageService_->hoverAt(path, at.first, at.second);
+        });
+        connect(editor, &CodeEditor::hoverCanceled, this,
+                [this]() { languageService_->cancelHover(); });
+
+        // L5: completion. The editor reports keystrokes and the caret; every
+        // decision about them — whether a request is worth making, which
+        // candidates match, in what order, and what each one types — is
+        // `lsp_core::completion`'s. All that happens here is the position
+        // conversion and the FFI-to-view struct copy.
+        connect(editor,
+                &CodeEditor::completionRequested,
+                this,
+                [this, editor](int position, const QString &textBefore, bool explicitRequest) {
+                    const QString path = editor->property("lspPath").toString();
+                    if (path.isEmpty()) {
+                        return;
+                    }
+                    const QPair<quint32, quint32> at = lspPosition(editor, position);
+                    languageService_->completionAt(path, at.first, at.second, textBefore,
+                                                   explicitRequest);
+                });
+        connect(editor,
+                &CodeEditor::completionFilterChanged,
+                this,
+                [this, editor](const QString &textBefore) {
+                    QVector<CompletionEntry> entries;
+                    for (const FfiCompletionItem &item :
+                         languageService_->completionItems(textBefore)) {
+                        entries.append(CompletionEntry{
+                            item.label,
+                            item.kind,
+                            item.detail,
+                            item.documentation,
+                            item.insert,
+                            item.has_range,
+                            static_cast<int>(item.start_line),
+                            static_cast<int>(item.start_character),
+                            static_cast<int>(item.end_line),
+                            static_cast<int>(item.end_character),
+                            static_cast<int>(item.prefix_length),
+                        });
+                    }
+                    editor->showCompletions(entries);
+                });
+        connect(editor, &CodeEditor::completionCanceled, this,
+                [this]() { languageService_->cancelCompletion(); });
 
         // L3: only the visible tab's cursor should move the status bar —
         // guards against a background tab's programmatic cursor change
@@ -1034,7 +1234,31 @@ private:
                 docManager_,
                 [this, tabId](bool modified) { docManager_->setTabModified(tabId, modified); });
 
+        // Task L2: tell the language server about the document, and keep it
+        // told. The path rides on the widget (like `tabId`) so a close can
+        // still name the document after the session has forgotten the tab.
+        const QString path = docManager_->tabPath(tabId);
+        editor->setProperty("lspPath", path);
+        if (!path.isEmpty()) {
+            languageService_->documentOpened(path, editor->toPlainText());
+        }
+        // didChange is full-text (ADR-0016), so it is debounced rather than
+        // sent per keystroke — the delay is a view-side rate limit, not a
+        // rule about when a server should re-analyse.
+        auto *changeTimer = new QTimer(editor);
+        changeTimer->setSingleShot(true);
+        changeTimer->setInterval(300);
+        connect(changeTimer, &QTimer::timeout, this, [this, editor]() {
+            const QString current = editor->property("lspPath").toString();
+            if (!current.isEmpty()) {
+                languageService_->documentChanged(current, editor->toPlainText());
+            }
+        });
+        connect(editor->document(), &QTextDocument::contentsChanged, changeTimer,
+                 qOverload<>(&QTimer::start));
+
         group->addTab(editor, title);
+        applyDiagnostics();
     }
 
     void onTabClosed(quint64 tabId)
@@ -1044,6 +1268,10 @@ private:
             return;
         }
         QWidget *widget = loc.group->widget(loc.index);
+        const QString path = widget->property("lspPath").toString();
+        if (!path.isEmpty()) {
+            languageService_->documentClosed(path);
+        }
         loc.group->removeTab(loc.index);
         delete widget;
         if (loc.group->count() == 0) {
@@ -1178,6 +1406,7 @@ private:
     }
 
     DocumentManager *docManager_;
+    LanguageService *languageService_;
     QSplitter *root_;
     QWidget *window_;
     QList<QTabWidget *> groups_;
@@ -1629,20 +1858,25 @@ private:
     DocumentManager *docManager_ = nullptr;
 };
 
-// Go to Declaration (N2/N8): turns SearchModel's streamed resolution
-// results into either a jump or a chooser.
+// Go to Declaration (N2/N8/L4): turns a resolution — from the language
+// server or from the index — into either a jump or a chooser.
 //
-// The rule this class does *not* contain is which candidate is best —
-// `index_core::resolve_declaration` already ranked them and the first one
-// to arrive is the winner. All that is decided here is presentation: one
-// candidate jumps straight there, several offer the list (resolution is
-// name-based per ADR-0008, so ambiguity is a legitimate answer, not an
-// error), none reports why nothing happened.
+// Two rules this class does *not* contain: which candidate is best
+// (`index_core::resolve_declaration` and the server both answer ranked, and
+// the first candidate to arrive is the winner), and who answers at all —
+// `lsp_core::definition_outcome` decides that, and reaches here as either
+// the definitionFound/definitionFinished pair or definitionFallback.
+// Presentation is all that is decided here: one candidate jumps straight
+// there, several offer the list (resolution may legitimately be ambiguous —
+// name-based per ADR-0008, or genuinely several targets per LSP), none
+// reports why nothing happened.
 class DeclarationNavigator : public QObject
 {
 public:
-    DeclarationNavigator(SearchModel *searchModel, EditorTabs *editorTabs, QMainWindow *window)
+    DeclarationNavigator(LanguageService *languageService, SearchModel *searchModel,
+                          EditorTabs *editorTabs, QMainWindow *window)
       : QObject(window)
+      , languageService_(languageService)
       , searchModel_(searchModel)
       , editorTabs_(editorTabs)
       , window_(window)
@@ -1661,6 +1895,22 @@ public:
                     candidates_.clear();
                     report(tr("Go to Declaration failed: %1").arg(message));
                 });
+
+        // L4: the language server's answer, when it had one. Targets carry
+        // no kind or container — a server answers with places, not with the
+        // index's symbol metadata.
+        connect(languageService_, &LanguageService::definitionFound, this,
+                [this](const FfiDefinition &target) {
+                    candidates_.append(
+                      Candidate{target.path, target.line, target.column, QString(), QString()});
+                });
+        connect(languageService_, &LanguageService::definitionFinished, this, [this]() {
+            // Project tier: several targets are several real answers, so
+            // they are offered rather than silently reduced to the first.
+            finish(FfiResolutionTier::Project, QString());
+        });
+        connect(languageService_, &LanguageService::definitionFallback, this,
+                &DeclarationNavigator::askIndex);
     }
 
     // Entry point for both the Ctrl+Click gesture and the menu action.
@@ -1673,8 +1923,23 @@ public:
             return;
         }
         candidates_.clear();
+        position_ = documentPosition;
+        const QPair<quint32, quint32> at = editorTabs_->lspPositionAt(documentPosition);
+        languageService_->resolveDefinition(path, at.first, at.second);
+    }
+
+    // ADR-0016's fallback: ADR-0011's name-based index answers whenever the
+    // server did not. Never called from a condition evaluated here — it is
+    // wired to definitionFallback, which is `lsp_core`'s verdict.
+    void askIndex()
+    {
+        const QString path = editorTabs_->currentPath();
+        if (path.isEmpty()) {
+            return;
+        }
+        candidates_.clear();
         searchModel_->resolveDeclaration(path, editorTabs_->currentContent(),
-                                          editorTabs_->byteOffsetAt(documentPosition));
+                                          editorTabs_->byteOffsetAt(position_));
     }
 
 private:
@@ -1763,10 +2028,14 @@ private:
         return QString();
     }
 
+    LanguageService *languageService_;
     SearchModel *searchModel_;
     EditorTabs *editorTabs_;
     QMainWindow *window_;
     QList<Candidate> candidates_;
+    // The document position of the gesture being resolved, kept so the
+    // index fallback can re-ask about the same spot in its own units.
+    int position_ = 0;
 };
 
 // File > Recent Projects (C2): rebuilds `menu` from `appSettings`'s
@@ -1848,7 +2117,10 @@ void applyKeymap(const QHash<QString, QAction *> &actions, AppSettings *appSetti
 
 void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *editorTabs,
                         KeymapEditor *keymapEditor, const QHash<QString, QAction *> &actions,
-                        DocumentManager *docManager, const std::shared_ptr<QString> &mcpStatus)
+                        DocumentManager *docManager, const std::shared_ptr<QString> &mcpStatus,
+                        SyntaxColorEditor *syntaxColorEditor, LanguageCatalog *languageCatalog,
+                        LanguageServerEditor *languageServerEditor,
+                        LanguageService *languageService)
 {
     const QString originalTheme = appSettings->themeName();
     const FfiEditorFont originalFont = appSettings->editorFont();
@@ -1856,11 +2128,20 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
 
     QDialog dialog(parent);
     dialog.setWindowTitle(QObject::tr("Settings"));
+    // The pages' own minimums add up to roughly 740x510, which is enough to
+    // lay a page out but not enough to read one: the Languages tree needs
+    // room for four columns before Matches has anything to elide. Sized here
+    // rather than in the pages because the dialog is what the user sees, and
+    // one number beats four minimums fighting over the same window.
+    dialog.resize(960, 640);
 
     auto *categoryList = new QListWidget(&dialog);
     categoryList->addItem(QObject::tr("Appearance"));
     categoryList->addItem(QObject::tr("Editor"));
+    categoryList->addItem(QObject::tr("Syntax Colors"));
     categoryList->addItem(QObject::tr("Keymap"));
+    categoryList->addItem(QObject::tr("Languages"));
+    categoryList->addItem(QObject::tr("Language Servers"));
     categoryList->addItem(QObject::tr("MCP"));
     categoryList->setMaximumWidth(150);
 
@@ -1959,11 +2240,36 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
 
     pages->addWidget(editorPage);
 
+    // Syntax Colors follows Appearance rather than Keymap: it applies live,
+    // so the user sees the colour in the open editor while picking it, and
+    // the Cancel branch below reverts it the same way the theme is reverted.
+    syntaxColorEditor->beginEdit();
+    pages->addWidget(buildSyntaxColorsPage(
+      &dialog, syntaxColorEditor, QFont(originalFont.family, static_cast<int>(originalFont.size)),
+      [editorTabs]() { editorTabs->refreshHighlighting(); }));
+
     // Unlike Appearance/Editor, the keymap isn't applied live: the page edits
     // a draft held in Rust, so Cancel discards it by never committing, and
     // the next beginEdit() re-reads from disk.
     keymapEditor->beginEdit();
     pages->addWidget(buildKeymapPage(&dialog, keymapEditor));
+
+    // Languages needs no draft: nothing on it is a setting. Adding a
+    // language, clearing a quarantine and reloading all take effect when
+    // pressed, which is why the page offers no OK-shaped promise.
+    pages->addWidget(buildLanguagesPage(
+      &dialog, languageCatalog,
+      [&dialog, editorTabs](const QString &path) {
+          editorTabs->openFileAtLine(path, 1, 1);
+          dialog.accept();
+      },
+      [editorTabs]() { editorTabs->reloadHighlighterLanguages(); }));
+
+    // Language Servers commits on OK, like Keymap and MCP: starting and
+    // stopping a server on every keystroke in a command field is not a
+    // preview.
+    languageServerEditor->beginEdit();
+    pages->addWidget(buildLanguageServersPage(&dialog, languageServerEditor, languageService));
 
     // MCP, like Keymap and unlike Appearance/Editor, commits on OK rather
     // than applying live: restarting the server on every keystroke in the
@@ -2037,7 +2343,14 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
         // whether anything changed here would be the view deciding
         // something the Rust side already decides.
         docManager->applyMcpSettings();
+        languageServerEditor->commit();
+        // Reconciling is the Rust side's decision: it stops what the new
+        // settings no longer describe and leaves the rest running, and the
+        // re-announcement below starts the replacements.
+        languageService->applyServerSettings();
+        editorTabs->reannounceDocuments();
     } else {
+        syntaxColorEditor->revert();
         applyTheme(originalTheme);
         editorTabs->refreshHighlighting();
         editorTabs->setEditorFont(QFont(originalFont.family, static_cast<int>(originalFont.size)));
@@ -2070,11 +2383,14 @@ struct CentralWidgets
     FindUsagesPanel *findUsagesPanel;
     ads::CDockWidget *findUsagesDock;
     SearchEverywhereDialog *searchEverywhereDialog;
+    ProblemsPanel *problemsPanel;
+    ads::CDockWidget *problemsDock;
 };
 
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
                                    DocumentManager *docManager, AppSettings *appSettings,
-                                   SearchModel *searchModel, TerminalSession *terminalSession)
+                                   SearchModel *searchModel, TerminalSession *terminalSession,
+                                   LanguageService *languageService)
 {
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
@@ -2100,7 +2416,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     treeDock->setWidget(treeView);
     dockManager->addDockWidget(ads::LeftDockWidgetArea, treeDock, editorArea);
 
-    auto *editorTabs = new EditorTabs(docManager, editorRoot, window);
+    auto *editorTabs = new EditorTabs(docManager, languageService, editorRoot, window);
 
     // Task H: bottom dock panel, matching where JetBrains/VS-style IDEs
     // dock their Find in Files results. Reuses the one EditorTabs instance
@@ -2157,6 +2473,24 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // conventional spot for an embedded shell in JetBrains/VS-style IDEs.
     // The widget itself only starts the PTY once it's actually shown/sized
     // (TerminalWidget::showEvent/resizeEvent), not eagerly here.
+    // Task L2: the Problems panel, tabbed into the same bottom area as Find
+    // in Files and Find Usages — the same "list of locations" shape, fed by
+    // the language servers instead of a query.
+    auto *problemsPanel = new ProblemsPanel(languageService, openAt, dockManager);
+    auto *problemsDock = new ads::CDockWidget(dockManager, QObject::tr("Problems"));
+    problemsDock->setWidget(problemsPanel);
+    dockManager->addDockWidget(ads::CenterDockWidgetArea, problemsDock, bottomArea);
+    // Hidden until there is something to show (or the View menu asks): it
+    // opens itself once per session, the first time a diagnostic arrives.
+    problemsDock->toggleView(false);
+    problemsPanel->setFirstDiagnosticCallback([problemsDock]() {
+        problemsDock->toggleView(true);
+    });
+    // The squiggles and the panel read the same store, so one signal drives
+    // both.
+    QObject::connect(languageService, &LanguageService::diagnosticsChanged, editorTabs,
+                      [editorTabs]() { editorTabs->applyDiagnostics(); });
+
     auto *terminalWidget = new TerminalWidget(terminalSession, appSettings, dockManager);
     auto *terminalDock = new ads::CDockWidget(dockManager, QObject::tr("Terminal"));
     terminalDock->setWidget(terminalWidget);
@@ -2174,8 +2508,10 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                       [classViewPanel, editorTabs](quint64, const QString &) {
                           classViewPanel->refresh(editorTabs->currentTabId());
                       });
-    editorTabs->setActiveTabChangedCallback([classViewPanel, editorTabs]() {
+    editorTabs->setActiveTabChangedCallback([classViewPanel, editorTabs, problemsPanel]() {
         classViewPanel->refresh(editorTabs->currentTabId());
+        // The current file's group sorts to the top of the Problems panel.
+        problemsPanel->setCurrentFile(editorTabs->currentPath());
     });
     QObject::connect(docManager, &DocumentManager::tabModifiedChanged, classViewPanel,
                       [classViewPanel, editorTabs](quint64 tabId, bool modified) {
@@ -2192,6 +2528,16 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                       &ProjectTreeModel::projectOpened,
                       searchModel,
                       [searchModel](const QString &rootPath) { searchModel->openIndex(rootPath); });
+
+    // Same project-open lifecycle event for the language servers: the root is
+    // what `initialize` reports, and re-opening a project must not leave the
+    // previous one's servers running.
+    QObject::connect(treeModel,
+                      &ProjectTreeModel::projectOpened,
+                      languageService,
+                      [languageService](const QString &rootPath) {
+                          languageService->openProject(rootPath);
+                      });
 
     // Initial bottom-panel height: without it the area is sized from the
     // terminal's tiny size hint (~60px), which is unusable for every panel
@@ -2396,7 +2742,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     return CentralWidgets{editorTabs,      dockManager,    searchResultsPanel,
                            searchResultsDock, classViewPanel, classViewDock,
                            terminalDock,    terminalWidget, findUsagesPanel,
-                           findUsagesDock,  searchEverywhereDialog};
+                           findUsagesDock,  searchEverywhereDialog,
+                           problemsPanel,   problemsDock};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -2419,6 +2766,13 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // Holds the Settings > Keymap page's draft between beginEdit() and
     // commit(); parented to the window so it outlives each dialog.
     auto *keymapEditor = new KeymapEditor(window);
+    // The same arrangement for the three language-platform pages (T4, G3,
+    // L6): each holds its page's state between the dialog's beginEdit() and
+    // its commit/revert, and is parented to the window so it outlives the
+    // dialog.
+    auto *syntaxColorEditor = new SyntaxColorEditor(window);
+    auto *languageCatalog = new LanguageCatalog(window);
+    auto *languageServerEditor = new LanguageServerEditor(window);
 
     const FfiWindowGeometry savedGeometry = appSettings->windowGeometry();
     if (savedGeometry.width > 0 && savedGeometry.height > 0) {
@@ -2439,6 +2793,10 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // establish above. The shell isn't spawned yet (TerminalSession::start
     // hasn't been called) until TerminalWidget knows its own pixel size.
     auto *terminalSession = new TerminalSession(window);
+    // Task L2: one language-server adapter per window, alongside the other
+    // per-window QObjects. It launches nothing until a project is opened and
+    // a file of a configured language is opened in it.
+    auto *languageService = new LanguageService(window);
     // One MCP server per process, brought up right after the shared
     // DocumentManager exists — the listener thread it spawns dispatches
     // every EditorCommand back onto this same QObject's Qt thread. Whether
@@ -2459,7 +2817,8 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     docManager->applyMcpSettings();
     progress(3, QObject::tr("Building workspace..."));
     const CentralWidgets central =
-      buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession);
+      buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession,
+                          languageService);
     EditorTabs *editorTabs = central.editorTabs;
     window->setEditorTabs(editorTabs);
     window->setAppSettings(appSettings);
@@ -2482,6 +2841,34 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     auto *languageLabel = new QLabel(statusBar);
     auto *positionLabel = new QLabel(statusBar);
     auto *encodingLabel = new QLabel(QStringLiteral("UTF-8"), statusBar);
+    // Task L2: a compact problem counter, coloured by the worst severity
+    // present and empty when there is nothing wrong. A button rather than a
+    // label because clicking it opens the Problems dock.
+    auto *problemsButton = new QToolButton(statusBar);
+    problemsButton->setAutoRaise(true);
+    problemsButton->setVisible(false);
+    QObject::connect(problemsButton, &QToolButton::clicked, window, [central]() {
+        central.problemsDock->toggleView(true);
+        central.problemsDock->raise();
+        central.problemsPanel->focusTree();
+    });
+    const auto updateProblemsButton = [problemsButton, languageService]() {
+        const FfiDiagnosticCounts counts = languageService->diagnosticCounts();
+        const bool any = counts.errors > 0 || counts.warnings > 0;
+        problemsButton->setVisible(any);
+        if (!any) {
+            return;
+        }
+        problemsButton->setText(QObject::tr("%1 errors, %2 warnings")
+                                   .arg(counts.errors)
+                                   .arg(counts.warnings));
+        const QColor color = severityColor(counts.errors > 0 ? FfiSeverity::Error
+                                                             : FfiSeverity::Warning);
+        problemsButton->setStyleSheet(QStringLiteral("color: %1;").arg(color.name()));
+    };
+    QObject::connect(languageService, &LanguageService::diagnosticsChanged, window,
+                      updateProblemsButton);
+    statusBar->addPermanentWidget(problemsButton);
     statusBar->addPermanentWidget(languageLabel);
     statusBar->addPermanentWidget(positionLabel);
     statusBar->addPermanentWidget(encodingLabel);
@@ -2547,9 +2934,12 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
 
     QObject::connect(preferencesAction, &QAction::triggered, window,
                       [window, appSettings, editorTabs, keymapEditor, actions, docManager,
-                       mcpStatus]() {
+                       mcpStatus, syntaxColorEditor, languageCatalog, languageServerEditor,
+                       languageService]() {
                           showSettingsDialog(window, appSettings, editorTabs, keymapEditor,
-                                              *actions, docManager, mcpStatus);
+                                              *actions, docManager, mcpStatus,
+                                              syntaxColorEditor, languageCatalog,
+                                              languageServerEditor, languageService);
                       });
 
     QMenu *editMenu = window->menuBar()->addMenu(QObject::tr("&Edit"));
@@ -2593,6 +2983,13 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
         central.classViewDock->toggleView(true);
         central.classViewDock->raise();
     });
+    QAction *problemsAction = registerAction(viewMenu, QStringLiteral("view.problems"),
+                                             QObject::tr("Problems"), appSettings, *actions);
+    QObject::connect(problemsAction, &QAction::triggered, window, [central]() {
+        central.problemsDock->toggleView(true);
+        central.problemsDock->raise();
+        central.problemsPanel->focusTree();
+    });
     QAction *terminalAction = registerAction(viewMenu, QStringLiteral("view.terminal"),
                                              QObject::tr("Terminal"), appSettings, *actions);
     QObject::connect(terminalAction, &QAction::triggered, window, [central]() {
@@ -2634,7 +3031,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // N8: code navigation. The Ctrl+Click gesture and every action below
     // route through the one DeclarationNavigator, so there is a single
     // place that turns a resolution result into a jump.
-    auto *navigator = new DeclarationNavigator(searchModel, editorTabs, window);
+    auto *navigator = new DeclarationNavigator(languageService, searchModel, editorTabs, window);
     editorTabs->setDeclarationRequestedCallback(
       [navigator](int position) { navigator->resolveAt(position); });
 
@@ -2774,6 +3171,10 @@ int run_app()
     // Applying the theme (T2) before anything is shown means neither the
     // splash nor the main window ever flashes an unstyled frame.
     applyTheme(appSettings->themeName());
+    // Build the language registry from what the config directory holds and
+    // which languages the user turned off, before the first file can be
+    // opened — otherwise a disabled language would come back every restart.
+    appSettings->reloadLanguages();
 
     SplashScreen splash(appSettings->themeName());
     splash.show();

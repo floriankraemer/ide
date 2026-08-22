@@ -1,0 +1,7 @@
+/* Harness fixture (X1): must contain a keyword, a string and a comment. */
+@media (min-width: 40rem) {
+  .card::after {
+    content: "read more";
+    color: #1d4ed8;
+  }
+}

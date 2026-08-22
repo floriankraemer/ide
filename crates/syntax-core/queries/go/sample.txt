@@ -1,0 +1,8 @@
+// Harness fixture (X1): must contain a keyword, a string and a comment.
+package fixtures
+
+import "fmt"
+
+func Greet(name string) string {
+	return fmt.Sprintf("hello, %s", name)
+}

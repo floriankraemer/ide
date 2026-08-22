@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Harness fixture (X1): a keyword, a string and a comment. -->
+<project name="ide">
+  <module path="crates/syntax-core" />
+</project>

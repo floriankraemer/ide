@@ -1,0 +1,4 @@
+// Harness fixture (X1): must contain a keyword, a string and a comment.
+export function Greeting({ name }: { name: string }) {
+  return <p className="greeting">hello, {name}</p>;
+}

@@ -1,0 +1,14 @@
+# A tiny greeter, used as the highlighting fixture.
+module Greeting
+  class Greeter
+    def initialize(name)
+      @name = name
+    end
+
+    def call
+      "hello, #{@name}"
+    end
+  end
+end
+
+puts Greeting::Greeter.new("world").call unless ARGV.empty?

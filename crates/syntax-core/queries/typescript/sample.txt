@@ -1,0 +1,8 @@
+// Harness fixture (X1): must contain a keyword, a string and a comment.
+export interface Greeting {
+  text: string;
+}
+
+export function greet(name: string): Greeting {
+  return { text: "hello, " + name };
+}

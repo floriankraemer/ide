@@ -1,14 +1,22 @@
 #include "code_editor.h"
 
+#include <QAbstractItemView>
 #include <QColor>
+#include <QCompleter>
 #include <QEvent>
+#include <QFocusEvent>
 #include <QFontMetrics>
+#include <QHelpEvent>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPalette>
 #include <QPaintEvent>
 #include <QPainter>
 #include <QPolygon>
 #include <QResizeEvent>
+#include <QScrollBar>
+#include <QStandardItemModel>
+#include <QStringList>
 #include <QTextBlock>
 #include <QTextCursor>
 #include <QTextDocument>
@@ -19,6 +27,14 @@ namespace ui_shell {
 namespace {
 // Width reserved for the fold triangle, left of the line-number digits.
 constexpr int kFoldMarkerWidth = 12;
+
+// Which CompletionEntry a popup row stands for. Read back through the
+// completer's proxy model, so no assumption is made about the proxy keeping
+// the source order.
+constexpr int kEntryIndexRole = Qt::UserRole + 1;
+
+// Slack added to the popup's ideal width so the last glyph is not clipped.
+constexpr int kPopupWidthPadding = 8;
 
 // Nudges `base` away from itself so a band drawn in the result reads as a
 // subtle tint on both dark and light editor backgrounds.
@@ -40,8 +56,162 @@ CodeEditor::CodeEditor(QWidget *parent)
     // same reason TerminalWidget enables tracking for its links.
     setMouseTracking(true);
 
+    // L5: the completion popup. UnfilteredPopupCompletion is the point —
+    // QCompleter's own prefix matching is bypassed entirely, because which
+    // items match and in what order is the server's answer, computed in
+    // `lsp_core::completion` before the model is filled.
+    completionModel_ = new QStandardItemModel(this);
+    completer_ = new QCompleter(completionModel_, this);
+    completer_->setWidget(this);
+    completer_->setCompletionMode(QCompleter::UnfilteredPopupCompletion);
+    connect(completer_,
+            qOverload<const QModelIndex &>(&QCompleter::activated),
+            this,
+            [this](const QModelIndex &index) {
+                const int entry = index.data(kEntryIndexRole).toInt();
+                if (entry >= 0 && entry < completionEntries_.size()) {
+                    insertCompletion(completionEntries_.at(entry));
+                }
+            });
+
     updateLineNumberAreaWidth(0);
     highlightCurrentLine();
+}
+
+QString CodeEditor::textBeforeCursor() const
+{
+    const QTextCursor cursor = textCursor();
+    return cursor.block().text().left(cursor.positionInBlock());
+}
+
+void CodeEditor::showCompletions(const QVector<CompletionEntry> &items)
+{
+    completionEntries_ = items;
+    completionModel_->clear();
+    if (items.isEmpty()) {
+        hideCompletionPopup();
+        return;
+    }
+    for (int i = 0; i < items.size(); ++i) {
+        const CompletionEntry &entry = items.at(i);
+        auto *row = new QStandardItem(entry.label);
+        row->setEditable(false);
+        row->setData(i, kEntryIndexRole);
+        QStringList tooltip;
+        for (const QString &part : {entry.kind, entry.detail, entry.documentation}) {
+            if (!part.isEmpty()) {
+                tooltip << part;
+            }
+        }
+        row->setToolTip(tooltip.join(QStringLiteral("\n")));
+        completionModel_->appendRow(row);
+    }
+    QAbstractItemView *popup = completer_->popup();
+    popup->setCurrentIndex(completer_->completionModel()->index(0, 0));
+    QRect anchor = cursorRect();
+    anchor.setWidth(popup->sizeHintForColumn(0) + popup->verticalScrollBar()->sizeHint().width()
+                    + kPopupWidthPadding);
+    completer_->complete(anchor);
+}
+
+void CodeEditor::refreshCompletions()
+{
+    emit completionFilterChanged(textBeforeCursor());
+}
+
+void CodeEditor::hideCompletionPopup()
+{
+    if (!completer_->popup()->isVisible() && completionEntries_.isEmpty()) {
+        return;
+    }
+    completer_->popup()->hide();
+    completionEntries_.clear();
+    emit completionCanceled();
+}
+
+void CodeEditor::insertCompletion(const CompletionEntry &entry)
+{
+    QTextCursor cursor = textCursor();
+    const int caret = cursor.position();
+    if (entry.hasRange) {
+        const QTextBlock start = document()->findBlockByNumber(entry.startLine);
+        const QTextBlock end = document()->findBlockByNumber(entry.endLine);
+        if (start.isValid() && end.isValid()) {
+            cursor.setPosition(start.position() + entry.startCharacter);
+            // Never leave characters typed since the request behind the
+            // insertion: the replaced span always runs up to the caret.
+            cursor.setPosition(qMax(end.position() + entry.endCharacter, caret),
+                               QTextCursor::KeepAnchor);
+        }
+    } else if (entry.prefixLength > 0) {
+        cursor.setPosition(qMax(0, caret - entry.prefixLength), QTextCursor::KeepAnchor);
+    }
+    cursor.insertText(entry.insert);
+    setTextCursor(cursor);
+    hideCompletionPopup();
+}
+
+void CodeEditor::keyPressEvent(QKeyEvent *event)
+{
+    // While the popup is up it owns these keys; QCompleter forwards them
+    // here rather than handling them itself (Qt's Custom Completer example).
+    if (completer_->popup()->isVisible()) {
+        switch (event->key()) {
+        case Qt::Key_Enter:
+        case Qt::Key_Return:
+        case Qt::Key_Tab: {
+            const QModelIndex current = completer_->popup()->currentIndex();
+            if (current.isValid()) {
+                event->accept();
+                const int entry = current.data(kEntryIndexRole).toInt();
+                if (entry >= 0 && entry < completionEntries_.size()) {
+                    insertCompletion(completionEntries_.at(entry));
+                }
+                return;
+            }
+            break;
+        }
+        case Qt::Key_Escape:
+            event->accept();
+            hideCompletionPopup();
+            return;
+        default:
+            break;
+        }
+    }
+
+    // Ctrl+Space: ask regardless of what is typed, mid-word or not.
+    if (event->key() == Qt::Key_Space && event->modifiers().testFlag(Qt::ControlModifier)) {
+        event->accept();
+        emit completionRequested(textCursor().position(), textBeforeCursor(), true);
+        return;
+    }
+
+    QPlainTextEdit::keyPressEvent(event);
+
+    const bool typed = !event->text().isEmpty() && event->text().at(0).isPrint();
+    const bool deleted = event->key() == Qt::Key_Backspace || event->key() == Qt::Key_Delete;
+    if (!typed && !deleted) {
+        // A caret move (arrows, Home, Enter) leaves the word the popup
+        // describes, so the list stops being about anything.
+        hideCompletionPopup();
+        return;
+    }
+    if (completer_->popup()->isVisible()) {
+        refreshCompletions();
+    }
+    if (typed) {
+        // Fired on every character: whether it is worth a request — a
+        // trigger character, enough of a word, a list already in hand — is
+        // `lsp_core::completion`'s decision, not this widget's.
+        emit completionRequested(textCursor().position(), textBeforeCursor(), false);
+    }
+}
+
+void CodeEditor::focusOutEvent(QFocusEvent *event)
+{
+    hideCompletionPopup();
+    QPlainTextEdit::focusOutEvent(event);
 }
 
 QPair<int, int> CodeEditor::identifierAt(const QPoint &pos) const
@@ -78,7 +248,34 @@ void CodeEditor::clearHoverSpan()
 void CodeEditor::mouseMoveEvent(QMouseEvent *event)
 {
     updateHoverSpan(event->pos(), event->modifiers().testFlag(Qt::ControlModifier));
+    cancelHover();
     QPlainTextEdit::mouseMoveEvent(event);
+}
+
+bool CodeEditor::viewportEvent(QEvent *event)
+{
+    if (event->type() == QEvent::ToolTip) {
+        const QPair<int, int> span = identifierAt(static_cast<QHelpEvent *>(event)->pos());
+        if (span.first >= 0) {
+            hoverPending_ = true;
+            emit hoverRequested(span.first);
+        }
+        // Accepted either way: the default handler would only offer this
+        // widget's (empty) static tooltip, and a server's answer arrives
+        // later, on hoverReady.
+        event->accept();
+        return true;
+    }
+    return QPlainTextEdit::viewportEvent(event);
+}
+
+void CodeEditor::cancelHover()
+{
+    if (!hoverPending_) {
+        return;
+    }
+    hoverPending_ = false;
+    emit hoverCanceled();
 }
 
 void CodeEditor::mousePressEvent(QMouseEvent *event)
@@ -100,6 +297,7 @@ void CodeEditor::mousePressEvent(QMouseEvent *event)
 void CodeEditor::leaveEvent(QEvent *event)
 {
     clearHoverSpan();
+    cancelHover();
     QPlainTextEdit::leaveEvent(event);
 }
 
@@ -121,6 +319,13 @@ void CodeEditor::setMatchSelections(const QVector<QPair<int, int>> &matches, int
     currentMatch_ = currentMatch;
     // Match highlights ride on the same extra-selection list as the
     // current-line band, so both are (re)applied from one place.
+    highlightCurrentLine();
+}
+
+void CodeEditor::setDiagnosticSpans(const QVector<DiagnosticSpan> &spans)
+{
+    diagnosticSpans_ = spans;
+    // Same one place every other extra selection is (re)applied from.
     highlightCurrentLine();
 }
 
@@ -155,6 +360,16 @@ void CodeEditor::highlightCurrentLine()
         hover.cursor.setPosition(hoverSpan_.first);
         hover.cursor.setPosition(hoverSpan_.second, QTextCursor::KeepAnchor);
         selections.append(hover);
+    }
+
+    for (const DiagnosticSpan &span : diagnosticSpans_) {
+        QTextEdit::ExtraSelection diagnostic;
+        diagnostic.format.setUnderlineStyle(QTextCharFormat::SpellCheckUnderline);
+        diagnostic.format.setUnderlineColor(span.color);
+        diagnostic.cursor = textCursor();
+        diagnostic.cursor.setPosition(span.start);
+        diagnostic.cursor.setPosition(span.end, QTextCursor::KeepAnchor);
+        selections.append(diagnostic);
     }
 
     setExtraSelections(selections);

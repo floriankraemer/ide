@@ -16,8 +16,10 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 pub mod keymap;
+pub mod syntax_colors;
 
 pub use keymap::{action, ActionDef, Binding, Keymap, ACTIONS};
+pub use syntax_colors::{LanguageScopeStyles, ScopeStyle, ScopeStyles};
 
 /// File name used to persist settings inside the config directory.
 const SETTINGS_FILE: &str = "settings.toml";
@@ -35,6 +37,30 @@ pub struct WindowGeometry {
     pub width: u32,
     #[serde(default)]
     pub height: u32,
+}
+
+/// One `[[language_server]]` entry: what the user says about the language
+/// server for one language id.
+///
+/// Every field but `language_id` is optional, so `enabled = false` alone
+/// switches a shipped server off without wiping its command. This mirrors
+/// `lsp_core::ServerOverride` field for field but is declared here so the
+/// config crate keeps no dependency on the LSP client (ADR-0016) — `ui-shell`
+/// maps one to the other at the seam.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct LanguageServerSetting {
+    /// LSP language id, e.g. `"rust"`. The key both the shipped catalog and
+    /// this table are keyed by.
+    #[serde(default)]
+    pub language_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
 }
 
 /// Structured application settings, round-tripped to `settings.toml` in the
@@ -92,6 +118,42 @@ pub struct Settings {
     /// See [`Keymap`] for the rules layered over this map.
     #[serde(default)]
     pub keymap: HashMap<String, String>,
+    /// Base syntax colors: scope name -> style, applying to every language.
+    ///
+    /// Per-language overrides deliberately live in a *separate* top-level
+    /// table rather than nesting under `[syntax_colors.<lang>]`: in TOML both
+    /// a table-form style (`comment = { fg = "…" }`) and a language sub-table
+    /// (`[syntax_colors.python]`) are just tables under the same key, so
+    /// nothing in the syntax tells them apart. Disambiguating would mean
+    /// guessing from the inner keys — fragile the moment a language id
+    /// collides with a scope name, or a scope table uses a key a future style
+    /// field also uses. Two flat maps parse unambiguously and cost one extra
+    /// TOML header.
+    ///
+    /// Dotted scope names may be written either quoted
+    /// (`"function.method" = "…"`) or as the nested table TOML makes of a
+    /// bare dotted key — see [`syntax_colors::deserialize_scope_styles`].
+    #[serde(default, deserialize_with = "syntax_colors::deserialize_scope_styles")]
+    pub syntax_colors: ScopeStyles,
+    /// Per-language syntax color overrides: language id -> (scope name ->
+    /// style). Layered over [`Settings::syntax_colors`] by the theme
+    /// resolution in `syntax-core` — this crate only stores them.
+    #[serde(
+        default,
+        deserialize_with = "syntax_colors::deserialize_language_scope_styles"
+    )]
+    pub syntax_colors_by_language: LanguageScopeStyles,
+    /// Per-language language-server overrides, written as `[[language_server]]`
+    /// blocks. Layered over the shipped catalog by `lsp_core::resolve_servers`;
+    /// this crate only stores them.
+    #[serde(default, rename = "language_server")]
+    pub language_servers: Vec<LanguageServerSetting>,
+    /// Stable ids of languages the user turned off. A disabled language is
+    /// still *listed* by the Languages page — otherwise it could never be
+    /// switched back on — but the registry refuses to resolve it, so its
+    /// files open as plain text. Ids, not names: names are display-only.
+    #[serde(default)]
+    pub disabled_languages: Vec<String>,
 }
 
 /// Cap on remembered recent projects — enough for a useful menu without
@@ -177,6 +239,20 @@ impl Settings {
         self.recent_files.retain(|p| p != &path);
         self.recent_files.insert(0, path);
         self.recent_files.truncate(MAX_RECENT_FILES);
+    }
+
+    /// Turn one language off or back on. Kept sorted and deduped so the
+    /// persisted list is stable no matter what order the user toggled in.
+    pub fn set_language_disabled(&mut self, id: &str, disabled: bool) {
+        self.disabled_languages.retain(|other| other != id);
+        if disabled {
+            self.disabled_languages.push(id.to_string());
+            self.disabled_languages.sort();
+        }
+    }
+
+    pub fn is_language_disabled(&self, id: &str) -> bool {
+        self.disabled_languages.iter().any(|other| other == id)
     }
 }
 
@@ -298,6 +374,34 @@ mod tests {
             window_state: "opaque-blob".to_string(),
             editor_layout: "{\"groups\":[]}".to_string(),
             keymap: HashMap::from([("view.goToLine".to_string(), "Ctrl+L".to_string())]),
+            syntax_colors: HashMap::from([
+                (
+                    "keyword".to_string(),
+                    ScopeStyle::Color("#cc7832".to_string()),
+                ),
+                (
+                    "comment".to_string(),
+                    ScopeStyle::Full {
+                        fg: Some("#808080".to_string()),
+                        bold: false,
+                        italic: true,
+                        underline: false,
+                    },
+                ),
+            ]),
+            syntax_colors_by_language: HashMap::from([(
+                "python".to_string(),
+                HashMap::from([(
+                    "decorator".to_string(),
+                    ScopeStyle::Color("#ffc66d".to_string()),
+                )]),
+            )]),
+            language_servers: vec![LanguageServerSetting {
+                language_id: "rust".to_string(),
+                command: Some("/opt/rust-analyzer".to_string()),
+                ..LanguageServerSetting::default()
+            }],
+            disabled_languages: vec!["vala".to_string()],
         };
 
         save(dir.path(), &settings).unwrap();
@@ -449,5 +553,185 @@ mod tests {
             settings.recent_files[0],
             PathBuf::from(format!("/f{}.rs", MAX_RECENT_FILES + 9))
         );
+    }
+
+    #[test]
+    fn syntax_colors_accept_both_the_string_and_table_spellings() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(SETTINGS_FILE),
+            concat!(
+                "[syntax_colors]\n",
+                "keyword = \"#cc7832\"\n",
+                "comment = { fg = \"#808080\", italic = true }\n",
+                "\n",
+                "[syntax_colors_by_language.python]\n",
+                "decorator = \"#ffc66d\"\n",
+            ),
+        )
+        .unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+
+        let keyword = &loaded.syntax_colors["keyword"];
+        assert_eq!(keyword.fg(), Some("#cc7832"));
+        assert!(!keyword.italic());
+        let comment = &loaded.syntax_colors["comment"];
+        assert_eq!(comment.fg(), Some("#808080"));
+        assert!(comment.italic());
+        assert!(!comment.bold());
+        assert_eq!(
+            loaded.syntax_colors_by_language["python"]["decorator"].fg(),
+            Some("#ffc66d")
+        );
+
+        // And both spellings survive being written back out.
+        save(dir.path(), &loaded).unwrap();
+        assert_eq!(load(dir.path()).unwrap(), loaded);
+    }
+
+    #[test]
+    fn syntax_color_table_form_keeps_only_the_flags_it_sets() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(SETTINGS_FILE),
+            "[syntax_colors]\nerror = { bold = true, underline = true }\n",
+        )
+        .unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+        let style = &loaded.syntax_colors["error"];
+
+        assert_eq!(style.fg(), None);
+        assert!(style.bold());
+        assert!(style.underline());
+        assert!(!style.italic());
+
+        save(dir.path(), &loaded).unwrap();
+        assert_eq!(load(dir.path()).unwrap(), loaded);
+    }
+
+    #[test]
+    fn unknown_scope_names_and_language_ids_survive_a_load_save_cycle() {
+        // A newer build may know scopes and languages this one does not; they
+        // are stored as opaque strings, never rejected or dropped. Dotted
+        // scope names must be quoted in TOML — a bare `a.b.c` key is a nested
+        // table per the TOML spec, not a scope named "a.b.c" — and the
+        // serializer quotes them again on the way out.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(SETTINGS_FILE),
+            concat!(
+                "[syntax_colors]\n",
+                "\"some.future.scope\" = \"#123456\"\n",
+                "\n",
+                "[syntax_colors_by_language.brainfuck]\n",
+                "\"tape.pointer\" = { fg = \"#abcdef\", bold = true }\n",
+            ),
+        )
+        .unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+        save(dir.path(), &loaded).unwrap();
+        let reloaded = load(dir.path()).unwrap();
+
+        assert_eq!(reloaded, loaded);
+        assert_eq!(
+            reloaded.syntax_colors["some.future.scope"].fg(),
+            Some("#123456")
+        );
+        assert!(reloaded.syntax_colors_by_language["brainfuck"]["tape.pointer"].bold());
+    }
+
+    #[test]
+    fn settings_file_without_syntax_colors_loads_empty_maps() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(SETTINGS_FILE), "theme = \"light\"\n").unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+
+        assert!(loaded.syntax_colors.is_empty());
+        assert!(loaded.syntax_colors_by_language.is_empty());
+    }
+
+    #[test]
+    fn per_language_overrides_can_be_set_without_a_base_table() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(SETTINGS_FILE),
+            "[syntax_colors_by_language.rust]\nmacro = \"#bbb529\"\n",
+        )
+        .unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+
+        assert!(loaded.syntax_colors.is_empty());
+        assert_eq!(
+            loaded.syntax_colors_by_language["rust"]["macro"].fg(),
+            Some("#bbb529")
+        );
+    }
+
+    #[test]
+    fn language_server_overrides_round_trip_as_array_of_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            language_servers: vec![
+                LanguageServerSetting {
+                    language_id: "rust".into(),
+                    command: Some("/opt/ra".into()),
+                    args: Some(vec!["--log".into()]),
+                    ..LanguageServerSetting::default()
+                },
+                LanguageServerSetting {
+                    language_id: "go".into(),
+                    enabled: Some(false),
+                    ..LanguageServerSetting::default()
+                },
+            ],
+            ..Settings::default()
+        };
+
+        save(dir.path(), &settings).unwrap();
+        let toml = fs::read_to_string(dir.path().join(SETTINGS_FILE)).unwrap();
+        assert!(toml.contains("[[language_server]]"), "{toml}");
+
+        let loaded = load(dir.path()).unwrap();
+        assert_eq!(loaded.language_servers, settings.language_servers);
+        // Unset fields stay unset rather than being written as empty strings,
+        // so "only disable it" cannot silently wipe the shipped command.
+        assert!(loaded.language_servers[1].command.is_none());
+    }
+
+    #[test]
+    fn disabled_languages_round_trip_and_stay_sorted_and_deduped() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings::default();
+        settings.set_language_disabled("zig", true);
+        settings.set_language_disabled("rust", true);
+        settings.set_language_disabled("zig", true);
+
+        save(dir.path(), &settings).unwrap();
+        let mut loaded = load(dir.path()).unwrap();
+        assert_eq!(loaded.disabled_languages, vec!["rust", "zig"]);
+        assert!(loaded.is_language_disabled("rust"));
+
+        loaded.set_language_disabled("rust", false);
+        assert_eq!(loaded.disabled_languages, vec!["zig"]);
+        assert!(!loaded.is_language_disabled("rust"));
+    }
+
+    #[test]
+    fn a_settings_file_without_disabled_languages_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(SETTINGS_FILE), "theme = \"light\"\n").unwrap();
+        assert!(load(dir.path()).unwrap().disabled_languages.is_empty());
+    }
+
+    #[test]
+    fn a_settings_file_without_language_servers_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(SETTINGS_FILE), "theme = \"light\"\n").unwrap();
+        assert!(load(dir.path()).unwrap().language_servers.is_empty());
     }
 }

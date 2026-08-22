@@ -6,10 +6,12 @@ edition = "2021"
 [dependencies]
 app-core = { path = "../app-core" }
 app-config = { path = "../app-config" }
+settings-model = { path = "../settings-model" }
 editor-core = { path = "../editor-core" }
 project-model = { path = "../project-model" }
 syntax-core = { path = "../syntax-core" }
 index-core = { path = "../index-core" }
+lsp-core = { path = "../lsp-core" }
 pty-core = { path = "../pty-core" }
 terminal-core = { path = "../terminal-core" }
 mcp-server = { path = "../mcp-server" }

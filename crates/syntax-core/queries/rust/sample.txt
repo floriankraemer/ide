@@ -1,0 +1,11 @@
+// Harness fixture (X1): must contain a keyword, a string and a comment.
+pub struct Greeter {
+    name: String,
+}
+
+impl Greeter {
+    /// Doc comment.
+    pub fn greet(&self) -> String {
+        format!("hello, {}", self.name)
+    }
+}

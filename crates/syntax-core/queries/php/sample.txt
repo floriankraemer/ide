@@ -1,0 +1,11 @@
+<?php
+// Harness fixture (X1): must contain a keyword, a string and a comment.
+namespace Fixtures;
+
+class Greeter
+{
+    public function greet(string $name): string
+    {
+        return "hello, " . $name;
+    }
+}

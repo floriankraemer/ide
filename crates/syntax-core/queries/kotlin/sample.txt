@@ -1,0 +1,8 @@
+// Harness fixture (X1): must contain a keyword, a string and a comment.
+package fixtures
+
+class Greeter(private val name: String) {
+    fun greet(): String {
+        return "hello, " + name
+    }
+}

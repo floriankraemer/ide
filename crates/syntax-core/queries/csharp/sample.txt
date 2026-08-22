@@ -1,0 +1,7 @@
+// Harness fixture (X1): must contain a keyword, a string and a comment.
+namespace Fixtures;
+
+public class Greeter
+{
+    public string Greet(string name) => $"hello, {name}";
+}

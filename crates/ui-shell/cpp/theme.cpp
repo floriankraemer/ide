@@ -347,6 +347,32 @@ ThemeColors colorsForTheme(const QString &themeName)
                        QColor(QStringLiteral("#4b6eaf"))};
 }
 
+SemanticColors semanticColorsForTheme(const QString &themeName)
+{
+    // Darcula's own #6897bb info blue measures 4.50:1 on #2b2b2b — it passes
+    // by rounding and fails the moment a row lands on the alternating band,
+    // so it is not used here.
+    if (themeName == QStringLiteral("light")) {
+        return SemanticColors{QColor(QStringLiteral("#c62828")),
+                              QColor(QStringLiteral("#8a6100")),
+                              QColor(QStringLiteral("#1565c0")),
+                              QColor(QStringLiteral("#2e7d32")),
+                              QColor(QStringLiteral("#5f5f5f"))};
+    }
+    // The vscode-dark set deliberately does not match VS Code's own #f14c4c,
+    // which measures 4.34:1 on #252526 and fails AA (spec open question 4).
+    return SemanticColors{QColor(QStringLiteral("#ff6b68")),
+                          QColor(QStringLiteral("#d9a441")),
+                          QColor(QStringLiteral("#74a7cc")),
+                          QColor(QStringLiteral("#6aab73")),
+                          QColor(QStringLiteral("#9a9a9a"))};
+}
+
+SemanticColors semanticColors()
+{
+    return semanticColorsForTheme(activeThemeName());
+}
+
 QString styleSheetForTheme(const QString &themeName)
 {
     if (themeName == QStringLiteral("light")) {

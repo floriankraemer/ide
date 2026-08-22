@@ -1,0 +1,8 @@
+# Package metadata used as the highlighting fixture.
+[package]
+name = "ide-syntax"
+edition = "2021"
+publish = false
+
+[dependencies]
+tree-sitter = { version = "0.26", optional = true }

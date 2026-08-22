@@ -1,0 +1,9 @@
+// Harness fixture (X1): must contain a keyword, a string and a comment.
+#include <string>
+
+class Greeter {
+public:
+    std::string greet(const std::string& name) const {
+        return "hello, " + name;
+    }
+};

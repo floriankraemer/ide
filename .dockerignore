@@ -1,3 +1,14 @@
-target/
-dist/
-.git/
+# Exclude everything, then allow only what the build needs.
+*
+
+!Cargo.toml
+!Cargo.lock
+!crates
+!third_party
+!docker
+
+# Re-exclude build/VCS junk nested inside the allowed dirs
+# (worktrees, submodule git dirs, stale target dirs).
+**/target
+**/.git
+**/.gitmodules

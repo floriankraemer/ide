@@ -29,8 +29,9 @@ build-linux: ## Export dist/ide-linux-x86_64/ (binary + bundled Qt runtime)
 	$(DOCKER) buildx build --target linux-artifact -f $(DOCKERFILE) \
 		--output type=local,dest=dist/ .
 
-# Requires the out-of-band mxe-spike-snapshot:2 base image.
-build-windows: ## Export dist/windows/ (needs mxe-spike-snapshot:2)
+# First run builds the MXE mingw-w64 + Qt6 cross toolchain (mxe-base stage)
+# from source: several hours. Cached as a layer afterwards.
+build-windows: ## Export dist/windows/ (first run builds the MXE toolchain, hours)
 	$(DOCKER) buildx build --target windows-artifact -f $(DOCKERFILE) \
 		--output type=local,dest=dist/ .
 

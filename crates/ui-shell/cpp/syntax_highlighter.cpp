@@ -6,8 +6,11 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
+#include <vector>
 
 #include <QColor>
+#include <QFont>
 #include <QTextBlock>
 #include <QTextCharFormat>
 #include <QTextDocument>
@@ -17,57 +20,33 @@ namespace ui_shell {
 
 namespace {
 
-// VS Code's Dark+ token colors. Kept here rather than in theme.cpp so the
-// theme module stays free of the generated FFI types.
-QColor vscodeDarkColorForKind(FfiTokenKind kind)
+// The character formats of one (theme, language), indexed by scope id —
+// exactly the layout `FfiHighlightSpan::scope` indexes and exactly as long
+// as the Rust scope table, because Rust built it. Every colour decision
+// (theme table, user override precedence, parent-scope inheritance, what a
+// missing colour means) lives in `syntax_core::theme`; this only paints.
+QVector<QTextCharFormat> buildScopeFormats(const SyntaxHighlighterHandle &handle,
+                                           const QString &themeName)
 {
-    switch (kind) {
-    case FfiTokenKind::Keyword:
-        return QColor(QStringLiteral("#569cd6"));
-    case FfiTokenKind::String:
-        return QColor(QStringLiteral("#ce9178"));
-    case FfiTokenKind::Comment:
-        return QColor(QStringLiteral("#6a9955"));
-    case FfiTokenKind::Number:
-        return QColor(QStringLiteral("#b5cea8"));
-    case FfiTokenKind::Function:
-        return QColor(QStringLiteral("#dcdcaa"));
-    case FfiTokenKind::Type:
-        return QColor(QStringLiteral("#4ec9b0"));
-    case FfiTokenKind::Other:
-    default:
-        // Invalid means "leave it to the editor palette's Text role".
-        return QColor();
-    }
-}
+    const QByteArray themeBytes = themeName.toUtf8();
+    const rust::Vec<FfiScopeStyle> styles = handle.palette(
+      rust::Str(themeBytes.constData(), static_cast<std::size_t>(themeBytes.size())));
 
-// Y2's promised theme-sourced colors: the color scheme follows the chrome
-// theme, which is what a theme named after an editor has to do to look like
-// it. A3's split still holds — the *mechanism* stays separate from the
-// chrome QSS, it just keys off the same theme name.
-QColor colorForKind(FfiTokenKind kind, const QString &themeName)
-{
-    if (themeName == QStringLiteral("vscode-dark")) {
-        return vscodeDarkColorForKind(kind);
+    QVector<QTextCharFormat> formats;
+    formats.reserve(static_cast<int>(styles.size()));
+    for (const auto &style : styles) {
+        QTextCharFormat format;
+        if (style.has_fg) {
+            format.setForeground(QColor(style.red, style.green, style.blue));
+        }
+        if (style.bold) {
+            format.setFontWeight(QFont::Bold);
+        }
+        format.setFontItalic(style.italic);
+        format.setFontUnderline(style.underline);
+        formats.append(format);
     }
-    // Darcula-ish palette for the Dark and Light themes, unchanged.
-    switch (kind) {
-    case FfiTokenKind::Keyword:
-        return QColor(QStringLiteral("#cc7832"));
-    case FfiTokenKind::String:
-        return QColor(QStringLiteral("#6a8759"));
-    case FfiTokenKind::Comment:
-        return QColor(QStringLiteral("#808080"));
-    case FfiTokenKind::Number:
-        return QColor(QStringLiteral("#6897bb"));
-    case FfiTokenKind::Function:
-        return QColor(QStringLiteral("#ffc66d"));
-    case FfiTokenKind::Type:
-        return QColor(QStringLiteral("#a9b7c6"));
-    case FfiTokenKind::Other:
-    default:
-        return QColor();
-    }
+    return formats;
 }
 
 // Builds a UTF-16-code-unit-index -> UTF-8-byte-offset table by walking
@@ -109,6 +88,16 @@ QVector<int> byteOffsetsByUtf16Index(const QString &text)
     }
     offsets.append(byteOffset);
     return offsets;
+}
+
+// Byte offset of UTF-16 index `index`, clamped to the table — a block's
+// end index can sit one past the last entry.
+std::size_t byteOffsetAtUtf16Index(const QVector<int> &offsets, int index)
+{
+    if (offsets.isEmpty()) {
+        return 0;
+    }
+    return static_cast<std::size_t>(offsets.at(std::clamp<qsizetype>(index, 0, offsets.size() - 1)));
 }
 
 // Inverse lookup into `byteOffsetsByUtf16Index`'s table: the UTF-16 index
@@ -163,22 +152,38 @@ ByteEdit diffByteRanges(const QByteArray &oldBytes, const QByteArray &newBytes)
                       static_cast<std::size_t>(newEnd) };
 }
 
-rust::Box<SyntaxHighlighterHandle> makeHighlighter(const QString &extension)
+rust::Box<SyntaxHighlighterHandle> makeHighlighter(const QString &fileName)
 {
-    const QByteArray extBytes = extension.toUtf8();
+    const QByteArray nameBytes = fileName.toUtf8();
     return new_syntax_highlighter(
-      rust::Str(extBytes.constData(), static_cast<std::size_t>(extBytes.size())));
+      rust::Str(nameBytes.constData(), static_cast<std::size_t>(nameBytes.size())));
 }
 
 } // namespace
 
-SyntaxHighlighter::SyntaxHighlighter(QTextDocument *document, QString fileExtension,
+SyntaxHighlighter::SyntaxHighlighter(QTextDocument *document, QString fileName,
                                       CodeEditor *editor)
   : QSyntaxHighlighter(document)
-  , fileExtension_(std::move(fileExtension))
-  , highlighter_(makeHighlighter(fileExtension_))
+  , fileName_(std::move(fileName))
+  , highlighter_(makeHighlighter(fileName_))
   , editor_(editor)
 {
+}
+
+void SyntaxHighlighter::invalidatePalette()
+{
+    scopeFormats_.clear();
+}
+
+void SyntaxHighlighter::reloadLanguage()
+{
+    highlighter_ = makeHighlighter(fileName_);
+    hasParsedOnce_ = false;
+    cachedRevision_ = -1;
+    cachedSpans_.clear();
+    cachedSpanMaxEnd_.clear();
+    cachedTextBytes_.clear();
+    scopeFormats_.clear();
 }
 
 void SyntaxHighlighter::highlightBlock(const QString &text)
@@ -214,8 +219,18 @@ void SyntaxHighlighter::highlightBlock(const QString &text)
 
         cachedSpans_.clear();
         cachedSpans_.reserve(static_cast<int>(spans.size()));
+        cachedSpanMaxEnd_.clear();
+        cachedSpanMaxEnd_.reserve(spans.size());
+        std::size_t maxEnd = 0;
         for (const auto &span : spans) {
             cachedSpans_.append(span);
+            // Running max of `end`: spans are sorted by start, but a span
+            // can nest inside an earlier one, so `end` alone isn't
+            // monotonic and can't be binary-searched. This is, and it is
+            // what lets highlightBlock() jump straight to the first span
+            // that can still reach into the block.
+            maxEnd = std::max(maxEnd, span.end);
+            cachedSpanMaxEnd_.push_back(maxEnd);
         }
         cachedByteOffsets_ = byteOffsetsByUtf16Index(wholeDocument);
         cachedTextBytes_ = textBytes;
@@ -248,31 +263,50 @@ void SyntaxHighlighter::highlightBlock(const QString &text)
         return;
     }
 
-    // Read once per block rather than per span — it can't change mid-block,
-    // and a theme switch re-runs the whole highlighter anyway.
-    const QString theme = activeThemeName();
+    // Built once and reused across blocks and revisions. It is *not*
+    // re-derived per block from the active theme, so anything that changes
+    // what the palette resolves to — a theme switch, edited syntax colours —
+    // must call invalidatePalette() before rehighlight(); see
+    // MainWindow's refreshHighlighting().
+    if (scopeFormats_.isEmpty()) {
+        scopeFormats_ = buildScopeFormats(*highlighter_, activeThemeName());
+    }
+
     const QVector<int> &byteOffsets = cachedByteOffsets_;
     const int blockStart = block.position();
     const int blockEnd = blockStart + block.length();
+    const std::size_t blockStartByte = byteOffsetAtUtf16Index(byteOffsets, blockStart);
+    const std::size_t blockEndByte = byteOffsetAtUtf16Index(byteOffsets, blockEnd);
 
-    for (const auto &span : cachedSpans_) {
-        const int start = utf16IndexForByteOffset(byteOffsets, span.start);
-        const int end = utf16IndexForByteOffset(byteOffsets, span.end);
-        if (end <= blockStart || start >= blockEnd) {
+    // Spans arrive in document order, so seek to the first one that can
+    // still overlap this block instead of scanning the whole document per
+    // block (which made attaching to an N-span document O(blocks x N)).
+    const auto begin = std::upper_bound(cachedSpanMaxEnd_.begin(), cachedSpanMaxEnd_.end(),
+                                        blockStartByte);
+    for (auto i = static_cast<int>(std::distance(cachedSpanMaxEnd_.begin(), begin));
+         i < cachedSpans_.size(); ++i) {
+        const auto &span = cachedSpans_.at(i);
+        // Sorted by start: once past the block, every later span is too.
+        if (span.start >= blockEndByte) {
+            break;
+        }
+        if (span.end <= blockStartByte) {
             continue;
         }
+        // The whole correctness story against a palette built from a
+        // different scope table than the spans: never index past it.
+        if (span.scope >= static_cast<std::uint16_t>(scopeFormats_.size())) {
+            continue;
+        }
+        const int start = utf16IndexForByteOffset(byteOffsets, span.start);
+        const int end = utf16IndexForByteOffset(byteOffsets, span.end);
         const int localStart = std::max(start, blockStart) - blockStart;
         const int localEnd = std::min(end, blockEnd) - blockStart;
         if (localEnd <= localStart) {
             continue;
         }
-        const QColor color = colorForKind(span.kind, theme);
-        if (!color.isValid()) {
-            continue;
-        }
-        QTextCharFormat format;
-        format.setForeground(color);
-        setFormat(localStart, localEnd - localStart, format);
+        setFormat(localStart, localEnd - localStart,
+                   scopeFormats_.at(static_cast<int>(span.scope)));
     }
 }
 

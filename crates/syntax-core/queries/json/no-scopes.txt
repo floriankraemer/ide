@@ -1,0 +1,5 @@
+# Standard JSON (RFC 8259) has no comment syntax at all, so no sample can
+# ever produce a comment span and json/highlights.scm has no @comment
+# pattern. `true`/`false`/`null` are the keywords, so `keyword` is not
+# excepted.
+comment

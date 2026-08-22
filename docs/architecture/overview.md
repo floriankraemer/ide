@@ -47,6 +47,8 @@ graph TB
 | `app-config` | support | `settings.toml` load/save, theme, editor font/colors, keymap | No |
 | `syntax-core` | support | tree-sitter parsing: highlighting, folding, outline, occurrences, supertype edges | No |
 | `index-core` | support | Project index: text search (tantivy + ripgrep crates) and symbols/references, plus declaration resolution ([ADR-0011](decisions/0011-code-navigation.md)) | No |
+| `lsp-core` | support | LSP client: framing, supervised server processes, diagnostics, hover, navigation, completion, server catalog ([ADR-0016](decisions/0016-lsp-client.md)) | No |
+| `settings-model` | support | The settings pages' rules: syntax-colour draft and override origin, language load errors as sentences, language-server draft ([ADR-0017](decisions/0017-settings-model-crate.md)) | No |
 | `pty-core` | support | Cross-platform PTY transport for the embedded terminal | No |
 | `terminal-core` | support | VT100/grid state over `alacritty_terminal` | No |
 | `mcp-server` | support | MCP server (protocol + transport) so an agent can read and drive the editor and query the project index ([ADR-0004](decisions/0004-mcp-transport.md), [ADR-0012](decisions/0012-mcp-protocol-index-and-lifecycle.md)) | No |
@@ -67,6 +69,8 @@ Rules crossing the FFI seam (typed errors, `TabId`, Rust-owned dirty state) are 
 ## 5. Build and deployment
 
 `docker/Dockerfile` is a single multi-stage file: a `linux-builder` stage (apt Qt6) and a `windows-builder` stage cross-compiling with MXE's mingw-w64 + Qt6 toolchain.
+The MXE toolchain is built by the `mxe-base` stage from a pinned upstream commit (`ARG MXE_COMMIT`), which compiles `qt6-qtbase` for `x86_64-w64-mingw32.shared` from source.
+That first build takes hours and is then served from the Docker layer cache; it exists so the Windows toolchain is reproducible from the repo rather than depending on a hand-built local image.
 Artifacts land in `dist/`.
 
 ## 6. Future scope (not implemented)

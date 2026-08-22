@@ -1,0 +1,6 @@
+// Harness fixture (X1): must contain a keyword, a string and a comment.
+export class Greeter {
+  greet(name) {
+    return "hello, " + name;
+  }
+}

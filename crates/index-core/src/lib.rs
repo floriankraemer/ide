@@ -65,10 +65,7 @@ use tantivy::schema::{
 use tantivy::tokenizer::NgramTokenizer;
 use tantivy::{doc, Index, IndexReader, IndexWriter, Term};
 
-use syntax_core::{
-    identifier_occurrences, language_for_extension, outline, supertype_edges, SymbolKind,
-    SymbolNode,
-};
+use syntax_core::{analyze_file, language_for_path, SymbolKind, SymbolNode};
 
 /// Directory (relative to the project root) the tantivy index lives under.
 const INDEX_DIR_NAME: &str = ".ide-index";
@@ -1445,17 +1442,15 @@ fn index_symbols(
     path_key: &str,
     content: &str,
 ) -> Result<(), IndexError> {
-    let extension = Path::new(path_key)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("");
-    let language = language_for_extension(extension);
+    let language = language_for_path(Path::new(path_key));
 
-    let roots = outline(language, content);
+    // One parse for all three extractions (outline, occurrences, supertype
+    // edges) instead of three -- see `syntax_core::analyze_file`.
+    let analysis = analyze_file(language, content);
     let mut flat: BTreeMap<(usize, usize), FlatSymbol<'_>> = BTreeMap::new();
-    flatten_outline(&roots, None, &mut flat);
+    flatten_outline(&analysis.outline, None, &mut flat);
 
-    for occurrence in identifier_occurrences(language, content) {
+    for occurrence in analysis.occurrences {
         let (line, col) = line_and_col_at(content, occurrence.start);
         let mut document = doc!(
             fields.path => path_key.to_string(),
@@ -1474,7 +1469,7 @@ fn index_symbols(
         writer.add_document(document)?;
     }
 
-    for edge in supertype_edges(language, content) {
+    for edge in analysis.supertype_edges {
         let (line, col) = line_and_col_at(content, edge.type_start);
         writer.add_document(doc!(
             fields.path => path_key.to_string(),
@@ -1508,28 +1503,30 @@ pub fn resolve_declaration_in_buffer(
     current_content: &str,
     byte_offset: usize,
 ) -> Resolution {
-    let language = language_for_extension(
-        current_path
-            .extension()
-            .and_then(|e| e.to_str())
-            .unwrap_or(""),
-    );
-    let occurrences = identifier_occurrences(language, current_content);
+    let language = language_for_path(current_path);
+    let no_identifier = || Resolution {
+        name: String::new(),
+        tier: ResolutionTier::None,
+        candidates: Vec::new(),
+    };
+    // One parse, then the `locals` walk alone -- the caret has to be on an
+    // identifier before the `tags` walk (which costs about as much as the
+    // parse) is worth running at all.
+    let Some(parsed) = syntax_core::ParsedFile::parse(language, current_content) else {
+        return no_identifier();
+    };
+    let occurrences = parsed.occurrences();
     let Some(target) = occurrences
         .iter()
         .find(|o| byte_offset >= o.start && byte_offset < o.end)
     else {
-        return Resolution {
-            name: String::new(),
-            tier: ResolutionTier::None,
-            candidates: Vec::new(),
-        };
+        return no_identifier();
     };
     let name = target.name.clone();
 
-    let roots = outline(language, current_content);
+    let outline = parsed.outline();
     let mut flat: BTreeMap<(usize, usize), FlatSymbol<'_>> = BTreeMap::new();
-    flatten_outline(&roots, None, &mut flat);
+    flatten_outline(&outline, None, &mut flat);
 
     let mut local: Vec<(usize, SymbolMatch)> = occurrences
         .iter()
