@@ -1362,8 +1362,24 @@ mod ffi {
         #[cxx_name = "excludeFromIndexRename"]
         fn exclude_from_index_rename(self: Pin<&mut SearchModel>, path: &QString);
 
-        /// Apply the pending name-based rename to every ticked site that was
-        /// not excluded, writing to disk and re-indexing — the same applier
+        /// Take the pending rename's sites in `path` as edits for that open
+        /// editor to splice, removing them from the plan.
+        ///
+        /// A file the user has open must not be rewritten underneath them:
+        /// that loses the undo history and makes the editor prompt about a
+        /// change it made itself. So the view takes the open files first and
+        /// `applyIndexRename` writes only what is left — the same split
+        /// `lsp_core::plan_edit` makes for a server-driven edit.
+        #[qinvokable]
+        #[cxx_name = "takeIndexRenameBufferEdits"]
+        fn take_index_rename_buffer_edits(
+            self: Pin<&mut SearchModel>,
+            path: &QString,
+        ) -> Vec<FfiTextEdit>;
+
+        /// Apply what is left of the pending name-based rename — every
+        /// ticked site that was neither excluded nor taken for an open
+        /// buffer — writing to disk and re-indexing. The same applier
         /// Replace in Files uses, because a rename site really is a
         /// single-line span of a known length.
         ///
@@ -4247,6 +4263,29 @@ impl ffi::SearchModel {
                 site.checked = false;
             }
         }
+    }
+
+    pub fn take_index_rename_buffer_edits(
+        self: Pin<&mut Self>,
+        path: &QString,
+    ) -> Vec<ffi::FfiTextEdit> {
+        let path = std::path::PathBuf::from(path.to_string());
+        let mut borrowed = self.rename.borrow_mut();
+        let Some((plan, new_name)) = borrowed.as_mut() else {
+            return Vec::new();
+        };
+        index_core::take_buffer_edits(plan, new_name, &path)
+            .into_iter()
+            .map(|edit| ffi::FfiTextEdit {
+                path: QString::from(edit.path.to_string_lossy().as_ref()),
+                in_buffer: true,
+                start_line: edit.line,
+                start_character: edit.start_character,
+                end_line: edit.line,
+                end_character: edit.end_character,
+                new_text: QString::from(edit.text.as_str()),
+            })
+            .collect()
     }
 
     pub fn apply_index_rename(mut self: Pin<&mut Self>) {
