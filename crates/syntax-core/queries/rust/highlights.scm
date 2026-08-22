@@ -3,6 +3,13 @@
 ; `TokenKind` in lib.rs: @keyword, @string, @comment, @number, @function,
 ; @type. Anything not captured here yields no span, same as the old
 ; matcher's `_ => None` arm.
+;
+; Since then, upstream tree-sitter-rust 0.24.2's four `#match?`-guarded
+; path patterns have been ported in below (uppercase path segments of a
+; scoped_identifier / scoped_type_identifier -> @type). Both the pinned
+; 0.24.2 grammar and 0.23.3 declare the `path` and `name` fields these
+; rely on, so the patterns compile either way. Nothing predicate-guarded
+; is left out of this file.
 
 (line_comment) @comment
 (block_comment) @comment
@@ -55,6 +62,26 @@
 (self) @keyword
 (super) @keyword
 (crate) @keyword
+
+; Uppercase names in paths are types — `Foo::bar()`, `<Foo as Bar>::baz`.
+; Ported from upstream tree-sitter-rust 0.24.2. These sit above the
+; naming-conventions block so the path segment reads as @type rather than
+; being claimed as a CamelCase @constructor.
+
+((scoped_identifier
+  path: (identifier) @type)
+ (#match? @type "^[A-Z]"))
+((scoped_identifier
+  path: (scoped_identifier
+    name: (identifier) @type))
+ (#match? @type "^[A-Z]"))
+((scoped_type_identifier
+  path: (identifier) @type)
+ (#match? @type "^[A-Z]"))
+((scoped_type_identifier
+  path: (scoped_identifier
+    name: (identifier) @type))
+ (#match? @type "^[A-Z]"))
 
 ; --- Naming conventions -----------------------------------------------
 ;
