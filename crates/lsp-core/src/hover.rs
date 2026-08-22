@@ -169,6 +169,32 @@ fn escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// Who answers a hover.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HoverOutcome {
+    /// The language server had something to say.
+    Lsp(HoverText),
+    /// It did not, so the declaration the name-based index resolves to is
+    /// shown instead — which is what gives a signature tooltip in the many
+    /// languages this IDE has a grammar but no server for.
+    Index,
+}
+
+/// The precedence rule, the same shape as
+/// [`crate::navigation::definition_outcome`]: a server's non-empty answer
+/// wins, and everything else — no server for the language, none running yet,
+/// an error, a timeout, an empty hover — falls back to the index.
+///
+/// `None` means no request was made at all.
+pub fn hover_outcome(
+    response: Option<Result<Option<HoverText>, crate::manager::LspError>>,
+) -> HoverOutcome {
+    match response {
+        Some(Ok(Some(hover))) => HoverOutcome::Lsp(hover),
+        _ => HoverOutcome::Index,
+    }
+}
+
 /// Decides whether a hover response is still the one the user is waiting for.
 ///
 /// A hover request is answered on a worker thread, so the pointer can move —
@@ -330,5 +356,32 @@ mod tests {
         let token = tracker.begin();
         tracker.cancel();
         assert!(!tracker.accept(token));
+    }
+    #[test]
+    fn a_servers_hover_wins() {
+        let hover = HoverText {
+            value: "fn main()".into(),
+            markdown: false,
+        };
+        assert_eq!(
+            hover_outcome(Some(Ok(Some(hover.clone())))),
+            HoverOutcome::Lsp(hover),
+        );
+    }
+
+    #[test]
+    fn every_other_case_falls_back_to_the_declaration() {
+        assert_eq!(hover_outcome(None), HoverOutcome::Index);
+        assert_eq!(hover_outcome(Some(Ok(None))), HoverOutcome::Index);
+        assert_eq!(
+            hover_outcome(Some(Err(crate::manager::LspError::NoServer("zig".into())))),
+            HoverOutcome::Index,
+        );
+        assert_eq!(
+            hover_outcome(Some(Err(crate::manager::LspError::Timeout {
+                method: "textDocument/hover".into()
+            }))),
+            HoverOutcome::Index,
+        );
     }
 }

@@ -39,7 +39,9 @@ pub use completion::{
 pub use diagnostics::{
     path_from_uri, uri_from_path, DiagnosticCounts, DiagnosticRow, DiagnosticStore, Severity,
 };
-pub use hover::{parse_hover, to_tooltip_html, HoverText, HoverTracker};
+pub use hover::{
+    hover_outcome, parse_hover, to_tooltip_html, HoverOutcome, HoverText, HoverTracker,
+};
 pub use manager::{LspError, LspEvent, LspManager, DEFAULT_REQUEST_TIMEOUT, REFACTOR_TIMEOUT};
 pub use navigation::{definition_outcome, parse_definition, DefinitionOutcome, DefinitionTarget};
 pub use rename::{

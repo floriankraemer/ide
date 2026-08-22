@@ -225,6 +225,11 @@ public:
     // N7: a Ctrl+Click inside any editor. Same callback shape as above.
     std::function<void(int)> declarationRequested_;
     std::function<void()> navigationChanged_;
+    // RF12: the index leg of hover, wired by the window because SearchModel
+    // lives there.
+    std::function<void()> hoverFallback_;
+    std::function<void()> hoverCanceled_;
+    int hoverPosition_ = 0;
 
     // Opens `path`, or focuses its tab if already open (US-3). The session
     // decides whether the file may open (binary rejection, readability);
@@ -395,6 +400,36 @@ public:
         }
         for (CodeEditor *editor : editors) {
             editor->textCursor().endEditBlock();
+        }
+    }
+
+    // RF12: where the pointer last dwelled, so the index leg of hover can
+    // be started from outside this class when the server declines.
+    int hoverPosition() const { return hoverPosition_; }
+
+    // Called when no server answered a hover, and when there was no server
+    // to ask. Set by the window, which owns the SearchModel.
+    void setHoverFallbackCallback(std::function<void()> callback)
+    {
+        hoverFallback_ = std::move(callback);
+    }
+
+    void setHoverCanceledCallback(std::function<void()> callback)
+    {
+        hoverCanceled_ = std::move(callback);
+    }
+
+    void hoverFallback()
+    {
+        if (hoverFallback_) {
+            hoverFallback_();
+        }
+    }
+
+    void hoverCanceled()
+    {
+        if (hoverCanceled_) {
+            hoverCanceled_();
         }
     }
 
@@ -1295,15 +1330,24 @@ private:
         // UI thread (LanguageService answers from its worker), and a file
         // with no server never got an lspPath, so nothing is asked for it.
         connect(editor, &CodeEditor::hoverRequested, this, [this, editor](int position) {
+            hoverPosition_ = position;
             const QString path = editor->property("lspPath").toString();
+            // RF12: a file whose language has no server never got an
+            // lspPath, so there is nobody to ask — which is precisely when
+            // the index's declaration answers instead.
             if (path.isEmpty()) {
+                hoverFallback();
                 return;
             }
             const QPair<quint32, quint32> at = lspPosition(editor, position);
             languageService_->hoverAt(path, at.first, at.second);
         });
-        connect(editor, &CodeEditor::hoverCanceled, this,
-                [this]() { languageService_->cancelHover(); });
+        connect(editor, &CodeEditor::hoverCanceled, this, [this]() {
+            // Two legs, two trackers: the server's answer and the index's
+            // are separate round trips, and both must stop being wanted.
+            languageService_->cancelHover();
+            hoverCanceled();
+        });
 
         // L5: completion. The editor reports keystrokes and the caret; every
         // decision about them — whether a request is worth making, which
@@ -3387,6 +3431,26 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QAction *findInFilesAction = registerAction(editMenu, QStringLiteral("edit.findInFiles"),
                                                  QObject::tr("Find in Files..."), appSettings,
                                                  *actions);
+
+    // RF12: the hover signature fallback. `lsp_core::hover_outcome` decides
+    // whether the server answered; this only starts the index leg when it
+    // says no, and shows whatever comes back the same way a server's hover
+    // is shown.
+    editorTabs->setHoverFallbackCallback([editorTabs, searchModel]() {
+        const QString path = editorTabs->currentPath();
+        if (path.isEmpty()) {
+            return;
+        }
+        searchModel->hoverSignature(path,
+                                     editorTabs->currentContent(),
+                                     editorTabs->byteOffsetAt(editorTabs->hoverPosition()));
+    });
+    editorTabs->setHoverCanceledCallback(
+      [searchModel]() { searchModel->cancelHoverSignature(); });
+    QObject::connect(languageService, &LanguageService::hoverFallback, window,
+                      [editorTabs]() { editorTabs->hoverFallback(); });
+    QObject::connect(searchModel, &SearchModel::hoverSignatureReady, window,
+                      [](const QString &html) { QToolTip::showText(QCursor::pos(), html); });
 
     // RF11: the Refactor menu. Every entry routes through the one
     // RefactorController, so there is a single place that turns a server's

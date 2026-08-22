@@ -1317,6 +1317,39 @@ mod ffi {
             case_sensitive: bool,
         );
 
+        /// RF12 — the declaration of the symbol at `byte_offset`, rendered
+        /// as a tooltip.
+        ///
+        /// The hover fallback: with no language server there is no stored
+        /// signature anywhere, so the declaration's own source line (plus
+        /// its continuations, capped) is shown — `index_core::
+        /// declaration_signature`'s heuristic. Resolution is
+        /// `resolve_declaration`, the same two tiers Go to Declaration uses,
+        /// so hovering and Ctrl+Click agree about what a name means.
+        ///
+        /// Answers on `hoverSignatureReady`, and on nothing at all when the
+        /// pointer has moved on or nothing resolved.
+        #[qinvokable]
+        #[cxx_name = "hoverSignature"]
+        fn hover_signature(
+            self: Pin<&mut SearchModel>,
+            path: &QString,
+            content: &QString,
+            byte_offset: usize,
+        );
+
+        /// The pointer moved or left: an outstanding `hoverSignature` is no
+        /// longer wanted. The LSP leg has its own tracker, so the view
+        /// cancels both.
+        #[qinvokable]
+        #[cxx_name = "cancelHoverSignature"]
+        fn cancel_hover_signature(self: Pin<&mut SearchModel>);
+
+        /// Tooltip HTML for the most recent, still-current request.
+        #[qsignal]
+        #[cxx_name = "hoverSignatureReady"]
+        fn hover_signature_ready(self: Pin<&mut SearchModel>, html: QString);
+
         /// RF9 — work out what renaming the symbol under the caret would
         /// change, with no language server involved.
         ///
@@ -1842,6 +1875,17 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "hoverReady"]
         fn hover_ready(self: Pin<&mut LanguageService>, html: QString);
+
+        /// RF12 — emitted instead of `hoverReady` when no server answered:
+        /// no server for the language, none running yet, an error, a
+        /// timeout, or an empty hover. The declaration the name-based index
+        /// resolves to is shown instead, which is what gives a signature
+        /// tooltip in the languages this IDE has a grammar but no server
+        /// for. Which of the two it is, is `lsp_core::hover_outcome`'s
+        /// decision — the same shape as `definitionFallback`.
+        #[qsignal]
+        #[cxx_name = "hoverFallback"]
+        fn hover_fallback(self: Pin<&mut LanguageService>);
 
         /// L4 — Go to Declaration at a position, asked of the language
         /// server first (ADR-0016). Answers on exactly one of two paths:
@@ -3693,6 +3737,10 @@ impl ffi::KeymapEditor {
 /// once and only re-indexing serialises them.
 pub struct SearchModelRust {
     index: mcp_server::IndexHandle,
+    /// RF12: the index leg of hover is a second round trip that
+    /// `LanguageService`'s tracker cannot see, so it needs its own. The rule
+    /// is `lsp_core::HoverTracker`'s; only its state lives here.
+    hover: std::cell::RefCell<lsp_core::HoverTracker>,
     /// RF9: the name-based rename waiting for the preview's verdict, and the
     /// name it would write. Kept so the view can read the sites back rather
     /// than being handed them in a signal, the same shape completion uses.
@@ -3712,6 +3760,7 @@ impl Default for SearchModelRust {
             // with no way to inject a shared handle. Same reasoning as the
             // `APP_SESSION` thread-local above — one project, one index.
             index: index_slot(),
+            hover: Default::default(),
             rename: Default::default(),
             context: Default::default(),
             everywhere: Default::default(),
@@ -4166,6 +4215,59 @@ impl ffi::SearchModel {
                 }
             }
         });
+    }
+
+    pub fn hover_signature(
+        mut self: Pin<&mut Self>,
+        path: &QString,
+        content: &QString,
+        byte_offset: usize,
+    ) {
+        let path = std::path::PathBuf::from(path.to_string());
+        let content = content.to_string();
+        let token = self.hover.borrow_mut().begin();
+        let qt_thread = self.as_mut().qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            let guard = slot.read().unwrap();
+            // Without a built index the buffer alone still resolves a
+            // same-file declaration, which is most of what a hover asks
+            // about — the same reasoning `resolve_declaration` uses.
+            let resolution = match guard.ready() {
+                Some(index) => index.resolve_declaration(&path, &content, byte_offset).ok(),
+                None => Some(index_core::resolve_declaration_in_buffer(
+                    &path,
+                    &content,
+                    byte_offset,
+                )),
+            };
+            drop(guard);
+            let Some(target) = resolution.and_then(|r| r.candidates.into_iter().next()) else {
+                return;
+            };
+            let Some(signature) = index_core::declaration_signature(&target.path, target.line)
+            else {
+                return;
+            };
+            // Rendered through the tooltip path the server answers use, as
+            // plain text: a declaration is source, not Markdown, and must
+            // not have its punctuation reinterpreted.
+            let html = lsp_core::to_tooltip_html(&lsp_core::HoverText {
+                value: signature,
+                markdown: false,
+            });
+            let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                if model.hover.borrow().accept(token) {
+                    model
+                        .as_mut()
+                        .hover_signature_ready(QString::from(html.as_str()));
+                }
+            });
+        });
+    }
+
+    pub fn cancel_hover_signature(self: Pin<&mut Self>) {
+        self.hover.borrow_mut().cancel();
     }
 
     pub fn plan_index_rename(
@@ -5336,23 +5438,37 @@ impl ffi::LanguageService {
 
     pub fn hover_at(mut self: Pin<&mut Self>, path: &QString, line: u32, character: u32) {
         let path = path.to_string();
+        let token = self.hover.borrow_mut().begin();
         if !self.open_docs.borrow().contains_key(&path) {
+            // No server has this document, so there is nothing to ask — and
+            // that is exactly the case the index fallback exists for.
+            self.as_mut().hover_fallback();
             return;
         }
         let uri = lsp_core::uri_from_path(&path);
-        let token = self.hover.borrow_mut().begin();
         let qt_thread = self.as_mut().qt_thread();
-        self.push_job(move |manager| {
-            let Ok(Some(hover)) = manager.hover(&uri, line, character) else {
-                return;
+        let queued = self.push_job(move |manager| {
+            let outcome = lsp_core::hover_outcome(Some(manager.hover(&uri, line, character)));
+            let answer = match outcome {
+                lsp_core::HoverOutcome::Lsp(hover) => Some(lsp_core::to_tooltip_html(&hover)),
+                lsp_core::HoverOutcome::Index => None,
             };
-            let html = lsp_core::to_tooltip_html(&hover);
             let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
-                if service.hover.borrow().accept(token) {
-                    service.as_mut().hover_ready(QString::from(html.as_str()));
+                // A dwell the pointer has already moved on from is dropped
+                // on both paths, so a late answer never appears under a
+                // different word.
+                if !service.hover.borrow().accept(token) {
+                    return;
+                }
+                match answer {
+                    Some(html) => service.as_mut().hover_ready(QString::from(html.as_str())),
+                    None => service.as_mut().hover_fallback(),
                 }
             });
         });
+        if !queued {
+            self.as_mut().hover_fallback();
+        }
     }
 
     pub fn code_actions_at(
