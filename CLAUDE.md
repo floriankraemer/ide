@@ -17,7 +17,7 @@ docker run --rm -v "$(pwd)":/workspace -w /workspace ide-linux-builder \
 
 ## Starting a session
 
-Before starting work, read `docs/architecture/settings-docking-theming-mcp-plan.md`'s Progress table and `git log` to find the next open task. Update the task's row (status + commit hash) in the same commit that finishes it — status and code must never drift apart.
+Before starting work, read the Progress table of the newest plan doc in `docs/architecture/` (currently `refactoring-plan.md`) and `git log` to find the next open task. Update the task's row (status + commit hash) in the same commit that finishes it — status and code must never drift apart.
 
 Check `git status`/`git log` before starting; if another session's work is uncommitted or mid-flight, don't overwrite it — coordinate or work on a different task instead.
 
