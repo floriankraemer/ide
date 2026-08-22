@@ -1521,6 +1521,58 @@ mod tests {
         assert_eq!(names.iter().filter(|o| !o.is_definition).count(), 2);
     }
 
+    #[test]
+    fn java_type_usages_are_references() {
+        // `BcCheckException` in the extends clause, the field type, and the
+        // `new` expression are `type_identifier` nodes in tree-sitter-java,
+        // not `identifier` — every one must still be an occurrence, or Go to
+        // Declaration and Rename see "no symbol under the caret" there.
+        let text = "class ConfigurationException extends BcCheckException {\n  BcCheckException cause;\n  void m() { throw new BcCheckException(); }\n}";
+        let occurrences = identifier_occurrences(java(), text);
+        let uses: Vec<&Occurrence> = occurrences
+            .iter()
+            .filter(|o| o.name == "BcCheckException")
+            .collect();
+        assert_eq!(uses.len(), 3, "extends + field type + new: {uses:?}");
+        assert!(uses.iter().all(|o| !o.is_definition));
+    }
+
+    #[test]
+    fn c_struct_name_is_a_definition_and_its_usage_a_reference() {
+        let text = "struct point { int x; };\nstruct point origin;";
+        let occurrences = identifier_occurrences(lang("c"), text);
+        let points: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "point").collect();
+        assert_eq!(points.len(), 2, "1 definition + 1 usage: {points:?}");
+        assert!(points[0].is_definition, "the struct tag declares the name");
+        assert!(!points[1].is_definition);
+    }
+
+    #[test]
+    fn cpp_class_name_is_a_definition_and_its_usage_a_reference() {
+        let text = "class Shape {};\nclass Circle : public Shape {};\nShape *s;";
+        let occurrences = identifier_occurrences(lang("cpp"), text);
+        let shapes: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "Shape").collect();
+        assert_eq!(
+            shapes.len(),
+            3,
+            "definition + base clause + type: {shapes:?}"
+        );
+        assert!(shapes[0].is_definition);
+        assert!(!shapes[1].is_definition);
+        assert!(!shapes[2].is_definition);
+    }
+
+    #[test]
+    fn kotlin_class_name_is_a_definition_and_its_usage_a_reference() {
+        let text = "class Shape\nclass Circle : Shape()\nval s: Shape? = null";
+        let occurrences = identifier_occurrences(lang("kotlin"), text);
+        let shapes: Vec<&Occurrence> = occurrences.iter().filter(|o| o.name == "Shape").collect();
+        assert_eq!(shapes.len(), 3, "definition + supertype + type: {shapes:?}");
+        assert!(shapes[0].is_definition);
+        assert!(!shapes[1].is_definition);
+        assert!(!shapes[2].is_definition);
+    }
+
     // --- PHP (Task B) ---
 
     // Opens with `<?php`: the catalog row uses `LANGUAGE_PHP` (R4d), the
