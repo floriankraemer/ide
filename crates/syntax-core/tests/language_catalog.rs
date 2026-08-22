@@ -505,35 +505,17 @@ const NOT_A_SCOPE: &[&str] = &[
 ///
 /// Keyed by language id so a name dead in one language cannot silently
 /// excuse the same name in another.
-const KNOWN_DEAD_CAPTURES: &[(&str, &[&str])] = &[
-    (
-        "scala",
-        &[
-            "conditional",
-            "exception",
-            "float",
-            "include",
-            "method",
-            "method.call",
-            "namespace",
-            "none",
-            "parameter",
-            "repeat",
-            "storageclass",
-        ],
-    ),
-    (
-        "css",
-        &[
-            "charset",
-            "import",
-            "keyframes",
-            "media",
-            "namespace",
-            "supports",
-        ],
-    ),
-];
+const KNOWN_DEAD_CAPTURES: &[(&str, &[&str])] = &[(
+    "css",
+    &[
+        "charset",
+        "import",
+        "keyframes",
+        "media",
+        "namespace",
+        "supports",
+    ],
+)];
 
 fn known_dead(id: &str, capture: &str) -> bool {
     KNOWN_DEAD_CAPTURES

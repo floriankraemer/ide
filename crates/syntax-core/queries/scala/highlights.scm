@@ -1,11 +1,19 @@
 ; Scala highlights.scm — adapted from tree-sitter-scala 0.26.2's own
 ; queries/highlights.scm (MIT, https://github.com/tree-sitter/tree-sitter-scala).
-; Ten upstream patterns guarded by `#match?`/`#eq?`/`#any-of?` predicates
-; are still absent: not because this crate leaves predicates unevaluated
-; (it does not — see queries/go/highlights.scm) but because nobody has
-; ported them back. Upstream uses them for the "identifier starting with a
-; capital letter is a type" heuristic, which the naming-conventions block
-; at the end of this file covers.
+; Upstream carries ten `#match?`-guarded patterns. Six are ported below:
+; the capitalised import/export paths, the capitalised call target, and the
+; `this`/`super` identifiers. Four are deliberately left out — upstream's
+; `(field_expression value: ...)`, its `(namespace_selectors ...)` and its
+; trailing bare-identifier rule all produce `@type` on nodes that the
+; naming-conventions block at the end of this file already reaches, and its
+; `(stable_identifier ...)` type pattern is written out twice.
+;
+; Capture names follow this crate's SCOPES taxonomy rather than upstream's
+; nvim-treesitter flavour: parameter -> variable.parameter, namespace ->
+; module, method -> function.method, method.call -> function.call, float ->
+; number.float, and conditional / repeat / include / exception /
+; storageclass -> keyword. Upstream's two `@none` captures are dropped
+; rather than renamed — see the note above the `;; types` section.
 
 ; CREDITS @stumash (stuart.mashaal@gmail.com)
 
@@ -34,12 +42,18 @@
 ;; variables
 
 (class_parameter
-  name: (identifier) @parameter)
+  name: (identifier) @variable.parameter)
 
-(self_type (identifier) @parameter)
+(self_type (identifier) @variable.parameter)
 
-(interpolation (identifier) @none)
-(interpolation (block) @none)
+; Upstream captures `(interpolation (identifier))` and `(interpolation
+; (block))` as `@none`, its sentinel for "clear any highlight on this node"
+; so that `$name` renders as plain text rather than as part of the
+; surrounding string. This crate has no such sentinel, and a node with no
+; capture produces no span — so the ABSENCE of a pattern here is the port of
+; that rule. Do not "restore" the two upstream patterns: giving them a real
+; scope paints them, and because the enclosing `@string` span is wider it is
+; applied first, so the narrower interpolation span would win on screen.
 
 ;; types
 
@@ -61,16 +75,32 @@
   name: (identifier) @variable)
 
 ; imports/exports
+;
+; A capitalised path segment names a type, not a package. These sit above the
+; `@module` patterns because captures on one node resolve first-pattern-wins.
+
+((import_declaration
+  path: (identifier) @type) (#match? @type "^[A-Z]"))
+((stable_identifier (identifier) @type) (#match? @type "^[A-Z]"))
+
+((export_declaration
+  path: (identifier) @type) (#match? @type "^[A-Z]"))
 
 (import_declaration
-  path: (identifier) @namespace)
-((stable_identifier (identifier) @namespace))
+  path: (identifier) @module)
+((stable_identifier (identifier) @module))
 
 (export_declaration
-  path: (identifier) @namespace)
-((stable_identifier (identifier) @namespace))
+  path: (identifier) @module)
+((stable_identifier (identifier) @module))
 
 ; method invocation
+
+; A capitalised callee is a constructor application; it has to precede the
+; `@function.call` patterns below to win the node.
+((call_expression
+  function: (identifier) @constructor)
+ (#match? @constructor "^[A-Z]"))
 
 (call_expression
   function: (identifier) @function.call)
@@ -80,7 +110,7 @@
 
 (call_expression
   function: (field_expression
-    field: (identifier) @method.call))
+    field: (identifier) @function.call))
 
 (generic_function
   function: (identifier) @function.call)
@@ -94,18 +124,18 @@
   name: (identifier) @function)
 
 (parameter
-  name: (identifier) @parameter)
+  name: (identifier) @variable.parameter)
 
 (binding
-  name: (identifier) @parameter)
+  name: (identifier) @variable.parameter)
 
 ; method definition
 
 (function_declaration
-      name: (identifier) @method)
+      name: (identifier) @function.method)
 
 (function_definition
-      name: (identifier) @method)
+      name: (identifier) @function.method)
 
 ; expressions
 
@@ -122,7 +152,7 @@
 
 (boolean_literal) @boolean
 (integer_literal) @number
-(floating_point_literal) @float
+(floating_point_literal) @number.float
 
 [
   (string)
@@ -178,11 +208,11 @@
   "protected"
 ] @type.qualifier
 
-(inline_modifier) @storageclass
+(inline_modifier) @keyword
 
 (null_literal) @constant.builtin
 
-(wildcard) @parameter
+(wildcard) @variable.parameter
 
 (annotation) @attribute
 
@@ -195,7 +225,7 @@
   "if"
   "match"
   "then"
-] @conditional
+] @keyword
 
 [
  "("
@@ -216,7 +246,7 @@
   "for"
   "while"
   "yield"
-] @repeat
+] @keyword
 
 "def" @keyword.function
 
@@ -226,13 +256,13 @@
  "@"
 ] @operator
 
-["import" "export"] @include
+["import" "export"] @keyword
 
 [
   "try"
   "catch"
   "throw"
-] @exception
+] @keyword
 
 "return" @keyword.return
 
@@ -242,14 +272,14 @@
 ;; `case` is a conditional keyword in case_block
 
 (case_block
-  (case_clause ("case") @conditional))
+  (case_clause ("case") @keyword))
 (indented_cases
-  (case_clause ("case") @conditional))
+  (case_clause ("case") @keyword))
 
 (operator_identifier) @operator
 
 ;; Scala CLI using directives
-(using_directive_key) @parameter
+(using_directive_key) @variable.parameter
 (using_directive_value) @string
 
 ;; XML literals
@@ -260,6 +290,14 @@
 (xml_comment) @spell @comment
 (xml_cdata) @string
 (xml_processing_instruction) @keyword.directive
+
+; `this` and `super` are lexed as plain identifiers, so they need the text
+; predicate to be told apart from any other name.
+((identifier) @variable.builtin
+  (#match? @variable.builtin "^this$"))
+
+((identifier) @function.builtin
+  (#match? @function.builtin "^super$"))
 
 ; --- Naming conventions -----------------------------------------------
 ;
