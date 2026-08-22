@@ -2,18 +2,15 @@
 ; queries/highlights.scm (MIT,
 ; https://github.com/tree-sitter-grammars/tree-sitter-lua).
 ;
-; Three systematic differences from upstream; go/highlights.scm documents
-; the predicate rules they follow:
+; Upstream carries three predicate-guarded patterns (`#eq?`, `#match?`,
+; `#any-of?`); all three are ported. Two systematic differences remain;
+; go/highlights.scm documents the predicate rules they follow:
 ;
 ;   * the catch-all `(identifier) @variable` is still absent — span
 ;     extraction resolves same-node captures first-pattern-wins now, so a
 ;     catch-all placed last would lose to every function name, field and
 ;     parameter instead of stacking under them; it has simply not been
 ;     ported back;
-;   * the patterns guarded by `#eq?`, `#match?` or `#any-of?` are also
-;     still absent, not because those predicates go unevaluated (they are
-;     evaluated, see `spans_from_tree`) but because the upstream
-;     builtin-function list has not been ported back yet;
 ;   * Neovim-flavoured capture names are rewritten to the standard ones in
 ;     `syntax_core::SCOPES` (`@conditional`/`@repeat` -> `@keyword`,
 ;     `@field` -> `@variable.member`, `@parameter` -> `@variable.parameter`,
@@ -126,6 +123,14 @@
   "}"
 ] @punctuation.bracket
 
+; Variables
+;
+; Upstream's only `@variable.builtin` is `self`; it has no `_G` pattern,
+; so none is invented here. It sits above every other identifier capture
+; so first-pattern-wins keeps `self` builtin-coloured.
+((identifier) @variable.builtin
+  (#eq? @variable.builtin "self"))
+
 ; Constants
 (variable_list
   (attribute
@@ -186,6 +191,17 @@
   (field
     name: (identifier) @function
     value: (function_definition)))
+
+; Above the generic call pattern below: same-node captures resolve
+; first-pattern-wins, so `print` has to be claimed as a builtin before
+; the call pattern claims it as an ordinary function.
+(function_call
+  (identifier) @function.builtin
+  (#any-of? @function.builtin
+    ; built-in functions in Lua 5.1
+    "assert" "collectgarbage" "dofile" "error" "getfenv" "getmetatable" "ipairs" "load" "loadfile"
+    "loadstring" "module" "next" "pairs" "pcall" "print" "rawequal" "rawget" "rawset" "require"
+    "select" "setfenv" "setmetatable" "tonumber" "tostring" "type" "unpack" "xpcall"))
 
 (function_call
   name: [

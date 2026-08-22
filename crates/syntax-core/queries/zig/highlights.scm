@@ -1,16 +1,29 @@
 ; Zig highlights.scm — adapted from tree-sitter-zig 1.1.2's own
 ; queries/highlights.scm (MIT, https://github.com/tree-sitter-grammars/tree-sitter-zig).
-; Two classes of upstream pattern are still absent:
 ;
-;   * five guarded by `#lua-match?`/`#eq?` predicates. The `#eq?` ones are
-;     evaluated (see queries/go/highlights.scm) and have just not been
-;     ported back; `#lua-match?` is a general predicate tree-sitter does
-;     not know, so `spans_from_tree` drops the whole pattern — pasting one
-;     of those in would leave it inert rather than unguarded;
-;   * the catch-all `(identifier) @variable` — same-node captures resolve
-;     first-pattern-wins now, so a catch-all placed last would lose to
-;     every specific capture instead of stacking a span underneath it; it
-;     has simply not been ported back.
+; Upstream carries five predicate-guarded patterns. Three are ported: the
+; `#any-of?` on `@import`/`@cImport`, the `#eq?` on `_`, and the `//!`
+; doc-comment pattern, which upstream guards with `#lua-match?` and which
+; is re-authored here with `#match?` (see the Comments section).
+;
+; The other two are `#lua-match?` and stay out **by design**, not by
+; omission:
+;
+;     ((identifier) @type     (#lua-match? @type "^[A-Z_][a-zA-Z0-9_]*"))
+;     ((identifier) @constant (#lua-match? @constant "^[A-Z][A-Z_0-9]+$"))
+;
+; `#lua-match?` is a general predicate tree-sitter does not know, so
+; `spans_from_tree` drops the whole pattern — pasting one in leaves it
+; inert, not unguarded. They are also redundant: the naming-conventions
+; block at the end of this file does exactly the same CamelCase ->
+; `@type`, SCREAMING_CASE -> `@constant` job with `#match?`, which *is*
+; evaluated. Do not "fix" them back in.
+;
+; One further difference from upstream: the catch-all `(identifier)
+; @variable` is still absent — same-node captures resolve
+; first-pattern-wins now, so a catch-all placed last would lose to every
+; specific capture instead of stacking a span underneath it; it has simply
+; not been ported back.
 
 ; Variables
 
@@ -80,6 +93,18 @@
               .
               member: (identifier) @variable.member)))
 
+; Modules
+;
+; Above `(builtin_identifier) @function.builtin` on purpose: same-node
+; captures resolve first-pattern-wins, so `@import` has to be claimed as
+; an import keyword before the generic builtin pattern claims it.
+
+(variable_declaration
+  (identifier) @module
+  (builtin_function
+    (builtin_identifier) @keyword.import
+    (#any-of? @keyword.import "@import" "@cImport")))
+
 ; Functions
 
 (builtin_identifier) @function.builtin
@@ -102,6 +127,9 @@
   "c"
   "..."
 ] @variable.builtin
+
+((identifier) @variable.builtin
+  (#eq? @variable.builtin "_"))
 
 (calling_convention
   (identifier) @variable.builtin)
@@ -283,6 +311,18 @@
 (payload "|" @punctuation.bracket)
 
 ; Comments
+
+; Doc comments first — same-node captures resolve first-pattern-wins, so
+; this has to beat the plain `(comment)` capture below.
+;
+; Re-authored from upstream's `((comment) @comment.documentation
+; (#lua-match? @comment.documentation "^//!"))`. `#lua-match?` is a
+; general predicate, so the pattern would have been dropped whole; `^//!`
+; is a trivially portable regex and `comment.documentation` is both in
+; `SCOPES` and themed, so the pattern is worth converting rather than
+; skipping.
+((comment) @comment.documentation
+  (#match? @comment.documentation "^//!"))
 
 (comment) @comment @spell
 
