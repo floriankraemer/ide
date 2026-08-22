@@ -212,3 +212,56 @@ and the TOML nested-table gotcha that silently discarded a hand-edited dotted
 scope colour ([#22](https://github.com/floriankraemer/ide/issues/22), fixed:
 both spellings load, and an unknown scope name is now said out loud on the
 Syntax Colors page).
+
+### The recurring shape: assertions satisfied by something weaker than they claim
+
+Three defects found during this work were the same defect.
+Each was a test that passed while the property it claimed to establish was false, because the assertion could be satisfied by something strictly weaker than that property.
+
+- [#17](https://github.com/floriankraemer/ide/issues/17): the harness accepted a *descendant* scope as proof of its ancestor.
+  A `string.escape` span satisfied an assertion about `string`, so a language that had lost its `string` rule kept passing.
+  This happened to Zig, and was caught by eye rather than by the harness.
+- [#31](https://github.com/floriankraemer/ide/issues/31): `every_theme_resolves_every_scope` accepted a scope *resolving* as proof that it was *visible*.
+  Twenty-two scopes resolved to the editor's default foreground, which is a perfectly renderable style, so the test was satisfied while the text was indistinguishable from unhighlighted.
+- The capture guard: the catalog test accepted a query *compiling* as proof that its captures *produced spans*.
+  A capture naming a scope outside `SCOPES` resolves to nothing and yields no span at all, which is strictly worse than an uncoloured one — no palette can rescue it — and nothing failed.
+
+The instances are evidence.
+The lesson is the shape: **an assertion satisfied by something strictly weaker than the property it claims is not a guard, it is a guard-shaped hole.**
+
+The fix was the same shape in all three cases, and that is the transferable part.
+
+1. Assert **equality**, not sufficiency.
+   Not "a span with this scope exists somewhere under here" but "the span at this position carries exactly this scope".
+   Not "every scope resolves" but "the set of scopes indistinguishable from default foreground equals the set documented as deliberately unstyled".
+2. Put the burden on the **exception**, via a documented allow-list that fails when an entry stops being exceptional.
+   A hand-written list of things to check protects only what someone remembered to add.
+   An allow-list protects everything by default and forces the next person adding an exception to say out loud why it is one.
+3. Where the exceptions are temporary — bugs under repair rather than permanent facts — check the list **bidirectionally**, so a repaired entry fails until it is deleted.
+   A one-directional tolerance stays silently satisfied after the fix, and the list rots into a record of things that used to be broken instead of shrinking to nothing.
+
+Four categories of capture emerged from applying that to the query files, and they are worth naming because three of them look alike from a distance.
+`NOT_A_SCOPE` holds real markers that legitimately never carry colour, such as nvim-treesitter's `@spell`.
+`KNOWN_DEAD_CAPTURES` held genuine bugs, checked bidirectionally; it has since reached zero and the comment at its definition says that is the intended end state.
+`MUST_NOT_APPEAR` holds directives spelled like captures, where the correct port is the *absence* of a pattern: upstream's `@none` means "clear the highlight", and a capture with no matching scope already produces no span, so writing nothing is the faithful port and giving it a real scope is a regression.
+Predicate operands — any capture whose name begins with `_` — must appear, because the predicate references them by name, and must never resolve; that one is a rule rather than a list, because each grammar invents its own and an enumeration would go stale the moment a new one is ported.
+
+Two mechanical lessons are worth keeping with the above.
+The guards read compiled `Query::capture_names()` rather than the text of the `.scm` files, and that choice is load-bearing twice over: a regex over the file matches capture-like text inside comments and inside quoted anonymous node literals, and it cannot distinguish a list entry naming a real capture from one naming a capture that never existed.
+Both failure modes occurred here — six CSS at-rule "dead captures" turned out to be quoted node literals in a `[ ... ] @keyword` alternation, and they sat in the temporary list as phantom entries until a third assertion was added requiring every listed name to actually be a capture in that language.
+
+Why it recurred is worth stating plainly, because the alternative reading is wrong.
+Each guard was correct when it was written.
+The scope taxonomy then grew — six themed scopes became the full set, `SCOPES` grew past fifty entries, thirty-one languages arrived with upstream capture vocabularies of their own — and each guard went on asserting what it had always asserted while the property it stood in for drifted away from it.
+This is a taxonomy outgrowing its checks, not a sequence of authoring mistakes.
+The defence is not more care; it is assertions whose strength is tied to the taxonomy rather than to a snapshot of it, which is what the allow-list form buys.
+
+One hop is still unguarded, and no test in this repository closes it.
+The three guards stop at the palette: they can establish that a capture produces a span, that the span carries a scope, and that the scope carries a colour distinct from the default foreground.
+None of them can establish that a user sees it.
+That gap is exactly where #31 lived for as long as it did, and the only reason anyone noticed was that someone looked at a picture.
+Rendering the app under Xvfb and sampling glyph colours out of the PNG is what closes it, and the recipe is recorded in the pull request for this branch.
+
+A different kind of gap, not a weak assertion but an absent environment: no language server is installed in the build image, so the LSP surfaces — squiggles, hover tooltips, the completion popup, a populated Problems dock — have never been rendered against a real server.
+The stub exercises the protocol path and says nothing about the pixels.
+The render harness does not cover this, and should not be read as covering it.
