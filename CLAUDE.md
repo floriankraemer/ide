@@ -8,12 +8,17 @@ Architecture authority: `docs/architecture/layering.md` and the ADRs in `docs/ar
 Always use Docker containers for development (builds, tests, running the app) — never the bare host.
 
 ```sh
-docker build --target linux-builder -t ide-linux-builder -f docker/Dockerfile .
-docker run --rm -v "$(pwd)":/workspace -w /workspace ide-linux-builder \
-    cargo test --workspace
+make linux-image     # build/refresh the builder image
+make test            # cargo test --workspace inside it
+make lint            # clippy -D warnings + rustfmt --check
 ```
 
-`linux-builder` has the full Qt6 dev toolchain (`docker/Dockerfile`); mount the workspace rather than baking in source so edits are picked up without a rebuild. Use the same image for `cargo build`/`cargo build --release -p app`.
+Go through the Makefile rather than a hand-written `docker run`: its `RUN_LINUX` mounts named volumes for the crate registry and the ccache object store, and a bare `docker run --rm` throws both away — re-downloading 390-odd crates and recompiling every C++ translation unit each time.
+
+Debug builds carry line tables only, so backtraces keep file and line but a debugger sees no variable or type information.
+When you need to step through something — usually the cxx-qt seam — build with `cargo build --profile debugging -p app`, which is `dev` plus full DWARF.
+
+`linux-builder` has the full Qt6 dev toolchain (`docker/Dockerfile`); the workspace is mounted rather than baked in, so edits are picked up without an image rebuild. For anything the Makefile has no target for, reuse `RUN_LINUX`'s mounts, e.g. `make shell` then `cargo build --release -p app`.
 
 ## Starting a session
 

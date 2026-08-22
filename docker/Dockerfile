@@ -38,6 +38,8 @@ WORKDIR /workspace
 FROM base AS linux-builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
+        ccache \
+        mold \
         qt6-base-dev \
         qt6-base-dev-tools \
         qt6-base-private-dev \
@@ -52,6 +54,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 ENV QMAKE=/usr/bin/qmake6
+
+# cc-rs recognises ccache as the leading token of CC/CXX and keeps it as the
+# launcher. build.rs compiles the whole vendored docking system through cc,
+# which has no object cache of its own, so without this every rerun of that
+# build script recompiles all ~213 translation units from scratch.
+# CCACHE_DIR is a plain path so the Makefile can mount a named volume there
+# and the cache survives `docker run --rm`.
+ENV CC="ccache gcc" \
+    CXX="ccache g++" \
+    CCACHE_DIR=/ccache
 
 # ---------------------------------------------------------------------------
 # linux-artifact-builder: linux-builder + baked-in source, for buildx

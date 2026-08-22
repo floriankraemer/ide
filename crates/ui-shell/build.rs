@@ -111,6 +111,21 @@ fn qt_private_gui_include_dir(qmake: &str) -> Option<PathBuf> {
     None
 }
 
+/// `moc` and `rcc` rewrite their output unconditionally, and every file this
+/// script hands to `cpp_file()` becomes a `rerun-if-changed` input — so a
+/// freshly stamped generated file makes the build script dirty on its own
+/// next run, forever. That cost a full `ui-shell` recompile and `app` relink
+/// on *every* build, including no-op ones. Running the tool into a temp file
+/// and keeping the old output when the bytes match breaks the cycle.
+fn replace_if_changed(temp: &Path, output: &Path) {
+    let generated = std::fs::read(temp).expect("generated file is readable");
+    if std::fs::read(output).ok().as_deref() == Some(generated.as_slice()) {
+        let _ = std::fs::remove_file(temp);
+        return;
+    }
+    std::fs::rename(temp, output).expect("generated file is movable into place");
+}
+
 /// Compiles `ads.qrc` via `rcc` directly rather than `CxxQtBuilder::qrc()`.
 /// `qrc()` derives the generated resource-initializer function's name from
 /// the qrc file's own filename (`ads.qrc` -> `qInitResources_ads_qrc`, dots
@@ -122,6 +137,7 @@ fn qt_private_gui_include_dir(qmake: &str) -> Option<PathBuf> {
 fn compile_ads_qrc(ads_dir: &Path, tool_dirs: &[PathBuf]) -> PathBuf {
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
     let output = out_dir.join("ads_resources.cpp");
+    let temp = out_dir.join("ads_resources.cpp.new");
     let qrc_file = ads_dir.join("ads.qrc");
 
     let candidates: Vec<PathBuf> = tool_dirs
@@ -133,10 +149,11 @@ fn compile_ads_qrc(ads_dir: &Path, tool_dirs: &[PathBuf]) -> PathBuf {
         let status = Command::new(rcc)
             .arg(&qrc_file)
             .arg("-o")
-            .arg(&output)
+            .arg(&temp)
             .args(["--name", "ads"])
             .status();
         if matches!(status, Ok(s) if s.success()) {
+            replace_if_changed(&temp, &output);
             return output;
         }
     }
@@ -167,6 +184,7 @@ fn moc_ads_header(
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR not set"));
     let header_path = ads_dir.join(header);
     let output = out_dir.join(format!("moc_{}.cpp", header.replace(['/', '.'], "_")));
+    let temp = output.with_extension("cpp.new");
 
     let candidates: Vec<PathBuf> = tool_dirs
         .iter()
@@ -182,8 +200,9 @@ fn moc_ads_header(
         if is_windows {
             cmd.arg("-DQ_OS_WIN");
         }
-        cmd.arg(&header_path).arg("-o").arg(&output);
+        cmd.arg(&header_path).arg("-o").arg(&temp);
         if matches!(cmd.status(), Ok(s) if s.success()) {
+            replace_if_changed(&temp, &output);
             return output;
         }
     }
