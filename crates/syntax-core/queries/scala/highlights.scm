@@ -11,8 +11,9 @@
 ; Capture names follow this crate's SCOPES taxonomy rather than upstream's
 ; nvim-treesitter flavour: parameter -> variable.parameter, namespace ->
 ; module, method -> function.method, method.call -> function.call, float ->
-; number.float, none -> constant.builtin, and conditional / repeat / include
-; / exception / storageclass -> keyword.
+; number.float, and conditional / repeat / include / exception /
+; storageclass -> keyword. Upstream's two `@none` captures are dropped
+; rather than renamed — see the note above the `;; types` section.
 
 ; CREDITS @stumash (stuart.mashaal@gmail.com)
 
@@ -45,8 +46,14 @@
 
 (self_type (identifier) @variable.parameter)
 
-(interpolation (identifier) @constant.builtin)
-(interpolation (block) @constant.builtin)
+; Upstream captures `(interpolation (identifier))` and `(interpolation
+; (block))` as `@none`, its sentinel for "clear any highlight on this node"
+; so that `$name` renders as plain text rather than as part of the
+; surrounding string. This crate has no such sentinel, and a node with no
+; capture produces no span — so the ABSENCE of a pattern here is the port of
+; that rule. Do not "restore" the two upstream patterns: giving them a real
+; scope paints them, and because the enclosing `@string` span is wider it is
+; applied first, so the narrower interpolation span would win on screen.
 
 ;; types
 
