@@ -9,11 +9,13 @@
 #include <QWidget>
 
 class QCompleter;
+class QContextMenuEvent;
 class QEvent;
 class QFocusEvent;
 class QKeyEvent;
 class QMouseEvent;
 class QStandardItemModel;
+class QMenu;
 class QPaintEvent;
 class QResizeEvent;
 
@@ -178,8 +180,22 @@ signals:
     // is wanted.
     void completionCanceled();
 
+    // The right-click menu has been built with Qt's standard entries and is
+    // about to be shown: whoever wants to add to it does so now. The menu
+    // is owned by this widget and deleted after it closes, so a receiver
+    // must only append actions, never keep the pointer.
+    //
+    // A signal rather than a list this widget assembles, because what
+    // belongs in it (refactorings, navigation) is a window-level question
+    // and this widget knows nothing about either.
+    void contextMenuAboutToShow(QMenu *menu);
+
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    // Right-click: Qt's own entries plus whatever the window appends, and
+    // the caret moved under the pointer first so a gesture chosen from the
+    // menu acts on what was clicked.
+    void contextMenuEvent(QContextMenuEvent *event) override;
     void changeEvent(QEvent *event) override;
     // N7: Ctrl-hover feedback and Ctrl+Click activation, mirroring
     // TerminalWidget's clickable links (F4). Mouse tracking is on so a

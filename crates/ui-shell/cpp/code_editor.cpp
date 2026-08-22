@@ -1,4 +1,6 @@
 #include "code_editor.h"
+#include <QContextMenuEvent>
+#include <QMenu>
 
 #include <QAbstractItemView>
 #include <QColor>
@@ -212,6 +214,28 @@ void CodeEditor::focusOutEvent(QFocusEvent *event)
 {
     hideCompletionPopup();
     QPlainTextEdit::focusOutEvent(event);
+}
+
+void CodeEditor::contextMenuEvent(QContextMenuEvent *event)
+{
+    // Move the caret to what was right-clicked, unless the click landed
+    // inside an existing selection (where taking it away would throw away
+    // what the user picked out). Every gesture in the menu acts on the
+    // caret, so without this a right-click on one symbol would rename the
+    // one the caret happened to be on.
+    QTextCursor clicked = cursorForPosition(event->pos());
+    const QTextCursor current = textCursor();
+    const bool insideSelection = current.hasSelection()
+      && clicked.position() >= current.selectionStart()
+      && clicked.position() <= current.selectionEnd();
+    if (!insideSelection) {
+        setTextCursor(clicked);
+    }
+
+    QMenu *menu = createStandardContextMenu(event->pos());
+    emit contextMenuAboutToShow(menu);
+    menu->exec(event->globalPos());
+    delete menu;
 }
 
 QPair<int, int> CodeEditor::identifierAt(const QPoint &pos) const

@@ -229,6 +229,7 @@ public:
     // lives there.
     std::function<void()> hoverFallback_;
     std::function<void()> hoverCanceled_;
+    std::function<void(QMenu *)> contextMenu_;
     int hoverPosition_ = 0;
 
     // Opens `path`, or focuses its tab if already open (US-3). The session
@@ -417,6 +418,14 @@ public:
     void setHoverCanceledCallback(std::function<void()> callback)
     {
         hoverCanceled_ = std::move(callback);
+    }
+
+    // What the window wants added to an editor's right-click menu. Set once;
+    // every editor opened afterwards picks it up, and so does every one
+    // already open.
+    void setContextMenuCallback(std::function<void(QMenu *)> callback)
+    {
+        contextMenu_ = std::move(callback);
     }
 
     void hoverFallback()
@@ -1341,6 +1350,13 @@ private:
             }
             const QPair<quint32, quint32> at = lspPosition(editor, position);
             languageService_->hoverAt(path, at.first, at.second);
+        });
+        // Right-click: the window decides what goes in beyond Qt's own
+        // entries, so this only forwards the menu.
+        connect(editor, &CodeEditor::contextMenuAboutToShow, this, [this](QMenu *menu) {
+            if (contextMenu_) {
+                contextMenu_(menu);
+            }
         });
         connect(editor, &CodeEditor::hoverCanceled, this, [this]() {
             // Two legs, two trackers: the server's answer and the index's
@@ -2897,6 +2913,14 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     auto *treeView = new QTreeView();
     treeView->setModel(treeModel);
     treeView->setHeaderHidden(true);
+    QTimer::singleShot(6000, treeView, [treeView, treeModel]() {
+        qDebug() << "DBG indentation" << treeView->indentation() << "rootDecorated" << treeView->rootIsDecorated()
+                 << "iconSize" << treeView->iconSize() << "style" << treeView->style()->objectName();
+        QModelIndex i0 = treeView->model()->index(0, 0, QModelIndex());
+        qDebug() << "DBG cols" << treeView->model()->columnCount(QModelIndex())
+                 << "row0" << treeView->model()->data(i0).toString() << treeView->visualRect(i0)
+                 << "deco" << treeView->model()->data(i0, Qt::DecorationRole);
+    });
     auto *treeDock = new ads::CDockWidget(dockManager, QObject::tr("Project"));
     treeDock->setWidget(treeView);
     dockManager->addDockWidget(ads::LeftDockWidgetArea, treeDock, editorArea);
@@ -3516,6 +3540,27 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QObject::connect(refactorThisAction, &QAction::triggered, window, [refactorer]() {
         refactorer->extract(QString(),
                             QObject::tr("The language server offers no refactorings here."));
+    });
+
+    // The same gestures on the editor's right-click menu. The actions are
+    // looked up by id rather than captured, so this does not depend on which
+    // menus have been built yet — and because they are the *same* QActions,
+    // their shortcuts show here and a rebinding in Settings > Keymap reaches
+    // both places at once.
+    editorTabs->setContextMenuCallback([actions](QMenu *menu) {
+        const auto append = [menu, actions](const QString &id) {
+            if (QAction *action = actions->value(id)) {
+                menu->addAction(action);
+            }
+        };
+        menu->addSeparator();
+        append(QStringLiteral("navigate.goToDeclaration"));
+        append(QStringLiteral("navigate.findUsages"));
+        menu->addSeparator();
+        append(QStringLiteral("refactor.rename"));
+        append(QStringLiteral("refactor.extractMethod"));
+        append(QStringLiteral("refactor.extractClass"));
+        append(QStringLiteral("refactor.refactorThis"));
     });
 
     QMenu *viewMenu = window->menuBar()->addMenu(QObject::tr("&View"));
