@@ -665,6 +665,83 @@ pub fn plan_index_rename(
     })
 }
 
+/// One ticked rename site addressed the way an open editor wants it:
+/// 0-based line, UTF-16 characters, which is what `QTextCursor` counts.
+///
+/// The rename plan itself is byte-addressed, like everything else the index
+/// reports. Converting here rather than in the view keeps the one place that
+/// knows both unit systems in Qt-free code.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BufferRenameEdit {
+    pub path: PathBuf,
+    /// 0-based, unlike [`RenameSite::line`] — the editor counts from zero.
+    pub line: u32,
+    pub start_character: u32,
+    pub end_character: u32,
+    pub text: String,
+}
+
+/// Take the ticked sites in `path` out of `plan`, as edits an open editor
+/// can splice.
+///
+/// A file the user has open must not be rewritten behind their back: doing
+/// so loses the undo history and makes the editor prompt about a change it
+/// made itself. So the sites in open files are handed to the editor and the
+/// rest go to disk — the same split `lsp_core::plan_edit` makes for a
+/// server-driven edit, applied to the name-based path.
+///
+/// Reading the file to convert byte columns to UTF-16 is sound precisely
+/// because [`plan_index_rename`] refuses to plan at all while any buffer is
+/// unsaved: an open file is therefore identical to the one on disk. Sites
+/// are removed from `plan` whether or not their file could be read, so
+/// nothing is applied twice, and are returned last-first so a caller can
+/// splice them in one pass.
+pub fn take_buffer_edits(
+    plan: &mut IndexRenamePlan,
+    new_name: &str,
+    path: &Path,
+) -> Vec<BufferRenameEdit> {
+    let name_len = plan.name.len();
+    // An unticked site in an open file is dropped either way: the user said
+    // no to it. Everything in another file stays for the disk pass.
+    let (mine, remaining): (Vec<RenameSite>, Vec<RenameSite>) = std::mem::take(&mut plan.sites)
+        .into_iter()
+        .partition(|site| site.path == path);
+    plan.sites = remaining;
+    let taken: Vec<RenameSite> = mine.into_iter().filter(|site| site.checked).collect();
+
+    let Ok(content) = fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let lines: Vec<&str> = content.lines().collect();
+    let mut edits: Vec<BufferRenameEdit> = taken
+        .into_iter()
+        .filter_map(|site| {
+            let line = lines.get(site.line.checked_sub(1)?)?;
+            let start = utf16_len(line.get(..site.col)?);
+            let end = start + utf16_len(line.get(site.col..site.col + name_len)?);
+            Some(BufferRenameEdit {
+                path: site.path.clone(),
+                line: site.line as u32 - 1,
+                start_character: start,
+                end_character: end,
+                text: new_name.to_string(),
+            })
+        })
+        .collect();
+    // Last first, so each edit still addresses the text it was found in.
+    edits.sort_by(|a, b| {
+        b.line
+            .cmp(&a.line)
+            .then(b.start_character.cmp(&a.start_character))
+    });
+    edits
+}
+
+fn utf16_len(text: &str) -> u32 {
+    text.chars().map(|ch| ch.len_utf16() as u32).sum()
+}
+
 /// The sites of `plan` that are ticked, as the spans
 /// [`TextIndex::replace_in_files`] rewrites.
 ///
@@ -3040,5 +3117,110 @@ mod tests {
         let file = write(dir.path(), "a.rs", "fn first() {}\nfn second(x: u8) {}\n");
         assert_eq!(declaration_signature(&file, 2).unwrap(), "fn second(x: u8)",);
         assert!(declaration_signature(&dir.path().join("missing.rs"), 1).is_none());
+    }
+    #[test]
+    fn open_files_are_taken_out_of_the_plan_as_buffer_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = write(dir.path(), "a.rs", "fn target() {}\nlet x = target();\n");
+        let closed = dir.path().join("b.rs");
+        let resolved = Resolution {
+            name: "target".into(),
+            tier: ResolutionTier::LocalFile,
+            candidates: vec![symbol(&open, 1, 3, true)],
+        };
+        let usages = vec![
+            symbol(&open, 1, 3, true),
+            symbol(&open, 2, 8, false),
+            symbol(&closed, 4, 2, false),
+        ];
+        let mut plan = plan_index_rename(
+            &resolved,
+            &usages,
+            &[symbol(&open, 1, 3, true)],
+            "fresh",
+            false,
+        )
+        .unwrap();
+
+        let edits = take_buffer_edits(&mut plan, "fresh", &open);
+
+        assert_eq!(
+            edits,
+            vec![
+                BufferRenameEdit {
+                    path: open.clone(),
+                    line: 1,
+                    start_character: 8,
+                    end_character: 14,
+                    text: "fresh".into(),
+                },
+                BufferRenameEdit {
+                    path: open.clone(),
+                    line: 0,
+                    start_character: 3,
+                    end_character: 9,
+                    text: "fresh".into(),
+                },
+            ],
+            "0-based lines, UTF-16 columns, last edit first",
+        );
+        assert_eq!(
+            plan.sites.len(),
+            1,
+            "the open file's sites are gone, so the disk pass cannot apply them twice",
+        );
+        assert_eq!(plan.sites[0].path, closed);
+    }
+
+    #[test]
+    fn buffer_columns_are_counted_in_utf16() {
+        let dir = tempfile::tempdir().unwrap();
+        // "𝄞" is one char but two UTF-16 code units, so `target` starts at
+        // byte 11 and at UTF-16 unit 9 — the number an editor counts.
+        let open = write(dir.path(), "a.rs", "let 𝄞 = target();\n");
+        let resolved = Resolution {
+            name: "target".into(),
+            tier: ResolutionTier::LocalFile,
+            candidates: vec![symbol(&open, 1, 11, true)],
+        };
+        let usages = vec![symbol(&open, 1, 11, false)];
+        let mut plan = plan_index_rename(
+            &resolved,
+            &usages,
+            &[symbol(&open, 1, 11, true)],
+            "fresh",
+            false,
+        )
+        .unwrap();
+
+        let edits = take_buffer_edits(&mut plan, "fresh", &open);
+        assert_eq!(edits[0].start_character, 9);
+        assert_eq!(edits[0].end_character, 15);
+    }
+
+    #[test]
+    fn an_unreadable_open_file_still_loses_its_sites() {
+        let dir = tempfile::tempdir().unwrap();
+        let open = dir.path().join("gone.rs");
+        let resolved = Resolution {
+            name: "target".into(),
+            tier: ResolutionTier::LocalFile,
+            candidates: vec![symbol(&open, 1, 0, true)],
+        };
+        let usages = vec![symbol(&open, 1, 0, true)];
+        let mut plan = plan_index_rename(
+            &resolved,
+            &usages,
+            &[symbol(&open, 1, 0, true)],
+            "fresh",
+            false,
+        )
+        .unwrap();
+
+        assert!(take_buffer_edits(&mut plan, "fresh", &open).is_empty());
+        assert!(
+            plan.sites.is_empty(),
+            "a file we could not read must not fall through to the disk pass",
+        );
     }
 }

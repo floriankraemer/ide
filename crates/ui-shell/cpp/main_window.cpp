@@ -398,6 +398,23 @@ public:
         }
     }
 
+    // Every file open in a tab. Used by the name-based rename to splice the
+    // ones the user can see instead of rewriting them on disk.
+    QStringList openPaths() const
+    {
+        QStringList paths;
+        for (QTabWidget *group : groups_) {
+            for (int i = 0; i < group->count(); ++i) {
+                auto *editor = qobject_cast<CodeEditor *>(group->widget(i));
+                const QString path = editor ? editor->property("lspPath").toString() : QString();
+                if (!path.isEmpty() && !paths.contains(path)) {
+                    paths.append(path);
+                }
+            }
+        }
+        return paths;
+    }
+
     // The editor showing `path`, or nullptr when it is not open.
     CodeEditor *editorForPath(const QString &path) const
     {
@@ -2182,6 +2199,18 @@ private:
         }
         for (const QString &path : dialog.excludedPaths()) {
             searchModel_->excludeFromIndexRename(path);
+        }
+        // Files the user has open are spliced in their buffers, so the
+        // rename is undoable where it is visible and the editor does not
+        // prompt about a change it made itself. Taking them also removes
+        // them from the plan, so the disk pass below cannot apply them
+        // twice.
+        for (const QString &path : editorTabs_->openPaths()) {
+            const ::rust::Vec<FfiTextEdit> edits =
+              searchModel_->takeIndexRenameBufferEdits(path);
+            if (!edits.empty()) {
+                editorTabs_->applyBufferEdits(edits);
+            }
         }
         searchModel_->applyIndexRename();
     }
