@@ -491,6 +491,263 @@ impl IndexSlot {
     }
 }
 
+/// How much this rename knows about one of the sites it found.
+///
+/// The whole point of the type: without a language server this is name
+/// matching, not binding resolution (ADR-0008), so the plan says which sites
+/// it can stand behind and which it merely found — and the user decides the
+/// rest. Presenting both as equally certain would be the dishonest option.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SiteConfidence {
+    /// The site is in the file that declares the symbol, and no other file
+    /// declares anything by that name. Nothing else in the project can be
+    /// what this token means.
+    Resolved,
+    /// The name matches. That is all that is known — it may be an unrelated
+    /// symbol that happens to share it.
+    Unverified,
+}
+
+/// One occurrence a name-based rename would rewrite.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RenameSite {
+    pub path: PathBuf,
+    /// 1-based, as [`SymbolMatch`] reports it.
+    pub line: usize,
+    /// Byte offset of the name within its line.
+    pub col: usize,
+    pub confidence: SiteConfidence,
+    /// Whether this occurrence is a declaration rather than a use.
+    pub is_definition: bool,
+    /// Whether the site should start out ticked in the preview. Decided here
+    /// rather than in the dialog, because it is a judgement about how much
+    /// the rename knows, not about how the list is drawn.
+    pub checked: bool,
+}
+
+/// What a rename without a language server would do, and how sure it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexRenamePlan {
+    pub name: String,
+    pub sites: Vec<RenameSite>,
+    /// Whether more than one symbol in the project is declared with this
+    /// name. When true the sites cannot be told apart by name alone, so the
+    /// unverified ones start unticked and the preview says why.
+    pub ambiguous: bool,
+}
+
+impl IndexRenamePlan {
+    /// The sites that start out ticked.
+    pub fn checked_sites(&self) -> impl Iterator<Item = &RenameSite> {
+        self.sites.iter().filter(|site| site.checked)
+    }
+}
+
+/// Why a name-based rename cannot be offered.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RenameRefusal {
+    /// The caret is not on anything this index resolved to a declaration.
+    /// Renaming every token that happens to be spelled the same is a
+    /// find-and-replace, which this application already has, and offering it
+    /// under the name "rename" would be a lie about what it does.
+    Unresolved,
+    /// The new name is not an identifier.
+    InvalidName,
+    /// A file is open with unsaved changes. The index reads from disk, so
+    /// every line and column it reports for a modified buffer may be stale;
+    /// rewriting from those would corrupt the file. One rule, one message,
+    /// rather than per-file semantics nobody can predict.
+    UnsavedChanges,
+    /// The symbol was resolved, but nothing — not even its declaration —
+    /// came back as an occurrence.
+    NoSites,
+}
+
+impl std::fmt::Display for RenameRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RenameRefusal::Unresolved => write!(
+                f,
+                "There is no symbol under the caret to rename. Use Replace in Files to change every occurrence of a word."
+            ),
+            RenameRefusal::InvalidName => {
+                write!(f, "That is not a valid name.")
+            }
+            RenameRefusal::UnsavedChanges => write!(
+                f,
+                "Save all files before renaming without a language server \u{2014} the project index reads from disk."
+            ),
+            RenameRefusal::NoSites => {
+                write!(f, "No occurrences of this symbol were found in the project.")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RenameRefusal {}
+
+/// Is `name` something that could be an identifier?
+///
+/// Deliberately conservative and language-agnostic: a leading letter or
+/// underscore, then letters, digits and underscores. It exists to catch the
+/// empty box and the pasted sentence, not to model 31 grammars — a name this
+/// rejects that some language would accept is a smaller cost than a rename
+/// that writes `foo bar` across a project.
+pub fn is_valid_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_alphabetic() || first == '_') && chars.all(|ch| ch.is_alphanumeric() || ch == '_')
+}
+
+/// What a name-based rename would change, or why it will not be offered.
+///
+/// `resolution` is what the caret resolved to ([`TextIndex::resolve_declaration`]),
+/// `usages` every occurrence of that name ([`TextIndex::find_usages`]), and
+/// `definitions` every declaration of it ([`TextIndex::find_definitions_exact`]).
+/// `has_unsaved_changes` is the editor's answer about its own buffers, which
+/// only it can know.
+///
+/// The confidence rule: a site is [`SiteConfidence::Resolved`] when it lives
+/// in the file that declares the symbol *and* the project declares that name
+/// exactly once — in which case nothing else it could refer to exists.
+/// Everything else is [`SiteConfidence::Unverified`], and starts unticked
+/// whenever the name is ambiguous, so the default action is the safe one and
+/// widening it is a deliberate click.
+pub fn plan_index_rename(
+    resolution: &Resolution,
+    usages: &[SymbolMatch],
+    definitions: &[SymbolMatch],
+    new_name: &str,
+    has_unsaved_changes: bool,
+) -> Result<IndexRenamePlan, RenameRefusal> {
+    if resolution.tier == ResolutionTier::None || resolution.name.is_empty() {
+        return Err(RenameRefusal::Unresolved);
+    }
+    if !is_valid_identifier(new_name) {
+        return Err(RenameRefusal::InvalidName);
+    }
+    if has_unsaved_changes {
+        return Err(RenameRefusal::UnsavedChanges);
+    }
+
+    let declaring_path = resolution.candidates.first().map(|c| c.path.as_path());
+    let ambiguous = definitions.len() > 1;
+
+    let sites: Vec<RenameSite> = usages
+        .iter()
+        .map(|usage| {
+            let resolved = !ambiguous && declaring_path == Some(usage.path.as_path());
+            let confidence = if resolved {
+                SiteConfidence::Resolved
+            } else {
+                SiteConfidence::Unverified
+            };
+            RenameSite {
+                path: usage.path.clone(),
+                line: usage.line,
+                col: usage.col,
+                confidence,
+                is_definition: usage.is_definition,
+                checked: resolved || !ambiguous,
+            }
+        })
+        .collect();
+
+    if sites.is_empty() {
+        return Err(RenameRefusal::NoSites);
+    }
+    Ok(IndexRenamePlan {
+        name: resolution.name.clone(),
+        sites,
+        ambiguous,
+    })
+}
+
+/// The sites of `plan` that are ticked, as the spans
+/// [`TextIndex::replace_in_files`] rewrites.
+///
+/// This is the one place an LSP-free rename and the existing Replace in
+/// Files meet: a rename site is a single-line span of a known length, which
+/// is exactly what [`FileReplacement`] describes, so the applier is reused
+/// rather than reimplemented.
+pub fn rename_replacements(plan: &IndexRenamePlan, new_name: &str) -> Vec<FileReplacement> {
+    plan.checked_sites()
+        .map(|site| FileReplacement {
+            path: site.path.clone(),
+            line: site.line,
+            start: site.col,
+            end: site.col + plan.name.len(),
+            text: new_name.to_string(),
+        })
+        .collect()
+}
+
+/// The declaration at `line` of `path`, as the text to show in a tooltip.
+///
+/// The fallback for hover when no language server answers: there is no
+/// stored signature anywhere in this index, and the honest substitute is the
+/// declaration's own source text.
+///
+/// ponytail: bracket balance, capped at [`SIGNATURE_MAX_LINES`]. It reads a
+/// multi-line signature correctly and stops at the body, and it will include
+/// a trailing comment or miscount a bracket inside a string. A real answer
+/// means asking the grammar for the declaration node's range — worth doing
+/// if this proves annoying, and not before.
+pub fn declaration_signature(path: &Path, line: usize) -> Option<String> {
+    let content = fs::read_to_string(path).ok()?;
+    signature_from_text(&content, line)
+}
+
+/// How many lines of a declaration are worth showing before it stops being a
+/// signature and starts being the function.
+pub const SIGNATURE_MAX_LINES: usize = 5;
+
+fn signature_from_text(content: &str, line: usize) -> Option<String> {
+    let lines: Vec<&str> = content.lines().collect();
+    let first = lines.get(line.checked_sub(1)?)?;
+
+    let mut out = vec![first.trim_end().to_string()];
+    let mut depth = bracket_depth(first);
+    // Keep taking continuation lines while a bracket is still open: a
+    // signature broken across lines is unreadable when truncated at the
+    // first one.
+    while depth > 0 && out.len() < SIGNATURE_MAX_LINES {
+        let Some(next) = lines.get(line - 1 + out.len()) else {
+            break;
+        };
+        depth += bracket_depth(next);
+        out.push(next.trim_end().to_string());
+    }
+
+    let mut signature = out.join("\n");
+    // The body is not part of the signature. The brace that opens it is the
+    // last one with nothing but the body's own close after it, which covers
+    // both `fn f() {` and the one-line `fn f() {}`. A brace with anything
+    // else after it belongs to the declaration — a struct literal in a
+    // default argument, a block expression in an initialiser — and stays.
+    if let Some(open) = signature.rfind('{') {
+        if signature[open + 1..]
+            .chars()
+            .all(|ch| ch.is_whitespace() || ch == '}')
+        {
+            signature.truncate(open);
+        }
+    }
+    let signature = signature.trim().to_string();
+    (!signature.is_empty()).then_some(signature)
+}
+
+/// How far the bracket nesting moves across one line.
+fn bracket_depth(line: &str) -> i32 {
+    line.chars().fold(0, |depth, ch| match ch {
+        '(' | '[' | '<' => depth + 1,
+        ')' | ']' | '>' => depth - 1,
+        _ => depth,
+    })
+}
+
 /// Turns "these matched spans, this pattern, this replacement" into the
 /// concrete per-span replacement text [`TextIndex::replace_in_files`]
 /// applies. Callers hand in the spans a search produced; a span whose line
@@ -857,6 +1114,40 @@ impl TextIndex {
             }
             report.files += 1;
             report.matches += file_edits.len();
+            self.reindex_file(path)?;
+        }
+        Ok(report)
+    }
+
+    /// Write whole new contents for files a refactoring changed, and
+    /// re-index each one.
+    ///
+    /// The counterpart of [`replace_in_files`](Self::replace_in_files) for
+    /// edits that came from a language server: an LSP range spans lines, so
+    /// there is nothing single-line to rewrite in place, and the caller has
+    /// already produced the finished text with
+    /// `lsp_core::workspace_edit::apply_to_text` — which validates every
+    /// range before it produces anything, so a file arriving here is
+    /// complete or was never built.
+    ///
+    /// Files that cannot be written are counted as skipped, exactly as the
+    /// span-based path counts them, so one unwritable file does not abandon
+    /// the rest of the refactoring.
+    ///
+    /// Open editors learn about this the same way they learn about Replace
+    /// in Files: through the project watcher, not from here.
+    pub fn write_files(
+        &mut self,
+        files: &[(PathBuf, String)],
+    ) -> Result<ReplaceReport, IndexError> {
+        let mut report = ReplaceReport::default();
+        for (path, content) in files {
+            if fs::write(path, content).is_err() {
+                report.skipped_files += 1;
+                continue;
+            }
+            report.files += 1;
+            report.matches += 1;
             self.reindex_file(path)?;
         }
         Ok(report)
@@ -2478,5 +2769,276 @@ mod tests {
 
         assert_eq!(index.indexed_file_count(), before);
         assert!(index.find_files("meta", 5).is_empty());
+    }
+    fn symbol(path: &Path, line: usize, col: usize, is_definition: bool) -> SymbolMatch {
+        SymbolMatch {
+            name: "target".into(),
+            kind: None,
+            path: path.to_path_buf(),
+            line,
+            col,
+            is_definition,
+            container: None,
+        }
+    }
+
+    fn resolution(path: &Path, tier: ResolutionTier) -> Resolution {
+        Resolution {
+            name: "target".into(),
+            tier,
+            candidates: vec![symbol(path, 1, 3, true)],
+        }
+    }
+
+    #[test]
+    fn an_unresolved_caret_is_refused_rather_than_renamed_by_name() {
+        let nothing = Resolution {
+            name: String::new(),
+            tier: ResolutionTier::None,
+            candidates: Vec::new(),
+        };
+        assert_eq!(
+            plan_index_rename(&nothing, &[], &[], "fresh", false),
+            Err(RenameRefusal::Unresolved),
+            "renaming every token spelled the same is Replace in Files, not rename",
+        );
+    }
+
+    #[test]
+    fn an_invalid_new_name_is_refused_before_anything_is_planned() {
+        let home = PathBuf::from("/p/a.rs");
+        let resolved = resolution(&home, ResolutionTier::LocalFile);
+        for bad in ["", " ", "two words", "9lives", "has-dash"] {
+            assert_eq!(
+                plan_index_rename(&resolved, &[symbol(&home, 1, 3, true)], &[], bad, false),
+                Err(RenameRefusal::InvalidName),
+                "{bad:?} is not an identifier",
+            );
+        }
+        assert!(is_valid_identifier("_private2"));
+        assert!(is_valid_identifier("Ünicode"));
+    }
+
+    #[test]
+    fn unsaved_buffers_refuse_the_rename_because_the_index_reads_disk() {
+        let home = PathBuf::from("/p/a.rs");
+        let resolved = resolution(&home, ResolutionTier::LocalFile);
+        assert_eq!(
+            plan_index_rename(&resolved, &[symbol(&home, 1, 3, true)], &[], "fresh", true),
+            Err(RenameRefusal::UnsavedChanges),
+        );
+    }
+
+    #[test]
+    fn a_uniquely_named_symbol_resolves_every_site_in_its_own_file() {
+        let home = PathBuf::from("/p/a.rs");
+        let elsewhere = PathBuf::from("/p/b.rs");
+        let resolved = resolution(&home, ResolutionTier::LocalFile);
+        let usages = vec![
+            symbol(&home, 1, 3, true),
+            symbol(&home, 7, 8, false),
+            symbol(&elsewhere, 2, 4, false),
+        ];
+
+        let plan = plan_index_rename(
+            &resolved,
+            &usages,
+            &[symbol(&home, 1, 3, true)],
+            "fresh",
+            false,
+        )
+        .unwrap();
+
+        assert!(!plan.ambiguous);
+        assert_eq!(plan.sites[0].confidence, SiteConfidence::Resolved);
+        assert_eq!(plan.sites[1].confidence, SiteConfidence::Resolved);
+        assert_eq!(
+            plan.sites[2].confidence,
+            SiteConfidence::Unverified,
+            "another file's occurrence is a name match, nothing more",
+        );
+        assert!(
+            plan.sites.iter().all(|s| s.checked),
+            "with one declaration of the name there is nothing to mistake it for",
+        );
+    }
+
+    #[test]
+    fn a_shared_name_leaves_the_uncertain_sites_unticked() {
+        let home = PathBuf::from("/p/a.rs");
+        let elsewhere = PathBuf::from("/p/b.rs");
+        let resolved = resolution(&home, ResolutionTier::Project);
+        let usages = vec![symbol(&home, 1, 3, true), symbol(&elsewhere, 9, 2, true)];
+        let definitions = vec![symbol(&home, 1, 3, true), symbol(&elsewhere, 9, 2, true)];
+
+        let plan = plan_index_rename(&resolved, &usages, &definitions, "fresh", false).unwrap();
+
+        assert!(plan.ambiguous, "two symbols share this name");
+        assert!(
+            plan.sites
+                .iter()
+                .all(|s| s.confidence == SiteConfidence::Unverified),
+            "name matching cannot tell two same-named symbols apart",
+        );
+        assert_eq!(
+            plan.checked_sites().count(),
+            0,
+            "the safe default is to change nothing until the user says which",
+        );
+    }
+
+    #[test]
+    fn a_resolved_symbol_with_no_occurrences_is_refused() {
+        let home = PathBuf::from("/p/a.rs");
+        assert_eq!(
+            plan_index_rename(
+                &resolution(&home, ResolutionTier::LocalFile),
+                &[],
+                &[],
+                "fresh",
+                false
+            ),
+            Err(RenameRefusal::NoSites),
+        );
+    }
+
+    #[test]
+    fn ticked_sites_become_spans_the_existing_applier_understands() {
+        let home = PathBuf::from("/p/a.rs");
+        let resolved = resolution(&home, ResolutionTier::LocalFile);
+        let usages = vec![symbol(&home, 4, 11, false)];
+        let plan = plan_index_rename(
+            &resolved,
+            &usages,
+            &[symbol(&home, 1, 3, true)],
+            "fresh",
+            false,
+        )
+        .unwrap();
+
+        let spans = rename_replacements(&plan, "fresh");
+        assert_eq!(
+            spans,
+            vec![FileReplacement {
+                path: home,
+                line: 4,
+                start: 11,
+                end: 17,
+                text: "fresh".into(),
+            }],
+            "the span covers the old name exactly, which is what replace_in_files rewrites",
+        );
+    }
+
+    #[test]
+    fn write_files_rewrites_whole_files_and_follows_them_into_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(dir.path(), "a.rs", "fn old_name() {}\n");
+        let mut index = TextIndex::build(dir.path()).unwrap();
+
+        let report = index
+            .write_files(&[(file.clone(), "fn new_name() {}\n".to_string())])
+            .unwrap();
+
+        assert_eq!(report.files, 1);
+        assert_eq!(report.skipped_files, 0);
+        assert_eq!(fs::read_to_string(&file).unwrap(), "fn new_name() {}\n");
+        assert!(
+            index.find_definitions_exact("old_name").unwrap().is_empty(),
+            "the index followed the write",
+        );
+        assert_eq!(index.find_definitions_exact("new_name").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn write_files_skips_what_it_cannot_write_and_keeps_going() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = write(dir.path(), "a.rs", "fn a() {}\n");
+        let unwritable = dir.path().join("no-such-dir").join("b.rs");
+        let mut index = TextIndex::build(dir.path()).unwrap();
+
+        let report = index
+            .write_files(&[
+                (unwritable, "fn b() {}\n".to_string()),
+                (good.clone(), "fn c() {}\n".to_string()),
+            ])
+            .unwrap();
+
+        assert_eq!(report.skipped_files, 1);
+        assert_eq!(report.files, 1);
+        assert_eq!(
+            fs::read_to_string(&good).unwrap(),
+            "fn c() {}\n",
+            "one unwritable file must not abandon the rest of the refactoring",
+        );
+    }
+
+    #[test]
+    fn a_signature_is_the_declaration_line() {
+        let text =
+            "use std::fmt;\n\npub fn open(path: &Path) -> io::Result<Self> {\n    todo!()\n}\n";
+        assert_eq!(
+            signature_from_text(text, 3).unwrap(),
+            "pub fn open(path: &Path) -> io::Result<Self>",
+            "the trailing brace is the body starting, not part of the signature",
+        );
+    }
+
+    #[test]
+    fn a_signature_broken_across_lines_is_followed_to_its_close() {
+        let text = "fn wide(\n    first: u32,\n    second: u32,\n) -> u32 {\n    0\n}\n";
+        assert_eq!(
+            signature_from_text(text, 1).unwrap(),
+            "fn wide(\n    first: u32,\n    second: u32,\n) -> u32",
+        );
+    }
+
+    #[test]
+    fn a_runaway_declaration_stops_at_the_cap() {
+        let text = format!("fn many(\n{}) {{\n", "    arg: u32,\n".repeat(20));
+        let signature = signature_from_text(&text, 1).unwrap();
+        assert_eq!(
+            signature.lines().count(),
+            SIGNATURE_MAX_LINES,
+            "a tooltip shows a signature, not a function: {signature}",
+        );
+    }
+
+    #[test]
+    fn a_declaration_with_no_body_needs_no_trimming() {
+        let text = "interface Greeter {\n    void greet(String name);\n}\n";
+        assert_eq!(
+            signature_from_text(text, 2).unwrap(),
+            "void greet(String name);",
+        );
+    }
+
+    #[test]
+    fn a_brace_that_is_not_the_body_is_kept() {
+        let text = "fn f(opts: Opts = Opts { retry: true }) {}\n";
+        assert_eq!(
+            signature_from_text(text, 1).unwrap(),
+            "fn f(opts: Opts = Opts { retry: true })",
+            "only the brace that opens the body is cut",
+        );
+    }
+
+    #[test]
+    fn there_is_no_signature_off_the_end_of_the_file_or_on_a_blank_line() {
+        let text = "fn a() {}\n\n";
+        assert!(signature_from_text(text, 99).is_none());
+        assert!(signature_from_text(text, 0).is_none(), "lines are 1-based");
+        assert!(
+            signature_from_text(text, 2).is_none(),
+            "a blank line says nothing"
+        );
+    }
+
+    #[test]
+    fn declaration_signature_reads_the_file_it_is_pointed_at() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = write(dir.path(), "a.rs", "fn first() {}\nfn second(x: u8) {}\n");
+        assert_eq!(declaration_signature(&file, 2).unwrap(), "fn second(x: u8)",);
+        assert!(declaration_signature(&dir.path().join("missing.rs"), 1).is_none());
     }
 }
