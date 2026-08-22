@@ -372,6 +372,59 @@ mod ffi {
         prefix_length: u32,
     }
 
+    /// One edit a refactoring makes, in the protocol's own units (0-based
+    /// lines, UTF-16 characters — which is what `QTextCursor` counts too, so
+    /// the view re-expresses these rather than converting them).
+    ///
+    /// `in_buffer` is not a hint the view may second-guess: `lsp_core`
+    /// decided which documents are open and therefore spliced live, and
+    /// which are rewritten on disk. The view routes by this flag.
+    #[derive(Default)]
+    struct FfiTextEdit {
+        path: QString,
+        in_buffer: bool,
+        start_line: u32,
+        start_character: u32,
+        end_line: u32,
+        end_character: u32,
+        new_text: QString,
+    }
+
+    /// What a refactoring is about to do, for the confirm text and for the
+    /// decision the view is not allowed to make: `touches_other_files` is
+    /// what says whether a preview is required, computed in `lsp_core`.
+    #[derive(Default)]
+    struct FfiRefactorSummary {
+        title: QString,
+        document_count: u32,
+        edit_count: u32,
+        touches_other_files: bool,
+    }
+
+    /// One occurrence a name-based rename would rewrite, as the preview
+    /// lists it. `resolved` and `checked` are `index_core`'s judgements
+    /// about how much this rename knows — the dialog paints them, it does
+    /// not decide them.
+    #[derive(Default)]
+    struct FfiRenameSite {
+        path: QString,
+        line: u32,
+        col: u32,
+        resolved: bool,
+        is_definition: bool,
+        checked: bool,
+    }
+
+    /// One offer from `textDocument/codeAction`. `disabled_reason` is empty
+    /// when the action is usable; a disabled action is still listed, greyed,
+    /// because a menu that changes shape with the caret reads as a bug.
+    #[derive(Default)]
+    struct FfiCodeAction {
+        title: QString,
+        kind: QString,
+        disabled_reason: QString,
+    }
+
     /// How many diagnostics of each severity exist right now, 1:1 with
     /// `lsp_core::DiagnosticCounts` — for the status-bar counter and the
     /// Problems panel's filter buttons.
@@ -1264,6 +1317,89 @@ mod ffi {
             case_sensitive: bool,
         );
 
+        /// RF9 — work out what renaming the symbol under the caret would
+        /// change, with no language server involved.
+        ///
+        /// This is ADR-0011's name-based resolution, so it is deliberately
+        /// cautious: it refuses when the caret resolved to nothing (that is
+        /// Replace in Files, not a rename), when the new name is not an
+        /// identifier, and when any buffer is unsaved, because the index
+        /// reads from disk. `index_core::plan_index_rename` owns all three
+        /// rules, including which sites start ticked.
+        ///
+        /// Answers on `indexRenameReady` or `indexRenameFailed`.
+        #[qinvokable]
+        #[cxx_name = "planIndexRename"]
+        fn plan_index_rename(
+            self: Pin<&mut SearchModel>,
+            path: &QString,
+            content: &QString,
+            byte_offset: usize,
+            new_name: &QString,
+            has_unsaved_changes: bool,
+        );
+
+        /// A rename plan is ready; the view reads its sites back with
+        /// `indexRenameSites`. `ambiguous` means more than one symbol in the
+        /// project carries this name, which is what the preview has to say
+        /// out loud.
+        #[qsignal]
+        #[cxx_name = "indexRenameReady"]
+        fn index_rename_ready(self: Pin<&mut SearchModel>, name: QString, ambiguous: bool);
+
+        /// The rename will not be offered, and this is the reason to show.
+        #[qsignal]
+        #[cxx_name = "indexRenameFailed"]
+        fn index_rename_failed(self: Pin<&mut SearchModel>, message: QString);
+
+        /// The sites of the pending name-based rename, in project order.
+        #[qinvokable]
+        #[cxx_name = "indexRenameSites"]
+        fn index_rename_sites(self: &SearchModel) -> Vec<FfiRenameSite>;
+
+        /// Leave `path` out of the pending name-based rename.
+        #[qinvokable]
+        #[cxx_name = "excludeFromIndexRename"]
+        fn exclude_from_index_rename(self: Pin<&mut SearchModel>, path: &QString);
+
+        /// Apply the pending name-based rename to every ticked site that was
+        /// not excluded, writing to disk and re-indexing — the same applier
+        /// Replace in Files uses, because a rename site really is a
+        /// single-line span of a known length.
+        ///
+        /// Answers on `refactorFilesFinished`/`refactorFilesFailed`.
+        #[qinvokable]
+        #[cxx_name = "applyIndexRename"]
+        fn apply_index_rename(self: Pin<&mut SearchModel>);
+
+        /// RF9 — apply refactoring edits to files no editor has open.
+        ///
+        /// Each file is read, the edits are applied to its whole text
+        /// (`lsp_core::apply_to_text`, which validates every range before it
+        /// produces anything), and the result is written and re-indexed.
+        /// Only edits whose `in_buffer` is false belong here — the rest are
+        /// spliced into their live buffers by the view, which is what keeps
+        /// one Ctrl+Z undoing the whole refactoring in the files the user
+        /// can see.
+        ///
+        /// Answers on `refactorFilesFinished` or `refactorFilesFailed`.
+        #[qinvokable]
+        #[cxx_name = "applyFileEdits"]
+        fn apply_file_edits(self: Pin<&mut SearchModel>, edits: Vec<FfiTextEdit>);
+
+        /// How many closed files a refactoring rewrote, and how many it left
+        /// alone because they could not be read, could not be written, or no
+        /// longer matched the edit.
+        #[qsignal]
+        #[cxx_name = "refactorFilesFinished"]
+        fn refactor_files_finished(self: Pin<&mut SearchModel>, files: u32, skipped_files: u32);
+
+        /// The write could not be attempted at all — no index, or it is
+        /// still building. Nothing was changed.
+        #[qsignal]
+        #[cxx_name = "refactorFilesFailed"]
+        fn refactor_files_failed(self: Pin<&mut SearchModel>, message: QString);
+
         /// Emitted once a `replaceInFiles` call finishes: how many files
         /// were rewritten, how many spans, and how many files were skipped
         /// because they changed since the search.
@@ -1777,6 +1913,150 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "completionReady"]
         fn completion_ready(self: Pin<&mut LanguageService>);
+
+        /// RF8 — ask the server what refactorings it offers for a range.
+        ///
+        /// `only` narrows the request to a kind family (`refactor.extract`)
+        /// or is empty for everything. It is only ever a hint: a server that
+        /// ignores it, or answers nothing to it, is asked again unfiltered
+        /// and the answer filtered here — `lsp_core::code_action`'s rule.
+        /// Answers on `codeActionsReady`, which the view reads back with
+        /// `codeActions`.
+        #[qinvokable]
+        #[cxx_name = "codeActionsAt"]
+        fn code_actions_at(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            start_line: u32,
+            start_character: u32,
+            end_line: u32,
+            end_character: u32,
+            only: &QString,
+        );
+
+        /// The offers from the last `codeActionsAt`, in the server's own
+        /// order — it ranks its list and nothing here knows better.
+        #[qinvokable]
+        #[cxx_name = "codeActions"]
+        fn code_actions(self: &LanguageService) -> Vec<FfiCodeAction>;
+
+        /// A `codeActionsAt` answered. Empty is a legitimate answer and is
+        /// still signalled, so the view can say "nothing here" rather than
+        /// leaving the gesture hanging.
+        #[qsignal]
+        #[cxx_name = "codeActionsReady"]
+        fn code_actions_ready(self: Pin<&mut LanguageService>);
+
+        /// RF8 — carry out the offer at `index` of the last `codeActions`.
+        ///
+        /// Resolving it, applying its edit and running its command all
+        /// happen off the UI thread, in the order `lsp_core::code_action`
+        /// prescribes, under a refactoring session — without which the edit
+        /// a command produces would be refused as unsolicited.
+        /// `buffer_revision` is the editor's document revision now, and what
+        /// a later `takePendingEdits` is checked against.
+        #[qinvokable]
+        #[cxx_name = "applyCodeAction"]
+        fn apply_code_action(self: Pin<&mut LanguageService>, index: u32, buffer_revision: i64);
+
+        /// RF8 — rename the symbol at a position.
+        ///
+        /// Asks `prepareRename` first where the server implements it, then
+        /// `rename`. Answers on `refactorReady` when the server produced an
+        /// edit, on `refactorFallback` when no server did (which is what
+        /// makes rename work for a language with a grammar and no server),
+        /// and on `refactorFailed` when the server refused. Which of those
+        /// it is, is `lsp_core::rename`'s decision.
+        #[qinvokable]
+        #[cxx_name = "renameAt"]
+        fn rename_at(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            line: u32,
+            character: u32,
+            new_name: &QString,
+            buffer_revision: i64,
+        );
+
+        /// Whether the server would let the symbol at this position be
+        /// renamed, and what to prefill the input with. Blocking and cheap
+        /// only because it is not: it queues like everything else and answers
+        /// on `renamePrepared`.
+        #[qinvokable]
+        #[cxx_name = "prepareRename"]
+        fn prepare_rename(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            line: u32,
+            character: u32,
+        );
+
+        /// The rename may go ahead; `placeholder` is what to prefill the
+        /// input with, empty when the server did not name one.
+        #[qsignal]
+        #[cxx_name = "renamePrepared"]
+        fn rename_prepared(self: Pin<&mut LanguageService>, placeholder: QString);
+
+        /// The server said this element cannot be renamed. Only an explicit
+        /// refusal reaches here — a server that does not implement
+        /// `prepareRename` produces `renamePrepared`, because its silence is
+        /// not a refusal (`lsp_core::rename::prepare_outcome`).
+        #[qsignal]
+        #[cxx_name = "renameRejected"]
+        fn rename_rejected(self: Pin<&mut LanguageService>, reason: QString);
+
+        /// A refactoring produced edits and is waiting to be applied. The
+        /// summary says how much it changes and whether a preview is
+        /// required; the edits themselves come from `pendingEdits`.
+        #[qsignal]
+        #[cxx_name = "refactorReady"]
+        fn refactor_ready(self: Pin<&mut LanguageService>, summary: FfiRefactorSummary);
+
+        /// No language server answered the rename, so the name-based index
+        /// answers instead — the same shape as `definitionFallback`.
+        #[qsignal]
+        #[cxx_name = "refactorFallback"]
+        fn refactor_fallback(self: Pin<&mut LanguageService>);
+
+        /// The refactoring could not be done, and nothing was changed.
+        #[qsignal]
+        #[cxx_name = "refactorFailed"]
+        fn refactor_failed(self: Pin<&mut LanguageService>, message: QString);
+
+        /// Every edit the pending refactoring would make, for the preview.
+        /// Reading them changes nothing.
+        #[qinvokable]
+        #[cxx_name = "pendingEdits"]
+        fn pending_edits(self: &LanguageService) -> Vec<FfiTextEdit>;
+
+        /// Leave `path` out of the pending refactoring — the user unticked
+        /// it in the preview. Call before `takePendingEdits`; excluding a
+        /// path that is not in the plan does nothing.
+        #[qinvokable]
+        #[cxx_name = "excludeFromRefactor"]
+        fn exclude_from_refactor(self: Pin<&mut LanguageService>, path: &QString);
+
+        /// Take the pending edits to apply them, minus every excluded file.
+        ///
+        /// Empty when the buffer has moved since the request (`buffer_revision`
+        /// no longer matches) or when there is nothing pending — the staleness
+        /// rule is `lsp_core::EditGate`'s, so the view applies whatever it is
+        /// handed and never decides that a late answer is safe.
+        ///
+        /// Edits are already ordered last-first per document, so the view
+        /// splices them in the order given.
+        #[qinvokable]
+        #[cxx_name = "takePendingEdits"]
+        fn take_pending_edits(
+            self: Pin<&mut LanguageService>,
+            buffer_revision: i64,
+        ) -> Vec<FfiTextEdit>;
+
+        /// The gesture was abandoned. Any edit a server is still waiting on
+        /// is refused, rather than left unanswered.
+        #[qinvokable]
+        #[cxx_name = "cancelRefactor"]
+        fn cancel_refactor(self: Pin<&mut LanguageService>);
 
         /// Emitted on the Qt thread after the store changed: a server
         /// published, or a document was closed. The view re-reads whatever it
@@ -3397,6 +3677,10 @@ impl ffi::KeymapEditor {
 /// once and only re-indexing serialises them.
 pub struct SearchModelRust {
     index: mcp_server::IndexHandle,
+    /// RF9: the name-based rename waiting for the preview's verdict, and the
+    /// name it would write. Kept so the view can read the sites back rather
+    /// than being handed them in a signal, the same shape completion uses.
+    rename: std::cell::RefCell<Option<(index_core::IndexRenamePlan, String)>>,
     context: std::sync::Arc<std::sync::Mutex<SearchContext>>,
     /// Separate query guards so the popup and the results panel never
     /// cancel each other.
@@ -3412,6 +3696,7 @@ impl Default for SearchModelRust {
             // with no way to inject a shared handle. Same reasoning as the
             // `APP_SESSION` thread-local above — one project, one index.
             index: index_slot(),
+            rename: Default::default(),
             context: Default::default(),
             everywhere: Default::default(),
             find_in_files: Default::default(),
@@ -3861,6 +4146,229 @@ impl ffi::SearchModel {
                         model
                             .as_mut()
                             .search_failed(generation, QString::from(message.as_str()));
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn plan_index_rename(
+        self: Pin<&mut Self>,
+        path: &QString,
+        content: &QString,
+        byte_offset: usize,
+        new_name: &QString,
+        has_unsaved_changes: bool,
+    ) {
+        let path = std::path::PathBuf::from(path.to_string());
+        let content = content.to_string();
+        let new_name = new_name.to_string();
+        let qt_thread = self.qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            let guard = slot.read().unwrap();
+            let Some(index) = guard.ready() else {
+                let reason = guard.unavailable_reason().unwrap_or_default();
+                drop(guard);
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model
+                        .as_mut()
+                        .index_rename_failed(QString::from(reason.as_str()));
+                });
+                return;
+            };
+            let planned = index
+                .resolve_declaration(&path, &content, byte_offset)
+                .and_then(|resolution| {
+                    let usages = index.find_usages(&resolution.name)?;
+                    let definitions = index.find_definitions_exact(&resolution.name)?;
+                    Ok(index_core::plan_index_rename(
+                        &resolution,
+                        &usages,
+                        &definitions,
+                        &new_name,
+                        has_unsaved_changes,
+                    ))
+                });
+            drop(guard);
+            match planned {
+                Ok(Ok(plan)) => {
+                    let name = QString::from(plan.name.as_str());
+                    let ambiguous = plan.ambiguous;
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        *model.rename.borrow_mut() = Some((plan, new_name));
+                        model.as_mut().index_rename_ready(name, ambiguous);
+                    });
+                }
+                // A refusal and a failed lookup reach the user the same way:
+                // as a sentence saying why nothing will happen.
+                Ok(Err(refusal)) => {
+                    let message = refusal.to_string();
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model
+                            .as_mut()
+                            .index_rename_failed(QString::from(message.as_str()));
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model
+                            .as_mut()
+                            .index_rename_failed(QString::from(message.as_str()));
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn index_rename_sites(&self) -> Vec<ffi::FfiRenameSite> {
+        let borrowed = self.rename.borrow();
+        let Some((plan, _)) = borrowed.as_ref() else {
+            return Vec::new();
+        };
+        plan.sites
+            .iter()
+            .map(|site| ffi::FfiRenameSite {
+                path: QString::from(site.path.to_string_lossy().as_ref()),
+                line: site.line as u32,
+                col: site.col as u32,
+                resolved: site.confidence == index_core::SiteConfidence::Resolved,
+                is_definition: site.is_definition,
+                checked: site.checked,
+            })
+            .collect()
+    }
+
+    pub fn exclude_from_index_rename(self: Pin<&mut Self>, path: &QString) {
+        let path = std::path::PathBuf::from(path.to_string());
+        if let Some((plan, _)) = self.rename.borrow_mut().as_mut() {
+            for site in plan.sites.iter_mut().filter(|site| site.path == path) {
+                site.checked = false;
+            }
+        }
+    }
+
+    pub fn apply_index_rename(mut self: Pin<&mut Self>) {
+        let Some((plan, new_name)) = self.rename.borrow_mut().take() else {
+            self.as_mut().refactor_files_finished(0, 0);
+            return;
+        };
+        let edits = index_core::rename_replacements(&plan, &new_name);
+        if edits.is_empty() {
+            self.as_mut().refactor_files_finished(0, 0);
+            return;
+        }
+
+        let qt_thread = self.as_mut().qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            let mut guard = slot.write().unwrap();
+            let reason = guard.unavailable_reason();
+            let Some(index) = guard.ready_mut() else {
+                let reason = reason.unwrap_or_default();
+                drop(guard);
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model
+                        .as_mut()
+                        .refactor_files_failed(QString::from(reason.as_str()));
+                });
+                return;
+            };
+            let result = index.replace_in_files(&edits);
+            drop(guard);
+            match result {
+                Ok(report) => {
+                    let files = report.files as u32;
+                    let skipped = report.skipped_files as u32;
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model.as_mut().refactor_files_finished(files, skipped);
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model
+                            .as_mut()
+                            .refactor_files_failed(QString::from(message.as_str()));
+                    });
+                }
+            }
+        });
+    }
+
+    pub fn apply_file_edits(mut self: Pin<&mut Self>, edits: Vec<ffi::FfiTextEdit>) {
+        // Group by file, keeping each document's order — `lsp_core` already
+        // sorted the edits last-first, which is what makes applying them in
+        // one pass correct.
+        let mut by_path: Vec<(String, Vec<lsp_core::TextEdit>)> = Vec::new();
+        for edit in edits.iter().filter(|edit| !edit.in_buffer) {
+            let path = edit.path.to_string();
+            let converted = lsp_core::TextEdit {
+                start_line: edit.start_line,
+                start_character: edit.start_character,
+                end_line: edit.end_line,
+                end_character: edit.end_character,
+                new_text: edit.new_text.to_string(),
+            };
+            match by_path.iter_mut().find(|(known, _)| *known == path) {
+                Some((_, edits)) => edits.push(converted),
+                None => by_path.push((path, vec![converted])),
+            }
+        }
+        if by_path.is_empty() {
+            self.as_mut().refactor_files_finished(0, 0);
+            return;
+        }
+
+        let qt_thread = self.as_mut().qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            let mut guard = slot.write().unwrap();
+            let reason = guard.unavailable_reason();
+            let Some(index) = guard.ready_mut() else {
+                let reason = reason.unwrap_or_default();
+                drop(guard);
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model
+                        .as_mut()
+                        .refactor_files_failed(QString::from(reason.as_str()));
+                });
+                return;
+            };
+
+            // A file that cannot be read, or whose text the edits no longer
+            // fit, is skipped whole — never half-written. The same rule
+            // `replace_in_files` applies to a span it can no longer place.
+            let mut skipped = 0u32;
+            let mut rewritten = Vec::new();
+            for (path, edits) in by_path {
+                let path = std::path::PathBuf::from(path);
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    skipped += 1;
+                    continue;
+                };
+                match lsp_core::apply_to_text(&text, &edits) {
+                    Ok(new_text) => rewritten.push((path, new_text)),
+                    Err(_) => skipped += 1,
+                }
+            }
+            let result = index.write_files(&rewritten);
+            drop(guard);
+            match result {
+                Ok(report) => {
+                    let skipped = skipped + report.skipped_files as u32;
+                    let files = report.files as u32;
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model.as_mut().refactor_files_finished(files, skipped);
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model
+                            .as_mut()
+                            .refactor_files_failed(QString::from(message.as_str()));
                     });
                 }
             }
@@ -4455,6 +4963,69 @@ pub struct LanguageServiceRust {
     /// Trigger characters per language, as each server advertised them in
     /// its `initialize` result (`LspEvent::ServerReady`).
     triggers: RefCell<std::collections::HashMap<String, Vec<String>>>,
+    /// RF8: the offers of the last `codeActionsAt`, plus the language they
+    /// came from — resolving or executing one has to go back to that server.
+    actions: RefCell<Vec<lsp_core::CodeActionItem>>,
+    actions_language: RefCell<String>,
+    /// The refactoring waiting to be applied, if any: what it changes, what
+    /// to call it, and — when it came from the server asking us — the gate
+    /// that server is blocked on.
+    pending: RefCell<Option<PendingRefactor>>,
+    /// RF2's staleness rule. The comparison is `lsp_core`'s; only its state
+    /// lives here.
+    edits: RefCell<lsp_core::EditGate>,
+}
+
+/// A refactoring that has produced edits and is waiting for the view to
+/// apply them.
+struct PendingRefactor {
+    plan: lsp_core::EditPlan,
+    /// Files the user unticked in the preview.
+    excluded: Vec<String>,
+    /// Set when this edit came from a `workspace/applyEdit`, i.e. a server
+    /// is blocked until it is answered. Answering it is not optional, so
+    /// every path out of here — applied, excluded, cancelled, superseded —
+    /// goes through `settle`.
+    gate: Option<lsp_core::ApplyEditGate>,
+}
+
+impl PendingRefactor {
+    /// Tell a waiting server what became of its edit. A refactoring the
+    /// editor started has no gate and nothing to tell.
+    fn settle(&self, applied: bool, reason: &str) {
+        let Some(gate) = &self.gate else {
+            return;
+        };
+        if applied {
+            gate.claim();
+        } else {
+            gate.refuse(reason);
+        }
+    }
+}
+
+/// Every edit of a plan as the view receives them, with the pile each
+/// belongs to already decided (`lsp_core::plan_edit`).
+fn to_ffi_edits(plan: &lsp_core::EditPlan, excluded: &[String]) -> Vec<ffi::FfiTextEdit> {
+    let documents = plan
+        .buffers
+        .iter()
+        .map(|doc| (true, doc))
+        .chain(plan.files.iter().map(|doc| (false, doc)));
+    documents
+        .filter(|(_, doc)| !excluded.contains(&doc.path))
+        .flat_map(|(in_buffer, doc)| {
+            doc.edits.iter().map(move |edit| ffi::FfiTextEdit {
+                path: QString::from(doc.path.as_str()),
+                in_buffer,
+                start_line: edit.start_line,
+                start_character: edit.start_character,
+                end_line: edit.end_line,
+                end_character: edit.end_character,
+                new_text: QString::from(edit.new_text.as_str()),
+            })
+        })
+        .collect()
 }
 
 fn to_ffi_severity(severity: lsp_core::Severity) -> ffi::FfiSeverity {
@@ -4745,6 +5316,331 @@ impl ffi::LanguageService {
         });
     }
 
+    pub fn code_actions_at(
+        mut self: Pin<&mut Self>,
+        path: &QString,
+        start_line: u32,
+        start_character: u32,
+        end_line: u32,
+        end_character: u32,
+        only: &QString,
+    ) {
+        let path = path.to_string();
+        if !self.open_docs.borrow().contains_key(&path) {
+            return;
+        }
+        let language_id = self
+            .open_docs
+            .borrow()
+            .get(&path)
+            .cloned()
+            .unwrap_or_default();
+        let uri = lsp_core::uri_from_path(&path);
+        let only = only.to_string();
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            let filters: Vec<&str> = if only.is_empty() {
+                Vec::new()
+            } else {
+                vec![&only]
+            };
+            let filtered = manager
+                .code_action(
+                    &uri,
+                    (start_line, start_character),
+                    (end_line, end_character),
+                    &filters,
+                )
+                .unwrap_or_default();
+            // An empty answer to a filtered request proves nothing: `only`
+            // is a hint servers treat inconsistently, so ask again for
+            // everything and let `lsp_core` classify what comes back.
+            let actions = if !only.is_empty() && lsp_core::needs_unfiltered_retry(&filtered) {
+                let all = manager
+                    .code_action(
+                        &uri,
+                        (start_line, start_character),
+                        (end_line, end_character),
+                        &[],
+                    )
+                    .unwrap_or_default();
+                lsp_core::filter_by_kind(&all, &only)
+            } else {
+                filtered
+            };
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                *service.actions.borrow_mut() = actions;
+                *service.actions_language.borrow_mut() = language_id;
+                service.as_mut().code_actions_ready();
+            });
+        });
+    }
+
+    pub fn code_actions(&self) -> Vec<ffi::FfiCodeAction> {
+        self.actions
+            .borrow()
+            .iter()
+            .map(|action| ffi::FfiCodeAction {
+                title: QString::from(action.title.as_str()),
+                kind: QString::from(action.kind.as_deref().unwrap_or_default()),
+                disabled_reason: QString::from(action.disabled.as_deref().unwrap_or_default()),
+            })
+            .collect()
+    }
+
+    pub fn apply_code_action(mut self: Pin<&mut Self>, index: u32, buffer_revision: i64) {
+        let Some(action) = self.actions.borrow().get(index as usize).cloned() else {
+            return;
+        };
+        let language_id = self.actions_language.borrow().clone();
+        let open_paths = self.open_document_paths();
+        let current_path = self.current_path_of(&action);
+        self.edits.borrow_mut().begin(buffer_revision);
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            // The guard is what makes an edit the command asks for
+            // legitimate; without it `lsp_core` refuses it as unsolicited
+            // and the refactoring silently does nothing.
+            let _session = manager.begin_refactor();
+            let resolved = if action.needs_resolve() {
+                manager
+                    .resolve_code_action(&language_id, &action)
+                    .ok()
+                    .and_then(|mut items| items.pop())
+                    .unwrap_or(action)
+            } else {
+                action
+            };
+
+            let mut documents = Vec::new();
+            let mut failure = None;
+            for step in lsp_core::action_steps(&resolved) {
+                match step {
+                    lsp_core::ActionStep::ApplyEdit(edit) => {
+                        match lsp_core::parse_workspace_edit(&edit) {
+                            Ok(docs) => documents.extend(docs),
+                            Err(e) => failure = Some(e.to_string()),
+                        }
+                    }
+                    // Whatever the command produces arrives as its own
+                    // `workspace/applyEdit`, and is published from there.
+                    lsp_core::ActionStep::Execute(command) => {
+                        if let Err(e) = manager.execute_command(&language_id, &command) {
+                            failure = Some(e.to_string());
+                        }
+                    }
+                }
+            }
+            let title = resolved.title.clone();
+            let versions: std::collections::HashMap<String, i32> = documents
+                .iter()
+                .filter_map(|doc| {
+                    manager
+                        .document_version(&doc.uri)
+                        .map(|v| (doc.uri.clone(), v))
+                })
+                .collect();
+            let planned = if documents.is_empty() {
+                Ok(lsp_core::EditPlan::default())
+            } else {
+                lsp_core::plan_edit(documents, &open_paths, &current_path, &|uri| {
+                    versions.get(uri).copied()
+                })
+            };
+            let _ = qt_thread.queue(move |service: Pin<&mut Self>| {
+                if let Some(message) = failure {
+                    service.finish_refactor(Err(message));
+                    return;
+                }
+                match planned {
+                    // An action that only ran a command has nothing to
+                    // publish here; its edit arrives as an ApplyEdit event.
+                    Ok(plan) if plan.is_empty() => {}
+                    Ok(plan) => service.publish_refactor(title, plan, None),
+                    Err(e) => service.finish_refactor(Err(e.to_string())),
+                }
+            });
+        });
+    }
+
+    pub fn prepare_rename(mut self: Pin<&mut Self>, path: &QString, line: u32, character: u32) {
+        let path = path.to_string();
+        if !self.open_docs.borrow().contains_key(&path) {
+            return;
+        }
+        let uri = lsp_core::uri_from_path(&path);
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            let outcome =
+                lsp_core::prepare_outcome(Some(manager.prepare_rename(&uri, line, character)));
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| match outcome {
+                // A server that cannot answer is not a server that said no,
+                // so both of these let the rename go ahead.
+                lsp_core::PrepareOutcome::Ready(prepared) => {
+                    let placeholder = prepared.placeholder.unwrap_or_default();
+                    service
+                        .as_mut()
+                        .rename_prepared(QString::from(placeholder.as_str()));
+                }
+                lsp_core::PrepareOutcome::Unknown => {
+                    service.as_mut().rename_prepared(QString::default());
+                }
+                lsp_core::PrepareOutcome::Rejected => {
+                    service
+                        .as_mut()
+                        .rename_rejected(QString::from("This element cannot be renamed."));
+                }
+            });
+        });
+    }
+
+    pub fn rename_at(
+        mut self: Pin<&mut Self>,
+        path: &QString,
+        line: u32,
+        character: u32,
+        new_name: &QString,
+        buffer_revision: i64,
+    ) {
+        let path = path.to_string();
+        let new_name = new_name.to_string();
+        let open_paths = self.open_document_paths();
+        self.edits.borrow_mut().begin(buffer_revision);
+
+        if !self.open_docs.borrow().contains_key(&path) {
+            // No server has this document, so there is nothing to ask —
+            // which is a fallback, not a failure.
+            self.as_mut().refactor_fallback();
+            return;
+        }
+        let uri = lsp_core::uri_from_path(&path);
+        let qt_thread = self.as_mut().qt_thread();
+        let queued = self.push_job(move |manager| {
+            let _session = manager.begin_refactor();
+            let answer = manager.rename(&uri, line, character, &new_name);
+            let outcome = lsp_core::rename_outcome(Some(answer));
+            let title = format!("Rename to {new_name}");
+            let planned = match outcome {
+                lsp_core::RenameOutcome::Lsp(documents) => {
+                    let versions: std::collections::HashMap<String, i32> = documents
+                        .iter()
+                        .filter_map(|doc| {
+                            manager
+                                .document_version(&doc.uri)
+                                .map(|v| (doc.uri.clone(), v))
+                        })
+                        .collect();
+                    Some(lsp_core::plan_edit(documents, &open_paths, &path, &|uri| {
+                        versions.get(uri).copied()
+                    }))
+                }
+                lsp_core::RenameOutcome::Index => None,
+            };
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| match planned {
+                Some(Ok(plan)) => service.publish_refactor(title, plan, None),
+                Some(Err(e)) => service.finish_refactor(Err(e.to_string())),
+                None => service.as_mut().refactor_fallback(),
+            });
+        });
+        if !queued {
+            self.as_mut().refactor_fallback();
+        }
+    }
+
+    pub fn pending_edits(&self) -> Vec<ffi::FfiTextEdit> {
+        match self.pending.borrow().as_ref() {
+            Some(pending) => to_ffi_edits(&pending.plan, &[]),
+            None => Vec::new(),
+        }
+    }
+
+    pub fn exclude_from_refactor(self: Pin<&mut Self>, path: &QString) {
+        if let Some(pending) = self.pending.borrow_mut().as_mut() {
+            pending.excluded.push(path.to_string());
+        }
+    }
+
+    pub fn take_pending_edits(self: Pin<&mut Self>, buffer_revision: i64) -> Vec<ffi::FfiTextEdit> {
+        let fresh = self.edits.borrow_mut().accept(buffer_revision);
+        let Some(pending) = self.pending.borrow_mut().take() else {
+            return Vec::new();
+        };
+        if !fresh {
+            // The buffer moved under the answer. Applying it would rewrite
+            // the wrong bytes, so it is dropped — and a server waiting on it
+            // is told so rather than left hanging.
+            pending.settle(
+                false,
+                "the file changed while the refactoring was being prepared",
+            );
+            return Vec::new();
+        }
+        let edits = to_ffi_edits(&pending.plan, &pending.excluded);
+        pending.settle(!edits.is_empty(), "the refactoring was not applied");
+        edits
+    }
+
+    pub fn cancel_refactor(self: Pin<&mut Self>) {
+        self.edits.borrow_mut().cancel();
+        if let Some(pending) = self.pending.borrow_mut().take() {
+            pending.settle(false, "the refactoring was cancelled");
+        }
+    }
+
+    /// Publish a plan for the view to apply, replacing (and answering) any
+    /// refactoring that was already waiting.
+    fn publish_refactor(
+        mut self: Pin<&mut Self>,
+        title: String,
+        plan: lsp_core::EditPlan,
+        gate: Option<lsp_core::ApplyEditGate>,
+    ) {
+        let summary = ffi::FfiRefactorSummary {
+            title: QString::from(title.as_str()),
+            document_count: plan.document_count() as u32,
+            edit_count: plan.edit_count() as u32,
+            touches_other_files: plan.touches_other_files,
+        };
+        if let Some(previous) = self.pending.borrow_mut().replace(PendingRefactor {
+            plan,
+            excluded: Vec::new(),
+            gate,
+        }) {
+            previous.settle(false, "a newer refactoring replaced this one");
+        }
+        self.as_mut().refactor_ready(summary);
+    }
+
+    /// Report a refactoring that produced nothing, answering anything that
+    /// was waiting on it.
+    fn finish_refactor(mut self: Pin<&mut Self>, outcome: Result<(), String>) {
+        if let Some(pending) = self.pending.borrow_mut().take() {
+            pending.settle(false, "the refactoring could not be applied");
+        }
+        if let Err(message) = outcome {
+            self.as_mut()
+                .refactor_failed(QString::from(message.as_str()));
+        }
+    }
+
+    /// The documents servers have open, which is what `lsp_core::plan_edit`
+    /// splits a workspace edit against.
+    fn open_document_paths(&self) -> Vec<String> {
+        self.open_docs.borrow().keys().cloned().collect()
+    }
+
+    /// The file a code action was asked about, so an edit confined to it
+    /// needs no preview. Taken from the action's own edit rather than
+    /// remembered separately.
+    fn current_path_of(&self, action: &lsp_core::CodeActionItem) -> String {
+        action
+            .edit
+            .as_ref()
+            .and_then(|edit| lsp_core::parse_workspace_edit(edit).ok())
+            .and_then(|docs| docs.first().map(|doc| doc.path.clone()))
+            .unwrap_or_default()
+    }
+
     pub fn cancel_hover(self: Pin<&mut Self>) {
         self.hover.borrow_mut().cancel();
     }
@@ -4969,15 +5865,41 @@ impl ffi::LanguageService {
                     0,
                 );
             }
-            // RF5: a server asking us to apply an edit. The surface that
-            // applies one lands with the refactoring UI, and until then no
-            // refactoring session is ever started — so `lsp-core` refuses
-            // these before they reach here and this arm cannot fire. It
-            // still refuses rather than dropping the gate, because a server
-            // left waiting on an answer that never comes is the one outcome
-            // the handshake exists to prevent.
-            lsp_core::LspEvent::ApplyEdit { gate, .. } => {
-                gate.refuse("the editor cannot apply server-driven edits yet");
+            // RF8: a server applying the edit its command computed — how
+            // jdtls, omnisharp and intelephense deliver an Extract. It is
+            // blocked until the gate is answered, so every path out of
+            // `PendingRefactor` answers it.
+            lsp_core::LspEvent::ApplyEdit {
+                label, edit, gate, ..
+            } => {
+                let documents = match lsp_core::parse_workspace_edit(&edit) {
+                    Ok(documents) => documents,
+                    Err(e) => {
+                        gate.refuse(e.to_string());
+                        self.as_mut()
+                            .refactor_failed(QString::from(e.to_string().as_str()));
+                        return;
+                    }
+                };
+                let open_paths = self.open_document_paths();
+                // The server chose the files, so there is no "current" one
+                // to compare against: a server-driven edit always shows its
+                // preview.
+                let planned = lsp_core::plan_edit(documents, &open_paths, "", &|_| None);
+                match planned {
+                    Ok(plan) => {
+                        self.publish_refactor(
+                            label.unwrap_or_else(|| "Refactoring".to_string()),
+                            plan,
+                            Some(gate),
+                        );
+                    }
+                    Err(e) => {
+                        gate.refuse(e.to_string());
+                        self.as_mut()
+                            .refactor_failed(QString::from(e.to_string().as_str()));
+                    }
+                }
             }
             lsp_core::LspEvent::Notification { .. } => {}
         }
