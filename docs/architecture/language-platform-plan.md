@@ -262,6 +262,12 @@ None of them can establish that a user sees it.
 That gap is exactly where #31 lived for as long as it did, and the only reason anyone noticed was that someone looked at a picture.
 Rendering the app under Xvfb and sampling glyph colours out of the PNG is what closes it, and the recipe is recorded in the pull request for this branch.
 
+That measurement has a failure mode of its own, and it nearly produced a false bug report against this branch.
+Sampling a small box around a glyph and taking the dominant non-background colour is unreliable on antialiased text: the blend of foreground and background can read as a third colour that belongs to neither.
+On one probe it suggested an interpolated `$who` in Scala was painting as part of its enclosing string, which would have meant a real regression; cropping the line and enlarging it showed the glyph rendering plain, as intended.
+Crop and look, rather than sample and infer.
+A measurement that is wrong in a plausible direction is worse than no measurement, because it is the one you act on.
+
 A different kind of gap, not a weak assertion but an absent environment: no language server is installed in the build image, so the LSP surfaces — squiggles, hover tooltips, the completion popup, a populated Problems dock — have never been rendered against a real server.
 The stub exercises the protocol path and says nothing about the pixels.
 The render harness does not cover this, and should not be read as covering it.
