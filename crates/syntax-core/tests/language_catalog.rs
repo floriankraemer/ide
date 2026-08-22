@@ -29,7 +29,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use syntax_core::{highlight, registry, HighlightSpan, Language, Scope};
+use syntax_core::{highlight, language_by_id, registry, HighlightSpan, Language, Scope};
 
 /// The three scopes every real language is expected to produce.
 const REQUIRED_SCOPES: [&str; 3] = ["keyword", "string", "comment"];
@@ -485,6 +485,31 @@ const NOT_A_SCOPE: &[&str] = &[
     "spell",
 ];
 
+/// Capture names that must not appear **at all**.
+///
+/// A third kind of unresolvable name, and the one the other two lists get
+/// wrong. `none` is nvim-treesitter's *directive* for "clear any highlight
+/// on this node", not a scope: upstream Scala used it so `$name` inside an
+/// interpolated string renders plain. In this engine a capture naming
+/// nothing produces no span, which is upstream's intent expressed exactly —
+/// by accident, but exactly.
+///
+/// So the correct port is the **absence** of a pattern, and the repair
+/// [`KNOWN_DEAD_CAPTURES`] recommends is the one thing that must not
+/// happen: give `@none` a real scope and those nodes get painted, which is
+/// the opposite of the rule being ported. Listing it as merely "dead" would
+/// mean the test went green on the wrong fix and endorsed the regression.
+///
+/// Checked against compiled capture names, not file text — deliberately.
+/// The Scala header still *discusses* `@none` in prose, explaining why the
+/// capture sites were deleted, and a grep-based version of this rule would
+/// fail on the very comment documenting the decision.
+const MUST_NOT_APPEAR: &[&str] = &[
+    // nvim-treesitter's "clear the highlight here" sentinel. Ported by
+    // deleting the pattern, never by renaming it to a scope.
+    "none",
+];
+
 /// Capture names that **should** resolve and do not — live bugs.
 ///
 /// A capture whose name reaches no [`Scope`] produces no span at all, so
@@ -505,17 +530,17 @@ const NOT_A_SCOPE: &[&str] = &[
 ///
 /// Keyed by language id so a name dead in one language cannot silently
 /// excuse the same name in another.
-const KNOWN_DEAD_CAPTURES: &[(&str, &[&str])] = &[(
-    "css",
-    &[
-        "charset",
-        "import",
-        "keyframes",
-        "media",
-        "namespace",
-        "supports",
-    ],
-)];
+const KNOWN_DEAD_CAPTURES: &[(&str, &[&str])] = &[
+    // Empty, and that is the intended end state: Scala's were repaired, and
+    // the CSS entries were never real. `"@media"` and friends are quoted
+    // anonymous *node literals* inside a `[ ... ] @keyword` alternation —
+    // the `@` is part of the CSS token, not a capture sigil — so they always
+    // resolved to `keyword`. They reached this list from a scan that grepped
+    // for `@name` without opening the file.
+    //
+    // Add an entry only for a capture that genuinely reaches no scope, and
+    // expect to delete it again.
+];
 
 fn known_dead(id: &str, capture: &str) -> bool {
     KNOWN_DEAD_CAPTURES
@@ -542,6 +567,52 @@ fn known_dead(id: &str, capture: &str) -> bool {
 /// inside a comment or a string cannot fool it; resolution is the
 /// registry's own `Scope::resolve` walk (`@keyword.coroutine` resolves via
 /// `keyword`), read back off `CompiledLanguage::highlight_scopes`.
+/// Every entry in [`KNOWN_DEAD_CAPTURES`] must name a capture that really
+/// exists in that language.
+///
+/// The bidirectional check on the list catches "listed and now resolves" —
+/// repaired, delete the entry. It cannot catch "listed but never a capture
+/// at all", and that gap is not hypothetical: six CSS entries sat in the
+/// list green for as long as it existed, because `"@media"` and friends are
+/// quoted node literals rather than captures, so they neither resolved nor
+/// failed. A wrong entry was invisible in exactly the way a shrink-to-zero
+/// list is meant to prevent — it would have sat there forever, with no
+/// repair able to remove it.
+///
+/// So assert the entry is real rather than assuming it. Cheap only because
+/// capture names come from the compiled `Query`: a text-based guard could
+/// not tell a phantom entry from a live one.
+#[test]
+fn every_known_dead_entry_names_a_real_capture() {
+    let registry = registry();
+    for (id, names) in KNOWN_DEAD_CAPTURES {
+        let language = language_by_id(id)
+            .unwrap_or_else(|| panic!("`KNOWN_DEAD_CAPTURES` names unknown language `{id}`"));
+        let compiled = registry
+            .compiled(language)
+            .unwrap_or_else(|| panic!("language `{id}` has no compiled queries"))
+            .unwrap_or_else(|err| panic!("language `{id}`: {err}"));
+        let captures: Vec<&str> = compiled
+            .highlights
+            .as_ref()
+            .map(|q| q.capture_names().to_vec())
+            .unwrap_or_default();
+        for name in *names {
+            assert!(
+                captures.contains(name),
+                "language `{id}`: `{name}` is listed in `KNOWN_DEAD_CAPTURES` \
+                 in {}, but no such capture exists in \
+                 queries/{id}/highlights.scm. Either the capture was removed \
+                 and the entry should go with it, or it was never a capture \
+                 and the entry is wrong — a quoted node literal such as \
+                 `\"@media\"` is part of the language's syntax, not a \
+                 capture. Delete the entry either way.",
+                file!()
+            );
+        }
+    }
+}
+
 #[test]
 fn every_highlights_capture_resolves_to_a_scope() {
     let registry = registry();
@@ -556,6 +627,16 @@ fn every_highlights_capture_resolves_to_a_scope() {
             continue;
         };
         for (index, capture) in highlights.capture_names().iter().enumerate() {
+            assert!(
+                !MUST_NOT_APPEAR.contains(capture),
+                "language `{id}`: `@{capture}` must not appear in \
+                 queries/{id}/highlights.scm at all. It is a directive \
+                 spelled like a capture, and porting it correctly means \
+                 *deleting* the pattern, not renaming it to a scope — giving \
+                 it one paints the very nodes it exists to leave plain. If \
+                 upstream has it, drop the pattern and say so in the file's \
+                 header.",
+            );
             if compiled.highlight_scopes[index].is_some() {
                 assert!(
                     !is_predicate_operand(capture),
