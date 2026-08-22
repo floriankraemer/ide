@@ -3,17 +3,12 @@
 Experiment building fast open source multi-language IDE.
 
 Rust core, Qt6 Widgets UI via cxx-qt (QML planned later).
-Early stage, MVP text editor shell.
 
 ## Crates
 
-- `crates/editor-core` — domain: rope `Document`, `TabList`, binary detection.
-- `crates/project-model` — domain: `ProjectSession`, directory tree, filesystem watcher.
-- `crates/app-core` — application layer: `AppSession`, commands, `TabId`, `AppError`.
-- `crates/ui-shell` — Qt adapter (cxx-qt bridge) + view (Qt Widgets).
-- `crates/app` — main entry point.
+The workspace is 13 crates in a layered architecture; see the crate table in [docs/architecture/overview.md](docs/architecture/overview.md) and the import rules in [docs/architecture/layering.md](docs/architecture/layering.md).
 
-See `docs/architecture/` for layering rules and ADRs.
+All docs are indexed in [docs/README.md](docs/README.md).
 
 ## Build
 
