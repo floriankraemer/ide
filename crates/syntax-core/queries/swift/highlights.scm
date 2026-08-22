@@ -1,14 +1,23 @@
 ; Swift highlights.scm — adapted from tree-sitter-swift 0.7.3's own
 ; queries/highlights.scm (MIT, https://github.com/alex-pinkus/tree-sitter-swift).
-; Two classes of upstream pattern are still absent:
 ;
-;   * four guarded by `#match?`/`#any-of?` predicates — those are
-;     evaluated (see queries/go/highlights.scm), so they would work as
-;     written; nobody has ported them back;
-;   * the catch-all `(simple_identifier) @variable` — span extraction
-;     resolves same-node captures first-pattern-wins now, so a catch-all
-;     placed last would lose to every specific capture instead of stacking
-;     a span underneath it; it has simply not been ported back.
+; Upstream carries four `#match?`-guarded patterns. Three are ported (the
+; `@comment.documentation` trio below, which has to sit above the plain
+; `(comment)` capture because same-node captures resolve
+; first-pattern-wins). The fourth,
+;
+;     ((navigation_expression (simple_identifier) @type) (#match? @type "^[A-Z]"))
+;
+; is deliberately left out as redundant, not unported: the
+; naming-conventions block at the end of this file already paints any
+; capitalised `simple_identifier` `@type`, and `SomeType` in
+; `SomeType.method()` is claimed by no other pattern, so restoring it
+; would change nothing. Do not "fix" it back in.
+;
+; The catch-all `(simple_identifier) @variable` is restored, at the very
+; end of the file: upstream relies on last-match-wins and puts it first,
+; this crate resolves first-pattern-wins, so the equivalent position is
+; last — it claims only identifiers no specific pattern took.
 
 [
   "."
@@ -223,6 +232,20 @@
 (statement_label) @label
 
 ; Comments
+; Doc comments first — same-node captures resolve first-pattern-wins, so
+; these have to beat the plain `(comment)` capture below.
+((comment) @comment.documentation
+  (#match? @comment.documentation "^///[^/]"))
+
+((comment) @comment.documentation
+  (#match? @comment.documentation "^///$"))
+
+; `(?s)` added to upstream's regex: `#match?` compiles with the `regex`
+; crate, where `.` does not cross a newline, and a multiline doc comment
+; always does.
+((multiline_comment) @comment.documentation
+  (#match? @comment.documentation "(?s)^/[*][*][^*].*[*]/$"))
+
 [
   (comment)
   (multiline_comment)
@@ -347,3 +370,9 @@
 ; CamelCase is a type.
 ((simple_identifier) @type
   (#match? @type "^[A-Z]"))
+
+; --- Catch-all --------------------------------------------------------
+;
+; Last on purpose: every specific capture above wins the node, so this
+; only paints identifiers nothing else claimed.
+(simple_identifier) @variable
