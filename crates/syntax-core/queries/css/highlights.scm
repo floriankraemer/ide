@@ -2,15 +2,17 @@
 ; `queries/highlights.scm` (MIT,
 ; https://github.com/tree-sitter/tree-sitter-css).
 ;
-; Two upstream patterns are still absent:
+; Upstream's two `#match?`-guarded custom-property patterns are ported
+; back below: `#match?` is evaluated (see queries/go/highlights.scm), and
+; because same-node captures resolve first-pattern-wins they sit above
+; the general `(property_name) @property` / `(plain_value)` rules so a
+; `--custom-prop` paints as `@variable` rather than as an ordinary
+; property or value.
 ;
-;   ((property_name) @variable (#match? @variable "^--"))
-;   ((plain_value)   @variable (#match? @variable "^--"))
-;
-; `#match?` is evaluated (see queries/go/highlights.scm), so both would
-; match only the custom properties they name; nobody has ported them back
-; yet. Until then custom properties highlight as ordinary properties and
-; values, which is wrong only in shade, not in kind.
+; Upstream's anonymous at-rule tokens (`"@media"`, `"@import"`, …) are
+; folded into one `[...] @keyword` list here. They are node literals, not
+; captures — the leading `@` belongs to the CSS token, not to a scope
+; name.
 ;
 ; At-rules are the one thing CSS has that reads as a keyword — `@media`,
 ; `@import`, `!important` — so there is no `no-scopes.txt` here.
@@ -44,6 +46,12 @@
 ] @operator
 
 (attribute_selector (plain_value) @string)
+
+((property_name) @variable
+  (#match? @variable "^--"))
+
+((plain_value) @variable
+  (#match? @variable "^--"))
 
 (class_name) @property
 (id_name) @property
