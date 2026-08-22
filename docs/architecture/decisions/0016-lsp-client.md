@@ -8,6 +8,8 @@ Diagnostics (L2) landed on top of it: `ui-shell`'s `LanguageService` QObject own
 Hover (L3) and go-to-definition (L4) landed next: `lsp_core::hover` owns the response shapes, the tooltip rendering and the stale-response rule, and `lsp_core::navigation` owns the response shapes and the LSP-over-index precedence rule below.
 Completion (L5) followed the same shape: `lsp_core::completion` owns the two response shapes, the `textEdit`/`insertText`/label insertion precedence, the `sortText`/`filterText` ordering and matching, the snippet-to-plain-text flattening, the trigger policy, and the stale-response rule — the editor's popup only paints what that module returns.
 The settings page (L6) landed with the other two language-platform settings pages: its draft model and the "persist only what differs from the catalog" rule live in `settings-model` (ADR-0017), and `LanguageService` gained `applyServerSettings`/`restartServer` so a committed change reconciles the running servers without restarting the untouched ones.
+Refactoring (ADR-0019) is the first feature to add an *inbound* request: `workspace/applyEdit` is no longer answered with `-32601`, because command-driven servers deliver an Extract that way, and `client_capabilities()` grew the code-action, rename and workspace-edit blocks that make servers offer those features at all.
+It is also the first to need a client that does not answer server requests on its read thread — see that ADR for the gate, and for the invariant that the Qt thread never blocks on the LSP worker.
 
 ## Context
 
