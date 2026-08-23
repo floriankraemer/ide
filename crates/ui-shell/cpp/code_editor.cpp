@@ -1,4 +1,6 @@
 #include "code_editor.h"
+
+#include "theme.h"
 #include <QContextMenuEvent>
 #include <QMenu>
 
@@ -38,12 +40,6 @@ constexpr int kEntryIndexRole = Qt::UserRole + 1;
 // Slack added to the popup's ideal width so the last glyph is not clipped.
 constexpr int kPopupWidthPadding = 8;
 
-// Nudges `base` away from itself so a band drawn in the result reads as a
-// subtle tint on both dark and light editor backgrounds.
-QColor tinted(const QColor &base, int darkFactor, int lightFactor)
-{
-    return base.lightness() < 128 ? base.lighter(darkFactor) : base.darker(lightFactor);
-}
 } // namespace
 
 CodeEditor::CodeEditor(QWidget *parent)

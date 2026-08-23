@@ -30,6 +30,19 @@ mod ffi {
         tab_id: u64,
     }
 
+    /// One row of the binary (hex) viewer, 1:1 with `editor_core::HexRow`.
+    ///
+    /// Three ready-to-paint strings, not bytes: the offset format, the byte
+    /// grouping, which bytes count as printable and what stands in for the
+    /// ones that don't are all decided in `editor-core` (ADR-0002), so the
+    /// widget only lays these out in three columns.
+    #[derive(Default)]
+    struct FfiHexRow {
+        offset: QString,
+        hex: QString,
+        ascii: QString,
+    }
+
     /// Persisted window geometry (L1), 1:1 with `app_config::WindowGeometry`.
     /// A freshly-defaulted value (all zero) means "nothing saved yet" — the
     /// view falls back to its own default size in that case.
@@ -910,6 +923,40 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "tabPath"]
         fn tab_path(self: &DocumentManager, tab_id: u64) -> QString;
+
+        /// Which kind of page the tab needs: `app_core::TabKind`'s code —
+        /// 0 text, 1 binary (ADR-0020). The view builds a `CodeEditor` or a
+        /// `HexViewer` from this; it never decides the kind itself from the
+        /// path or the bytes. Unknown ids answer 0, the same "treat it as
+        /// ordinary" default the widget-construction path already takes.
+        #[qinvokable]
+        #[cxx_name = "tabKind"]
+        fn tab_kind(self: &DocumentManager, tab_id: u64) -> i32;
+
+        /// How many hex rows a binary tab spans — the viewer's vertical
+        /// scroll range. 0 for a text tab or an unknown id.
+        #[qinvokable]
+        #[cxx_name = "binaryRowCount"]
+        fn binary_row_count(self: &DocumentManager, tab_id: u64) -> u64;
+
+        /// Size in bytes of a binary tab's file, for the status bar. 0 for a
+        /// text tab or an unknown id.
+        #[qinvokable]
+        #[cxx_name = "binaryLength"]
+        fn binary_length(self: &DocumentManager, tab_id: u64) -> u64;
+
+        /// `count` hex rows starting at `first_row`, clamped to the end of
+        /// the file. Pull-based per repaint, like `tabContent` — only the
+        /// rows currently on screen are ever read from disk, which is what
+        /// keeps a multi-gigabyte binary cheap to scroll.
+        #[qinvokable]
+        #[cxx_name = "hexRows"]
+        fn hex_rows(
+            self: &DocumentManager,
+            tab_id: u64,
+            first_row: u64,
+            count: u64,
+        ) -> Vec<FfiHexRow>;
 
         /// The authoritative dirty flag for `tab_id` (ADR-0003: the view
         /// reads this rather than trusting its own copy).
@@ -2506,7 +2553,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
-use app_core::{AppError, AppSession, TabId};
+use app_core::{AppError, AppSession, TabId, TabKind};
+
+/// Upper bound on rows one `hexRows` call will return. The viewer asks for
+/// what fits its viewport, so this only exists so a nonsense `count` can
+/// never turn into a huge allocation at the seam.
+const MAX_HEX_ROWS_PER_REQUEST: u64 = 4096;
 use cxx_qt::Threading;
 use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QVariant,
@@ -3495,6 +3547,45 @@ impl ffi::DocumentManager {
             .borrow()
             .tab_is_dirty(TabId::from_raw(tab_id))
             .unwrap_or(false)
+    }
+
+    pub fn tab_kind(&self, tab_id: u64) -> i32 {
+        self.session
+            .borrow()
+            .tab_kind(TabId::from_raw(tab_id))
+            .map(|kind| kind.code())
+            .unwrap_or(TabKind::CODE_TEXT)
+    }
+
+    pub fn binary_row_count(&self, tab_id: u64) -> u64 {
+        self.session
+            .borrow()
+            .binary_row_count(TabId::from_raw(tab_id))
+            .unwrap_or(0)
+    }
+
+    pub fn binary_length(&self, tab_id: u64) -> u64 {
+        self.session
+            .borrow()
+            .binary_len(TabId::from_raw(tab_id))
+            .unwrap_or(0)
+    }
+
+    pub fn hex_rows(&self, tab_id: u64, first_row: u64, count: u64) -> Vec<ffi::FfiHexRow> {
+        // `count` arrives from the widget as a row count derived from its
+        // viewport height, so it is small; clamping keeps a bad value from
+        // turning into a huge allocation regardless.
+        let count = count.min(MAX_HEX_ROWS_PER_REQUEST) as usize;
+        self.session
+            .borrow_mut()
+            .binary_rows(TabId::from_raw(tab_id), first_row, count)
+            .into_iter()
+            .map(|row| ffi::FfiHexRow {
+                offset: QString::from(row.offset.as_str()),
+                hex: QString::from(row.hex.as_str()),
+                ascii: QString::from(row.ascii.as_str()),
+            })
+            .collect()
     }
 
     pub fn check_external_change(mut self: Pin<&mut Self>, path: &QString) {

@@ -40,21 +40,27 @@ pub fn looks_binary(sample: &[u8]) -> bool {
 
 /// Read the first [`SNIFF_LEN`] bytes of `path` and apply [`looks_binary`].
 ///
-/// An unreadable file (removed, permissions, etc.) is treated as "cannot
-/// open" too — returned as `Ok(true)` rather than an error, since the
-/// caller's only two actions are "open as text" or "show cannot-open", and
-/// a file that can't even be read for sniffing certainly can't be opened
-/// as text either.
+/// An unreadable file (removed, permissions, ...) is reported as the `Err`
+/// it is, not folded into "binary". Both answers now open something — a
+/// text tab or a hex tab — so swallowing the real error here would open an
+/// empty hex view of a file that isn't there instead of saying what went
+/// wrong.
 pub fn looks_binary_file(path: &Path) -> io::Result<bool> {
     use std::io::Read;
 
-    let mut file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(_) => return Ok(true),
-    };
+    let mut file = fs::File::open(path)?;
     let mut buf = vec![0u8; SNIFF_LEN];
-    let read = file.read(&mut buf).unwrap_or(0);
-    buf.truncate(read);
+    // A single `read` is not obliged to fill the buffer even when the file
+    // is long enough, so keep reading until the sample is full or the file
+    // ends — otherwise the ratio below is computed over a short sample.
+    let mut filled = 0;
+    while filled < buf.len() {
+        match file.read(&mut buf[filled..])? {
+            0 => break,
+            n => filled += n,
+        }
+    }
+    buf.truncate(filled);
     Ok(looks_binary(&buf))
 }
 
@@ -107,9 +113,11 @@ mod tests {
     }
 
     #[test]
-    fn looks_binary_file_missing_file_is_treated_as_unopenable() {
+    fn looks_binary_file_reports_an_unreadable_file_as_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("does-not-exist.txt");
-        assert!(looks_binary_file(&path).unwrap());
+
+        let err = looks_binary_file(&path).expect_err("a missing file must not sniff as binary");
+        assert_eq!(err.kind(), io::ErrorKind::NotFound);
     }
 }
