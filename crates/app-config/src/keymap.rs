@@ -157,6 +157,12 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "Ctrl+L",
     },
     ActionDef {
+        id: "ai.addSelectionNewChat",
+        label: "Add Selection to New AI Chat",
+        category: "AI",
+        default_shortcut: "",
+    },
+    ActionDef {
         id: "ai.addFile",
         label: "Add File to AI Chat",
         category: "AI",
@@ -172,6 +178,16 @@ pub const ACTIONS: &[ActionDef] = &[
         id: "ai.togglePanel",
         label: "AI Chat",
         category: "AI",
+        default_shortcut: "",
+    },
+    // The View menu is where every other dock's show-action lives
+    // (Class View, Problems, Terminal). AI Chat having its toggle only on
+    // the AI menu is what made the panel hard to find after a restored
+    // layout closed it.
+    ActionDef {
+        id: "view.aiChat",
+        label: "AI Chat",
+        category: "View",
         default_shortcut: "",
     },
     ActionDef {
