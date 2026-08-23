@@ -8,6 +8,7 @@ mod registry;
 pub mod runtime;
 pub mod theme;
 
+use std::ops::Range;
 use std::sync::Arc;
 
 use streaming_iterator::StreamingIterator;
@@ -696,6 +697,29 @@ fn spans_from_tree(
 /// editor. Three levels covers every real nesting anyone has reported.
 pub const MAX_INJECTION_DEPTH: usize = 3;
 
+/// Documents larger than this are not highlighted at all: [`Highlighter`]
+/// keeps the text, skips the parse, and returns no spans.
+///
+/// A bound of the same kind as [`MAX_INJECTION_DEPTH`], for the same
+/// reason — the input decides the cost. Highlighting is whole-document
+/// (the query runs over the whole tree, and every injected region is
+/// re-parsed from scratch), so a multi-megabyte machine-generated file
+/// with a `<script>` in it pays a full JavaScript parse of the bundle
+/// inside it, synchronously, before the first paint. Colour on a file that
+/// large is worth less than the editor staying responsive, which is the
+/// same trade every other editor makes at roughly this size.
+pub const MAX_HIGHLIGHT_BYTES: usize = 2 * 1024 * 1024;
+
+/// Lines longer than this get no spans, even in a document under
+/// [`MAX_HIGHLIGHT_BYTES`].
+///
+/// A line this long is minified or generated, so per-token colour conveys
+/// nothing, and it is exactly where the cost lands: the view sets one
+/// character format per span, and thousands of formats on one text block
+/// make that block expensive to lay out every time it is scrolled into
+/// view. The value matches VS Code's `editor.maxTokenizationLineLength`.
+pub const MAX_HIGHLIGHT_LINE_BYTES: usize = 20_000;
+
 /// One injected region found by an `injections.scm` match: the language
 /// it is written in, and the byte ranges of its `@injection.content`
 /// captures. Several ranges in one match are parsed as *one* tree (that
@@ -906,6 +930,57 @@ fn spans_with_injections(
     spans
 }
 
+/// Byte ranges of the lines in `text` that are longer than
+/// [`MAX_HIGHLIGHT_LINE_BYTES`], in ascending order. The line terminator is
+/// not counted toward a line's length.
+fn overlong_line_ranges(text: &str) -> Vec<Range<usize>> {
+    // No line can exceed the cap if the whole document doesn't, which is
+    // every ordinary source file — so the common case never scans.
+    if text.len() <= MAX_HIGHLIGHT_LINE_BYTES {
+        return Vec::new();
+    }
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    for (i, &byte) in text.as_bytes().iter().enumerate() {
+        if byte == b'\n' {
+            if i - start > MAX_HIGHLIGHT_LINE_BYTES {
+                ranges.push(start..i);
+            }
+            start = i + 1;
+        }
+    }
+    if text.len() - start > MAX_HIGHLIGHT_LINE_BYTES {
+        ranges.push(start..text.len());
+    }
+    ranges
+}
+
+/// Drop every span that *begins* inside a line over
+/// [`MAX_HIGHLIGHT_LINE_BYTES`].
+///
+/// By where it starts, not by overlap: a span that opens on an ordinary
+/// line and runs into a long one (a multi-line string, say) is one format,
+/// which costs nothing. What this exists to remove is the thousands of
+/// spans a minified line generates entirely within itself.
+fn drop_spans_on_long_lines(spans: &mut Vec<HighlightSpan>, text: &str) {
+    let long = overlong_line_ranges(text);
+    if long.is_empty() {
+        return;
+    }
+    spans.retain(|span| {
+        long.binary_search_by(|line| {
+            if line.end <= span.start {
+                std::cmp::Ordering::Less
+            } else if line.start > span.start {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_err()
+    });
+}
+
 /// Byte offset `offset` within `text`, expressed as a tree-sitter
 /// [`tree_sitter::Point`] (row, byte-column-within-row) — the coordinate
 /// `InputEdit` needs alongside byte offsets. `offset` is clamped to
@@ -1021,6 +1096,15 @@ impl Highlighter {
     /// (edit each, keyed by region identity) only if profiling on a real
     /// HTML/Markdown file says it matters.
     fn reparse(&mut self) -> Vec<HighlightSpan> {
+        // Both size ceilings are enforced here rather than in `set_text`
+        // and `edit` separately: this is the one path both take, and it is
+        // the path whose cost they bound. Dropping the tree matters as much
+        // as returning no spans — `fold_ranges` reads off it, so a document
+        // over budget also stops paying for folds.
+        if self.text.len() > MAX_HIGHLIGHT_BYTES {
+            self.tree = None;
+            return Vec::new();
+        }
         let Some(compiled) = self.compiled.clone() else {
             return Vec::new();
         };
@@ -1034,9 +1118,10 @@ impl Highlighter {
         // lookup is an `Arc` clone plus a `OnceLock` read, and reading
         // through means a live registry reload (G2) also reaches injected
         // grammars. The host grammar stays pinned, as decision 3 requires.
-        let spans = spans_with_injections(&compiled, &new_tree, &self.text, 0, &|id| {
+        let mut spans = spans_with_injections(&compiled, &new_tree, &self.text, 0, &|id| {
             language_by_id(id).and_then(registry::compiled)
         });
+        drop_spans_on_long_lines(&mut spans, &self.text);
         self.tree = Some(new_tree);
         spans
     }
@@ -1341,6 +1426,69 @@ mod tests {
 
         let number = find(&spans, "number").expect("expected a Number span");
         assert_eq!(&new_text[number.start..number.end], "1");
+    }
+
+    #[test]
+    fn a_document_over_the_byte_ceiling_is_not_highlighted() {
+        let mut small = String::from("fn foo() { let x = 42; }\n");
+        let mut highlighter = Highlighter::new(rust());
+        assert!(
+            !highlighter.set_text(&small).is_empty(),
+            "an ordinary document must still highlight"
+        );
+
+        // Same code, repeated past MAX_HIGHLIGHT_BYTES.
+        while small.len() <= MAX_HIGHLIGHT_BYTES {
+            small.push_str("fn foo() { let x = 42; }\n");
+        }
+        assert!(highlighter.set_text(&small).is_empty());
+        // The tree goes with it, so folds stop costing anything too.
+        assert!(highlighter.fold_ranges().is_empty());
+    }
+
+    #[test]
+    fn a_line_over_the_line_ceiling_gets_no_spans_but_its_neighbours_do() {
+        let long_literal = "x".repeat(MAX_HIGHLIGHT_LINE_BYTES + 1);
+        let text = format!("fn a() {{ let n = 1; }}\nfn b() {{ let s = \"{long_literal}\"; }}\nfn c() {{ let n = 2; }}\n");
+
+        let spans = Highlighter::new(rust()).set_text(&text);
+        assert!(!spans.is_empty());
+
+        let long_line_start = text.find("fn b()").expect("second line exists");
+        let long_line_end = long_line_start
+            + text[long_line_start..]
+                .find('\n')
+                .expect("second line is terminated");
+        assert!(
+            !spans
+                .iter()
+                .any(|span| span.start >= long_line_start && span.start < long_line_end),
+            "no span may start inside the over-long line"
+        );
+
+        let third_line_start = long_line_end + 1;
+        assert!(
+            spans.iter().any(|span| span.start >= third_line_start),
+            "the ordinary line after the long one must keep its spans"
+        );
+        assert!(
+            spans.iter().any(|span| span.start < long_line_start),
+            "the ordinary line before the long one must keep its spans"
+        );
+    }
+
+    #[test]
+    fn overlong_line_ranges_finds_long_lines_including_an_unterminated_last_one() {
+        let long = "y".repeat(MAX_HIGHLIGHT_LINE_BYTES + 1);
+        assert!(overlong_line_ranges("short\nlines\nonly\n").is_empty());
+
+        let text = format!("short\n{long}\nshort\n{long}");
+        let ranges = overlong_line_ranges(&text);
+        assert_eq!(ranges.len(), 2);
+        // The terminator is not part of the line.
+        assert_eq!(&text[ranges[0].clone()], long);
+        assert_eq!(&text[ranges[1].clone()], long);
+        assert_eq!(ranges[1].end, text.len());
     }
 
     #[test]
