@@ -26,6 +26,10 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `ai-chat-core` | `lsp-core` (+ std, serde, serde_json, base64, tiktoken-rs, reqwest/rustls) | **No** |
 | `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `settings-model`, `syntax-core`, `mcp-server`, `index-core`, `lsp-core`, `ai-chat-core`, `pty-core`, `terminal-core` (+ tokio, cxx, cxx-qt, cxx-qt-lib) | Yes (adapter + view live here) |
 | `app` | `ui-shell` | Yes |
+| `e2e` | (std, serde_json, tempfile) — **no workspace crate**; drives the built `app` binary over X11 and the filesystem, as a user does (ADR-0024) | **No** |
+
+`e2e`'s *tests* live in `crates/app/tests/`, not in `crates/e2e/tests/`: `CARGO_BIN_EXE_app` is only defined for integration tests of the crate that declares the binary, and a harness that guesses at `target/<profile>/app` is wrong under every profile but one.
+That test target is the one place `app-config` may be read from a test rather than from the application — the window-state flow must parse the persisted TOML with the app's own types, or it only asserts against its own re-implementation of them.
 
 `editor-core`, `project-model`, and `app-core` MUST NOT depend on cxx-qt or Qt in any form — no direct dependency, no transitive dependency, no feature-gated dependency.
 
@@ -85,6 +89,7 @@ cargo tree -p mcp-server -e normal | grep -i qt     # must be empty
 cargo tree -p lsp-core -e normal | grep -i qt       # must be empty
 cargo tree -p lsp-core -e normal | grep -i tokio    # must be empty
 cargo tree -p ai-chat-core -e normal | grep -i qt   # must be empty
+cargo tree -p e2e -e normal | grep -i qt            # must be empty
 ```
 
 ## Known debt at time of writing

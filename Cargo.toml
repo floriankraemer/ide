@@ -15,6 +15,7 @@ members = [
     "crates/app-core",
     "crates/ui-shell",
     "crates/app",
+    "crates/e2e",
 ]
 
 # Debug builds link a ~300 MB binary on every incremental cycle; full DWARF is
