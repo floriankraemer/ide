@@ -12,7 +12,9 @@ use crate::bridge::convert::{
     MAX_HEX_ROWS_PER_REQUEST,
 };
 use crate::bridge::ffi::{self, FfiOpenResult, FfiResult};
-use crate::bridge::rest::{index_slot, mcp_control, shared_session, stop_mcp_server, McpControl};
+use crate::bridge::registry::{
+    index_slot, mcp_control, shared_session, stop_mcp_server, McpControl,
+};
 
 /// Rust side of the `DocumentManager` QObject: a handle to the shared
 /// session, nothing else — tabs, dirty flags, and the watcher-suppression

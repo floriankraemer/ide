@@ -14,15 +14,23 @@
 //   splitting it would produce two unrelated sets of C++ types. It is
 //   therefore exempt from the per-file size ceiling: its size is the size of
 //   the seam, not a symptom of a module doing too much.
+// * [`registry`] — the process-wide handles the adapters share, because
+//   cxx-qt builds QObjects through `Default` with no injection point.
 // * [`convert`] — translation helpers more than one feature module needs.
 //
 // Everything else is one feature's `…Rust` state struct and its `impl
-// ffi::…` blocks. `rest` is what F0-3 still has to divide up.
+// ffi::…` blocks. `ai` is two files because one would be over the ceiling:
+// `chat` is the panel surface (conversation, attachments, applying an
+// answer, history), `agent` is a run (the approval gate, `run_ask` /
+// `run_agent`, and what the worker queues back onto the Qt thread).
 
+pub mod ai;
 pub mod convert;
 pub mod editor;
 pub mod ffi;
-pub mod rest;
+pub mod language;
+pub mod registry;
+pub mod search;
 pub mod settings;
 pub mod terminal;
 pub mod tree;

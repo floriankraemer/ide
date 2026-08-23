@@ -13,9 +13,11 @@
 // it accepts — so the state structs and the `extern "Rust"` items are named
 // here, next to the bridge, and defined in the feature module that owns
 // them.
+use crate::bridge::ai::chat::AiChatRust;
 use crate::bridge::convert::{new_syntax_highlighter, syntax_scope_names, SyntaxHighlighterHandle};
 use crate::bridge::editor::DocumentManagerRust;
-use crate::bridge::rest::{AiChatRust, LanguageServiceRust, SearchModelRust};
+use crate::bridge::language::LanguageServiceRust;
+use crate::bridge::search::SearchModelRust;
 use crate::bridge::settings::{
     AiProviderEditorRust, AppSettingsRust, KeymapEditorRust, LanguageCatalogRust,
     LanguageServerEditorRust, SyntaxColorEditorRust,

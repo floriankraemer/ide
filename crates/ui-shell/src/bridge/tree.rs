@@ -8,7 +8,7 @@ use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QStri
 
 use crate::bridge::convert::{push_recent_project, to_ffi_result};
 use crate::bridge::ffi::{self, FfiResult, Roles};
-use crate::bridge::rest::shared_session;
+use crate::bridge::registry::shared_session;
 
 /// Rust side of the `ProjectTreeModel` QObject: a handle to the shared
 /// session, nothing else — the tree data itself lives in `app-core`.
