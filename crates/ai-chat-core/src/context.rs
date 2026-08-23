@@ -6,7 +6,7 @@
 //! order that reports everything it dropped.
 //!
 //! These are data-egress rules, which is why they are tested rules in a
-//! Qt-free crate and not checks in the panel (ADR-0020, "Consequences").
+//! Qt-free crate and not checks in the panel (ADR-0021, "Consequences").
 //!
 //! # The one gate
 //!
@@ -30,7 +30,7 @@ use crate::ChatError;
 /// Every variant carries its *text* rather than a reference to fetch later:
 /// the panel promises that what it lists is what will be sent, and a live
 /// reference could be edited, moved or deleted between the chip appearing
-/// and the request going out (ADR-0020: nothing is sent implicitly, and the
+/// and the request going out (ADR-0021: nothing is sent implicitly, and the
 /// panel always shows exactly what will accompany the next message).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Attachment {
@@ -62,7 +62,7 @@ pub enum Attachment {
     Diagnostics(Vec<DiagnosticNote>),
     /// Existing terminal output the user chose to include. Reading it is an
     /// attachment; *running* a command is not a tool this plan builds
-    /// (ADR-0020: no shell).
+    /// (ADR-0021: no shell).
     TerminalOutput(String),
     /// An image, already base64-encoded as every dialect wants it on the
     /// wire. Refused by [`accept_attachment`] when the provider declares no
@@ -220,7 +220,7 @@ const SECRET_EXTENSIONS: &[&str] = &["pem", "key", "p12", "pfx", "kdbx", "jks", 
 /// confidence. What a name test does reliably catch is the accident this
 /// exists for — dragging `.env` onto the panel, or a `@`-mention that
 /// completes to `credentials.json` — which is the realistic way a key
-/// reaches a third party (ADR-0020 §1).
+/// reaches a third party (ADR-0021 §1).
 ///
 /// Case-insensitive: `.ENV` and `Credentials.json` are the same mistake on
 /// a case-insensitive filesystem, and the same file on a case-sensitive one
@@ -267,7 +267,7 @@ pub fn is_secret_shaped(path: &Path) -> bool {
 /// matter. A lexical `starts_with` on the raw path lets `../../etc/passwd`
 /// through the moment the string happens to begin with the root, and lets a
 /// symlink inside the project point anywhere on the disk while still
-/// spelling a path under the root (ADR-0020 §1: every path argument is
+/// spelling a path under the root (ADR-0021 §1: every path argument is
 /// canonicalised and refused if it escapes the open project, symlinks
 /// included).
 ///
@@ -349,7 +349,7 @@ pub fn accept_attachment(
         }
     }
     if attachment.is_image() && !config.capabilities().has(Capability::Images) {
-        // Declared, not discovered (ADR-0020 §2): the user gets a sentence
+        // Declared, not discovered (ADR-0021 §2): the user gets a sentence
         // naming the provider before a single byte of their image leaves
         // the machine, instead of a 400 after it already has.
         return Err(ChatError::UnsupportedCapability {
@@ -408,7 +408,7 @@ pub fn load_image(path: &Path, bytes: &[u8]) -> Result<Attachment, ChatError> {
 
 /// The instructions the model is given ahead of the transcript.
 ///
-/// Here rather than in the bridge for the reason ADR-0020 §6 gives: what an
+/// Here rather than in the bridge for the reason ADR-0021 §6 gives: what an
 /// assistant is told about the user's project shapes every answer it gives,
 /// which makes it a rule and not a string the adapter happens to hold. The
 /// two modes differ in exactly one paragraph, because they are one feature
@@ -449,7 +449,7 @@ pub fn system_prompt(agent_mode: bool, project_root: Option<&Path>) -> String {
 ///
 /// Reported, never silent: a model answering about a file it only saw the
 /// first third of gives a confidently wrong answer, and the user's only
-/// defence is being told which attachment was cut (ADR-0020: `render_context`
+/// defence is being told which attachment was cut (ADR-0021: `render_context`
 /// reports every truncation instead of dropping anything).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Truncation {

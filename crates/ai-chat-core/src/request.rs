@@ -5,7 +5,7 @@
 //!
 //! One of the two pure functions the dialect differences are confined to
 //! (the other is [`crate::stream::parse_sse_event`]), so a fifth provider is
-//! a match arm and a fixture test rather than a subsystem (ADR-0020 §2).
+//! a match arm and a fixture test rather than a subsystem (ADR-0021 §2).
 //!
 //! # What this module refuses to send
 //!
@@ -26,7 +26,7 @@
 //!   `capabilities().tools`.
 //!
 //! Capabilities are *declared*, so all three refusals are local and cost no
-//! round trip (ADR-0020, "Consequences").
+//! round trip (ADR-0021, "Consequences").
 //!
 //! `tool_schemas` arrives already in the dialect's own shape — `tools.rs`
 //! renders the catalog per [`ProviderKind`] — so this module embeds it
@@ -50,7 +50,7 @@ use crate::ChatError;
 /// still fitting an answer that rewrites several files, which is the
 /// expensive case this feature exists for. It is deliberately not a setting:
 /// a user cannot tell what the right value is, and the run is already
-/// bounded on tokens by the agent's own ceiling (ADR-0020 §1).
+/// bounded on tokens by the agent's own ceiling (ADR-0021 §1).
 pub const DEFAULT_MAX_TOKENS: u32 = 8192;
 
 /// The URL to POST a streaming completion to.
@@ -83,7 +83,7 @@ pub fn endpoint_url(config: &ProviderConfig) -> Result<String, ChatError> {
 /// The headers a request needs that are *not* the credential.
 ///
 /// Deliberately key-free: `transport` is the only module that holds the
-/// API key and the only one that attaches a credential header (ADR-0020
+/// API key and the only one that attaches a credential header (ADR-0021
 /// §3, and the redaction invariant on `ChatError`). Keeping the key out of
 /// this module's signature makes that structural rather than a convention
 /// somebody has to remember.
@@ -407,7 +407,7 @@ fn gemini_body(conversation: &Conversation, system: &str, tool_schemas: &[Value]
     // `cache_system` has no counterpart here: Gemini's explicit caching is a
     // `cachedContent` resource with a create/refresh/delete lifecycle this
     // plan does not build, which is why `Gemini` declares no `ExplicitCache`
-    // capability (ADR-0020, "Consequences").
+    // capability (ADR-0021, "Consequences").
     body
 }
 
@@ -810,7 +810,7 @@ mod tests {
 
     #[test]
     fn this_module_never_produces_a_credential_header() {
-        // The API key lives in `transport` alone (ADR-0020 §3). If a
+        // The API key lives in `transport` alone (ADR-0021 §3). If a
         // credential ever appears here, two modules hold the key and the
         // redaction invariant has two places to fail instead of one.
         for kind in [

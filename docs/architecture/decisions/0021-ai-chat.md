@@ -1,4 +1,4 @@
-# 0020. AI chat: a Qt-free provider layer, a policy-gated agent loop, environment-only keys, and edits through the refactoring path
+# 0021. AI chat: a Qt-free provider layer, a policy-gated agent loop, environment-only keys, and edits through the refactoring path
 
 ## Status
 

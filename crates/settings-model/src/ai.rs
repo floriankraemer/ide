@@ -125,7 +125,7 @@ impl KeyStatus {
     ///
     /// Written here and rendered verbatim, like every other sentence in this
     /// crate: what an unset variable *means* is the environment-only key
-    /// design talking (ADR-0020 §3), and a settings page that composed it
+    /// design talking (ADR-0021 §3), and a settings page that composed it
     /// would be a rule half in Rust and half in `cpp/` — which is exactly
     /// what `docs/architecture/layering.md` forbids the view to hold.
     pub fn sentence(&self) -> String {

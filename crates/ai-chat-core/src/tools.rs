@@ -7,7 +7,7 @@
 //! (ADR-0004, ADR-0012): this module owns the *schemas* and the *policy*
 //! only, while execution is a callback `ui-shell` routes onto the same
 //! `AppSession` and index code paths MCP drives, so an in-IDE agent can
-//! never see a different project than an attached one (ADR-0020 §1).
+//! never see a different project than an attached one (ADR-0021 §1).
 //!
 //! # SECURITY — what is deliberately absent
 //!
@@ -18,7 +18,7 @@
 //! dependency saying "now run this" becomes arbitrary code execution on the
 //! user's machine, gated by nothing stronger than the model's judgement.
 //! The agent reads, searches, navigates and edits; running commands stays
-//! the human's (ADR-0020 §1 and its alternatives table).
+//! the human's (ADR-0021 §1 and its alternatives table).
 //!
 //! The second absent thing is trust in the model's arguments.
 //! [`validate_call`] canonicalises every path argument and refuses one that
@@ -94,7 +94,7 @@ pub fn spec(name: &str) -> Option<&'static ToolSpec> {
 ///
 /// The three wire formats disagree only about which key the schema hangs
 /// off, so this is one match arm per dialect and not a subsystem — the same
-/// containment ADR-0020 §2 asks of `build_body` and `parse_sse_event`. The
+/// containment ADR-0021 §2 asks of `build_body` and `parse_sse_event`. The
 /// Gemini arm returns the bare declarations; wrapping them in
 /// `{"functionDeclarations": …}` belongs to `request.rs`, which owns the
 /// body's shape.
@@ -124,7 +124,7 @@ pub fn schemas_for(kind: ProviderKind) -> Vec<Value> {
         .collect()
 }
 
-/// What the agent may do with a tool without asking (ADR-0020 §1).
+/// What the agent may do with a tool without asking (ADR-0021 §1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolPolicy {
     /// Run it and report afterwards.
@@ -203,7 +203,7 @@ pub struct ToolOutcome {
 /// SECURITY: this runs before the approval card is shown, not after it is
 /// accepted. The user approving `read_buffer` cannot see that a path
 /// argument walks out of the tree through a symlink, so the check cannot be
-/// the human's job (ADR-0020 §1: "every path argument is canonicalised and
+/// the human's job (ADR-0021 §1: "every path argument is canonicalised and
 /// refused if it escapes the open project, symlinks included").
 ///
 /// `root` is `None` when no project is open, and then every path argument
@@ -309,7 +309,7 @@ fn article(declared: &str) -> &'static str {
 ///
 /// It is composed here rather than in the panel because it is the sentence
 /// a user consents to — deciding what a call means is a rule, and rules do
-/// not live in `cpp/` (ADR-0020 §6). It names the target rather than
+/// not live in `cpp/` (ADR-0021 §6). It names the target rather than
 /// echoing the arguments as JSON: "Replace the whole text of tab 3" is a
 /// thing a person can say yes or no to, and `{"tab_id":3,"content":"…"}` is
 /// not.
@@ -361,7 +361,7 @@ fn schema(properties: Value, required: &[&str]) -> Value {
 
 fn build_catalog() -> Vec<ToolSpec> {
     vec![
-        // --- Reads: the model may run these unattended (ADR-0020 §1) ---
+        // --- Reads: the model may run these unattended (ADR-0021 §1) ---
         ToolSpec {
             name: "search_text",
             kind: ToolKind::Read,
@@ -481,7 +481,7 @@ mod tests {
 
     #[test]
     fn the_catalog_contains_no_tool_that_could_run_a_command() {
-        // ADR-0020's flat refusal: a source file is something anybody can
+        // ADR-0021's flat refusal: a source file is something anybody can
         // write a sentence into, so an exec tool turns a prompt-injected
         // comment into code execution on the user's machine. This test is
         // the tripwire on adding one by habit.
@@ -500,7 +500,7 @@ mod tests {
 
     #[test]
     fn every_tool_the_mcp_server_performs_for_an_agent_is_offered_here_too() {
-        // One implementation, two front doors (ADR-0020 §1): an in-IDE
+        // One implementation, two front doors (ADR-0021 §1): an in-IDE
         // agent and an agent attached over MCP must not see different
         // projects, and the first way they would is a catalog that drifts.
         let names: Vec<&str> = catalog().iter().map(|spec| spec.name).collect();

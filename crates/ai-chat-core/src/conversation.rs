@@ -1,7 +1,7 @@
 //! The conversation block model (task AC2): [`Role`], [`Block`], [`Turn`]
 //! and [`Conversation`], plus the block-level mutations streaming needs.
 //!
-//! A turn is a list of typed blocks rather than a string (ADR-0020,
+//! A turn is a list of typed blocks rather than a string (ADR-0021,
 //! "Consequences"). That is what makes images, multi-turn tool results and
 //! `cache_control` markers expressible at all — a `Vec<Message{role,text}>`
 //! can carry none of the three, and retrofitting blocks later would be a
@@ -74,7 +74,7 @@ pub enum Block {
     /// The answer to a [`Block::ToolUse`]. A call the user declined is a
     /// perfectly ordinary result with `is_error: false` and a sentence
     /// saying so — a denial is data, not a failure, so the model can choose
-    /// another route (ADR-0020 §1).
+    /// another route (ADR-0021 §1).
     ToolResult {
         call_id: String,
         content: String,
@@ -519,7 +519,7 @@ mod tests {
 
     #[test]
     fn a_declined_call_answers_its_tool_use_like_any_other_result() {
-        // A denial is data, not a failure (ADR-0020 §1) — it satisfies the
+        // A denial is data, not a failure (ADR-0021 §1) — it satisfies the
         // pairing invariant so the run can carry on.
         let mut conversation = Conversation::new();
         conversation.begin_assistant();

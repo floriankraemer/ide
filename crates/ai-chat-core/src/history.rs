@@ -5,7 +5,7 @@
 //!
 //! A transcript holds source code, an attachment's contents, and often a
 //! secret the user pasted without thinking, which makes this a data-at-rest
-//! decision rather than a convenience feature (ADR-0020, "Consequences") —
+//! decision rather than a convenience feature (ADR-0021, "Consequences") —
 //! hence the mode bits, the atomicity, and the switch that keeps a
 //! conversation out of the store entirely.
 //!
@@ -187,7 +187,7 @@ impl HistoryStore {
     /// Deletes everything past the newest `keep` conversations, returning how
     /// many went.
     ///
-    /// The retention cap ADR-0020 asks for: a store of transcripts is a store
+    /// The retention cap ADR-0021 asks for: a store of transcripts is a store
     /// of source code, and one that only ever grows is a liability nobody
     /// chose to take on.
     pub fn prune(&self, project: &Path, keep: usize) -> Result<usize, ChatError> {
@@ -356,7 +356,7 @@ fn create_private_dir(dir: &Path) -> Result<(), ChatError> {
 
 /// Writes `bytes` to `path` atomically and privately.
 ///
-/// SECURITY (ADR-0020): the temp file is created `0600` by `open` itself, so
+/// SECURITY (ADR-0021): the temp file is created `0600` by `open` itself, so
 /// the contents are never momentarily world-readable, and the data is
 /// flushed before the rename so a crash cannot publish a name pointing at
 /// unwritten bytes.
@@ -509,7 +509,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_record_is_written_readable_only_by_its_owner() {
-        // SECURITY (ADR-0020): a transcript holds source code and whatever
+        // SECURITY (ADR-0021): a transcript holds source code and whatever
         // secret the user pasted. This asserts the actual mode on disk, not
         // the intent of the call that made it.
         use std::os::unix::fs::PermissionsExt;

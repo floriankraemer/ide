@@ -4,14 +4,14 @@
 //!
 //! A denied call is data, not a failure: it returns to the model saying the
 //! user declined so the model can choose another route instead of the run
-//! collapsing (ADR-0020 §1). `Never` is absolute and no ceiling is optional.
+//! collapsing (ADR-0021 §1). `Never` is absolute and no ceiling is optional.
 //!
 //! # What this module does not decide
 //!
 //! Executing a tool is a callback ([`AgentCallbacks::execute`]) that
 //! `ui-shell` routes onto the same `AppSession` and index code paths the MCP
 //! server drives — there is no second implementation of "read a buffer"
-//! (ADR-0020 §1). That callback also owns the *path confinement* half of
+//! (ADR-0021 §1). That callback also owns the *path confinement* half of
 //! [`crate::tools::validate_call`], because the project root is its
 //! knowledge and not the loop's: [`run`]'s signature deliberately carries no
 //! root, so the check lives where the root lives. What the loop does check
@@ -84,7 +84,7 @@ pub enum RunOutcome {
     /// would send byte-identical bytes and get the same nothing back, so
     /// the loop ends instead of spinning.
     Stopped,
-    /// One of the three ceilings was reached (ADR-0020 §1).
+    /// One of the three ceilings was reached (ADR-0021 §1).
     CeilingHit(RunLimit),
     /// The user pressed Stop. Outstanding calls are still answered in the
     /// transcript — see [`run_with`].
@@ -97,7 +97,7 @@ pub enum RunOutcome {
 /// panel renders from.
 ///
 /// Callbacks rather than a channel because the loop is driven from one
-/// `std::thread` in `ui-shell` (ADR-0020 §4) that already marshals to the UI
+/// `std::thread` in `ui-shell` (ADR-0021 §4) that already marshals to the UI
 /// thread with `CxxQtThread::queue()`; a second queue between the loop and
 /// its own caller would buy nothing.
 pub struct AgentCallbacks<'a> {
@@ -327,7 +327,7 @@ fn resolve_one_call(
     callbacks: &mut AgentCallbacks<'_>,
 ) -> ToolOutcome {
     // `Never` is answered before the user is prompted, which is what makes
-    // it absolute (ADR-0020 §1): a "yes to everything" habit cannot reach a
+    // it absolute (ADR-0021 §1): a "yes to everything" habit cannot reach a
     // tool that is switched off.
     if policies(&call.tool) == ToolPolicy::Never {
         return denial_result(format!(
@@ -362,7 +362,7 @@ fn resolve_one_call(
 /// A refusal, as a perfectly ordinary result.
 ///
 /// `is_error: false` is the load-bearing detail and not an oversight: a
-/// denial is data (ADR-0020 §1). Marked as an error, models treat it as a
+/// denial is data (ADR-0021 §1). Marked as an error, models treat it as a
 /// malfunction and retry the identical call; as plain content, they read the
 /// sentence and pick another route — which is the behaviour the approval
 /// gate exists to make possible.
@@ -619,7 +619,7 @@ mod tests {
 
     #[test]
     fn an_ask_tool_the_user_declines_is_fed_back_as_data_and_the_run_continues() {
-        // ADR-0020 §1: a denial is not an error. Marked as one, models
+        // ADR-0021 §1: a denial is not an error. Marked as one, models
         // retry the identical call; as content, they choose another route.
         let mut provider = FakeProvider::new(vec![
             vec![tool_call("call-1", "edit_buffer"), StreamEvent::Done],

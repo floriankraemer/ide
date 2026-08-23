@@ -7,11 +7,11 @@
 //! therefore the only place that constructs the [`crate::ChatError`]
 //! variants carrying upstream text. It stores that text already passed
 //! through [`crate::redact`], so `Display` cannot leak a key by someone
-//! forgetting to redact at a new call site (ADR-0020 §3).
+//! forgetting to redact at a new call site (ADR-0021 §3).
 //!
 //! Blocking on purpose. `reqwest::blocking` runs a private tokio runtime of
 //! its own inside the library; nothing here awaits, and the whole thing is
-//! driven from one `std::thread` in `ui-shell` (ADR-0020 §4).
+//! driven from one `std::thread` in `ui-shell` (ADR-0021 §4).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
@@ -52,7 +52,7 @@ const MAX_ERROR_BODY_CHARS: usize = 500;
 /// Deliberately carries no credential: the key reaches the wire only
 /// through the `api_key` argument of the functions below, so a request body
 /// or header list can be logged, tested and snapshotted without a redaction
-/// step (ADR-0020 §3).
+/// step (ADR-0021 §3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestSpec {
     pub url: String,
@@ -242,7 +242,7 @@ fn check_status(
         },
         413 => ChatError::PayloadTooLarge { provider, detail },
         // Providers report an over-long prompt as a 400 with a message
-        // rather than the 413 the status code was made for (ADR-0020 §3),
+        // rather than the 413 the status code was made for (ADR-0021 §3),
         // and the user's remedy — send less context — is the 413 one.
         400 if mentions_context_length(&detail) => ChatError::PayloadTooLarge { provider, detail },
         other => ChatError::ServerError {
@@ -464,7 +464,7 @@ mod tests {
     #[test]
     fn a_401_echoing_the_key_produces_an_error_that_does_not_show_it() {
         // Providers really do quote the rejected credential back. This is
-        // the test that freezes the ADR-0020 §3 guarantee.
+        // the test that freezes the ADR-0021 §3 guarantee.
         let url = serve_once(concat!(
             "HTTP/1.1 401 Unauthorized\r\n",
             "\r\n",

@@ -289,6 +289,8 @@ fn main() {
         .cpp_file("cpp/syntax_highlighter.cpp")
         .cpp_file("cpp/terminal_widget.h")
         .cpp_file("cpp/terminal_widget.cpp")
+        .cpp_file("cpp/hex_viewer.h")
+        .cpp_file("cpp/hex_viewer.cpp")
         // The chat panel declares Q_OBJECT, so its header is listed too
         // (passing a header to cpp_file() is what runs moc on it); the
         // providers page is a free function like every other settings

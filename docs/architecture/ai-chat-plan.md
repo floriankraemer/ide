@@ -241,7 +241,7 @@ Signals:
 | AC16 | View: chat panel | `ai_chat_panel.{h,cpp}`, transcript, composer, streaming render, chips, mode toggle, token counter |
 | AC17 | View: agent affordances | Tool-call approval cards, outcome rows, Stop, step counter, the conversation-history sidebar |
 | AC18 | View: attach, apply, settings | Ctrl+L and menu entries, the `@`-mention completer, image attach, per-block Apply through `RefactorPreviewDialog`, `ai_providers_page.{h,cpp}` |
-| AC19 | Docs | ADR-0020, this document, `layering.md`, `overview.md` |
+| AC19 | Docs | ADR-0021, this document, `layering.md`, `overview.md` |
 
 ## What a human should click through
 

@@ -147,7 +147,7 @@ pub const ACTIONS: &[ActionDef] = &[
         category: "View",
         default_shortcut: "Ctrl+Shift+N",
     },
-    // AI assistant (ADR-0020). Ctrl+L matches what every other IDE with a
+    // AI assistant (ADR-0021). Ctrl+L matches what every other IDE with a
     // chat panel binds "send this selection to the assistant" to, and was
     // unbound here.
     ActionDef {

@@ -12,7 +12,7 @@ namespace ui_shell {
 // Agent mode may do without asking.
 //
 // There is deliberately NO API key field on this page, and none may be
-// added. ADR-0020 decision 3: the IDE never stores keys, it reads them from
+// added. ADR-0021 decision 3: the IDE never stores keys, it reads them from
 // the environment at request time. The Environment Variable column and the
 // Status sentence next to it exist precisely so that absence is legible
 // rather than looking like an oversight.

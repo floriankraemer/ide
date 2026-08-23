@@ -4,6 +4,7 @@
 #include "ai_providers_page.h"
 #include "code_editor.h"
 #include "find_bar.h"
+#include "hex_viewer.h"
 #include "keymap_page.h"
 #include "language_servers_page.h"
 #include "languages_page.h"
@@ -53,6 +54,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QProgressBar>
 #include <QStatusBar>
 #include <QTextCursor>
 #include <QToolButton>
@@ -89,10 +91,14 @@ namespace ui_shell {
 
 namespace {
 
-// app_core::AppError's stable code for the binary-open rejection (ADR-0003,
-// pinned by app-core's error_codes_are_stable test) — the one error kind the
-// view presents as information rather than as an error.
-constexpr int kErrBinaryFile = 3;
+// app_core::AppError's stable code for "that tab holds a binary file, so it
+// cannot be edited" (ADR-0003, pinned by app-core's error_codes_are_stable
+// test) — the one error kind the view presents as information rather than as
+// an error, since it is a fact about the file rather than a failure.
+constexpr int kErrNotATextTab = 9;
+
+// app_core::TabKind's stable code for a binary tab (ADR-0020).
+constexpr int kTabKindBinary = 1;
 
 // The SyntaxHighlighter onTabOpened attached to `document`, if any.
 //
@@ -235,15 +241,12 @@ public:
     int hoverPosition_ = 0;
 
     // Opens `path`, or focuses its tab if already open (US-3). The session
-    // decides whether the file may open (binary rejection, readability);
-    // this only picks the dialog flavor by error code and shows the result.
+    // decides what opens and as what kind of page (ADR-0020) — a binary file
+    // opens a hex tab rather than failing; this only shows whatever error is
+    // left over.
     void openFile(const QString &path)
     {
         const auto result = docManager_->openFile(path);
-        if (result.code == kErrBinaryFile) {
-            QMessageBox::information(window_, tr("Cannot open file"), result.message);
-            return;
-        }
         if (result.code != 0) {
             QMessageBox::critical(window_, tr("Cannot open file"), result.message);
             return;
@@ -806,6 +809,10 @@ public:
     {
         editorFont_ = font;
         forEachEditor([&font](QPlainTextEdit *editor) { editor->setFont(font); });
+        forEachHexViewer([&font](HexViewer *viewer) {
+            viewer->setFont(font);
+            viewer->refreshMetrics();
+        });
     }
 
     // `backgroundHex`/`foregroundHex` empty means "use the theme's default
@@ -820,6 +827,7 @@ public:
         editorForeground_ = foregroundHex;
         editorCurrentLine_ = currentLineHex;
         forEachEditor([this](QPlainTextEdit *editor) { applyEditorAppearance(editor); });
+        forEachHexViewer([this](HexViewer *viewer) { applyEditorPalette(viewer); });
     }
 
     // L6: the language-server settings were committed and stale servers
@@ -1016,6 +1024,20 @@ private:
             for (int i = 0; i < group->count(); ++i) {
                 if (auto *editor = qobject_cast<QPlainTextEdit *>(group->widget(i))) {
                     apply(editor);
+                }
+            }
+        }
+    }
+
+    // The same walk for hex tabs. They are not QPlainTextEdits, so every
+    // forEachEditor loop skips them — appearance changes that should reach
+    // every page (the editor font, the editor colours) need this too.
+    void forEachHexViewer(const std::function<void(HexViewer *)> &apply) const
+    {
+        for (QTabWidget *group : std::as_const(groups_)) {
+            for (int i = 0; i < group->count(); ++i) {
+                if (auto *viewer = qobject_cast<HexViewer *>(group->widget(i))) {
+                    apply(viewer);
                 }
             }
         }
@@ -1303,6 +1325,13 @@ private:
         }
         auto *editor = currentEditor();
         if (!editor) {
+            const quint64 tabId = currentTabId();
+            if (tabId != 0 && docManager_->tabKind(tabId) == kTabKindBinary) {
+                positionLabel_->setText(
+                  QObject::tr("%L1 bytes").arg(docManager_->binaryLength(tabId)));
+                languageLabel_->setText(QObject::tr("Binary"));
+                return;
+            }
             positionLabel_->clear();
             languageLabel_->clear();
             return;
@@ -1325,7 +1354,9 @@ private:
         }
     }
 
-    void applyEditorPalette(QPlainTextEdit *editor)
+    // Takes a QWidget, not a QPlainTextEdit: the editor colours apply to
+    // every page that paints on the editor background, hex tabs included.
+    void applyEditorPalette(QWidget *editor)
     {
         QPalette pal = qApp->palette();
         if (!editorBackground_.isEmpty()) {
@@ -1337,6 +1368,27 @@ private:
         editor->setPalette(pal);
     }
 
+    // Builds the page for a binary tab: a read-only hex view (ADR-0020).
+    // None of the editor wiring below applies — there is no document, so no
+    // highlighter, no find bar, no dirty tracking and no LSP.
+    void addHexTab(QTabWidget *group, quint64 tabId, const QString &title)
+    {
+        auto *viewer = new HexViewer(group);
+        viewer->setProperty("tabId", QVariant::fromValue(tabId));
+        viewer->setFont(editorFont_);
+        viewer->setRowCount(docManager_->binaryRowCount(tabId));
+        viewer->setRowProvider([this, tabId](quint64 firstRow, int count) {
+            QVector<HexRow> rows;
+            const auto ffiRows = docManager_->hexRows(tabId, firstRow, static_cast<quint64>(count));
+            rows.reserve(static_cast<int>(ffiRows.size()));
+            for (const auto &row : ffiRows) {
+                rows.append(HexRow{ row.offset, row.hex, row.ascii });
+            }
+            return rows;
+        });
+        group->addTab(viewer, title);
+    }
+
     // Public for the same reason onBufferEditedExternally is: an agent's
     // tool can open a tab (AiChat::toolOpenedTab), and that relay lives in
     // buildMainWindow beside MCP's.
@@ -1344,6 +1396,12 @@ public:
     void onTabOpened(quint64 tabId, const QString &title)
     {
         QTabWidget *group = activeGroup_ ? activeGroup_ : groups_.first();
+        // Which page a tab needs is the session's answer, not a guess made
+        // here from the path or the bytes (ADR-0002, ADR-0020).
+        if (docManager_->tabKind(tabId) == kTabKindBinary) {
+            addHexTab(group, tabId, title);
+            return;
+        }
         auto *editor = new CodeEditor(group);
         editor->setProperty("tabId", QVariant::fromValue(tabId));
         editor->setPlainText(docManager_->tabContent(tabId));
@@ -2111,7 +2169,7 @@ private:
 // its first line: the dialog says what is changing and where, not what the
 // new text is in full. Free rather than a member of RefactorController: the
 // AI panel's Apply runs the same preview over the same FfiTextEdit rows
-// (ADR-0020 §5), and a second copy of this would drift.
+// (ADR-0021 §5), and a second copy of this would drift.
 QString previewText(const QString &newText)
 {
     const QString first = newText.split(QLatin1Char('\n')).value(0).trimmed();
@@ -2858,7 +2916,7 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     // AI Providers sits next to Language Servers — both configure an
     // external process the IDE talks to — and commits on OK for the same
     // reason: a half-typed base URL is not a setting worth applying. There
-    // is no API key field on the page, by ADR-0020 decision 3.
+    // is no API key field on the page, by ADR-0021 decision 3.
     aiProviderEditor->beginEdit();
     pages->addWidget(buildAiProvidersPage(&dialog, aiProviderEditor));
 
@@ -3200,13 +3258,10 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     reindexTimer->setSingleShot(true);
     reindexTimer->setInterval(300);
     QObject::connect(reindexTimer, &QTimer::timeout, searchModel, [searchModel, dirtyPaths]() {
-        for (const QString &path : std::as_const(*dirtyPaths)) {
-            if (QFileInfo::exists(path)) {
-                searchModel->reindexFile(path);
-            } else {
-                searchModel->removeIndexedFile(path);
-            }
-        }
+        // The whole window goes over as one call: whether a path is
+        // re-indexed or dropped is decided in Rust from whether it still
+        // exists, and the batch shares a single commit.
+        searchModel->syncIndexedFiles(QStringList(dirtyPaths->values()));
         dirtyPaths->clear();
     });
     QObject::connect(treeModel,
@@ -3426,7 +3481,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // per-window QObjects. It launches nothing until a project is opened and
     // a file of a configured language is opened in it.
     auto *languageService = new LanguageService(window);
-    // ADR-0020: one AI chat session per window, alongside the other
+    // ADR-0021: one AI chat session per window, alongside the other
     // per-window QObjects, plus the Settings > AI Providers draft — the same
     // arrangement KeymapEditor and LanguageServerEditor use, parented to the
     // window so it outlives each dialog. Both read the persisted AI settings
@@ -3479,7 +3534,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
       [window, aiChat, aiChatPanel, editorTabs, searchModel](quint64 messageIndex,
                                                               quint64 blockIndex) {
           // The same protocol — and the same discipline — a refactoring
-          // runs (ADR-0020 §5): the revision is read *before* the plan is
+          // runs (ADR-0021 §5): the revision is read *before* the plan is
           // made and handed back to `takePendingEdits`, so an answer
           // applied to a buffer that has since moved is refused by
           // `lsp_core::EditGate` instead of being spliced in blind.
@@ -3586,6 +3641,56 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     };
     QObject::connect(languageService, &LanguageService::diagnosticsChanged, window,
                       updateProblemsButton);
+    // The project index builds on a background thread for seconds to minutes
+    // after a folder is opened. Until this existed the only way to find that
+    // out was to run a search and be told to try again later.
+    // Two plain permanent widgets rather than a laid-out container: the
+    // status bar already spaces its own children, and a container's label
+    // stretches to fill whatever room is going, which pushed the bar a
+    // hand's width away from its own caption.
+    auto *indexLabel = new QLabel(statusBar);
+    auto *indexBar = new QProgressBar(statusBar);
+    indexLabel->setVisible(false);
+    indexBar->setVisible(false);
+    indexBar->setTextVisible(false);
+    indexBar->setFixedWidth(90);
+    indexBar->setFixedHeight(statusBar->fontMetrics().height());
+    QObject::connect(searchModel, &SearchModel::indexProgress, window,
+                      [indexLabel, indexBar](quint32 done, quint32 total) {
+                          const QString text =
+                              QObject::tr("Indexing... %1/%2").arg(done).arg(total);
+                          // Reserve the width of the widest reading this run
+                          // will ever show — `total/total`. Without it the
+                          // label is sized for "565/2223" one frame and
+                          // "1204/2223" the next, and clips while it catches
+                          // up.
+                          indexLabel->setMinimumWidth(indexLabel->fontMetrics().horizontalAdvance(
+                              QObject::tr("Indexing... %1/%2").arg(total).arg(total)));
+                          indexLabel->setStyleSheet(QString());
+                          indexLabel->setText(text);
+                          indexBar->setRange(0, static_cast<int>(total));
+                          indexBar->setValue(static_cast<int>(done));
+                          indexLabel->setVisible(true);
+                          indexBar->setVisible(true);
+                      });
+    QObject::connect(searchModel, &SearchModel::indexReady, window,
+                      [indexLabel, indexBar]() {
+                          indexLabel->setMinimumWidth(0);
+                          indexLabel->setVisible(false);
+                          indexBar->setVisible(false);
+                      });
+    QObject::connect(searchModel, &SearchModel::indexFailed, window,
+                      [indexLabel, indexBar](const QString &message) {
+                          indexLabel->setMinimumWidth(0);
+                          indexBar->setVisible(false);
+                          indexLabel->setStyleSheet(QStringLiteral("color: %1;")
+                                                       .arg(severityColor(FfiSeverity::Error).name()));
+                          indexLabel->setText(QObject::tr("Index failed: %1").arg(message));
+                          indexLabel->setVisible(true);
+                      });
+
+    statusBar->addPermanentWidget(indexLabel);
+    statusBar->addPermanentWidget(indexBar);
     statusBar->addPermanentWidget(problemsButton);
     statusBar->addPermanentWidget(languageLabel);
     statusBar->addPermanentWidget(positionLabel);
@@ -3900,7 +4005,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     editorTabs->setNavigationChangedCallback(refreshNavigationActions);
     refreshNavigationActions();
 
-    // ADR-0020: the AI menu. Every entry is a registered action, so its
+    // ADR-0021: the AI menu. Every entry is a registered action, so its
     // shortcut comes from the persisted keymap and Settings > Keymap can
     // rebind it like any other.
     QMenu *aiMenu = window->menuBar()->addMenu(QObject::tr("&AI"));

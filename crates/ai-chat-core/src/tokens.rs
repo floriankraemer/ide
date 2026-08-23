@@ -5,7 +5,7 @@
 //! estimate used when no counter is reachable.
 //!
 //! The distinction between a measurement and an estimate is carried in the
-//! type rather than lost on the way to the UI: ADR-0020 requires the panel
+//! type rather than lost on the way to the UI: ADR-0021 requires the panel
 //! to label an estimate as an estimate instead of presenting a guess as a
 //! number.
 //!
@@ -17,7 +17,7 @@
 //! block on the network is a frozen editor, so [`TokenCounter::count_text`]
 //! answers with an [`TokenCount::Estimated`] for those two and the round
 //! trip is left to `transport.rs`, which owns every socket in this crate
-//! (ADR-0020 §4). What this module contributes to that round trip is the
+//! (ADR-0021 §4). What this module contributes to that round trip is the
 //! two pure halves it can be tested on: [`remote_count_request`] builds the
 //! request, [`parse_remote_count`] reads the reply.
 
@@ -46,7 +46,7 @@ pub const IMAGE_TOKEN_ESTIMATE: u32 = 1_600;
 
 /// A number of tokens, and whether it was measured or guessed.
 ///
-/// Two different numbers wearing the same clothes is exactly what ADR-0020
+/// Two different numbers wearing the same clothes is exactly what ADR-0021
 /// forbids: `Exact` comes from a tokenizer that the provider itself uses,
 /// `Estimated` from [`estimate`] or from an image's flat charge. The panel
 /// renders the second with a "~", so the distinction has to survive the
@@ -79,7 +79,7 @@ impl TokenCount {
 pub fn estimate(text: &str) -> u32 {
     // Counting `chars` and not `len`: a byte count over-charges every
     // non-Latin script by two to four times, which is the mis-charging
-    // ADR-0020 rejected a byte budget for in the first place.
+    // ADR-0021 rejected a byte budget for in the first place.
     (text.chars().count() as u32).div_ceil(CHARS_PER_TOKEN)
 }
 
@@ -140,7 +140,7 @@ fn count_locally(kind: ProviderKind, model: &str, text: &str) -> Option<u32> {
 ///
 /// Only `OpenAi` gets [`TokenCount::Exact`]: it is the vocabulary the count
 /// was computed with. The compatible generic borrows that vocabulary for a
-/// close-enough number and must therefore say so (ADR-0020 §6).
+/// close-enough number and must therefore say so (ADR-0021 §6).
 fn label_for(kind: ProviderKind, tokens: u32) -> TokenCount {
     match kind {
         ProviderKind::OpenAi => TokenCount::Exact(tokens),
@@ -178,7 +178,7 @@ impl TokenCounter {
     /// OpenAI-compatible generic is tokenised with the same encoding
     /// because that is far closer than chars-over-four, but it is reported
     /// as an estimate: behind it is usually a Llama or Qwen build with a
-    /// different vocabulary, and ADR-0020 §6 is explicit that a number the
+    /// different vocabulary, and ADR-0021 §6 is explicit that a number the
     /// user reads must say which of the two kinds it is. Anthropic and
     /// Gemini have no local tokenizer at all — their counters are the HTTP
     /// endpoints `remote_count_request` builds, which this module will not
@@ -491,7 +491,7 @@ mod tests {
         // Behind the compatible kind is usually a Llama or Qwen build whose
         // vocabulary is not this one, so the number is close but not the
         // provider's own. It must still beat chars-over-four, and it must
-        // still say it is an estimate (ADR-0020 §6).
+        // still say it is an estimate (ADR-0021 §6).
         let text = "fn main() { println!(\"hello world\"); }";
         let mut counter = TokenCounter::new();
         let borrowed = counter.count_text(&config_for(ProviderKind::OpenAiCompatible), text);
@@ -536,7 +536,7 @@ mod tests {
     #[test]
     fn the_estimate_counts_characters_not_bytes_so_scripts_are_not_overcharged() {
         // A byte count would charge this three times over, which is the
-        // mis-charging ADR-0020 rejected a byte budget for.
+        // mis-charging ADR-0021 rejected a byte budget for.
         assert_eq!(estimate("日本語日"), 1);
     }
 

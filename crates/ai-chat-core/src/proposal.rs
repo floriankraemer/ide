@@ -5,7 +5,7 @@
 //! that names no file or names one outside the project.
 //!
 //! Emitting the parsed type rather than LSP JSON to be re-parsed is
-//! deliberate (ADR-0020 §5): it feeds `plan_edit`/`apply_to_text` directly,
+//! deliberate (ADR-0021 §5): it feeds `plan_edit`/`apply_to_text` directly,
 //! so a model's edit inherits the preview dialog, the single-undo splice and
 //! the staleness check a rename already has.
 //!
@@ -68,7 +68,7 @@ pub enum ApplyRefusal {
     /// that is not open is not that.
     TargetNotOpen(PathBuf),
     /// The block's path escapes the project — a `..` component here, or a
-    /// path the caller canonicalised outside the open root (ADR-0020 §1:
+    /// path the caller canonicalised outside the open root (ADR-0021 §1:
     /// paths are canonicalised and refused if they leave the project,
     /// symlinks included).
     OutsideProject(PathBuf),
@@ -298,7 +298,7 @@ fn unquote(value: &str) -> &str {
 /// is only allowed when the block itself named that file — see
 /// [`ApplyRefusal::NoTarget`].
 ///
-/// The result feeds [`lsp_core::plan_edit`] unchanged (ADR-0020 §5).
+/// The result feeds [`lsp_core::plan_edit`] unchanged (ADR-0021 §5).
 /// `version` is `None`, meaning "unversioned": no language server computed
 /// this edit against a document version, and the staleness that does matter
 /// here — the buffer moving while the user reads the answer — is caught by

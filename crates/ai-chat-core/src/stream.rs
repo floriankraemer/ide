@@ -1,6 +1,6 @@
 //! SSE decoding (task AC6): [`SseReader<R>`] framing over a blocking
 //! `reqwest::blocking::Response` — which is a `std::io::Read`, the shape an
-//! SSE framer wants (ADR-0020 §4) — plus [`parse_sse_event`] for all four
+//! SSE framer wants (ADR-0021 §4) — plus [`parse_sse_event`] for all four
 //! dialects, covering text deltas and tool-call deltas alike, and
 //! [`ToolCallAssembler`], which glues a call's argument fragments back into
 //! one JSON value.
@@ -826,7 +826,7 @@ mod tests {
     #[test]
     fn the_openai_compatible_dialect_decodes_identically_to_openai() {
         // The whole point of the generic kind: one parser, no per-endpoint
-        // code (ADR-0020 §2).
+        // code (ADR-0021 §2).
         assert_eq!(
             decode(ProviderKind::OpenAiCompatible, OPENAI_FIXTURE),
             decode(ProviderKind::OpenAi, OPENAI_FIXTURE)

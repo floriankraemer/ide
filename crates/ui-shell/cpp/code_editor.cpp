@@ -1,4 +1,6 @@
 #include "code_editor.h"
+
+#include "theme.h"
 #include <QContextMenuEvent>
 #include <QMenu>
 
@@ -38,12 +40,6 @@ constexpr int kEntryIndexRole = Qt::UserRole + 1;
 // Slack added to the popup's ideal width so the last glyph is not clipped.
 constexpr int kPopupWidthPadding = 8;
 
-// Nudges `base` away from itself so a band drawn in the result reads as a
-// subtle tint on both dark and light editor backgrounds.
-QColor tinted(const QColor &base, int darkFactor, int lightFactor)
-{
-    return base.lightness() < 128 ? base.lighter(darkFactor) : base.darker(lightFactor);
-}
 } // namespace
 
 CodeEditor::CodeEditor(QWidget *parent)
@@ -53,6 +49,14 @@ CodeEditor::CodeEditor(QWidget *parent)
     connect(this, &CodeEditor::blockCountChanged, this, &CodeEditor::updateLineNumberAreaWidth);
     connect(this, &CodeEditor::updateRequest, this, &CodeEditor::updateLineNumberArea);
     connect(this, &CodeEditor::cursorPositionChanged, this, &CodeEditor::highlightCurrentLine);
+
+    // Code is read on a horizontal scrollbar, not reflowed — the same
+    // default VS Code and IntelliJ ship. It is also what keeps a
+    // machine-generated file usable: QPlainTextDocumentLayout lays a block
+    // out atomically, so wrapping a single 600k-character line into
+    // thousands of visual lines makes every layout touch of that block cost
+    // the whole line.
+    setLineWrapMode(QPlainTextEdit::NoWrap);
 
     // Ctrl-hover feedback needs move events with no button held (N7), the
     // same reason TerminalWidget enables tracking for its links.
@@ -530,13 +534,12 @@ void CodeEditor::lineNumberAreaMousePressEvent(QMouseEvent *event)
 
 bool CodeEditor::foldStartingAt(int blockNumber, FoldRange *out) const
 {
-    for (const FoldRange &range : foldRanges_) {
-        if (range.startBlock == blockNumber && range.endBlock > range.startBlock) {
-            *out = range;
-            return true;
-        }
+    const auto it = foldStarts_.constFind(blockNumber);
+    if (it == foldStarts_.constEnd()) {
+        return false;
     }
-    return false;
+    *out = it.value();
+    return true;
 }
 
 void CodeEditor::setBlocksVisible(int fromBlockExclusive, int toBlockInclusive, bool visible)
@@ -607,6 +610,18 @@ void CodeEditor::ensureBlockVisible(int blockNumber)
 void CodeEditor::setFoldRanges(const QVector<FoldRange> &ranges)
 {
     foldRanges_ = ranges;
+
+    // Index by start block once per tree update, rather than scanning per
+    // painted gutter line. Only the first range starting on a given line is
+    // kept, which is what the previous linear scan returned for nested
+    // constructs opening on the same line.
+    foldStarts_.clear();
+    foldStarts_.reserve(foldRanges_.size());
+    for (const FoldRange &range : foldRanges_) {
+        if (range.endBlock > range.startBlock && !foldStarts_.contains(range.startBlock)) {
+            foldStarts_.insert(range.startBlock, range);
+        }
+    }
 
     // Edits can reshape or remove a previously-collapsed region; restore
     // visibility for any collapsed range that no longer matches an actual

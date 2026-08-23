@@ -1,4 +1,4 @@
-//! The AI chat's rules (ADR-0020): providers and their declared
+//! The AI chat's rules (ADR-0021): providers and their declared
 //! capabilities, the conversation block model, context assembly under a
 //! token budget, request bodies and SSE decoding per dialect, the tool
 //! catalog and the policy-gated agent loop, applying an answer through the
@@ -6,7 +6,7 @@
 //!
 //! Everything that is a decision lives here: `ui-shell`'s `bridge.rs`
 //! translates and `cpp/ai_chat_panel.cpp` paints, and neither decides
-//! (ADR-0002's humble view, restated for this feature in ADR-0020 §6). The
+//! (ADR-0002's humble view, restated for this feature in ADR-0021 §6). The
 //! test for whether something sits in the wrong place is `layering.md`'s —
 //! if it deserves a unit test, it cannot live in the bridge or in C++.
 //!
@@ -19,7 +19,7 @@
 //! Not runtime-free, unlike `lsp-core`: `reqwest::blocking` spins up its own
 //! private tokio runtime internally. That is the blocking API's business and
 //! stays inside it — nothing here awaits, and streaming is driven from one
-//! `std::thread` in `ui-shell` (ADR-0020 §4).
+//! `std::thread` in `ui-shell` (ADR-0021 §4).
 
 pub mod agent;
 pub mod context;
@@ -39,7 +39,7 @@ use std::path::PathBuf;
 use providers::Capability;
 
 /// Which ceiling ended an agent run. Every run is bounded on all three
-/// axes (ADR-0020 §1) — a model that loops, a model that is merely slow,
+/// axes (ADR-0021 §1) — a model that loops, a model that is merely slow,
 /// and a model that is expensive are three different failures and the user
 /// is told which one happened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,7 +81,7 @@ impl RunLimit {
 /// text **already redacted**. `transport.rs` is the only module that
 /// constructs them and the only one that ever holds a resolved API key, so
 /// it passes every upstream string through [`redact`] before it becomes an
-/// error (ADR-0020 §3).
+/// error (ADR-0021 §3).
 ///
 /// Redacting in `Display` instead would put the guarantee in the wrong
 /// place twice over: `Display` has no access to the key, and a new call
@@ -99,7 +99,7 @@ pub enum ChatError {
     /// typically a settings file written by a newer version.
     UnknownProvider(String),
     /// The provider needs a key and the environment variable its settings
-    /// name is not set in this process (ADR-0020 §3: keys are read from the
+    /// name is not set in this process (ADR-0021 §3: keys are read from the
     /// environment and nowhere else, so an unset variable is the whole
     /// failure mode and the message names the variable).
     MissingApiKey { provider: String, env_var: String },
@@ -139,18 +139,18 @@ pub enum ChatError {
     /// The user pressed Stop. Not a fault, but it ends the operation, so it
     /// travels the same channel as one.
     Cancelled,
-    /// An agent run hit one of its ceilings (ADR-0020 §1).
+    /// An agent run hit one of its ceilings (ADR-0021 §1).
     RunCeilingExceeded { limit: RunLimit, ceiling: u64 },
     /// A tool call was refused before it ran, because its policy is
     /// `Never`. A call the *user* declines at an `Ask` prompt is not this:
     /// that is fed back to the model as a `tool_result` so it can choose
-    /// another route (ADR-0020 §1).
+    /// another route (ADR-0021 §1).
     ToolDenied { tool: String, reason: String },
     /// A tool ran and failed. `detail` comes from the executing callback in
     /// `ui-shell`, never from the network.
     ToolFailed { tool: String, detail: String },
     /// A path argument or attachment resolved outside the open project.
-    /// Canonicalised first, so symlinks cannot walk out (ADR-0020 §1).
+    /// Canonicalised first, so symlinks cannot walk out (ADR-0021 §1).
     PathOutsideProject(PathBuf),
     /// A file whose name says it holds credentials — `.env`, `*.pem`,
     /// `credentials*`, a private key. Refused as an attachment and as a
@@ -158,7 +158,7 @@ pub enum ChatError {
     SecretShapedFile(PathBuf),
     /// The active provider declares it cannot do what was asked. Declared,
     /// not discovered: the refusal is local and names a reason, instead of
-    /// a request that comes back 400 (ADR-0020, "Consequences").
+    /// a request that comes back 400 (ADR-0021, "Consequences").
     UnsupportedCapability {
         provider: String,
         capability: Capability,

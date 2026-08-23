@@ -30,6 +30,19 @@ mod ffi {
         tab_id: u64,
     }
 
+    /// One row of the binary (hex) viewer, 1:1 with `editor_core::HexRow`.
+    ///
+    /// Three ready-to-paint strings, not bytes: the offset format, the byte
+    /// grouping, which bytes count as printable and what stands in for the
+    /// ones that don't are all decided in `editor-core` (ADR-0002), so the
+    /// widget only lays these out in three columns.
+    #[derive(Default)]
+    struct FfiHexRow {
+        offset: QString,
+        hex: QString,
+        ascii: QString,
+    }
+
     /// Persisted window geometry (L1), 1:1 with `app_config::WindowGeometry`.
     /// A freshly-defaulted value (all zero) means "nothing saved yet" — the
     /// view falls back to its own default size in that case.
@@ -911,6 +924,40 @@ mod ffi {
         #[cxx_name = "tabPath"]
         fn tab_path(self: &DocumentManager, tab_id: u64) -> QString;
 
+        /// Which kind of page the tab needs: `app_core::TabKind`'s code —
+        /// 0 text, 1 binary (ADR-0020). The view builds a `CodeEditor` or a
+        /// `HexViewer` from this; it never decides the kind itself from the
+        /// path or the bytes. Unknown ids answer 0, the same "treat it as
+        /// ordinary" default the widget-construction path already takes.
+        #[qinvokable]
+        #[cxx_name = "tabKind"]
+        fn tab_kind(self: &DocumentManager, tab_id: u64) -> i32;
+
+        /// How many hex rows a binary tab spans — the viewer's vertical
+        /// scroll range. 0 for a text tab or an unknown id.
+        #[qinvokable]
+        #[cxx_name = "binaryRowCount"]
+        fn binary_row_count(self: &DocumentManager, tab_id: u64) -> u64;
+
+        /// Size in bytes of a binary tab's file, for the status bar. 0 for a
+        /// text tab or an unknown id.
+        #[qinvokable]
+        #[cxx_name = "binaryLength"]
+        fn binary_length(self: &DocumentManager, tab_id: u64) -> u64;
+
+        /// `count` hex rows starting at `first_row`, clamped to the end of
+        /// the file. Pull-based per repaint, like `tabContent` — only the
+        /// rows currently on screen are ever read from disk, which is what
+        /// keeps a multi-gigabyte binary cheap to scroll.
+        #[qinvokable]
+        #[cxx_name = "hexRows"]
+        fn hex_rows(
+            self: &DocumentManager,
+            tab_id: u64,
+            first_row: u64,
+            count: u64,
+        ) -> Vec<FfiHexRow>;
+
         /// The authoritative dirty flag for `tab_id` (ADR-0003: the view
         /// reads this rather than trusting its own copy).
         #[qinvokable]
@@ -1242,6 +1289,18 @@ mod ffi {
         #[cxx_name = "removeIndexedFile"]
         fn remove_indexed_file(self: Pin<&mut SearchModel>, path: &QString);
 
+        /// Bring a whole batch of changed paths up to date at once — the
+        /// watcher's coalesced window, handed over as one call.
+        ///
+        /// Whether a path is re-indexed or dropped is decided in Rust from
+        /// whether it still exists, not by the caller: that is a rule about
+        /// what the index holds, and the view has no business splitting the
+        /// batch. One commit and one write lock for the whole batch, rather
+        /// than one of each per file.
+        #[qinvokable]
+        #[cxx_name = "syncIndexedFiles"]
+        fn sync_indexed_files(self: Pin<&mut SearchModel>, paths: &QStringList);
+
         /// Record `path` as most-recently-opened: it feeds Search
         /// Everywhere's Recent tier and is persisted to `settings.toml`.
         #[qinvokable]
@@ -1306,6 +1365,15 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "indexFailed"]
         fn index_failed(self: Pin<&mut SearchModel>, message: QString);
+
+        /// How far the running index build has got. Emitted once with
+        /// `done == 0` as soon as the total is known, then at most every
+        /// [`PROGRESS_INTERVAL`] until `done == total` — a hop per file
+        /// would cost more than the indexing it reports on. Always followed
+        /// by exactly one `indexReady` or `indexFailed`.
+        #[qsignal]
+        #[cxx_name = "indexProgress"]
+        fn index_progress(self: Pin<&mut SearchModel>, done: u32, total: u32);
 
         /// Run Find-in-Files: `pattern` is a literal substring unless
         /// `is_regex` is set. Matches stream back as `searchBatch`
@@ -2506,7 +2574,7 @@ mod ffi {
     /// One provider as the chat's own picker lists it. Capabilities are
     /// *declared* by `ai_chat_core::providers` and carried here so the panel
     /// can grey out Agent mode or the image button, rather than sending a
-    /// request that comes back 400 (ADR-0020 §2).
+    /// request that comes back 400 (ADR-0021 §2).
     #[derive(Default)]
     struct FfiAiProvider {
         id: QString,
@@ -2566,7 +2634,7 @@ mod ffi {
 
     /// What became of a tool call. `status` is `ok` or `error`; a call the
     /// user declined is `ok`, because a denial is data and not a failure
-    /// (ADR-0020 §1).
+    /// (ADR-0021 §1).
     #[derive(Default)]
     struct FfiToolOutcome {
         call_id: QString,
@@ -2578,7 +2646,7 @@ mod ffi {
     /// The composer's live counter. `exact` says which of the two kinds of
     /// number this is (`ai_chat_core::tokens::TokenCount`), so the panel can
     /// mark an estimate as an estimate rather than presenting a guess as a
-    /// measurement (ADR-0020 §6).
+    /// measurement (ADR-0021 §6).
     #[derive(Default)]
     struct FfiTokenUsage {
         context_tokens: u32,
@@ -2599,7 +2667,7 @@ mod ffi {
     }
 
     extern "RustQt" {
-        /// The AI chat panel's FFI surface (ADR-0020): the transcript, the
+        /// The AI chat panel's FFI surface (ADR-0021): the transcript, the
         /// pending attachments, the streaming request, the agent loop's
         /// approval protocol, applying an answer, and the conversation
         /// store.
@@ -2608,14 +2676,14 @@ mod ffi {
         /// what may be attached, what a tool may do, when a run must stop,
         /// how a code block becomes an edit, what a failure means in
         /// English — lives in `ai-chat-core`, and every sentence crossing
-        /// this seam was composed there (ADR-0002, ADR-0020 §6).
+        /// this seam was composed there (ADR-0002, ADR-0021 §6).
         #[qobject]
         type AiChat = super::AiChatRust;
 
         /// Send `text` with whatever is attached. Returns as soon as the
         /// request is queued: one `std::thread` owns the blocking HTTP and
         /// marshals every delta back with `CxxQtThread::queue`, so the Qt
-        /// thread never waits on a provider (ADR-0020 §4).
+        /// thread never waits on a provider (ADR-0021 §4).
         #[qinvokable]
         #[cxx_name = "sendMessage"]
         fn send_message(self: Pin<&mut AiChat>, text: &QString) -> FfiResult;
@@ -2638,7 +2706,7 @@ mod ffi {
 
         /// `"ask"` or `"agent"`. Agent mode against a provider that
         /// declares no tool support is refused here, with the provider
-        /// named, rather than at the API (ADR-0020 §2).
+        /// named, rather than at the API (ADR-0021 §2).
         #[qinvokable]
         #[cxx_name = "setMode"]
         fn set_mode(self: Pin<&mut AiChat>, mode: &QString) -> FfiResult;
@@ -2784,7 +2852,7 @@ mod ffi {
 
         /// Take the edits to apply them. Empty when the buffer moved since
         /// `prepareApply` recorded its revision — the staleness rule is
-        /// `lsp_core::EditGate`'s, exactly as for a rename (ADR-0020 §5).
+        /// `lsp_core::EditGate`'s, exactly as for a rename (ADR-0021 §5).
         #[qinvokable]
         #[cxx_name = "takePendingEdits"]
         fn take_pending_edits(self: Pin<&mut AiChat>, buffer_revision: i64) -> Vec<FfiTextEdit>;
@@ -2992,7 +3060,12 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::rc::Rc;
 
-use app_core::{AppError, AppSession, TabId};
+use app_core::{AppError, AppSession, TabId, TabKind};
+
+/// Upper bound on rows one `hexRows` call will return. The viewer asks for
+/// what fits its viewport, so this only exists so a nonsense `count` can
+/// never turn into a huge allocation at the seam.
+const MAX_HEX_ROWS_PER_REQUEST: u64 = 4096;
 use cxx_qt::Threading;
 use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QVariant,
@@ -3983,6 +4056,45 @@ impl ffi::DocumentManager {
             .unwrap_or(false)
     }
 
+    pub fn tab_kind(&self, tab_id: u64) -> i32 {
+        self.session
+            .borrow()
+            .tab_kind(TabId::from_raw(tab_id))
+            .map(|kind| kind.code())
+            .unwrap_or(TabKind::CODE_TEXT)
+    }
+
+    pub fn binary_row_count(&self, tab_id: u64) -> u64 {
+        self.session
+            .borrow()
+            .binary_row_count(TabId::from_raw(tab_id))
+            .unwrap_or(0)
+    }
+
+    pub fn binary_length(&self, tab_id: u64) -> u64 {
+        self.session
+            .borrow()
+            .binary_len(TabId::from_raw(tab_id))
+            .unwrap_or(0)
+    }
+
+    pub fn hex_rows(&self, tab_id: u64, first_row: u64, count: u64) -> Vec<ffi::FfiHexRow> {
+        // `count` arrives from the widget as a row count derived from its
+        // viewport height, so it is small; clamping keeps a bad value from
+        // turning into a huge allocation regardless.
+        let count = count.min(MAX_HEX_ROWS_PER_REQUEST) as usize;
+        self.session
+            .borrow_mut()
+            .binary_rows(TabId::from_raw(tab_id), first_row, count)
+            .into_iter()
+            .map(|row| ffi::FfiHexRow {
+                offset: QString::from(row.offset.as_str()),
+                hex: QString::from(row.hex.as_str()),
+                ascii: QString::from(row.ascii.as_str()),
+            })
+            .collect()
+    }
+
     pub fn check_external_change(mut self: Pin<&mut Self>, path: &QString) {
         let path_buf = std::path::PathBuf::from(path.to_string());
         let hit = self.session.borrow_mut().check_external_change(&path_buf);
@@ -4433,6 +4545,11 @@ fn text_hit(m: index_core::SearchMatch, root: &std::path::Path) -> ffi::FfiSearc
     }
 }
 
+/// Shortest gap between two `indexProgress` emissions. A status bar cannot
+/// show more than a few updates a second anyway, and each one is a
+/// cross-thread hop.
+const PROGRESS_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+
 impl ffi::SearchModel {
     pub fn open_index(self: Pin<&mut Self>, root_path: &QString) {
         let root = std::path::PathBuf::from(root_path.to_string());
@@ -4452,19 +4569,62 @@ impl ffi::SearchModel {
             }
             *current = index_core::IndexSlot::Building(root.clone());
         }
-        std::thread::spawn(move || match index_core::TextIndex::open_or_build(&root) {
-            Ok(index) => {
-                *slot.write().unwrap() = index_core::IndexSlot::Ready(Box::new(index));
-                let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
-                    model.as_mut().index_ready();
+        std::thread::spawn(move || {
+            // One cross-thread hop per file would cost more than the file
+            // took to index, so the closure reports at most every
+            // `PROGRESS_INTERVAL` — plus the first report of a pass (which
+            // carries the total) and the last (which says it is done).
+            let last = std::sync::Mutex::new(None::<std::time::Instant>);
+            let progress_thread = qt_thread.clone();
+            let progress = move |p: index_core::IndexProgress| {
+                {
+                    let mut last = last.lock().unwrap();
+                    let due = match *last {
+                        None => true,
+                        Some(at) => at.elapsed() >= PROGRESS_INTERVAL,
+                    };
+                    if !due && p.done != p.total {
+                        return;
+                    }
+                    *last = Some(std::time::Instant::now());
+                }
+                let (done, total) = (p.done as u32, p.total as u32);
+                let _ = progress_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model.as_mut().index_progress(done, total);
                 });
+            };
+            match index_core::TextIndex::open_or_build_with_progress(&root, &progress) {
+                Ok(index) => {
+                    *slot.write().unwrap() = index_core::IndexSlot::Ready(Box::new(index));
+                    let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {
+                        model.as_mut().index_ready();
+                    });
+                }
+                Err(err) => {
+                    let message = err.to_string();
+                    *slot.write().unwrap() = index_core::IndexSlot::Failed(message.clone());
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model.as_mut().index_failed(QString::from(message.as_str()));
+                    });
+                }
             }
-            Err(err) => {
-                let message = err.to_string();
-                *slot.write().unwrap() = index_core::IndexSlot::Failed(message.clone());
-                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
-                    model.as_mut().index_failed(QString::from(message.as_str()));
-                });
+        });
+    }
+
+    pub fn sync_indexed_files(self: Pin<&mut Self>, paths: &QStringList) {
+        let paths: Vec<std::path::PathBuf> = paths
+            .iter()
+            .map(|p| std::path::PathBuf::from(p.to_string()))
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            if let Some(index) = slot.write().unwrap().ready_mut() {
+                // A path that vanished or became unreadable is dropped by
+                // `sync_paths` itself, so there is nothing to report here.
+                let _ = index.sync_paths(&paths);
             }
         });
     }
@@ -7046,7 +7206,7 @@ impl ffi::LanguageServerEditor {
 }
 
 // ---------------------------------------------------------------------------
-// AI chat (ADR-0020, plan tasks AC13-AC15)
+// AI chat (ADR-0021, plan tasks AC13-AC15)
 // ---------------------------------------------------------------------------
 
 use ai_chat_core::agent::{self, AgentCallbacks, Decision, RunLimits, RunOutcome};
@@ -7211,7 +7371,7 @@ impl ApprovalGate {
     ///
     /// The denial reason is left empty on purpose in both silent exits:
     /// `agent::run` composes what the model is told, and a sentence written
-    /// here would be model-facing wording in the adapter (ADR-0020 §6).
+    /// here would be model-facing wording in the adapter (ADR-0021 §6).
     fn wait_for_decision(&self, call_id: &str) -> Decision {
         let mut inner = recover(self.inner.lock());
         if inner.abandoned {
@@ -7292,7 +7452,7 @@ pub struct AiChatRust {
     session: Rc<RefCell<AppSession>>,
     /// The same index `SearchModel` builds and the MCP server queries, so
     /// an in-IDE agent can never see a different project than an attached
-    /// one (ADR-0020 §1).
+    /// one (ADR-0021 §1).
     index: mcp_server::IndexHandle,
     diagnostics: SharedDiagnostics,
     /// The Qt thread's copy of the transcript. During a run the worker owns
@@ -7439,7 +7599,7 @@ impl ffi::AiChat {
         let qt_thread = self.as_mut().qt_thread();
 
         // One thread owns the blocking HTTP and marshals everything back
-        // with `queue` — the PTY reader's pattern (ADR-0020 §4). The Qt
+        // with `queue` — the PTY reader's pattern (ADR-0021 §4). The Qt
         // thread returns from this call immediately and never waits on it.
         std::thread::spawn(move || {
             let mut conversation = conversation;
@@ -7928,7 +8088,7 @@ impl ffi::AiChat {
             call_id: QString::from(call.call_id.as_str()),
             tool: QString::from(call.tool.as_str()),
             // A declined call is `ok`: a denial is data, not a failure
-            // (ADR-0020 §1), and painting it red would teach the user that
+            // (ADR-0021 §1), and painting it red would teach the user that
             // saying no broke something.
             status: QString::from(if outcome.is_error { "error" } else { "ok" }),
             detail: QString::from(outcome.content.as_str()),
@@ -8165,7 +8325,7 @@ impl ffi::AiChat {
 
     /// The one gate every attachment passes: a credentials-shaped name, a
     /// path outside the open project, and an image a provider cannot read
-    /// are all refused here, in `ai-chat-core`'s words (ADR-0020 §1). No
+    /// are all refused here, in `ai-chat-core`'s words (ADR-0021 §1). No
     /// `attach_*` slot may push around it.
     fn accept(mut self: Pin<&mut Self>, attachment: Attachment) -> FfiResult {
         let config = match self.provider() {
@@ -8397,7 +8557,7 @@ impl ffi::AiChat {
         ffi::FfiTokenUsage {
             context_tokens: rendered.tokens.value() + composer.value() + transcript.value(),
             // Exact only if all three were: one estimate makes the total an
-            // estimate, and `Exact` has to mean exact (ADR-0020 §6).
+            // estimate, and `Exact` has to mean exact (ADR-0021 §6).
             exact: rendered.tokens.is_exact() && composer.is_exact() && transcript.is_exact(),
             budget: ai_chat_core::tokens::context_window(&config),
             input_tokens,
@@ -8545,7 +8705,7 @@ impl ffi::AiChat {
 
         // The same `plan_edit` a rename goes through, so the model's edit
         // inherits the preview, the single-undo splice and the staleness
-        // check unchanged (ADR-0020 §5).
+        // check unchanged (ADR-0021 §5).
         let open_paths = self.open_document_paths();
         let path_text = path.to_string_lossy().into_owned();
         let plan = match lsp_core::plan_edit(documents, &open_paths, &path_text, &|_| None) {

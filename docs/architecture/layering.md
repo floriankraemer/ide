@@ -20,7 +20,7 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `pty-core` | (std, portable-pty) | **No** |
 | `terminal-core` | (std, alacritty_terminal) | **No** |
 | `lsp-core` | (std, lsp-types, serde, serde_json; `syntax-core` as a **dev**-dependency only, ADR-0018) | **No** |
-| `index-core` | `syntax-core`, `editor-core` (+ std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore, nucleo-matcher, fs4, dirs) | **No** |
+| `index-core` | `syntax-core`, `editor-core` (+ std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore, rayon, nucleo-matcher, fs4, dirs) | **No** |
 | `settings-model` | `app-config`, `syntax-core`, `lsp-core` (+ std, serde, toml, tree-sitter) | **No** |
 | `app-core` | `editor-core`, `project-model` | **No** |
 | `ai-chat-core` | `lsp-core` (+ std, serde, serde_json, base64, tiktoken-rs, reqwest/rustls) | **No** |
@@ -36,12 +36,13 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 - **Rules a refactoring needs** (which documents of a workspace edit are spliced in a buffer and which are written to disk, whether an answer is still fresh enough to apply, whether an inbound `workspace/applyEdit` was asked for, and whether a name-based rename site can be vouched for) live in `lsp-core` and `index-core` (ADR-0019).
   The adapter routes and the view paints; neither decides. In particular `bridge.rs` never re-derives which pile an edit belongs to — it forwards the flag `lsp_core::plan_edit` set.
 - **Rules a settings page needs** (which override a colour row comes from, what a language load failure means in English, which server entries are worth persisting) live in `settings-model`, not in `app-config`: they join persisted settings to the vocabularies of `syntax-core` and `lsp-core`, which `app-config` deliberately knows nothing about (ADR-0017).
-- **Rules the AI assistant needs** (how attachments are assembled into a prompt and in what order they are truncated, how many tokens that costs, which files are too secret to attach or read, whether a model-supplied path escapes the project, which tool an approval policy allows, how a code block or an approved tool call becomes an edit, and when an agent run must stop) live in `ai-chat-core` (ADR-0020).
+- **Which kind of page a tab needs** is `app-core`'s answer, carried across the seam as `TabKind` (ADR-0020). The view builds a `CodeEditor` or a `HexViewer` from it and never infers the kind from the path or the bytes. What a hex row *says* — offset format, byte grouping, printable-byte rule, short-row padding — belongs to `editor_core::hex`, next to the `binary_detect` rule that decides what counts as binary in the first place.
+- **Rules the AI assistant needs** (how attachments are assembled into a prompt and in what order they are truncated, how many tokens that costs, which files are too secret to attach or read, whether a model-supplied path escapes the project, which tool an approval policy allows, how a code block or an approved tool call becomes an edit, and when an agent run must stop) live in `ai-chat-core` (ADR-0021).
   It depends on `lsp-core` because a proposed edit is expressed as `Vec<lsp_core::DocumentEdits>` and applied through the same `plan_edit` path a refactoring uses — there is no second apply semantics and no second undo story.
   The agent's tool catalog is deliberately the work `mcp-server` already performs: `ai-chat-core` owns the schemas, the policy and the loop, while executing a tool is a callback `ui-shell` routes to the same `AppSession` and index paths MCP drives (ADR-0012).
   An assistant inside the IDE therefore cannot see a different project than an agent attached over MCP, and `bridge.rs` never decides whether a tool may run.
   `ai-chat-core` is the one Qt-free crate deliberately **not** covered by the `grep -i tokio` gate the other background-work crates take: `reqwest::blocking` builds a private current-thread runtime internally, so tokio appears in its tree even though no async code is written here and no runtime is managed by us.
-  The gate that matters for it is the Qt one, and the rule the tokio gate was protecting — that long work runs on a `std::thread` and returns through `CxxQtThread::queue()`, not on an ambient runtime — is unchanged (ADR-0007, ADR-0020).
+  The gate that matters for it is the Qt one, and the rule the tokio gate was protecting — that long work runs on a `std::thread` and returns through `CxxQtThread::queue()`, not on an ambient runtime — is unchanged (ADR-0007, ADR-0021).
 
 - **Which language a file is** is answered in exactly one place, `syntax-core`'s registry (ADR-0018).
   `lsp-core` owns only what the protocol owns — the server command per language id, and the few ids LSP names differently from the grammar (`tsx` -> `typescriptreact`) — and `ui-shell` joins the two, which is translation and so allowed in the adapter.

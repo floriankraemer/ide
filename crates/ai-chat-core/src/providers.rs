@@ -3,7 +3,7 @@
 //! persists, the [`default_catalog`] a fresh installation starts from, and
 //! [`resolve_api_key`].
 //!
-//! Four kinds cover the field (ADR-0020 §2): Anthropic, OpenAI, Gemini, and
+//! Four kinds cover the field (ADR-0021 §2): Anthropic, OpenAI, Gemini, and
 //! one OpenAI-compatible generic that is a base URL plus a model name and so
 //! covers OpenRouter, Groq, Ollama, LM Studio and vLLM without a line of
 //! code each.
@@ -47,7 +47,7 @@ impl Capability {
 /// Which dialect a provider speaks. The differences between them are
 /// confined to two pure functions — [`crate::request::build_body`] and
 /// [`crate::stream::parse_sse_event`] — so a fifth provider is a match arm
-/// and a fixture test, not a subsystem (ADR-0020 §2).
+/// and a fixture test, not a subsystem (ADR-0021 §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ProviderKind {
     Anthropic,
@@ -111,7 +111,7 @@ impl ProviderKind {
             },
             // Gemini does have explicit caching, but its `cachedContent`
             // resources need a create/refresh/delete lifecycle this plan
-            // does not build (ADR-0020, "Consequences"), so it is declared
+            // does not build (ADR-0021, "Consequences"), so it is declared
             // absent rather than half-implemented.
             ProviderKind::Gemini => Capabilities {
                 tools: true,
@@ -159,7 +159,7 @@ impl Capabilities {
 
 /// One configured provider, as the settings layer persists it.
 ///
-/// There is deliberately no key field, and never will be (ADR-0020 §3):
+/// There is deliberately no key field, and never will be (ADR-0021 §3):
 /// `api_key_env` holds the *name* of an environment variable, and
 /// [`resolve_api_key`] is the only way to turn that into a key.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -247,7 +247,7 @@ pub fn default_catalog() -> Vec<ProviderConfig> {
 
 /// Resolves `config`'s API key from the process environment.
 ///
-/// This reads `std::env::var` and **nothing else** (ADR-0020 §3): no file,
+/// This reads `std::env::var` and **nothing else** (ADR-0021 §3): no file,
 /// no settings field, no keyring. An OS keyring was rejected on build and
 /// deployment reality — its Linux implementation needs a D-Bus Secret
 /// Service that the builder image, CI and minimal desktops all lack, and the
@@ -318,7 +318,7 @@ mod tests {
     fn anthropic_is_the_only_kind_declaring_explicit_prompt_caching() {
         // The OpenAI dialects cache automatically with nothing to send, and
         // Gemini's cachedContent needs a lifecycle this plan does not build
-        // (ADR-0020, "Consequences").
+        // (ADR-0021, "Consequences").
         assert!(ProviderKind::Anthropic.capabilities().explicit_cache);
         for kind in [
             ProviderKind::OpenAi,
@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn the_default_catalog_offers_all_four_kinds_and_enables_none_of_them() {
-        // Nothing is sent implicitly (ADR-0020): a fresh installation talks
+        // Nothing is sent implicitly (ADR-0021): a fresh installation talks
         // to nobody until the user turns a provider on.
         let catalog = default_catalog();
         let kinds: Vec<ProviderKind> = catalog.iter().map(|entry| entry.kind).collect();

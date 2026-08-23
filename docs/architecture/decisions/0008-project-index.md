@@ -11,6 +11,26 @@ ripgrep crates are fully statically linked. The Linux `linux-builder` build was 
 verified clean as of task G1. The gate this ADR was pending on is closed.
 
 
+## Amendment: packed symbol documents, a size cap, and a parallel build
+
+Three things this ADR describes changed once the build was actually measured (see [the index performance plan](../index-performance-plan.md) for the numbers — WordPress `wp-includes` took eight minutes).
+
+**One symbol document per (file, name), not per occurrence.**
+The original schema wrote a document per identifier occurrence, each repeating the file's whole path.
+Occurrences of one name in one file now pack into a single document, with line, column, is-definition, kind and container carried as five multi-valued fields appended together so the nth value of each describes the same occurrence.
+Because a packed document matches `sym_is_definition:1` when *any* of its rows is a definition, every definition query re-filters the expanded rows; that filter is correctness, not an optimisation.
+`sym_kind`, `sym_container`, `sym_line` and `sym_col` lost their `INDEXED` flag, since nothing ever queried them.
+
+**A size cap.**
+A file past 2 MiB contributes no documents at all — no content, no symbols — while still counting as indexable so it keeps its place in the file-name tier.
+A stamped empty-content document was tried first and rejected: its path re-entered the candidate list whenever the ngram stage fell back to "every text doc", so Find in Files reached into an over-cap file on some patterns and not on others.
+Binary files are still dropped entirely; the difference is that a NUL byte in the first 8 KiB decides it before the whole file is read.
+
+**The build is parallel, and reports progress.**
+`IndexWriter::add_document` and `delete_term` take `&self`, so the walk splits into a cheap single-threaded pass that establishes the file list and a rayon pass that reads, parses and builds documents — no mutex over the writer.
+Walking first is also what makes the total known before any file is read, which is the difference between a progress bar and a spinner; `index-core` reports it through a `&(dyn Fn(IndexProgress) + Sync)` and stays Qt-free.
+A `stamps.tsv` sidecar next to the index replaces deserialising every stored document on a warm open, and is safe by construction: a stamp that is missing or does not match makes the file be re-read, so a stale sidecar costs work, never correctness.
+
 ## Amendment: where the index lives when the project's filesystem cannot lock it
 
 Tantivy allows one `IndexWriter` per directory and enforces it with an advisory lock on `.tantivy-writer.lock` inside the index directory.

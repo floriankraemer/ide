@@ -96,7 +96,7 @@ QWidget *buildAiProvidersPage(QWidget *parent, AiProviderEditor *editor)
     auto *layout = new QVBoxLayout(page);
 
     // Why there is no password field on this page, said before the user
-    // starts looking for one (ADR-0020 decision 3).
+    // starts looking for one (ADR-0021 decision 3).
     auto *keyNote = new QLabel(
       QObject::tr("The IDE never stores API keys. Each provider names an environment variable, "
                   "and the key is read from your environment at request time — so it is never "

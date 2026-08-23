@@ -531,4 +531,9 @@ void applyTheme(const QString &themeName)
     qApp->setStyleSheet(styleSheetForTheme(themeName));
 }
 
+QColor tinted(const QColor &base, int darkFactor, int lightFactor)
+{
+    return base.lightness() < 128 ? base.lighter(darkFactor) : base.darker(lightFactor);
+}
+
 } // namespace ui_shell

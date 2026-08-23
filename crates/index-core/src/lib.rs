@@ -4,7 +4,8 @@
 //! Qt-free by design (see `docs/architecture/layering.md`) — this crate only
 //! moves bytes and offsets around. Wiring it into a background
 //! `std::thread` + `CxxQtThread::queue()`, and driving re-indexing off
-//! `project_model::ProjectWatcher`, is `ui-shell`'s job (task H).
+//! `project_model::ProjectWatcher`, is `ui-shell`'s job; progress crosses
+//! that seam as [`IndexProgress`], not as anything Qt-shaped.
 //!
 //! # Two-stage search
 //!
@@ -24,7 +25,9 @@
 //! field (`"text"`, `"symbol"`, `"inherit"`): the **text** schema above
 //! (`path` + `content`); the **symbol/reference** schema (`sym_name`/
 //! `sym_kind`/`path`/`sym_line`/`sym_col`/`sym_container`/
-//! `sym_is_definition`), fed by
+//! `sym_is_definition`) — one document per (file, name), carrying every
+//! occurrence of that name in that file as index-aligned multi-valued
+//! fields, so a definition query has to re-filter the expanded rows — fed by
 //! `syntax_core::outline()` (definitions, with kind + container) and
 //! `syntax_core::identifier_occurrences()` (every occurrence, references
 //! included) — see [`TextIndex::find_definitions`]/[`find_usages`]/
@@ -36,7 +39,7 @@
 //! queries filter on it. Kept in the same index (not co-located ones)
 //! because tantivy's schema model makes this straightforward — no extra
 //! `IndexWriter`/`IndexReader` pairs, no extra on-disk directories, one
-//! `build()`/`reindex_file()` walk populates all three. They also share the
+//! `build()`/`sync_paths()` walk populates all three. They also share the
 //! `path` term, so `delete_term(path)` drops every document a file
 //! produced, whatever its shape.
 //!
@@ -49,7 +52,7 @@ use std::collections::{BTreeMap, BinaryHeap, HashMap};
 use std::fmt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use grep_matcher::Matcher;
 use grep_regex::RegexMatcherBuilder;
@@ -57,6 +60,7 @@ use grep_searcher::sinks::UTF8;
 use grep_searcher::Searcher;
 use nucleo_matcher::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo_matcher::{Config, Utf32Str};
+use rayon::prelude::*;
 use tantivy::collector::TopDocs;
 use tantivy::query::{BooleanQuery, Occur, QueryParser, TermQuery};
 use tantivy::schema::{
@@ -74,13 +78,23 @@ const INDEX_DIR_NAME: &str = ".ide-index";
 /// `syntax-core/queries`, [`analyze`]'s rules) without the tantivy schema
 /// changing: an existing index is then rebuilt instead of serving symbols
 /// the old extraction missed. 2: Java/C/C++ `type_identifier`, PHP type
-/// positions, Zig anchored variable names.
-const EXTRACTION_VERSION: u32 = 2;
+/// positions, Zig anchored variable names. 3: one symbol document per
+/// (file, name) instead of one per occurrence.
+const EXTRACTION_VERSION: u32 = 3;
 const EXTRACTION_VERSION_FILE: &str = "extraction.version";
 
 /// Tantivy's own writer-lock file inside the index directory. Named here so
 /// an error can point at the exact path rather than at the project root.
 const WRITER_LOCK_FILE: &str = ".tantivy-writer.lock";
+
+/// Sidecar file holding `mtime<TAB>size<TAB>path` for every indexed file.
+///
+/// Recovering those stamps from the index itself means deserialising every
+/// stored document, which is the whole cost of opening a project that has not
+/// changed. A stale or missing sidecar is safe by construction: a stamp that
+/// is missing or does not match makes the file be re-read, so the worst it
+/// can cause is work, never a stale index.
+const STAMPS_FILE: &str = "stamps.tsv";
 
 /// File the lock probe below takes and releases. Never read.
 const LOCK_PROBE_FILE: &str = ".ide-lock-probe";
@@ -88,8 +102,29 @@ const LOCK_PROBE_FILE: &str = ".ide-lock-probe";
 /// Ngram size used for the `content` field's tokenizer — see module docs.
 const NGRAM_SIZE: usize = 3;
 
-/// Heap tantivy may use before it flushes a segment.
-const WRITER_HEAP_BYTES: usize = 50_000_000;
+/// Heap tantivy may use per indexing thread before it flushes a segment.
+///
+/// The thread count matters more than the number itself: `Index::writer`
+/// derives its thread count by dividing the *total* budget by tantivy's
+/// 15 MB-per-thread minimum, so the old flat 50 MB total silently capped
+/// indexing at three threads no matter how many cores were available.
+const WRITER_HEAP_BYTES_PER_THREAD: usize = 32_000_000;
+
+/// Tantivy's own ceiling (`MAX_NUM_THREAD`); asking for more is rejected.
+const MAX_WRITER_THREADS: usize = 8;
+
+/// Files larger than this are indexed by name only — no content, no symbols.
+///
+/// A minified bundle or a multi-megabyte log is ngram(3)-tokenized byte by
+/// byte, so a handful of them can cost more than the entire rest of a
+/// project, and nobody is reading them in an editor anyway.
+// ponytail: a flat byte cap, in the same range as mainstream IDEs use. A
+// per-language cap, or "index the first N bytes", would be the upgrade if
+// something legitimate turns out to sit just above the line.
+const MAX_INDEXED_BYTES: u64 = 2 * 1024 * 1024;
+
+/// How much of a file is sniffed for a NUL byte before deciding it is binary.
+const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 /// How long to keep retrying the writer lock before reporting it busy. An
 /// instance that has just been closed still holds the lock for as long as
@@ -185,9 +220,13 @@ fn fallback_index_dir(project_root: &Path) -> Option<PathBuf> {
 /// [`IndexError::Locked`] — never as a reason to rebuild, since rebuilding
 /// deletes the very files the live writer is using.
 fn acquire_writer(index: &Index, index_dir: &Path) -> Result<IndexWriter, IndexError> {
+    let threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .clamp(1, MAX_WRITER_THREADS);
     let mut attempts = 0;
     loop {
-        match index.writer(WRITER_HEAP_BYTES) {
+        match index.writer_with_num_threads(threads, threads * WRITER_HEAP_BYTES_PER_THREAD) {
             Ok(writer) => return Ok(writer),
             Err(e @ tantivy::TantivyError::LockFailure(_, _)) => {
                 if attempts >= WRITER_LOCK_RETRIES {
@@ -356,13 +395,24 @@ fn build_schema() -> (Schema, Fields) {
     // term matching; `find_definitions`' substring match is done in Rust
     // over the (already tantivy-narrowed-to-definitions) stored values,
     // per the plan doc's "exact substring match is the minimum bar".
+    //
+    // One symbol document now covers every occurrence of one name in one
+    // file, so `sym_name` is single-valued while the five row fields below
+    // are multi-valued and index-aligned: the nth value of each describes
+    // the same occurrence. `symbol_docs` appends all five per row so they
+    // cannot drift, and `collect_symbol_matches` zips them back apart.
     let sym_name = builder.add_text_field("sym_name", STRING | STORED);
-    let sym_kind = builder.add_text_field("sym_kind", STRING | STORED);
-    let sym_container = builder.add_text_field("sym_container", STRING | STORED);
-    let sym_line = builder.add_u64_field("sym_line", INDEXED | STORED);
+    // Stored, not indexed: nothing queries a kind or a container, they are
+    // only read back off a document that some other field already matched.
+    let sym_kind = builder.add_text_field("sym_kind", STORED);
+    let sym_container = builder.add_text_field("sym_container", STORED);
+    let sym_line = builder.add_u64_field("sym_line", STORED);
     // Byte column within the line. Without it a jump can only land at
     // column 0; Go to Declaration wants the caret *on* the identifier.
-    let sym_col = builder.add_u64_field("sym_col", INDEXED | STORED);
+    let sym_col = builder.add_u64_field("sym_col", STORED);
+    // Indexed, because `find_definitions` narrows on it. A packed document
+    // matches `sym_is_definition:1` when *any* of its rows is a definition,
+    // so the reader filters the rows again after expanding them.
     let sym_is_definition = builder.add_u64_field("sym_is_definition", INDEXED | STORED);
     // Supertype edges (`doc_type = "inherit"`): `inh_type` declares
     // `inh_supertype`. They reuse the shared `path` term, so an existing
@@ -409,9 +459,57 @@ struct FileStamp {
 }
 
 fn stamp_of(path: &Path) -> FileStamp {
-    let Ok(meta) = fs::metadata(path) else {
-        return FileStamp::default();
-    };
+    match fs::metadata(path) {
+        Ok(meta) => stamp_from(&meta),
+        Err(_) => FileStamp::default(),
+    }
+}
+
+/// Read the stamp sidecar. `None` when it is absent or unreadable — the
+/// caller then falls back to recovering stamps from the index itself.
+fn read_stamps(index_dir: &Path) -> Option<HashMap<String, FileStamp>> {
+    let raw = fs::read_to_string(index_dir.join(STAMPS_FILE)).ok()?;
+    let mut stamps = HashMap::new();
+    for line in raw.lines() {
+        // Path last, so a path containing a tab still round-trips.
+        let mut parts = line.splitn(3, '\t');
+        let (Some(mtime), Some(size), Some(path)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return None;
+        };
+        let (Ok(mtime_secs), Ok(size_bytes)) = (mtime.parse(), size.parse()) else {
+            return None;
+        };
+        stamps.insert(
+            path.to_string(),
+            FileStamp {
+                mtime_secs,
+                size_bytes,
+            },
+        );
+    }
+    Some(stamps)
+}
+
+/// Replace the stamp sidecar. Written to a temporary name and renamed, so a
+/// crash mid-write leaves the previous file rather than a truncated one.
+/// Failures are silent on purpose: the sidecar is a cache, and losing it
+/// costs one slow open.
+fn write_stamps(index_dir: &Path, stamps: &[(String, FileStamp)]) {
+    let mut out = String::with_capacity(stamps.len() * 48);
+    for (key, stamp) in stamps {
+        out.push_str(&format!(
+            "{}\t{}\t{}\n",
+            stamp.mtime_secs, stamp.size_bytes, key
+        ));
+    }
+    let temp = index_dir.join(format!("{STAMPS_FILE}.tmp"));
+    if fs::write(&temp, out).is_ok() {
+        let _ = fs::rename(&temp, index_dir.join(STAMPS_FILE));
+    }
+}
+
+fn stamp_from(meta: &fs::Metadata) -> FileStamp {
     let mtime_secs = meta
         .modified()
         .ok()
@@ -503,6 +601,15 @@ struct FlatSymbol<'a> {
     container: Option<&'a str>,
 }
 
+/// One occurrence's row inside a packed symbol document.
+struct SymbolRow<'a> {
+    line: usize,
+    col: usize,
+    is_definition: bool,
+    kind: Option<&'a str>,
+    container: Option<&'a str>,
+}
+
 fn flatten_outline<'a>(
     nodes: &'a [SymbolNode],
     parent: Option<&'a str>,
@@ -534,6 +641,47 @@ fn line_and_col_at(text: &str, offset: usize) -> (usize, usize) {
         .unwrap_or(0);
     (line, clamped - line_start)
 }
+
+/// Byte offset of the first byte of every line in `text`, ascending, always
+/// starting with 0.
+///
+/// Built once per file so that resolving a position costs a binary search
+/// instead of a scan from byte 0. [`line_and_col_at`] on its own is fine for
+/// the one-off callers, but the indexer resolves a position for *every*
+/// identifier occurrence in a file, which made symbol extraction quadratic in
+/// file size.
+fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(text.len() / 32 + 1);
+    starts.push(0);
+    starts.extend(
+        text.bytes()
+            .enumerate()
+            .filter(|(_, byte)| *byte == b'\n')
+            .map(|(i, _)| i + 1),
+    );
+    starts
+}
+
+/// Same result as [`line_and_col_at`], against a table from [`line_starts`].
+fn line_and_col_from(starts: &[usize], offset: usize) -> (usize, usize) {
+    let line = starts.partition_point(|&start| start <= offset).max(1);
+    (line, offset - starts[line - 1])
+}
+
+/// How far an index build has got.
+///
+/// `total` is the number of files this pass has to read — files whose stamp
+/// already matched are not counted, so a warm open with nothing to do reports
+/// `0/0` once and finishes. `done` never exceeds `total` and the last report
+/// of a pass always has `done == total`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IndexProgress {
+    pub done: usize,
+    pub total: usize,
+}
+
+/// The progress callback for callers that do not want one.
+fn no_progress(_: IndexProgress) {}
 
 /// Where one project's index is in its lifecycle. Opening a project starts
 /// a build that takes seconds to minutes on a real repository, so "there is
@@ -979,6 +1127,11 @@ pub fn resolve_replacements(
 /// verification on top (see module docs for the two-stage design).
 pub struct TextIndex {
     root: PathBuf,
+    /// Where this index actually lives. Usually `<root>/.ide-index/`, but
+    /// [`index_dir_for`] falls back to the user's cache directory on a
+    /// filesystem that cannot take an advisory lock, so it cannot be
+    /// re-derived from the root without probing for a lock all over again.
+    index_dir: PathBuf,
     index: Index,
     writer: IndexWriter,
     reader: IndexReader,
@@ -993,6 +1146,15 @@ impl TextIndex {
     /// entries excluded unless explicitly un-ignored). Any existing index
     /// directory is replaced.
     pub fn build(project_root: &Path) -> Result<Self, IndexError> {
+        Self::build_with_progress(project_root, &no_progress)
+    }
+
+    /// [`build`](Self::build), reporting how far along it is. See
+    /// [`IndexProgress`].
+    pub fn build_with_progress(
+        project_root: &Path,
+        progress: &(dyn Fn(IndexProgress) + Sync),
+    ) -> Result<Self, IndexError> {
         let index_dir = index_dir_for(project_root);
         if index_dir.exists() {
             fs::remove_dir_all(&index_dir)?;
@@ -1014,13 +1176,14 @@ impl TextIndex {
         let reader = index.reader()?;
         let mut this = Self {
             root: project_root.to_path_buf(),
+            index_dir: index_dir.clone(),
             index,
             writer,
             reader,
             fields,
             files: Vec::new(),
         };
-        this.sync_from_disk(&HashMap::new())?;
+        this.sync_from_disk(&HashMap::new(), progress)?;
         Ok(this)
     }
 
@@ -1033,10 +1196,29 @@ impl TextIndex {
     /// This is what a project open should call: an unchanged repository costs
     /// one directory walk plus a `stat` per file, not a full re-index.
     pub fn open_or_build(project_root: &Path) -> Result<Self, IndexError> {
+        Self::open_or_build_with_progress(project_root, &no_progress)
+    }
+
+    /// [`open_or_build`](Self::open_or_build), reporting how far along it is.
+    /// See [`IndexProgress`].
+    pub fn open_or_build_with_progress(
+        project_root: &Path,
+        progress: &(dyn Fn(IndexProgress) + Sync),
+    ) -> Result<Self, IndexError> {
         match Self::open_existing(project_root) {
             Ok(mut index) => {
-                let stamps = index.indexed_stamps()?;
-                index.sync_from_disk(&stamps)?;
+                let sidecar = read_stamps(&index.index_dir);
+                let stamps = match sidecar {
+                    Some(ref stamps) => stamps.clone(),
+                    None => index.indexed_stamps()?,
+                };
+                index.sync_from_disk(&stamps, progress)?;
+                if sidecar.is_none() {
+                    // The pass only rewrites the sidecar when it changed
+                    // something; a missing or damaged one has to be healed
+                    // here, or every open pays the slow fallback forever.
+                    index.write_current_stamps();
+                }
                 Ok(index)
             }
             // A busy lock is never answered by rebuilding: `build` wipes the
@@ -1044,7 +1226,7 @@ impl TextIndex {
             // writer that holds the lock and leave two writers disagreeing
             // about `meta.json`.
             Err(err @ IndexError::Locked(_)) => Err(err),
-            Err(_) => Self::build(project_root),
+            Err(_) => Self::build_with_progress(project_root, progress),
         }
     }
 
@@ -1078,6 +1260,7 @@ impl TextIndex {
         let reader = index.reader()?;
         Ok(Self {
             root: project_root.to_path_buf(),
+            index_dir: index_dir.clone(),
             index,
             writer,
             reader,
@@ -1127,10 +1310,20 @@ impl TextIndex {
     /// Walk the project, re-indexing every file whose stamp differs from
     /// `known` and removing indexed files that no longer exist, then rebuild
     /// the in-memory file list. One commit for the whole pass.
-    fn sync_from_disk(&mut self, known: &HashMap<String, FileStamp>) -> Result<(), IndexError> {
-        let index_dir = self.root.join(INDEX_DIR_NAME);
-        let mut seen: Vec<(PathBuf, String)> = Vec::new();
-        let mut dirty = false;
+    ///
+    /// Two passes on purpose. The walk is cheap and single-threaded, and
+    /// finishing it before any file is read is what makes the number of files
+    /// to index known up front — a progress report without a total is a
+    /// spinner, not progress. The second pass is where all the cost is (read,
+    /// tree-sitter parse, document build) and it runs in parallel.
+    fn sync_from_disk(
+        &mut self,
+        known: &HashMap<String, FileStamp>,
+        progress: &(dyn Fn(IndexProgress) + Sync),
+    ) -> Result<(), IndexError> {
+        let index_dir = self.index_dir.clone();
+        let mut unchanged: Vec<(PathBuf, String, FileStamp)> = Vec::new();
+        let mut stale: Vec<(PathBuf, String, FileStamp)> = Vec::new();
 
         for entry in ignore::WalkBuilder::new(&self.root).build() {
             let Ok(entry) = entry else { continue };
@@ -1138,23 +1331,62 @@ impl TextIndex {
             if path.starts_with(&index_dir) {
                 continue;
             }
-            if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
+            // The walker already stat'ed this entry; re-stat'ing it here was
+            // a second syscall per file for the same two numbers.
+            let Ok(metadata) = entry.metadata() else {
+                continue;
+            };
+            if !metadata.is_file() {
                 continue;
             }
             let key = path.to_string_lossy().into_owned();
-            let stamp = stamp_of(path);
+            let stamp = stamp_from(&metadata);
             if known.get(&key) == Some(&stamp) {
-                seen.push((path.to_path_buf(), key));
-                continue;
-            }
-            if self.write_file_doc(path, stamp)? {
-                dirty = true;
-                seen.push((path.to_path_buf(), key));
+                unchanged.push((path.to_path_buf(), key, stamp));
+            } else {
+                stale.push((path.to_path_buf(), key, stamp));
             }
         }
 
+        let total = stale.len();
+        progress(IndexProgress { done: 0, total });
+
+        let done = AtomicUsize::new(0);
+        // Whether this pass actually changed the index, as opposed to merely
+        // looking at files. A file the index has no record of has nothing to
+        // delete, and a file past the size cap contributes no documents, so
+        // neither makes the pass dirty — which is what keeps a reopen of an
+        // unchanged project from committing and reloading for nothing.
+        let mutated = AtomicBool::new(false);
+        let writer = &self.writer;
+        let fields = &self.fields;
+        let indexed: Vec<Option<(PathBuf, String, FileStamp)>> = stale
+            .into_par_iter()
+            .map(|(path, key, stamp)| {
+                if known.contains_key(&key) {
+                    writer.delete_term(Term::from_field_text(fields.path, key.as_str()));
+                    mutated.store(true, Ordering::Relaxed);
+                }
+                let documents = file_docs(fields, &key, &path, stamp);
+                let indexable = documents.is_some();
+                for document in documents.unwrap_or_default() {
+                    writer.add_document(document)?;
+                    mutated.store(true, Ordering::Relaxed);
+                }
+                progress(IndexProgress {
+                    done: done.fetch_add(1, Ordering::Relaxed) + 1,
+                    total,
+                });
+                Ok(indexable.then_some((path, key, stamp)))
+            })
+            .collect::<Result<Vec<_>, IndexError>>()?;
+
+        let mut seen: Vec<(PathBuf, String, FileStamp)> = unchanged;
+        seen.extend(indexed.into_iter().flatten());
+
         let live: std::collections::HashSet<&str> =
-            seen.iter().map(|(_, key)| key.as_str()).collect();
+            seen.iter().map(|(_, key, _)| key.as_str()).collect();
+        let mut dirty = mutated.into_inner();
         for key in known.keys() {
             if !live.contains(key.as_str()) {
                 self.writer
@@ -1168,9 +1400,17 @@ impl TextIndex {
             self.reader.reload()?;
         }
 
+        if dirty {
+            let stamps: Vec<(String, FileStamp)> = seen
+                .iter()
+                .map(|(_, key, stamp)| (key.clone(), *stamp))
+                .collect();
+            write_stamps(&index_dir, &stamps);
+        }
+
         self.files = seen
             .into_iter()
-            .map(|(path, _)| FileEntry {
+            .map(|(path, _, _)| FileEntry {
                 relative: relative_display(&self.root, &path),
                 path,
             })
@@ -1187,18 +1427,23 @@ impl TextIndex {
         let key = path.to_string_lossy().into_owned();
         self.writer
             .delete_term(Term::from_field_text(self.fields.path, &key));
-        let Ok(content) = fs::read_to_string(path) else {
+        let Some(documents) = file_docs(&self.fields, &key, path, stamp) else {
             return Ok(false);
         };
-        index_symbols(&mut self.writer, &self.fields, &key, &content)?;
-        self.writer.add_document(doc!(
-            self.fields.path => key,
-            self.fields.doc_type => DOC_TYPE_TEXT,
-            self.fields.content => content,
-            self.fields.mtime_secs => stamp.mtime_secs,
-            self.fields.size_bytes => stamp.size_bytes,
-        ))?;
+        for document in documents {
+            self.writer.add_document(document)?;
+        }
         Ok(true)
+    }
+
+    /// Rewrite the stamp sidecar from the file list currently in memory.
+    fn write_current_stamps(&self) {
+        let stamps: Vec<(String, FileStamp)> = self
+            .files
+            .iter()
+            .map(|f| (f.path.to_string_lossy().into_owned(), stamp_of(&f.path)))
+            .collect();
+        write_stamps(&self.index_dir, &stamps);
     }
 
     pub fn root(&self) -> &Path {
@@ -1213,7 +1458,7 @@ impl TextIndex {
     /// files, which produces more events, forever. Every mutating entry point
     /// filters through here so no caller can reintroduce that loop.
     pub fn is_index_internal(&self, path: &Path) -> bool {
-        path.starts_with(self.root.join(INDEX_DIR_NAME))
+        path.starts_with(&self.index_dir)
     }
 
     /// Number of files currently held in the file-name tier.
@@ -1236,6 +1481,40 @@ impl TextIndex {
         self.writer.commit()?;
         self.reader.reload()?;
         self.track_file(path, indexable);
+        Ok(())
+    }
+
+    /// Bring a batch of paths up to date in one pass: each path that still
+    /// exists is re-indexed, each that does not is dropped, and the whole
+    /// batch shares a single commit and reader reload.
+    ///
+    /// This is what the filesystem watcher should call. One save can produce
+    /// several events, and a commit per event is both the expensive part and
+    /// a write lock the whole application waits behind.
+    pub fn sync_paths(&mut self, paths: &[PathBuf]) -> Result<(), IndexError> {
+        let mut touched: Vec<(PathBuf, bool)> = Vec::with_capacity(paths.len());
+        for path in paths {
+            if self.is_index_internal(path) {
+                continue;
+            }
+            if path.exists() {
+                let indexable = self.write_file_doc(path, stamp_of(path))?;
+                touched.push((path.clone(), indexable));
+            } else {
+                let key = path.to_string_lossy().into_owned();
+                self.writer
+                    .delete_term(Term::from_field_text(self.fields.path, &key));
+                touched.push((path.clone(), false));
+            }
+        }
+        if touched.is_empty() {
+            return Ok(());
+        }
+        self.writer.commit()?;
+        self.reader.reload()?;
+        for (path, present) in touched {
+            self.track_file(&path, present);
+        }
         Ok(())
     }
 
@@ -1620,7 +1899,7 @@ impl TextIndex {
                 )),
             ),
         ]);
-        let mut matches = self.collect_symbol_matches(&searcher, &query)?;
+        let mut matches = self.collect_symbol_matches(&searcher, &query, true)?;
         matches.retain(|m| m.name.contains(name_query));
         matches.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
         Ok(matches)
@@ -1679,7 +1958,7 @@ impl TextIndex {
                 )),
             ),
         ]);
-        let mut matches = self.collect_symbol_matches(&searcher, &query)?;
+        let mut matches = self.collect_symbol_matches(&searcher, &query, false)?;
         matches.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
         Ok(matches)
     }
@@ -1713,7 +1992,7 @@ impl TextIndex {
                 )),
             ),
         ]);
-        let mut matches = self.collect_symbol_matches(&searcher, &query)?;
+        let mut matches = self.collect_symbol_matches(&searcher, &query, true)?;
         matches.sort_by(|a, b| (&a.path, a.line).cmp(&(&b.path, b.line)));
         Ok(matches)
     }
@@ -1855,10 +2134,18 @@ impl TextIndex {
         Ok(matches)
     }
 
+    /// Expand every packed symbol document `query` matches back into one
+    /// [`SymbolMatch`] per occurrence.
+    ///
+    /// `definitions_only` is not an optimisation: a packed document matches
+    /// the `sym_is_definition:1` term when *any* of its rows is a definition,
+    /// so a definition query that did not filter the expanded rows would
+    /// report every reference in the same file as a definition too.
     fn collect_symbol_matches(
         &self,
         searcher: &tantivy::Searcher,
         query: &dyn tantivy::query::Query,
+        definitions_only: bool,
     ) -> Result<Vec<SymbolMatch>, IndexError> {
         let num_docs = searcher.num_docs() as usize;
         if num_docs == 0 {
@@ -1868,42 +2155,54 @@ impl TextIndex {
         let mut matches = Vec::with_capacity(top_docs.len());
         for (_score, doc_address) in top_docs {
             let retrieved: tantivy::TantivyDocument = searcher.doc(doc_address)?;
-            let get_str = |field| {
+            let all_u64 = |field| {
+                retrieved
+                    .get_all(field)
+                    .map(|v| v.as_u64().unwrap_or(0))
+                    .collect::<Vec<_>>()
+            };
+            let all_str = |field| {
+                retrieved
+                    .get_all(field)
+                    .map(|v| v.as_str().unwrap_or("").to_string())
+                    .collect::<Vec<_>>()
+            };
+            let first_str = |field| {
                 retrieved
                     .get_first(field)
                     .and_then(|v| v.as_str())
                     .map(str::to_string)
             };
-            let Some(name) = get_str(self.fields.sym_name) else {
+            let Some(name) = first_str(self.fields.sym_name) else {
                 continue;
             };
-            let Some(path) = get_str(self.fields.path) else {
+            let Some(path) = first_str(self.fields.path) else {
                 continue;
             };
-            let line = retrieved
-                .get_first(self.fields.sym_line)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let col = retrieved
-                .get_first(self.fields.sym_col)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0) as usize;
-            let is_definition = retrieved
-                .get_first(self.fields.sym_is_definition)
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0)
-                == 1;
-            let kind = get_str(self.fields.sym_kind).and_then(|k| symbol_kind_from_str(&k));
-            let container = get_str(self.fields.sym_container);
-            matches.push(SymbolMatch {
-                name,
-                kind,
-                path: PathBuf::from(path),
-                line,
-                col,
-                is_definition,
-                container,
-            });
+            let lines = all_u64(self.fields.sym_line);
+            let cols = all_u64(self.fields.sym_col);
+            let definitions = all_u64(self.fields.sym_is_definition);
+            let kinds = all_str(self.fields.sym_kind);
+            let containers = all_str(self.fields.sym_container);
+
+            for (row, &line) in lines.iter().enumerate() {
+                let is_definition = definitions.get(row).copied().unwrap_or(0) == 1;
+                if definitions_only && !is_definition {
+                    continue;
+                }
+                matches.push(SymbolMatch {
+                    name: name.clone(),
+                    kind: kinds.get(row).and_then(|k| symbol_kind_from_str(k)),
+                    path: PathBuf::from(&path),
+                    line: line as usize,
+                    col: cols.get(row).copied().unwrap_or(0) as usize,
+                    is_definition,
+                    container: containers
+                        .get(row)
+                        .filter(|c| !c.is_empty())
+                        .map(|c| c.to_string()),
+                });
+            }
         }
         Ok(matches)
     }
@@ -1916,19 +2215,60 @@ fn doc_type_query(field: tantivy::schema::Field, value: &str) -> Box<dyn tantivy
     ))
 }
 
-/// Index the definition/reference rows for one file's already-read
-/// `content` into the symbol/reference schema (see the module doc's "Two
-/// schemas, one index" section). Merges `outline()`'s definitions
-/// (kind + container) onto the matching `identifier_occurrences()` row by
-/// shared name-token byte range rather than indexing both separately, so a
-/// definition site appears exactly once in `find_usages` results, not
-/// twice.
-fn index_symbols(
-    writer: &mut IndexWriter,
+/// Every document one file contributes to the index, or `None` when the file
+/// is not indexable at all (unreadable, or not UTF-8 text) — those are
+/// dropped from the index *and* from the file-name tier, since neither text
+/// nor file search can serve them.
+///
+/// A file past [`MAX_INDEXED_BYTES`] contributes no documents at all but is
+/// still reported as indexable, so it stays in the file-name tier and stays
+/// findable by name — it is simply not searchable by content or by symbol.
+/// Deliberately no stamped, empty-content text document: that document would
+/// carry the file's path back into the candidate list whenever the ngram
+/// stage falls back to "every text doc", so Find in Files would reach into an
+/// over-cap file on some patterns and not others. The cost of leaving it out
+/// is that each open re-decides it, which is a size comparison against a
+/// stat the walk already did.
+///
+/// Free-standing rather than a method so the indexing pass can run it on
+/// many files in parallel — it borrows nothing mutable.
+fn file_docs(
     fields: &Fields,
     path_key: &str,
-    content: &str,
-) -> Result<(), IndexError> {
+    path: &Path,
+    stamp: FileStamp,
+) -> Option<Vec<tantivy::TantivyDocument>> {
+    let text_doc = |content: String| {
+        doc!(
+            fields.path => path_key.to_string(),
+            fields.doc_type => DOC_TYPE_TEXT,
+            fields.content => content,
+            fields.mtime_secs => stamp.mtime_secs,
+            fields.size_bytes => stamp.size_bytes,
+        )
+    };
+
+    if stamp.size_bytes > MAX_INDEXED_BYTES {
+        return Some(Vec::new());
+    }
+    let bytes = fs::read(path).ok()?;
+    if bytes[..bytes.len().min(BINARY_SNIFF_BYTES)].contains(&0) {
+        return None;
+    }
+    let content = String::from_utf8(bytes).ok()?;
+
+    let mut documents = symbol_docs(fields, path_key, &content);
+    documents.push(text_doc(content));
+    Some(documents)
+}
+
+/// The definition/reference rows for one file's already-read `content` as
+/// symbol/reference-schema documents (see the module doc's "Three schemas,
+/// one index" section). Merges `outline()`'s definitions (kind + container)
+/// onto the matching `identifier_occurrences()` row by shared name-token
+/// byte range rather than indexing both separately, so a definition site
+/// appears exactly once in `find_usages` results, not twice.
+fn symbol_docs(fields: &Fields, path_key: &str, content: &str) -> Vec<tantivy::TantivyDocument> {
     let language = language_for_path(Path::new(path_key));
 
     // One parse for all three extractions (outline, occurrences, supertype
@@ -1937,37 +2277,60 @@ fn index_symbols(
     let mut flat: BTreeMap<(usize, usize), FlatSymbol<'_>> = BTreeMap::new();
     flatten_outline(&analysis.outline, None, &mut flat);
 
-    for occurrence in analysis.occurrences {
-        let (line, col) = line_and_col_at(content, occurrence.start);
+    // One table for the whole file: every occurrence and edge below resolves
+    // its position by binary search instead of counting newlines from byte 0.
+    let starts = line_starts(content);
+
+    // Group by name first: one document per (file, name) rather than one per
+    // occurrence. A file mentioning `self` two hundred times used to cost two
+    // hundred documents, each repeating the file's whole path.
+    let mut by_name: BTreeMap<String, Vec<SymbolRow<'_>>> = BTreeMap::new();
+    for occurrence in &analysis.occurrences {
+        let (line, col) = line_and_col_from(&starts, occurrence.start);
+        let flat_symbol = flat.get(&(occurrence.start, occurrence.end));
+        by_name
+            .entry(occurrence.name.clone())
+            .or_default()
+            .push(SymbolRow {
+                line,
+                col,
+                is_definition: occurrence.is_definition,
+                kind: flat_symbol.map(|f| symbol_kind_to_str(f.kind)),
+                container: flat_symbol.and_then(|f| f.container),
+            });
+    }
+
+    let mut documents = Vec::with_capacity(by_name.len() + analysis.supertype_edges.len());
+    for (name, rows) in by_name {
         let mut document = doc!(
             fields.path => path_key.to_string(),
             fields.doc_type => DOC_TYPE_SYMBOL,
-            fields.sym_name => occurrence.name,
-            fields.sym_line => line as u64,
-            fields.sym_col => col as u64,
-            fields.sym_is_definition => occurrence.is_definition as u64,
+            fields.sym_name => name,
         );
-        if let Some(flat_symbol) = flat.get(&(occurrence.start, occurrence.end)) {
-            document.add_text(fields.sym_kind, symbol_kind_to_str(flat_symbol.kind));
-            if let Some(container) = flat_symbol.container {
-                document.add_text(fields.sym_container, container);
-            }
+        // All five, every row, in row order — that is the whole contract
+        // that keeps the parallel fields aligned when they are read back.
+        for row in rows {
+            document.add_u64(fields.sym_line, row.line as u64);
+            document.add_u64(fields.sym_col, row.col as u64);
+            document.add_u64(fields.sym_is_definition, row.is_definition as u64);
+            document.add_text(fields.sym_kind, row.kind.unwrap_or(""));
+            document.add_text(fields.sym_container, row.container.unwrap_or(""));
         }
-        writer.add_document(document)?;
+        documents.push(document);
     }
 
-    for edge in analysis.supertype_edges {
-        let (line, col) = line_and_col_at(content, edge.type_start);
-        writer.add_document(doc!(
+    for edge in &analysis.supertype_edges {
+        let (line, col) = line_and_col_from(&starts, edge.type_start);
+        documents.push(doc!(
             fields.path => path_key.to_string(),
             fields.doc_type => DOC_TYPE_INHERIT,
-            fields.inh_type => edge.type_name,
-            fields.inh_supertype => edge.supertype_name,
+            fields.inh_type => edge.type_name.clone(),
+            fields.inh_supertype => edge.supertype_name.clone(),
             fields.sym_line => line as u64,
             fields.sym_col => col as u64,
-        ))?;
+        ));
     }
-    Ok(())
+    documents
 }
 
 /// Tier 1 of [`TextIndex::resolve_declaration`] on its own: declarations of
@@ -2523,6 +2886,242 @@ mod tests {
         index.remove_file(&file).unwrap();
 
         assert_eq!(index.search("findme", false, true).unwrap().len(), 0);
+    }
+
+    // --- stamp sidecar and batched watcher updates (IP4) ---
+
+    #[test]
+    fn the_stamp_sidecar_carries_the_same_answer_as_reading_the_index() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "fn add() {}\n");
+        write(dir.path(), "src/other.rs", "fn other() {}\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+        let from_index = index.indexed_stamps().unwrap();
+        let index_dir = index.index_dir.clone();
+        drop(index);
+
+        let from_sidecar = read_stamps(&index_dir).expect("sidecar written by the build");
+        assert_eq!(from_sidecar, from_index);
+    }
+
+    #[test]
+    fn a_missing_sidecar_still_opens_correctly_from_the_index_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "fn add() {}\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+        let index_dir = index.index_dir.clone();
+        drop(index);
+
+        fs::write(index_dir.join(STAMPS_FILE), "not a stamp file at all").unwrap();
+        assert!(read_stamps(&index_dir).is_none());
+
+        // The unparseable sidecar sends the open down the tantivy fallback,
+        // and the result is the same index either way.
+        let index = TextIndex::open_or_build(dir.path()).unwrap();
+        assert_eq!(index.indexed_file_count(), 1);
+        assert_eq!(index.find_definitions_exact("add").unwrap().len(), 1);
+    }
+
+    #[test]
+    fn sync_paths_applies_a_whole_watcher_batch_in_one_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let kept = write(dir.path(), "src/kept.rs", "fn kept() {}\n");
+        let doomed = write(dir.path(), "src/doomed.rs", "fn doomed() {}\n");
+        let mut index = TextIndex::build(dir.path()).unwrap();
+
+        fs::write(&kept, "fn renamed() {}\n").unwrap();
+        fs::remove_file(&doomed).unwrap();
+        let added = write(dir.path(), "src/added.rs", "fn added() {}\n");
+
+        index
+            .sync_paths(&[kept.clone(), doomed.clone(), added.clone()])
+            .unwrap();
+
+        assert_eq!(index.find_definitions_exact("kept").unwrap().len(), 0);
+        assert_eq!(index.find_definitions_exact("renamed").unwrap().len(), 1);
+        assert_eq!(index.find_definitions_exact("doomed").unwrap().len(), 0);
+        assert_eq!(index.find_definitions_exact("added").unwrap().len(), 1);
+        assert_eq!(index.indexed_file_count(), 2);
+    }
+
+    #[test]
+    fn reopening_an_unchanged_project_writes_nothing_at_all() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "fn add() {}\n");
+        write(dir.path(), "src/other.rs", "fn other() {}\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+        let index_dir = index.index_dir.clone();
+        drop(index);
+
+        let listing = |dir: &Path| {
+            let mut entries: Vec<(String, u64)> = fs::read_dir(dir)
+                .unwrap()
+                .flatten()
+                .map(|e| {
+                    (
+                        e.file_name().to_string_lossy().into_owned(),
+                        e.metadata().map(|m| m.len()).unwrap_or(0),
+                    )
+                })
+                .collect();
+            entries.sort();
+            entries
+        };
+        let before = listing(&index_dir);
+
+        let index = TextIndex::open_or_build(dir.path()).unwrap();
+        assert_eq!(index.indexed_file_count(), 2);
+        drop(index);
+
+        // No commit, no new segment, no rewritten sidecar: a project that did
+        // not change costs a walk and a stat per file, and nothing else.
+        assert_eq!(listing(&index_dir), before);
+    }
+
+    // --- packed symbol documents, size cap, binary sniff (IP1/IP3) ---
+
+    #[test]
+    fn line_and_col_from_a_table_matches_the_scanning_version() {
+        let text = "alpha\nbeta\n\ngamma delta\n";
+        let starts = line_starts(text);
+        for offset in 0..=text.len() {
+            assert_eq!(
+                line_and_col_from(&starts, offset),
+                line_and_col_at(text, offset),
+                "offset {offset}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_document_carries_every_occurrence_of_a_name_with_its_rows_aligned() {
+        let dir = tempfile::tempdir().unwrap();
+        // `add` is defined on line 1 and referenced on lines 2 and 3, so all
+        // three occurrences pack into a single document.
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "fn add(x: i32) -> i32 { x }\nfn a() -> i32 { add(1) }\nfn b() -> i32 { add(2) }\n",
+        );
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let searcher = index.reader.searcher();
+        let query = BooleanQuery::new(vec![
+            (
+                Occur::Must,
+                doc_type_query(index.fields.doc_type, DOC_TYPE_SYMBOL),
+            ),
+            (
+                Occur::Must,
+                Box::new(TermQuery::new(
+                    Term::from_field_text(index.fields.sym_name, "add"),
+                    IndexRecordOption::Basic,
+                )),
+            ),
+        ]);
+        let docs = searcher.search(&query, &TopDocs::with_limit(10)).unwrap();
+        assert_eq!(docs.len(), 1, "one document per (file, name)");
+
+        let usages = index.find_usages("add").unwrap();
+        assert_eq!(
+            usages.iter().map(|u| u.line).collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        // The rows stayed aligned: only the row on line 1 is the definition,
+        // and only it carries the kind the outline supplied.
+        assert_eq!(
+            usages.iter().map(|u| u.is_definition).collect::<Vec<_>>(),
+            vec![true, false, false]
+        );
+        assert_eq!(usages[0].kind, Some(SymbolKind::Function));
+        assert_eq!(usages[1].kind, None);
+        assert_eq!(usages[2].kind, None);
+    }
+
+    #[test]
+    fn a_definition_query_reports_only_the_definition_rows_of_a_packed_document() {
+        let dir = tempfile::tempdir().unwrap();
+        write(
+            dir.path(),
+            "src/lib.rs",
+            "fn add(x: i32) -> i32 { x }\nfn a() -> i32 { add(1) }\n",
+        );
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        let defs = index.find_definitions_exact("add").unwrap();
+        assert_eq!(defs.len(), 1, "{defs:?}");
+        assert_eq!(defs[0].line, 1);
+        assert!(defs[0].is_definition);
+
+        let substring = index.find_definitions("ad").unwrap();
+        assert_eq!(substring.len(), 1, "{substring:?}");
+        assert_eq!(substring[0].line, 1);
+    }
+
+    #[test]
+    fn a_file_past_the_size_cap_is_findable_by_name_but_not_by_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let big = format!(
+            "fn zqmarker_huge() {{}}\n// {}\n",
+            "x".repeat(MAX_INDEXED_BYTES as usize)
+        );
+        write(dir.path(), "src/big.rs", &big);
+        write(dir.path(), "src/small.rs", "fn small() {}\n");
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        // Still in the file-name tier, and still stamped, so a warm open
+        // does not keep rediscovering it.
+        assert!(index
+            .find_files("big.rs", 10)
+            .iter()
+            .any(|m| m.path.ends_with("big.rs")));
+
+        // The documented ceiling: no content in the ngram index, so the
+        // candidate stage never nominates it, and no symbols at all.
+        let hits = index.search("zqmarker_huge", false, true).unwrap();
+        assert!(hits.is_empty(), "{hits:?}");
+        let defs = index.find_definitions_exact("zqmarker_huge").unwrap();
+        assert!(defs.is_empty(), "{defs:?}");
+    }
+
+    #[test]
+    fn a_binary_file_is_dropped_from_the_index_entirely() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "fn add() {}\n");
+        fs::write(dir.path().join("blob.bin"), b"MZ\x00\x00binary payload").unwrap();
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        assert!(
+            index.find_files("blob", 10).is_empty(),
+            "a binary file is not worth listing by name either"
+        );
+        assert_eq!(index.indexed_file_count(), 1);
+    }
+
+    #[test]
+    fn progress_counts_up_to_the_total_it_announced() {
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..5 {
+            write(dir.path(), &format!("src/f{i}.rs"), "fn f() {}\n");
+        }
+        let seen = std::sync::Mutex::new(Vec::new());
+        let index = TextIndex::build_with_progress(dir.path(), &|p: IndexProgress| {
+            seen.lock().unwrap().push((p.done, p.total));
+        })
+        .unwrap();
+        drop(index);
+
+        let seen = seen.into_inner().unwrap();
+        let total = seen[0].1;
+        assert_eq!(total, 5);
+        assert_eq!(
+            seen[0].0, 0,
+            "the total is announced before any file is read"
+        );
+        let mut done: Vec<usize> = seen.iter().map(|(d, _)| *d).collect();
+        done.sort();
+        assert_eq!(done, vec![0, 1, 2, 3, 4, 5]);
+        assert!(seen.iter().all(|(d, t)| *d <= *t && *t == total));
     }
 
     // --- symbol/reference schema (E1) ---

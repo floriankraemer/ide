@@ -195,7 +195,7 @@ protected:
 };
 
 // The composer's live counter. `exact` is the whole reason FfiTokenUsage
-// carries a flag rather than only a number (ADR-0020: "labels it an estimate
+// carries a flag rather than only a number (ADR-0021: "labels it an estimate
 // rather than presenting a guess as a measurement"), so an estimate is
 // rendered with a leading tilde and says so in its tooltip.
 QString tokenText(const FfiTokenUsage &usage)
@@ -583,7 +583,7 @@ QFrame *AiChatPanel::makeBubbleFrame(const QString &role, QTextBrowser **browser
     layout->addWidget(who);
 
     auto *browser = new QTextBrowser(frame);
-    // SECURITY (ADR-0020): assistant output is untrusted text. Both switches
+    // SECURITY (ADR-0021): assistant output is untrusted text. Both switches
     // are needed — setOpenLinks(false) stops QTextBrowser navigating itself,
     // setOpenExternalLinks(false) stops it handing a URL to the desktop. No
     // anchorClicked handler is connected, so a link the model emits is inert.

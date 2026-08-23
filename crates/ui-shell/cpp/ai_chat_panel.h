@@ -33,7 +33,7 @@ namespace ui_shell {
 // the attachment chips that say exactly what will be sent, and a composer
 // with a live token counter.
 //
-// Humble view (ADR-0002, ADR-0020 decision 6): every rule lives in
+// Humble view (ADR-0002, ADR-0021 decision 6): every rule lives in
 // `ai-chat-core` behind `AiChat`. Which providers exist, whether a key is
 // reachable, what a tool call is allowed to do, how a fenced block becomes an
 // edit, whether an apply is stale, what a failure means in English, and
@@ -43,7 +43,7 @@ namespace ui_shell {
 // two already-computed strings to show.
 //
 // Two things in here are security requirements rather than preferences
-// (ADR-0020, "Data-egress and safety constraints"):
+// (ADR-0021, "Data-egress and safety constraints"):
 //   * assistant output is untrusted text — it renders into a read-only
 //     QTextBrowser with setOpenExternalLinks(false) AND setOpenLinks(false),
 //     so a link the model emits can never be followed by a click;
