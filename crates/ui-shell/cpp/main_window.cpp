@@ -2175,7 +2175,11 @@ protected:
     void keyPressEvent(QKeyEvent *event) override
     {
         static constexpr int kDoubleShiftMs = 300;
-        if (event->key() == Qt::Key_Shift && !event->isAutoRepeat()) {
+        // A Shift held together with another modifier is part of a
+        // shortcut, not a gesture: Ctrl+Shift+N followed within the window by
+        // any capital letter would otherwise open the popup a second time.
+        const bool bareShift = (event->modifiers() & ~Qt::ShiftModifier) == Qt::NoModifier;
+        if (event->key() == Qt::Key_Shift && !event->isAutoRepeat() && bareShift) {
             if (lastShift_.isValid() && lastShift_.elapsed() < kDoubleShiftMs) {
                 lastShift_.invalidate();
                 if (searchEverywhere_) {
