@@ -14,10 +14,14 @@ use std::io;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub mod keymap;
 pub mod syntax_colors;
+
+/// Per-project settings layered over the global file (ADR-0022).
+pub mod project_settings;
 
 pub use keymap::{action, ActionDef, Binding, Keymap, ACTIONS};
 pub use syntax_colors::{LanguageScopeStyles, ScopeStyle, ScopeStyles};
@@ -376,6 +380,11 @@ impl Settings {
 pub enum ConfigError {
     Io(io::Error),
     Parse(toml::de::Error),
+    /// The value could not be turned into TOML. `Settings` cannot hit this,
+    /// but a layer carrying arbitrary user keys forward can (see
+    /// `project_settings`), and a panic on the save path of a file that has
+    /// already caused data loss once is the wrong failure mode.
+    Serialize(toml::ser::Error),
 }
 
 impl fmt::Display for ConfigError {
@@ -383,6 +392,9 @@ impl fmt::Display for ConfigError {
         match self {
             ConfigError::Io(err) => write!(f, "settings I/O error: {err}"),
             ConfigError::Parse(err) => write!(f, "settings file is malformed: {err}"),
+            ConfigError::Serialize(err) => {
+                write!(f, "settings could not be written: {err}")
+            }
         }
     }
 }
@@ -403,62 +415,105 @@ pub fn default_config_dir() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("ide"))
 }
 
-/// Load settings from `<config_dir>/settings.toml`. A missing file is not an
-/// error — it means no settings have been saved yet, so this returns
-/// `Settings::default()`. A malformed file is an error.
-pub fn load(config_dir: &Path) -> Result<Settings, ConfigError> {
-    let path = config_dir.join(SETTINGS_FILE);
-    let content = match fs::read_to_string(&path) {
+// ---------------------------------------------------------------------------
+// The path-keyed core. `Settings` (global) and `ProjectSettings` (per project)
+// are both persisted through these three functions, so the guarantees below
+// hold for both and cannot drift apart:
+//
+//   * a missing file is not an error — it means nothing has been saved yet;
+//   * a malformed file IS an error, and never silently becomes defaults;
+//   * the write is atomic (temp file, fsync, rename) so no reader ever sees a
+//     half-written file;
+//   * read-modify-write aborts on a load failure rather than editing a
+//     defaulted value and saving that over the user's real settings.
+//
+// That last pair is not theoretical: settings.toml was once wiped to defaults
+// in exactly this way (see the `save`/`update` docs below).
+// ---------------------------------------------------------------------------
+
+/// Load a TOML file into `T`. A missing file yields `T::default()`.
+fn load_toml<T: DeserializeOwned + Default>(path: &Path) -> Result<T, ConfigError> {
+    let content = match fs::read_to_string(path) {
         Ok(content) => content,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Settings::default()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(T::default()),
         Err(e) => return Err(ConfigError::Io(e)),
     };
     toml::from_str(&content).map_err(ConfigError::Parse)
 }
 
-/// Save `settings` to `<config_dir>/settings.toml`, creating `config_dir` if
-/// it doesn't exist yet.
+/// Serialize `value` to `path`, creating the parent directory if needed.
 ///
-/// The write is atomic: the content goes to a temporary file in the same
-/// directory and is then renamed over the real one. A plain truncate-then-write
-/// leaves a window in which the settings file is empty or half-written, and
-/// anything that reads it in that window — another window of the app, the next
-/// launch after a crash or a SIGTERM — sees no settings at all, defaults them,
-/// and can then write those defaults back over everything the user configured.
-pub fn save(config_dir: &Path, settings: &Settings) -> Result<(), ConfigError> {
-    fs::create_dir_all(config_dir)?;
-    let content = toml::to_string_pretty(settings).expect("Settings always serializes");
-    let path = config_dir.join(SETTINGS_FILE);
-    let temp_path = config_dir.join(TEMP_SETTINGS_FILE);
+/// The write is atomic: the content goes to a temporary file beside the real
+/// one and is then renamed over it. A plain truncate-then-write leaves a
+/// window in which the file is empty or half-written, and anything reading it
+/// in that window — another window of the app, the next launch after a crash
+/// or a SIGTERM — sees nothing, defaults it, and can then write those defaults
+/// back over everything the user configured.
+fn save_toml<T: Serialize>(path: &Path, temp_path: &Path, value: &T) -> Result<(), ConfigError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let content = toml::to_string_pretty(value).map_err(ConfigError::Serialize)?;
     // fsync before the rename: the rename can otherwise reach the disk before
-    // the content does, which after a power loss leaves an empty settings file
-    // where a complete old one used to be.
+    // the content does, which after a power loss leaves an empty file where a
+    // complete old one used to be.
     let write_temp = || -> io::Result<()> {
-        let mut file = fs::File::create(&temp_path)?;
+        let mut file = fs::File::create(temp_path)?;
         file.write_all(content.as_bytes())?;
         file.sync_all()
     };
     if let Err(err) = write_temp() {
-        let _ = fs::remove_file(&temp_path);
+        let _ = fs::remove_file(temp_path);
         return Err(ConfigError::Io(err));
     }
-    if let Err(err) = fs::rename(&temp_path, &path) {
-        let _ = fs::remove_file(&temp_path);
+    if let Err(err) = fs::rename(temp_path, path) {
+        let _ = fs::remove_file(temp_path);
         return Err(ConfigError::Io(err));
     }
     Ok(())
 }
 
-/// Load, edit, save — the shape every "change one setting" path needs.
+/// Load, edit, save.
 ///
-/// A load failure aborts the update instead of editing a `Settings::default()`
-/// and saving that: the file on disk holds everything the user configured, so
+/// A load failure aborts the update instead of editing a `T::default()` and
+/// saving that: the file on disk holds everything the user configured, so
 /// writing defaults over it because it could not be read (or was momentarily
 /// unreadable) is data loss, not a fresh start.
+fn update_toml<T: DeserializeOwned + Serialize + Default>(
+    path: &Path,
+    temp_path: &Path,
+    edit: impl FnOnce(&mut T),
+) -> Result<(), ConfigError> {
+    let mut value: T = load_toml(path)?;
+    edit(&mut value);
+    save_toml(path, temp_path, &value)
+}
+
+/// Load settings from `<config_dir>/settings.toml`. A missing file is not an
+/// error — it means no settings have been saved yet, so this returns
+/// `Settings::default()`. A malformed file is an error.
+pub fn load(config_dir: &Path) -> Result<Settings, ConfigError> {
+    load_toml(&config_dir.join(SETTINGS_FILE))
+}
+
+/// Save `settings` to `<config_dir>/settings.toml`, creating `config_dir` if
+/// it doesn't exist yet. Atomic, per [`save_toml`].
+pub fn save(config_dir: &Path, settings: &Settings) -> Result<(), ConfigError> {
+    save_toml(
+        &config_dir.join(SETTINGS_FILE),
+        &config_dir.join(TEMP_SETTINGS_FILE),
+        settings,
+    )
+}
+
+/// Load, edit, save — the shape every "change one setting" path needs.
+/// Aborts on a load failure rather than defaulting, per [`update_toml`].
 pub fn update(config_dir: &Path, edit: impl FnOnce(&mut Settings)) -> Result<(), ConfigError> {
-    let mut settings = load(config_dir)?;
-    edit(&mut settings);
-    save(config_dir, &settings)
+    update_toml(
+        &config_dir.join(SETTINGS_FILE),
+        &config_dir.join(TEMP_SETTINGS_FILE),
+        edit,
+    )
 }
 
 #[cfg(test)]
