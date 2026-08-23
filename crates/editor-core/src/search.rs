@@ -17,6 +17,8 @@
 
 use regex::{Regex, RegexBuilder};
 
+use crate::offsets::Utf16Cursor;
+
 /// How a pattern is interpreted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SearchOptions {
@@ -170,34 +172,6 @@ fn compile(pattern: &str, opts: SearchOptions) -> Result<Regex, SearchError> {
         .case_insensitive(!opts.case_sensitive)
         .build()
         .map_err(|e| SearchError::InvalidPattern(e.to_string()))
-}
-
-/// Byte offset -> UTF-16 code-unit offset, amortised over a single forward
-/// pass. Matches arrive in ascending order, so each `utf16_at` continues
-/// where the last one stopped instead of rescanning from the start.
-struct Utf16Cursor<'a> {
-    hay: &'a str,
-    byte: usize,
-    utf16: usize,
-}
-
-impl<'a> Utf16Cursor<'a> {
-    fn new(hay: &'a str) -> Self {
-        Self {
-            hay,
-            byte: 0,
-            utf16: 0,
-        }
-    }
-
-    /// `target` must be a char boundary at or after the previous call's.
-    fn utf16_at(&mut self, target: usize) -> usize {
-        for ch in self.hay[self.byte..target].chars() {
-            self.byte += ch.len_utf8();
-            self.utf16 += ch.len_utf16();
-        }
-        self.utf16
-    }
 }
 
 #[cfg(test)]

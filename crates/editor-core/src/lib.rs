@@ -15,6 +15,10 @@ mod binary_detect;
 pub use binary_detect::{looks_binary, looks_binary_file};
 
 pub mod hex;
+
+/// Byte <-> UTF-16 offset conversion, shared by every place Rust text meets
+/// a Qt cursor position.
+pub mod offsets;
 pub use hex::{BinaryFile, HexRow, BYTES_PER_ROW};
 
 pub mod search;
