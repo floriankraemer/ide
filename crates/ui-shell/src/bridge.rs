@@ -3345,17 +3345,21 @@ impl ffi::AppSettings {
     }
 
     pub fn save_window_geometry(&self, x: i32, y: i32, width: u32, height: u32) {
-        let config_dir = app_core::resolve_config_dir();
-        let Ok(mut settings) = app_config::load(&config_dir) else {
-            return;
-        };
-        settings.window_geometry = app_config::WindowGeometry {
+        let geometry = app_config::WindowGeometry {
             x,
             y,
             width,
             height,
         };
-        let _ = app_config::save(&config_dir, &settings);
+        // A window on its way out can report a 0x0 rect; persisting it would
+        // replace a usable saved size with one the next launch has to throw
+        // away. Keeping the previous geometry is the better answer.
+        if !geometry.is_usable() {
+            return;
+        }
+        let _ = app_config::update(&app_core::resolve_config_dir(), |settings| {
+            settings.window_geometry = geometry;
+        });
     }
 
     pub fn window_state(&self) -> QString {
@@ -7045,7 +7049,17 @@ impl ffi::LanguageCatalog {
     pub fn set_disabled(&self, id: &QString, disabled: bool) -> FfiResult {
         let id = id.to_string();
         let config_dir = app_core::resolve_config_dir();
-        let mut settings = app_config::load(&config_dir).unwrap_or_default();
+        // Never edit a defaulted Settings here: saving that back would drop
+        // everything else the file holds.
+        let mut settings = match app_config::load(&config_dir) {
+            Ok(settings) => settings,
+            Err(err) => {
+                return FfiResult {
+                    code: 1,
+                    message: QString::from(err.to_string().as_str()),
+                }
+            }
+        };
         if disabled {
             settings.set_language_disabled(&id, true);
         } else {
@@ -7754,9 +7768,10 @@ impl ffi::AiChat {
             }
         }
         self.agent_mode.set(agent_mode);
-        let mut settings = load_settings();
-        settings.ai_mode = if agent_mode { "agent" } else { "ask" }.to_string();
-        let _ = app_config::save(&app_core::resolve_config_dir(), &settings);
+        let mode = if agent_mode { "agent" } else { "ask" }.to_string();
+        let _ = app_config::update(&app_core::resolve_config_dir(), |settings| {
+            settings.ai_mode = mode;
+        });
         self.as_mut().token_usage_changed();
         FfiResult::default()
     }
@@ -8811,15 +8826,16 @@ impl ffi::AiChat {
 
     pub fn set_active_provider(mut self: Pin<&mut Self>, id: &QString) -> FfiResult {
         let config_dir = app_core::resolve_config_dir();
-        let mut settings = load_settings();
-        settings.ai_active_provider = id.to_string();
-        let _ = app_config::save(&config_dir, &settings);
+        let active = id.to_string();
+        let _ = app_config::update(&config_dir, |settings| {
+            settings.ai_active_provider = active;
+        });
         *self.provider.borrow_mut() = None;
         // Agent mode against a provider that cannot use tools is not a mode
         // this build offers, so switching to one drops back to Ask rather
         // than leaving a toggle that would fail on the next send.
         if self.agent_mode.get()
-            && !active_provider(&settings).is_ok_and(|c| c.capabilities().tools)
+            && !active_provider(&load_settings()).is_ok_and(|c| c.capabilities().tools)
         {
             self.agent_mode.set(false);
         }
@@ -8921,9 +8937,9 @@ impl ffi::AiChat {
     pub fn set_persistence_enabled(mut self: Pin<&mut Self>, enabled: bool) {
         self.persist.set(enabled);
         let config_dir = app_core::resolve_config_dir();
-        let mut settings = load_settings();
-        settings.ai_persist_conversations = Some(enabled);
-        let _ = app_config::save(&config_dir, &settings);
+        let _ = app_config::update(&config_dir, |settings| {
+            settings.ai_persist_conversations = Some(enabled);
+        });
         if enabled {
             self.as_mut().save_conversation();
         }
@@ -9107,12 +9123,13 @@ impl ffi::AiProviderEditor {
             return FfiResult::default();
         };
         let config_dir = app_core::resolve_config_dir();
-        let mut settings = load_settings();
-        draft.commit(&mut settings);
-        for (tool, policy) in self.policies.borrow().iter() {
-            settings_model::ai::set_tool_policy(&mut settings, tool, *policy);
-        }
-        match app_config::save(&config_dir, &settings) {
+        let policies = self.policies.borrow().clone();
+        match app_config::update(&config_dir, |settings| {
+            draft.commit(settings);
+            for (tool, policy) in policies.iter() {
+                settings_model::ai::set_tool_policy(settings, tool, *policy);
+            }
+        }) {
             Ok(()) => FfiResult::default(),
             Err(error) => FfiResult {
                 code: 1,
