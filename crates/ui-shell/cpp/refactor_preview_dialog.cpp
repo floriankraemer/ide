@@ -1,5 +1,7 @@
 #include "refactor_preview_dialog.h"
 
+#include "e2e_mark.h"
+
 #include <QDialogButtonBox>
 #include <QFileInfo>
 #include <QHeaderView>
@@ -75,6 +77,19 @@ RefactorPreviewDialog::RefactorPreviewDialog(const QString &title,
     connect(buttons, &QDialogButtonBox::accepted, this, &QDialog::accept);
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
     layout->addWidget(buttons);
+
+    e2eMark(QStringLiteral("{\"ev\":\"preview_rows\",\"count\":%1,\"files\":%2}")
+              .arg(rows.size())
+              .arg(groups.size()));
+    e2eMark(QStringLiteral("{\"ev\":\"dialog_shown\",\"name\":\"refactor_preview\"}"));
+}
+
+void RefactorPreviewDialog::done(int result)
+{
+    QDialog::done(result);
+    e2eMark(QStringLiteral("{\"ev\":\"dialog_closed\",\"name\":\"refactor_preview\","
+                            "\"accepted\":%1}")
+              .arg(result == QDialog::Accepted ? QLatin1String("true") : QLatin1String("false")));
 }
 
 QStringList RefactorPreviewDialog::excludedPaths() const

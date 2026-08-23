@@ -1,5 +1,6 @@
 #include "search_everywhere_dialog.h"
 
+#include "e2e_mark.h"
 #include "highlight_delegate.h"
 #include "search_results_panel.h"
 
@@ -76,6 +77,17 @@ SearchEverywhereDialog::SearchEverywhereDialog(SearchModel *searchModel,
     connect(results_, &QListWidget::itemClicked, this, &SearchEverywhereDialog::activate);
 
     connect(searchModel_, &SearchModel::resultsBatch, this, &SearchEverywhereDialog::appendHits);
+    // One mark per query that actually completed — superseded generations
+    // are filtered out here exactly as the batches are, which is what lets a
+    // test count deliveries and prove stale results were dropped rather than
+    // rendered.
+    connect(searchModel_, &SearchModel::queryFinished, this, [this](quint64 generation) {
+        if (generation != generation_) {
+            return;
+        }
+        e2eMark(QStringLiteral("{\"ev\":\"search_results\",\"count\":%1}")
+                  .arg(results_->count()));
+    });
     // Opening a folder starts an index build that outlasts the user's
     // patience, so a query typed in that window comes back "still being
     // built". Re-run it once the index lands instead of leaving that notice
@@ -107,8 +119,17 @@ void SearchEverywhereDialog::popup(Tier tier)
     raise();
     activateWindow();
     queryEdit_->setFocus();
+    e2eMark(QStringLiteral("{\"ev\":\"dialog_shown\",\"name\":\"search_everywhere\"}"));
     // An empty query still has something to show: recent files and actions.
     runQuery();
+}
+
+void SearchEverywhereDialog::done(int result)
+{
+    QDialog::done(result);
+    e2eMark(QStringLiteral("{\"ev\":\"dialog_closed\",\"name\":\"search_everywhere\","
+                            "\"accepted\":%1}")
+              .arg(result == QDialog::Accepted ? QLatin1String("true") : QLatin1String("false")));
 }
 
 void SearchEverywhereDialog::scheduleQuery()
