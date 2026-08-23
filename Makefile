@@ -10,7 +10,7 @@ DOCKER_MOUNTS = -v "$(CURDIR)":/workspace -w /workspace \
 	-v ide-ccache:/ccache
 RUN_LINUX = $(DOCKER) run --rm $(DOCKER_MOUNTS) $(LINUX_IMAGE)
 
-.PHONY: help all test lint build build-linux build-windows linux-image shell clean
+.PHONY: help all test lint e2e e2e-repeat build build-linux build-windows linux-image shell clean
 
 .DEFAULT_GOAL := help
 
@@ -30,6 +30,28 @@ lint: linux-image ## Run clippy + rustfmt + file-size checks in Docker
 	$(RUN_LINUX) cargo clippy --workspace --all-targets -- -D warnings
 	$(RUN_LINUX) cargo fmt --all -- --check
 	$(RUN_LINUX) scripts/check-file-size.sh
+
+# One X server with N app instances makes xdotool's window targeting
+# ambiguous, and ambiguous input is the first source of E2E flake — hence
+# --test-threads=1. xvfb, xauth, x11-apps, imagemagick and xdotool are already
+# in linux-builder, so no image change is needed.
+E2E_XVFB = xvfb-run -a --server-args="-screen 0 1600x1200x24"
+
+e2e: linux-image ## Run the E2E flows under Xvfb (ignored by `make test`)
+	$(RUN_LINUX) sh -c 'cargo build -p app && $(E2E_XVFB) \
+		cargo test -p app --test e2e -- --ignored --test-threads=1 --nocapture'
+
+# Burn-in: `make e2e-repeat TEST=e2e_open_project_edit_save N=20`. A flake is
+# a P1 bug in the product or the harness, so this exists to find one before
+# it is discovered by somebody re-running CI.
+N ?= 20
+e2e-repeat: linux-image ## Repeat one E2E flow N times: make e2e-repeat TEST=<name> N=20
+	@test -n "$(TEST)" || { echo "usage: make e2e-repeat TEST=<name> [N=20]"; exit 2; }
+	$(RUN_LINUX) sh -c 'cargo build -p app && for i in $$(seq 1 $(N)); do \
+		echo "--- run $$i/$(N) ---"; \
+		$(E2E_XVFB) cargo test -p app --test e2e -- --ignored --exact \
+			--test-threads=1 --nocapture $(TEST) || exit 1; \
+	done'
 
 build: build-linux build-windows ## Build Linux and Windows artifacts
 
