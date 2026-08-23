@@ -807,7 +807,11 @@ impl AppSession {
     /// onto `path`) rather than externally.
     pub fn check_external_change(&mut self, path: &Path) -> Option<TabId> {
         let id = self.find_tab_by_path(path)?;
-        if self.entry(id).map(|e| e.content.is_deleted()).unwrap_or(true) {
+        if self
+            .entry(id)
+            .map(|e| e.content.is_deleted())
+            .unwrap_or(true)
+        {
             return None;
         }
         let is_own_change = self
@@ -957,7 +961,9 @@ mod tests {
     fn a_text_file_opens_as_a_text_tab_with_no_hex_answers() {
         let (project_dir, _config, mut session) = session_with_project();
 
-        let opened = session.open_file(&project_dir.path().join("a.txt")).unwrap();
+        let opened = session
+            .open_file(&project_dir.path().join("a.txt"))
+            .unwrap();
 
         assert_eq!(opened.kind, TabKind::Text);
         assert_eq!(session.tab_kind(opened.id), Some(TabKind::Text));
