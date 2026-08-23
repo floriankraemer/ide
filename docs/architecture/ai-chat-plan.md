@@ -7,25 +7,25 @@ A fresh session should read this table (and `git log`) before picking up work, p
 
 | Task | Status | Commit |
 |---|---|---|
-| AC1 | done | this change (#61) |
-| AC2 | done | this change (#61) |
-| AC3 | done | this change (#61) |
-| AC4 | done | this change (#61) |
-| AC5 | done | this change (#61) |
-| AC6 | done | this change (#61) |
-| AC7 | done | this change (#61) |
-| AC8 | done | this change (#61) |
-| AC9 | done | this change (#61) |
-| AC10 | done | this change (#61) |
-| AC11 | done | this change (#61) |
-| AC12 | done | this change (#61) |
-| AC13 | done | this change (#61) |
-| AC14 | done | this change (#61) |
-| AC15 | done | this change (#61) |
-| AC16 | done | this change (#61) |
-| AC17 | done | this change (#61) |
-| AC18 | done | this change (#61) |
-| AC19 | done | this change (#61) |
+| AC1 | done | this change (#68) |
+| AC2 | done | this change (#68) |
+| AC3 | done | this change (#68) |
+| AC4 | done | this change (#68) |
+| AC5 | done | this change (#68) |
+| AC6 | done | this change (#68) |
+| AC7 | done | this change (#68) |
+| AC8 | done | this change (#68) |
+| AC9 | done | this change (#68) |
+| AC10 | done | this change (#68) |
+| AC11 | done | this change (#68) |
+| AC12 | done | this change (#68) |
+| AC13 | done | this change (#68) |
+| AC14 | done | this change (#68) |
+| AC15 | done | this change (#68) |
+| AC16 | done | this change (#68) |
+| AC17 | done | this change (#68) |
+| AC18 | done | this change (#68) |
+| AC19 | done | this change (#68) |
 
 ## Context
 
