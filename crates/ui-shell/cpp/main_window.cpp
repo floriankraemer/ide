@@ -3065,6 +3065,28 @@ int treeRole(ProjectTreeModel::Roles role)
     return Qt::UserRole + static_cast<int>(role);
 }
 
+// Shows the AI chat dock, putting it back in its tab strip first if a
+// restored layout left it homeless.
+//
+// ADS flags a dock absent from a saved layout as unassigned
+// (DockManager::restoreDockWidgetsOpenState): closed, un-parented, no dock
+// area. Reopening one in that state takes CDockWidget's floating path, so a
+// user whose window_state predates this dock would get a detached window
+// rather than the tab beside Class View that buildCentralWidget arranged.
+// Both the tree's context menu and the menu bar go through here so "show
+// the panel" means the same thing wherever it is asked for.
+void showAiChatDock(ads::CDockManager *dockManager,
+                    ads::CDockWidget *aiChatDock,
+                    ads::CDockWidget *classViewDock)
+{
+    if (!aiChatDock->dockAreaWidget()) {
+        dockManager->addDockWidget(ads::CenterDockWidgetArea, aiChatDock,
+                                    classViewDock->dockAreaWidget());
+    }
+    aiChatDock->toggleView(true);
+    aiChatDock->raise();
+}
+
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
                                    DocumentManager *docManager, AppSettings *appSettings,
                                    SearchModel *searchModel, TerminalSession *terminalSession,
@@ -3336,7 +3358,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
       treeView,
       &QTreeView::customContextMenuRequested,
       treeView,
-      [treeView, treeModel, window](const QPoint &pos) {
+      [treeView, treeModel, window, aiChat, aiChatPanel, aiChatDock, dockManager,
+       classViewDock](const QPoint &pos) {
           const QString rootPath = treeModel->rootPath();
           if (rootPath.isEmpty()) {
               return; // No project open.
@@ -3360,10 +3383,18 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
           QAction *newFolderAction = menu.addAction(QObject::tr("New Folder"));
           QAction *renameAction = nullptr;
           QAction *deleteAction = nullptr;
+          QAction *addToChatAction = nullptr;
+          QAction *addToNewChatAction = nullptr;
           if (hasItem) {
               menu.addSeparator();
               renameAction = menu.addAction(QObject::tr("Rename"));
               deleteAction = menu.addAction(QObject::tr("Delete"));
+              // A folder attaches its contents, which is why the two entries
+              // read the same for a file and a folder: what differs is the
+              // rule `ai_chat_core::expand_folder` applies, not the gesture.
+              menu.addSeparator();
+              addToChatAction = menu.addAction(QObject::tr("Add to AI Chat"));
+              addToNewChatAction = menu.addAction(QObject::tr("Add to New AI Chat"));
           }
 
           QAction *chosen = menu.exec(treeView->viewport()->mapToGlobal(pos));
@@ -3423,6 +3454,27 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
               if (result.code != 0) {
                   QMessageBox::critical(window, QObject::tr("Cannot delete"), result.message);
               }
+          } else if (chosen == addToChatAction || chosen == addToNewChatAction) {
+              if (chosen == addToNewChatAction) {
+                  aiChat->newConversation();
+              }
+              // A folder attaches its contents and a file attaches itself;
+              // which files a folder yields, and what to say about the ones
+              // it did not, are both `ai-chat-core`'s answers.
+              const FfiResult result = itemIsDir ? aiChat->attachFolder(itemPath)
+                                                  : aiChat->attachFile(itemPath);
+              if (result.code != 0) {
+                  QMessageBox::information(window, QObject::tr("AI Chat"), result.message);
+                  return;
+              }
+              showAiChatDock(dockManager, aiChatDock, classViewDock);
+              // A folder's summary names what was skipped and what did not
+              // fit; a single file has nothing to report, so only the
+              // folder case is worth a line in the status bar.
+              if (itemIsDir && !QString(result.message).isEmpty()) {
+                  window->statusBar()->showMessage(result.message, 8000);
+              }
+              aiChatPanel->attachAndFocus();
           }
       });
 
@@ -3515,6 +3567,23 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
       buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession,
                           languageService, aiChat);
     EditorTabs *editorTabs = central.editorTabs;
+
+    // Every path that shows the AI chat goes through here, because a dock
+    // that a restored layout never mentioned needs putting back before it
+    // can be raised.
+    //
+    // ADS flags a dock absent from the saved blob as unassigned
+    // (DockManager::restoreDockWidgetsOpenState): closed, un-parented and
+    // with no dock area. Reopening one in that state takes the floating
+    // path (CDockWidget::showDockWidget, which floats when DockArea is
+    // null), so a user whose window_state predates this dock would get a
+    // detached window instead of the tab beside Class View that
+    // buildCentralWidget arranged. Re-adding it first is what keeps
+    // "show the panel" meaning the same thing on every config.
+    const auto showAiChat = [central]() {
+        showAiChatDock(central.dockManager, central.aiChatDock, central.classViewDock);
+    };
+
     window->setEditorTabs(editorTabs);
     window->setAppSettings(appSettings);
     window->setDockManager(central.dockManager);
@@ -3882,6 +3951,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
         append(QStringLiteral("refactor.refactorThis"));
         menu->addSeparator();
         append(QStringLiteral("ai.addSelection"));
+        append(QStringLiteral("ai.addSelectionNewChat"));
     });
 
     QMenu *viewMenu = window->menuBar()->addMenu(QObject::tr("&View"));
@@ -3890,6 +3960,14 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QObject::connect(classViewAction, &QAction::triggered, window, [central]() {
         central.classViewDock->toggleView(true);
         central.classViewDock->raise();
+    });
+    // The AI panel's show-action belongs here with every other dock's, not
+    // only on the AI menu: a user looking for a hidden panel opens View.
+    QAction *aiChatViewAction = registerAction(viewMenu, QStringLiteral("view.aiChat"),
+                                               QObject::tr("AI Chat"), appSettings, *actions);
+    QObject::connect(aiChatViewAction, &QAction::triggered, window, [central, showAiChat]() {
+        showAiChat();
+        central.aiChatPanel->focusComposer();
     });
     QAction *problemsAction = registerAction(viewMenu, QStringLiteral("view.problems"),
                                              QObject::tr("Problems"), appSettings, *actions);
@@ -4013,71 +4091,83 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // shortcut comes from the persisted keymap and Settings > Keymap can
     // rebind it like any other.
     QMenu *aiMenu = window->menuBar()->addMenu(QObject::tr("&AI"));
+
+    // Both selection entries share this: the only difference between them
+    // is whether the conversation is cleared first, and duplicating the
+    // 0-based-to-1-based conversion is how one of the two copies ends up
+    // off by one.
+    const auto attachSelection = [window, aiChat, central, editorTabs, showAiChat](bool newChat) {
+        if (newChat) {
+            aiChat->newConversation();
+        }
+        // The protocol positions the editor reports are 0-based; an
+        // attachment names the lines the way the user reads them off the
+        // gutter.
+        const auto range = editorTabs->selectionRange();
+        const FfiResult result = aiChat->attachSelection(editorTabs->currentPath(),
+                                                          range.first.first + 1,
+                                                          range.second.first + 1,
+                                                          editorTabs->selectedText());
+        if (result.code != 0) {
+            // An attachment can be refused — a secret-shaped file, a path
+            // outside the project — and the reason is Rust's sentence, not
+            // one composed here.
+            QMessageBox::information(window, QObject::tr("AI Chat"), result.message);
+            return;
+        }
+        showAiChat();
+        central.aiChatPanel->attachAndFocus();
+    };
+
     QAction *aiAddSelectionAction =
       registerAction(aiMenu, QStringLiteral("ai.addSelection"),
                       QObject::tr("Add Selection to AI Chat"), appSettings, *actions);
     QObject::connect(aiAddSelectionAction, &QAction::triggered, window,
-                      [window, aiChat, central, editorTabs]() {
-                          // The protocol positions the editor reports are
-                          // 0-based; an attachment names the lines the way
-                          // the user reads them off the gutter.
-                          const auto range = editorTabs->selectionRange();
-                          const FfiResult result =
-                            aiChat->attachSelection(editorTabs->currentPath(),
-                                                     range.first.first + 1,
-                                                     range.second.first + 1,
-                                                     editorTabs->selectedText());
-                          if (result.code != 0) {
-                              // An attachment can be refused — a
-                              // secret-shaped file, a path outside the
-                              // project — and the reason is Rust's sentence,
-                              // not one composed here.
-                              QMessageBox::information(window, QObject::tr("AI Chat"),
-                                                        result.message);
-                              return;
-                          }
-                          central.aiChatDock->toggleView(true);
-                          central.aiChatDock->raise();
-                          central.aiChatPanel->attachAndFocus();
-                      });
+                      [attachSelection]() { attachSelection(false); });
+
+    QAction *aiAddSelectionNewChatAction =
+      registerAction(aiMenu, QStringLiteral("ai.addSelectionNewChat"),
+                      QObject::tr("Add Selection to New AI Chat"), appSettings, *actions);
+    QObject::connect(aiAddSelectionNewChatAction, &QAction::triggered, window,
+                      [attachSelection]() { attachSelection(true); });
 
     QAction *aiAddFileAction = registerAction(aiMenu, QStringLiteral("ai.addFile"),
                                                QObject::tr("Add File to AI Chat"), appSettings,
                                                *actions);
     QObject::connect(aiAddFileAction, &QAction::triggered, window,
-                      [window, aiChat, central, editorTabs]() {
+                      [window, aiChat, central, editorTabs, showAiChat]() {
                           const FfiResult result = aiChat->attachFile(editorTabs->currentPath());
                           if (result.code != 0) {
                               QMessageBox::information(window, QObject::tr("AI Chat"),
                                                         result.message);
                               return;
                           }
-                          central.aiChatDock->toggleView(true);
-                          central.aiChatDock->raise();
+                          showAiChat();
                           central.aiChatPanel->attachAndFocus();
                       });
 
     aiMenu->addSeparator();
     QAction *aiNewChatAction = registerAction(aiMenu, QStringLiteral("ai.newChat"),
                                                QObject::tr("New AI Chat"), appSettings, *actions);
-    QObject::connect(aiNewChatAction, &QAction::triggered, window, [central, aiChat]() {
+    QObject::connect(aiNewChatAction, &QAction::triggered, window,
+                      [central, aiChat, showAiChat]() {
         aiChat->newConversation();
-        central.aiChatDock->toggleView(true);
-        central.aiChatDock->raise();
+        showAiChat();
         central.aiChatPanel->attachAndFocus();
     });
 
     QAction *aiTogglePanelAction = registerAction(aiMenu, QStringLiteral("ai.togglePanel"),
                                                    QObject::tr("AI Chat"), appSettings, *actions);
-    QObject::connect(aiTogglePanelAction, &QAction::triggered, window, [central]() {
+    QObject::connect(aiTogglePanelAction, &QAction::triggered, window,
+                      [central, showAiChat]() {
         // A real toggle, unlike the View menu's panels: this one has a
         // shortcut of its own, and a shortcut that only ever opens a panel
         // gives the user no way back with the same keys.
-        const bool show = central.aiChatDock->isClosed();
-        central.aiChatDock->toggleView(show);
-        if (show) {
-            central.aiChatDock->raise();
+        if (central.aiChatDock->isClosed()) {
+            showAiChat();
             central.aiChatPanel->focusComposer();
+        } else {
+            central.aiChatDock->toggleView(false);
         }
     });
 

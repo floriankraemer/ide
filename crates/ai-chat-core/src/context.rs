@@ -668,6 +668,241 @@ fn fair_shares(wanted: &[u32], budget: u32) -> Vec<u32> {
     allowances
 }
 
+/// Why one file of a folder attach never made it into the chip row.
+///
+/// Recorded rather than implied: a folder attach that silently produced
+/// eleven chips for a fourteen-file directory leaves the user believing the
+/// model saw the three it did not, which is the same failure mode
+/// [`render_context`] avoids by reporting every truncation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipReason {
+    /// [`editor_core::looks_binary_file`] said so — the one
+    /// place that rule lives.
+    Binary,
+    /// [`is_secret_shaped`] said so. The same gate [`accept_attachment`]
+    /// applies per file, applied here before the file is ever opened.
+    SecretShaped,
+    /// Permissions, or the file vanished between the walk and the read. A
+    /// folder attach must not fail whole because one entry moved under it.
+    Unreadable,
+    /// The file alone costs more than the entire budget, so no ordering of
+    /// the walk could ever have fitted it. Distinct from "did not fit":
+    /// this one is the file's fault, not the budget's remainder.
+    TooLarge,
+}
+
+impl SkipReason {
+    /// The words the summary sentence uses. Adjectival, so they read as a
+    /// count of a kind: "1 binary, 2 secret-shaped".
+    fn label(self) -> &'static str {
+        match self {
+            SkipReason::Binary => "binary",
+            SkipReason::SecretShaped => "secret-shaped",
+            SkipReason::Unreadable => "unreadable",
+            SkipReason::TooLarge => "too large",
+        }
+    }
+}
+
+/// What [`expand_folder`] made of a directory.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FolderExpansion {
+    /// One [`Attachment::File`] per file that fit, in walk order (sorted by
+    /// path), which is also the order the chips appear in.
+    pub attachments: Vec<Attachment>,
+    /// Every file the walk saw and did not attach, with the reason.
+    pub skipped: Vec<(PathBuf, SkipReason)>,
+    /// Files the walk reached the budget before it reached. Counted, not
+    /// listed: the user's next move is "attach fewer things", and a list of
+    /// forty names in a docked panel is not what tells them that.
+    pub stopped_at_budget: usize,
+}
+
+impl FolderExpansion {
+    /// The one sentence the panel shows after a folder attach.
+    ///
+    /// Composed here rather than in `bridge.rs` or C++ for the reason
+    /// ADR-0021 gives for every other rule in this file: what the user is
+    /// told about which of their files left the machine — and which
+    /// deliberately did not — is a rule, and the adapter's job is to
+    /// display the sentence, not to decide it.
+    pub fn summary(&self) -> String {
+        let mut clauses = vec![match self.attachments.len() {
+            0 => "No files attached".to_string(),
+            1 => "1 file attached".to_string(),
+            count => format!("{count} files attached"),
+        }];
+
+        if !self.skipped.is_empty() {
+            // A fixed order, not the order the walk happened to hit them:
+            // the same folder must produce the same sentence twice running.
+            let breakdown: Vec<String> = [
+                SkipReason::Binary,
+                SkipReason::SecretShaped,
+                SkipReason::Unreadable,
+                SkipReason::TooLarge,
+            ]
+            .into_iter()
+            .filter_map(|reason| {
+                let count = self
+                    .skipped
+                    .iter()
+                    .filter(|(_, skipped)| *skipped == reason)
+                    .count();
+                (count > 0).then(|| format!("{count} {}", reason.label()))
+            })
+            .collect();
+            clauses.push(format!(
+                "{} skipped ({})",
+                self.skipped.len(),
+                breakdown.join(", ")
+            ));
+        }
+
+        if self.stopped_at_budget > 0 {
+            clauses.push(format!("{} did not fit", self.stopped_at_budget));
+        }
+
+        format!("{}.", clauses.join("; "))
+    }
+}
+
+/// The directory the project's own search index lives in, which a folder
+/// attach has no business reading — the same name and the same skip
+/// `index_core::TextIndex` applies to its own store.
+const INDEX_DIR_NAME: &str = ".ide-index";
+
+/// A generous ceiling on bytes per token, used to refuse a file as
+/// [`SkipReason::TooLarge`] from its metadata alone.
+///
+/// Every tokenizer here produces at most one token per byte and usually far
+/// fewer, so a file longer than `budget * 8` bytes cannot possibly fit even
+/// in the worst case. Checking the length first is what keeps a folder
+/// containing one multi-gigabyte log from being read into a `String` only
+/// to be discarded.
+const MAX_BYTES_PER_TOKEN: u64 = 8;
+
+/// Expands `folder` into one [`Attachment::File`] per file it contains,
+/// within `budget_tokens`.
+///
+/// Confinement comes first and short-circuits everything: a folder outside
+/// the project is refused before a single directory is opened, because a
+/// walk is itself a read (ADR-0021 §1). The walk that follows is
+/// `ignore`'s, the same one `index_core::TextIndex::build` uses, so
+/// `.gitignore` means the same thing to an attachment as it does to search;
+/// symlinks are not followed, which is what keeps a link inside the project
+/// from walking out of it.
+///
+/// Two deviations from the index's walk, both deliberate: hidden entries
+/// are *not* skipped, because a user attaching a config directory means the
+/// dotfiles in it and the secret gate below is what makes that safe; and
+/// `.git` is skipped explicitly, since including it means attaching the
+/// object store.
+///
+/// Nothing is dropped silently. Every file the walk saw is either attached,
+/// in `skipped` with a reason, or counted in `stopped_at_budget` — the
+/// discipline [`render_context`] already keeps for truncation.
+///
+/// The budget is measured over file *text*, not over the rendered blocks;
+/// [`render_context`] applies the real budget to what is actually sent, and
+/// would rather be handed a few files too few than a request it has to cut.
+pub fn expand_folder(
+    config: &ProviderConfig,
+    counter: &mut TokenCounter,
+    root: &Path,
+    folder: &Path,
+    budget_tokens: u32,
+) -> Result<FolderExpansion, ChatError> {
+    let folder = within_project_root(root, folder)?;
+    let index_dir = resolve_as_far_as_it_exists(root).join(INDEX_DIR_NAME);
+
+    let mut paths: Vec<PathBuf> = Vec::new();
+    let walk = ignore::WalkBuilder::new(&folder)
+        .hidden(false)
+        .filter_entry(move |entry| {
+            entry.file_name() != std::ffi::OsStr::new(".git")
+                && entry.file_name() != std::ffi::OsStr::new(INDEX_DIR_NAME)
+        })
+        .build();
+    for entry in walk {
+        let Ok(entry) = entry else { continue };
+        let path = entry.path();
+        if path.starts_with(&index_dir) {
+            continue;
+        }
+        // The walker already stat'ed this entry; a directory is a container,
+        // not an attachment.
+        match entry.metadata() {
+            Ok(metadata) if metadata.is_file() => paths.push(path.to_path_buf()),
+            _ => continue,
+        }
+    }
+    // Sorted, so the same tree yields the same attachments *and* the same
+    // truncation point on every run. Filesystem order is not a promise, and
+    // a budget applied to an unstable order gives the user a different set
+    // of chips each time they attach the same folder.
+    paths.sort();
+
+    let mut expansion = FolderExpansion::default();
+    let mut spent: u32 = 0;
+    for (index, path) in paths.iter().enumerate() {
+        if spent >= budget_tokens {
+            expansion.stopped_at_budget = paths.len() - index;
+            break;
+        }
+        if is_secret_shaped(path) {
+            // Refused on the name, before the file is opened — reading it to
+            // decide would mean reading exactly the file that must not be
+            // read.
+            expansion
+                .skipped
+                .push((path.clone(), SkipReason::SecretShaped));
+            continue;
+        }
+        match editor_core::looks_binary_file(path) {
+            Ok(true) => {
+                expansion.skipped.push((path.clone(), SkipReason::Binary));
+                continue;
+            }
+            Ok(false) => {}
+            Err(_) => {
+                expansion
+                    .skipped
+                    .push((path.clone(), SkipReason::Unreadable));
+                continue;
+            }
+        }
+        let too_long = std::fs::metadata(path)
+            .map(|metadata| metadata.len() > budget_tokens as u64 * MAX_BYTES_PER_TOKEN)
+            .unwrap_or(false);
+        if too_long {
+            expansion.skipped.push((path.clone(), SkipReason::TooLarge));
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(path) else {
+            expansion
+                .skipped
+                .push((path.clone(), SkipReason::Unreadable));
+            continue;
+        };
+        let tokens = counter.count_text(config, &text).value();
+        if tokens > budget_tokens {
+            expansion.skipped.push((path.clone(), SkipReason::TooLarge));
+            continue;
+        }
+        if spent + tokens > budget_tokens {
+            expansion.stopped_at_budget = paths.len() - index;
+            break;
+        }
+        spent += tokens;
+        expansion.attachments.push(Attachment::File {
+            path: path.clone(),
+            text,
+        });
+    }
+    Ok(expansion)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1134,5 +1369,240 @@ mod tests {
         assert!(rendered
             .text
             .contains("src/main.rs:19 warning: unused import"));
+    }
+
+    // --- folder expansion -------------------------------------------------
+
+    /// A project the walk will treat as one: `ignore` only honours a
+    /// `.gitignore` inside an actual repository, so the `.git` directory is
+    /// part of the fixture rather than decoration.
+    fn a_project() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().expect("a temp dir");
+        std::fs::create_dir(dir.path().join(".git")).expect("a git dir");
+        dir
+    }
+
+    fn write_file(root: &Path, relative: &str, contents: impl AsRef<[u8]>) -> PathBuf {
+        let path = root.join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("the parent dir");
+        }
+        std::fs::write(&path, contents).expect("the fixture file");
+        path
+    }
+
+    fn expanded_names(expansion: &FolderExpansion) -> Vec<String> {
+        expansion
+            .attachments
+            .iter()
+            .map(|attachment| attachment.label())
+            .collect()
+    }
+
+    fn expand(root: &Path, folder: &Path, budget: u32) -> FolderExpansion {
+        let config = config_for(ProviderKind::OpenAi);
+        let mut counter = TokenCounter::new();
+        expand_folder(&config, &mut counter, root, folder, budget).expect("the folder is inside")
+    }
+
+    #[test]
+    fn a_folder_outside_the_project_is_refused_before_anything_is_walked() {
+        let project = a_project();
+        let elsewhere = tempfile::tempdir().expect("a temp dir");
+        write_file(elsewhere.path(), "secrets.txt", "not yours to read");
+
+        let config = config_for(ProviderKind::OpenAi);
+        let mut counter = TokenCounter::new();
+        let error = expand_folder(
+            &config,
+            &mut counter,
+            project.path(),
+            elsewhere.path(),
+            10_000,
+        )
+        .expect_err("a folder outside the project must not be walked");
+
+        assert_eq!(error.code(), ChatError::CODE_PATH_OUTSIDE_PROJECT);
+    }
+
+    #[test]
+    fn an_empty_folder_expands_to_nothing_rather_than_failing() {
+        let project = a_project();
+        std::fs::create_dir(project.path().join("empty")).expect("the folder");
+
+        let expansion = expand(project.path(), &project.path().join("empty"), 10_000);
+
+        assert_eq!(expansion, FolderExpansion::default());
+        assert_eq!(
+            expansion.summary(),
+            "No files attached.",
+            "an empty folder is a fact to state, not an error to raise"
+        );
+    }
+
+    #[test]
+    fn a_gitignored_file_is_no_more_attachable_than_it_is_searchable() {
+        let project = a_project();
+        write_file(project.path(), ".gitignore", "build/\nnotes.log\n");
+        write_file(project.path(), "src/main.rs", "fn main() {}\n");
+        write_file(project.path(), "notes.log", "noise");
+        write_file(project.path(), "build/artifact.txt", "generated");
+
+        let expansion = expand(project.path(), project.path(), 100_000);
+
+        let names = expanded_names(&expansion);
+        assert!(names.contains(&"main.rs".to_string()), "{names:?}");
+        assert!(
+            !names
+                .iter()
+                .any(|name| name == "notes.log" || name == "artifact.txt"),
+            "the walk honours .gitignore exactly as the index does: {names:?}"
+        );
+        assert!(
+            expansion.skipped.is_empty(),
+            "an ignored file was never a candidate, so it is not a skip to report: {:?}",
+            expansion.skipped
+        );
+    }
+
+    #[test]
+    fn a_dotenv_is_walked_but_refused_as_secret_shaped_rather_than_hidden_away() {
+        let project = a_project();
+        write_file(project.path(), ".env", "API_KEY=sk-live-do-not-send\n");
+        write_file(project.path(), "src/main.rs", "fn main() {}\n");
+
+        let expansion = expand(project.path(), project.path(), 100_000);
+
+        assert_eq!(
+            expansion.skipped,
+            vec![(project.path().join(".env"), SkipReason::SecretShaped)],
+            "the secret gate, not the walker's hidden-file default, is what \
+             must refuse a .env — otherwise the refusal disappears the day \
+             the walk starts showing dotfiles"
+        );
+        assert_eq!(expanded_names(&expansion), vec!["main.rs".to_string()]);
+    }
+
+    #[test]
+    fn a_binary_file_is_skipped_for_the_reason_editor_core_gives() {
+        let project = a_project();
+        let mut bytes = vec![0x00u8, 0x01, 0xff];
+        bytes.extend(std::iter::repeat_n(0xAAu8, 200));
+        write_file(project.path(), "logo.ico", bytes);
+        write_file(project.path(), "readme.md", "# hello\n");
+
+        let expansion = expand(project.path(), project.path(), 100_000);
+
+        assert_eq!(
+            expansion.skipped,
+            vec![(project.path().join("logo.ico"), SkipReason::Binary)]
+        );
+        assert_eq!(expanded_names(&expansion), vec!["readme.md".to_string()]);
+    }
+
+    #[test]
+    fn a_file_that_alone_outgrows_the_whole_budget_is_named_too_large_not_left_unfit() {
+        let project = a_project();
+        write_file(project.path(), "a_small.txt", "tiny\n");
+        write_file(project.path(), "b_huge.txt", "word ".repeat(20_000));
+        write_file(project.path(), "c_small.txt", "also tiny\n");
+
+        let expansion = expand(project.path(), project.path(), 200);
+
+        assert_eq!(
+            expansion.skipped,
+            vec![(project.path().join("b_huge.txt"), SkipReason::TooLarge)],
+            "no ordering of the walk could have fitted it, so it is the \
+             file's own problem and not the budget's remainder"
+        );
+        assert_eq!(
+            expanded_names(&expansion),
+            vec!["a_small.txt".to_string(), "c_small.txt".to_string()],
+            "and the walk carries on past it"
+        );
+        assert_eq!(expansion.stopped_at_budget, 0);
+    }
+
+    #[test]
+    fn the_budget_stops_the_walk_and_says_how_many_files_it_never_reached() {
+        let project = a_project();
+        for index in 0..10 {
+            write_file(
+                project.path(),
+                &format!("file_{index:02}.txt"),
+                "let value = compute(argument);\n".repeat(20),
+            );
+        }
+
+        let expansion = expand(project.path(), project.path(), 300);
+
+        assert!(
+            !expansion.attachments.is_empty() && expansion.attachments.len() < 10,
+            "the fixture is meant to overflow part-way: {}",
+            expansion.attachments.len()
+        );
+        assert_eq!(
+            expansion.attachments.len() + expansion.stopped_at_budget,
+            10,
+            "every file the walk saw is attached or counted — nothing may \
+             fall out between the two"
+        );
+    }
+
+    #[test]
+    fn two_runs_over_the_same_tree_attach_the_same_files_and_cut_in_the_same_place() {
+        let project = a_project();
+        for index in 0..12 {
+            write_file(
+                project.path(),
+                &format!("module_{index:02}.rs",),
+                "pub fn handler() { do_the_thing(); }\n".repeat(15),
+            );
+        }
+
+        let first = expand(project.path(), project.path(), 400);
+        let second = expand(project.path(), project.path(), 400);
+
+        assert_eq!(
+            first, second,
+            "readdir order is not a promise the filesystem makes, so the \
+             attachments are sorted before the budget is applied — without \
+             that, attaching the same folder twice gives two different \
+             requests"
+        );
+        assert!(first.stopped_at_budget > 0, "the fixture must overflow");
+    }
+
+    #[test]
+    fn the_summary_names_what_was_attached_what_was_refused_and_what_did_not_fit() {
+        let expansion = FolderExpansion {
+            attachments: vec![file_of("a.rs", 1), file_of("b.rs", 1)],
+            skipped: vec![
+                (PathBuf::from(".env"), SkipReason::SecretShaped),
+                (PathBuf::from("logo.png"), SkipReason::Binary),
+                (PathBuf::from("other.png"), SkipReason::Binary),
+            ],
+            stopped_at_budget: 3,
+        };
+
+        assert_eq!(
+            expansion.summary(),
+            "2 files attached; 3 skipped (2 binary, 1 secret-shaped); 3 did not fit."
+        );
+    }
+
+    #[test]
+    fn the_summary_stays_a_sentence_when_a_folder_went_in_whole() {
+        let expansion = FolderExpansion {
+            attachments: vec![file_of("only.rs", 1)],
+            ..FolderExpansion::default()
+        };
+
+        assert_eq!(
+            expansion.summary(),
+            "1 file attached.",
+            "an empty skip list is nothing to report, and the singular has \
+             to read as English"
+        );
     }
 }

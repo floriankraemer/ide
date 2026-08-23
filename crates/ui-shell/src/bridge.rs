@@ -2742,6 +2742,17 @@ mod ffi {
         /// refused again for a format no dialect reads — the second is a
         /// property of the file and switching provider cannot fix it.
         #[qinvokable]
+        /// Attach every text file under a folder, as one `File`
+        /// attachment each.
+        ///
+        /// Which files those are is `ai_chat_core::expand_folder`'s
+        /// answer, not a walk written here: it honours `.gitignore`, skips
+        /// binaries and secret-shaped names, and stops at the token budget.
+        /// The result's message is its summary sentence, so the view says
+        /// what was left out without composing the wording (ADR-0021 §11).
+        #[cxx_name = "attachFolder"]
+        fn attach_folder(self: Pin<&mut AiChat>, path: &QString) -> FfiResult;
+
         #[cxx_name = "attachImage"]
         fn attach_image(self: Pin<&mut AiChat>, path: &QString) -> FfiResult;
 
@@ -8386,6 +8397,54 @@ impl ffi::AiChat {
                 code: 1,
                 message: QString::from(error.to_string().as_str()),
             },
+        }
+    }
+
+    pub fn attach_folder(mut self: Pin<&mut Self>, path: &QString) -> FfiResult {
+        let folder = std::path::PathBuf::from(path.to_string());
+        let config = match self.provider() {
+            Ok(config) => config,
+            Err(error) => return to_chat_result(error),
+        };
+        let Some(root) = self
+            .session
+            .borrow()
+            .root_path()
+            .map(std::path::Path::to_path_buf)
+        else {
+            // Without an open project there is no root to confine the walk
+            // to, and an unconfined one could read the whole disk.
+            return to_chat_result(ChatError::PathOutsideProject(folder));
+        };
+
+        let expansion = {
+            let mut counter = self.counter.borrow_mut();
+            let budget = self.context_budget(&config, &mut counter);
+            match context::expand_folder(&config, &mut counter, &root, &folder, budget) {
+                Ok(expansion) => expansion,
+                Err(error) => return to_chat_result(error),
+            }
+        };
+
+        // Composed before the attachments are consumed below, and it is
+        // the whole user-facing answer: what was attached, what was
+        // skipped and why, and what did not fit.
+        let summary = expansion.summary();
+
+        // Each file still goes through the same gate a hand-attached one
+        // does: `expand_folder` decided what is worth offering, `accept`
+        // decides what may be sent, and the second is not skipped because
+        // the first already looked.
+        for attachment in expansion.attachments {
+            let result = self.as_mut().accept(attachment);
+            if result.code != 0 {
+                return result;
+            }
+        }
+
+        FfiResult {
+            code: 0,
+            message: QString::from(summary.as_str()),
         }
     }
 

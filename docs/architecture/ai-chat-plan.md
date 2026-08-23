@@ -258,6 +258,27 @@ The container has no real API keys and no display beyond Xvfb, so the end-to-end
 
 Worth a human's attention afterwards, since the container has no real keys: one real Anthropic run (tools, images and `cache_control` all exercised), one real OpenAI run, and one Gemini run — checking that streaming, tool-call deltas, token counts and error bodies (401, 429, overlong context) all surface as readable messages.
 
+## Follow-up: making the panel findable, and attaching from the tree
+
+Driving the merged feature on a real machine turned up three reasons the panel could not be seen, only one of which was a code defect:
+
+1. The Linux artifact in `dist/` predated the merge, so the feature was genuinely absent from the binary being run. No code change; `make build-linux`.
+2. `main_window.cpp` restores the ADS layout after the docks are built, and ADS flags a dock absent from the saved blob as unassigned — closed, un-parented, no dock area (`DockManager::restoreDockWidgetsOpenState`). Anyone whose `window_state` predated the merge started with the panel closed, and reopening it took `CDockWidget`'s floating path, giving a detached window instead of the tab beside Class View.
+3. The dock's show-action lived only on the AI menu, while every other dock's lives in View — which is where someone looking for a missing panel goes.
+
+`showAiChatDock` now re-adds the dock to its intended area when it finds it homeless, and every show path goes through it. There is deliberately **no** general post-restore reconciliation and no layout versioning: a future dock will hit the same ADS behaviour and will need the same three lines.
+
+The same pass added the attachment gestures the editor already had, on the project tree:
+
+| Entry | File | Folder |
+|---|---|---|
+| Add to AI Chat | `attachFile` | `attachFolder` |
+| Add to New AI Chat | `newConversation` first, then the same | |
+
+`attachFolder` is `ai_chat_core::context::expand_folder`: a gitignore-aware walk that skips binaries (`editor_core::looks_binary_file`) and secret-shaped names, attaches files in sorted order for reproducibility, and stops at the token budget — reporting what it skipped, why, and how many files it never reached. Hidden entries are deliberately walked, unlike the index's own walk, so that `.env` is *refused with a reason* rather than silently never seen.
+
+The editor gained `ai.addSelectionNewChat` beside the existing Ctrl+L, sharing one handler so the 0-based-to-1-based line conversion exists in exactly one place.
+
 ## Known limits that follow from decisions already taken
 
 - **Keys are environment-only**, so launching from a desktop launcher rather than a configured shell means no key — the Settings page says so rather than failing silently.
