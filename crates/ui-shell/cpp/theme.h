@@ -73,4 +73,10 @@ QPalette paletteForTheme(const QString &themeName);
 // drift apart.
 void applyTheme(const QString &themeName);
 
+// Nudges `base` away from itself so a band or column drawn in the result
+// reads as a subtle tint on both dark and light editor backgrounds. Used by
+// every widget that paints its own chrome against QPalette::Base — the
+// editor's gutter and current-line band, and the hex viewer's columns.
+QColor tinted(const QColor &base, int darkFactor, int lightFactor);
+
 } // namespace ui_shell

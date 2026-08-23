@@ -33,14 +33,14 @@ Page-down timings are deliberately not compared: `PageDown` steps by *visual* li
 
 | # | Task | Status | Commit |
 | --- | --- | --- | --- |
-| A1 | Word wrap off by default in `CodeEditor` | done | |
-| A2 | Highlighting size ceilings (`MAX_HIGHLIGHT_BYTES`, `MAX_HIGHLIGHT_LINE_BYTES`) in `syntax-core` | done | |
-| A3 | O(1) fold-start lookup in the gutter paint | done | |
-| B1 | Tab kinds in `app-core`; `open_file` opens binary files | open | |
-| B2 | `BinaryFile` + hex row formatting in `editor-core` | open | |
-| B3 | `HexViewer` widget and its FFI seam | open | |
-| B4 | Wire the viewer into the tab area; audit the `CodeEditor` casts | open | |
-| B5 | Stop `looks_binary_file` reporting unreadable files as binary | open | |
+| A1 | Word wrap off by default in `CodeEditor` | done | `f71cf8b` (#64) |
+| A2 | Highlighting size ceilings (`MAX_HIGHLIGHT_BYTES`, `MAX_HIGHLIGHT_LINE_BYTES`) in `syntax-core` | done | `f71cf8b` (#64) |
+| A3 | O(1) fold-start lookup in the gutter paint | done | `f71cf8b` (#64) |
+| B1 | Tab kinds in `app-core`; `open_file` opens binary files | done | (#66) |
+| B2 | `BinaryFile` + hex row formatting in `editor-core` | done | (#66) |
+| B3 | `HexViewer` widget and its FFI seam | done | (#66) |
+| B4 | Wire the viewer into the tab area; audit the `CodeEditor` casts | done | (#66) |
+| B5 | Stop `looks_binary_file` reporting unreadable files as binary | done | (#66) |
 
 ## Part A — large files
 
@@ -70,7 +70,15 @@ Only the first range starting on a given line is kept, which is what the previou
 
 ## Part B — the binary viewer
 
-See [ADR-0020](decisions/0020-tab-kinds-and-the-binary-viewer.md) for why a tab gained a kind, why the hex formatting lives in `editor-core`, and why the viewer is read-only.
+[ADR-0020](decisions/0020-tab-kinds-and-the-binary-viewer.md) records why a tab gained a kind, why the hex formatting lives in `editor-core`, and why the viewer is read-only.
+
+A tab now holds a `TabContent` — `Text(Document)` or `Binary(BinaryFile)` — and `TabKind` crosses the seam so the view knows which widget to build.
+Because `TabContent` answers path, title, rename retargeting and delete flagging for both kinds, the tab strip, session restore, the external-change watcher and the tree-driven rename and delete all work on a binary tab unchanged.
+Only edit, save, save-as, reload and dirty state are text-only, and they now fail with `AppError::NotATextTab` (code 9) rather than pretending the tab is missing.
+
+`editor_core::hex` formats rows; `BinaryFile` keeps the file open and reads only the window the viewer asks for, so a multi-gigabyte binary costs the same to open and scroll as a small one.
+`HexViewer` is a `QAbstractScrollArea` painting three columns, in the same shape as `TerminalWidget`.
+It is not a `QPlainTextEdit`, so the existing `qobject_cast` guards and null-checked `currentEditor()` call sites make Find, Save, the LSP wiring and diagnostics inert on a hex tab with no new branches; the editor font and colour loops got an explicit `forEachHexViewer` counterpart so appearance settings still reach it.
 
 ## Verification
 

@@ -14,6 +14,9 @@ use ropey::Rope;
 mod binary_detect;
 pub use binary_detect::{looks_binary, looks_binary_file};
 
+pub mod hex;
+pub use hex::{BinaryFile, HexRow, BYTES_PER_ROW};
+
 pub mod search;
 pub use search::{find_matches, replacements, Replacement, SearchError, SearchOptions, TextMatch};
 
