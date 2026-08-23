@@ -149,6 +149,20 @@ pub struct Settings {
     pub editor_font_size: u32,
     #[serde(default)]
     pub editor_font_family: String,
+    /// Interface font scale in percent for every piece of chrome that has no
+    /// scale of its own (tabs, docks, dialogs, status bar). `0` means "never
+    /// chosen", which resolves to [`DEFAULT_UI_FONT_SCALE`]. Read through
+    /// [`Settings::ui_font_scale_or_default`].
+    #[serde(default)]
+    pub ui_font_scale: u32,
+    /// Interface font scale in percent for the project tree sidebar,
+    /// independent of [`Settings::ui_font_scale`].
+    #[serde(default)]
+    pub project_tree_font_scale: u32,
+    /// Interface font scale in percent for the menu bar and its popup menus,
+    /// independent of [`Settings::ui_font_scale`].
+    #[serde(default)]
+    pub menu_font_scale: u32,
     /// Whether the MCP server listens at all. `None` means "never chosen",
     /// which resolves to [`DEFAULT_MCP_ENABLED`] — a bare `bool` would make
     /// the derived `Default` say "off" and silently disable the server for
@@ -274,6 +288,26 @@ const DEFAULT_THEME: &str = "dark";
 const DEFAULT_EDITOR_FONT_FAMILY: &str = "Monospace";
 const DEFAULT_EDITOR_FONT_SIZE: u32 = 11;
 
+/// Interface font scale used when the user has never chosen one: the
+/// platform's own default UI font size, unscaled.
+pub const DEFAULT_UI_FONT_SCALE: u32 = 100;
+
+/// Bounds on an interface font scale. Enforced on read rather than on write
+/// so a hand-edited `settings.toml` cannot produce a window whose menus are
+/// unreadable or too large to fit the screen.
+pub const MIN_UI_FONT_SCALE: u32 = 50;
+pub const MAX_UI_FONT_SCALE: u32 = 300;
+
+/// Resolves a stored percentage: `0` (never chosen) becomes the default, and
+/// anything else is clamped into [`MIN_UI_FONT_SCALE`]..=[`MAX_UI_FONT_SCALE`].
+fn resolve_font_scale(value: u32) -> u32 {
+    if value == 0 {
+        DEFAULT_UI_FONT_SCALE
+    } else {
+        value.clamp(MIN_UI_FONT_SCALE, MAX_UI_FONT_SCALE)
+    }
+}
+
 /// The MCP server is on unless the user turns it off: the IDE's whole point
 /// of having one is that an agent can attach to a running instance without
 /// the human first hunting for a switch.
@@ -314,6 +348,21 @@ impl Settings {
         } else {
             self.editor_font_size
         }
+    }
+
+    /// The interface font scale for general chrome, resolved and clamped.
+    pub fn ui_font_scale_or_default(&self) -> u32 {
+        resolve_font_scale(self.ui_font_scale)
+    }
+
+    /// The interface font scale for the project tree, resolved and clamped.
+    pub fn project_tree_font_scale_or_default(&self) -> u32 {
+        resolve_font_scale(self.project_tree_font_scale)
+    }
+
+    /// The interface font scale for the menu bar, resolved and clamped.
+    pub fn menu_font_scale_or_default(&self) -> u32 {
+        resolve_font_scale(self.menu_font_scale)
     }
 
     /// Whether the MCP server should listen, defaulting to
@@ -612,6 +661,9 @@ mod tests {
             theme: "dark".to_string(),
             editor_font_size: 14,
             editor_font_family: "Fira Code".to_string(),
+            ui_font_scale: 130,
+            project_tree_font_scale: 150,
+            menu_font_scale: 90,
             mcp_enabled: Some(true),
             mcp_port: 7337,
             editor_colors: colors,
@@ -755,6 +807,53 @@ mod tests {
         };
         assert_eq!(settings.editor_font_family_or_default(), "Fira Code");
         assert_eq!(settings.editor_font_size_or_default(), 14);
+    }
+
+    #[test]
+    fn ui_font_scales_default_to_unscaled_when_unset() {
+        let settings = Settings::default();
+        assert_eq!(settings.ui_font_scale_or_default(), 100);
+        assert_eq!(settings.project_tree_font_scale_or_default(), 100);
+        assert_eq!(settings.menu_font_scale_or_default(), 100);
+    }
+
+    #[test]
+    fn ui_font_scales_return_the_set_values() {
+        let settings = Settings {
+            ui_font_scale: 130,
+            project_tree_font_scale: 150,
+            menu_font_scale: 90,
+            ..Settings::default()
+        };
+        assert_eq!(settings.ui_font_scale_or_default(), 130);
+        assert_eq!(settings.project_tree_font_scale_or_default(), 150);
+        assert_eq!(settings.menu_font_scale_or_default(), 90);
+    }
+
+    #[test]
+    fn ui_font_scales_clamp_a_hand_edited_file() {
+        let settings = Settings {
+            ui_font_scale: 5000,
+            project_tree_font_scale: 1,
+            menu_font_scale: 300,
+            ..Settings::default()
+        };
+        assert_eq!(settings.ui_font_scale_or_default(), 300);
+        assert_eq!(settings.project_tree_font_scale_or_default(), 50);
+        assert_eq!(settings.menu_font_scale_or_default(), 300);
+    }
+
+    #[test]
+    fn a_settings_file_without_ui_font_scales_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(SETTINGS_FILE), "theme = \"light\"\n").unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+
+        assert_eq!(loaded.ui_font_scale, 0);
+        assert_eq!(loaded.ui_font_scale_or_default(), 100);
+        assert_eq!(loaded.project_tree_font_scale_or_default(), 100);
+        assert_eq!(loaded.menu_font_scale_or_default(), 100);
     }
 
     #[test]

@@ -4,6 +4,8 @@
 #include <QPalette>
 #include <QString>
 
+class QWidget;
+
 namespace ui_shell {
 
 // The handful of theme colors a widget needs when it paints itself instead
@@ -72,6 +74,22 @@ QPalette paletteForTheme(const QString &themeName);
 // use this rather than setStyleSheet() alone, so palette and QSS can never
 // drift apart.
 void applyTheme(const QString &themeName);
+
+// Scales the whole application's default UI font to `percent` of the font
+// Qt picked for the platform (100 = unchanged). Widgets that were never
+// given a font of their own follow it; the two that were — see
+// applyWidgetFontScale() — keep their own scale.
+//
+// Always relative to the font captured on the first call, so repeated live
+// previews from the Settings dialog scale the original rather than
+// compounding what the previous preview left behind.
+void applyUiFontScale(int percent);
+
+// Same scale, applied to one widget and its children (the menu bar and its
+// popup menus, the project tree). An explicitly set font wins over the
+// application one, which is exactly what keeps these two independent of
+// applyUiFontScale().
+void applyWidgetFontScale(QWidget *widget, int percent);
 
 // Nudges `base` away from itself so a band or column drawn in the result
 // reads as a subtle tint on both dark and light editor backgrounds. Used by

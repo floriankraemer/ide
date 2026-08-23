@@ -2759,15 +2759,41 @@ void applyKeymap(const QHash<QString, QAction *> &actions, AppSettings *appSetti
     }
 }
 
+// The two widgets that carry an interface font scale of their own, plus the
+// one widget whose size is derived from a font metric and therefore has to be
+// recomputed whenever a scale changes.
+struct UiFontTargets
+{
+    QWidget *menuBar;
+    QWidget *projectTree;
+    QWidget *indexBar;
+};
+
+// One sink for all three scales, used at startup and by the Settings
+// dialog's live preview and its Cancel path alike.
+void applyUiFontScales(const FfiUiFontScales &scales, const UiFontTargets &targets)
+{
+    applyUiFontScale(static_cast<int>(scales.ui));
+    applyWidgetFontScale(targets.menuBar, static_cast<int>(scales.menu));
+    applyWidgetFontScale(targets.projectTree, static_cast<int>(scales.project_tree));
+    // Fixed at build time from the status bar's font metrics, so a scaled
+    // status bar would otherwise leave the indexing bar at the old height.
+    if (targets.indexBar != nullptr) {
+        targets.indexBar->setFixedHeight(targets.indexBar->fontMetrics().height());
+    }
+}
+
 void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *editorTabs,
                         KeymapEditor *keymapEditor, const QHash<QString, QAction *> &actions,
                         DocumentManager *docManager, const std::shared_ptr<QString> &mcpStatus,
                         SyntaxColorEditor *syntaxColorEditor, LanguageCatalog *languageCatalog,
                         LanguageServerEditor *languageServerEditor,
                         LanguageService *languageService,
-                        AiProviderEditor *aiProviderEditor, AiChat *aiChat)
+                        AiProviderEditor *aiProviderEditor, AiChat *aiChat,
+                        const UiFontTargets &uiFontTargets)
 {
     const QString originalTheme = appSettings->themeName();
+    const FfiUiFontScales originalScales = appSettings->uiFontScales();
     const FfiEditorFont originalFont = appSettings->editorFont();
     const FfiEditorColors originalColors = appSettings->editorColors();
 
@@ -2789,7 +2815,12 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     categoryList->addItem(QObject::tr("Language Servers"));
     categoryList->addItem(QObject::tr("AI Providers"));
     categoryList->addItem(QObject::tr("MCP"));
-    categoryList->setMaximumWidth(150);
+    // Derived from the widest category rather than a fixed 150px: the
+    // interface font scale below can make "Language Servers" wider than any
+    // constant chosen for one font size, and a clipped category list is the
+    // first thing a user of the scale setting would see.
+    categoryList->setMaximumWidth(
+      categoryList->fontMetrics().horizontalAdvance(QObject::tr("Language Servers")) + 40);
 
     auto *pages = new QStackedWidget(&dialog);
 
@@ -2803,6 +2834,41 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     // lands on Dark, the same theme styleSheetForTheme() would apply for it.
     themeCombo->setCurrentIndex(std::max(0, themeCombo->findData(originalTheme)));
     appearanceForm->addRow(QObject::tr("Theme:"), themeCombo);
+
+    // Percentages of the platform's own UI font rather than absolute point
+    // sizes, so the same settings.toml stays sane on a machine whose default
+    // UI font is a different size. The editor keeps its own absolute font
+    // (Settings > Editor) — it is content, not chrome.
+    auto makeScaleSpin = [appearancePage](quint32 value) {
+        auto *spin = new QSpinBox(appearancePage);
+        spin->setRange(50, 300);
+        spin->setSingleStep(10);
+        spin->setSuffix(QStringLiteral(" %"));
+        spin->setValue(static_cast<int>(value));
+        return spin;
+    };
+    QSpinBox *uiScaleSpin = makeScaleSpin(originalScales.ui);
+    QSpinBox *treeScaleSpin = makeScaleSpin(originalScales.project_tree);
+    QSpinBox *menuScaleSpin = makeScaleSpin(originalScales.menu);
+    appearanceForm->addRow(QObject::tr("Interface font scale:"), uiScaleSpin);
+    appearanceForm->addRow(QObject::tr("Project tree font scale:"), treeScaleSpin);
+    appearanceForm->addRow(QObject::tr("Menu font scale:"), menuScaleSpin);
+
+    auto applyScalesLive = [uiScaleSpin, treeScaleSpin, menuScaleSpin, uiFontTargets,
+                             categoryList]() {
+        applyUiFontScales(FfiUiFontScales{static_cast<quint32>(uiScaleSpin->value()),
+                                           static_cast<quint32>(treeScaleSpin->value()),
+                                           static_cast<quint32>(menuScaleSpin->value())},
+                           uiFontTargets);
+        // The dialog is scaling under its own feet: its category list was
+        // sized for the font in force when it opened.
+        categoryList->setMaximumWidth(
+          categoryList->fontMetrics().horizontalAdvance(QObject::tr("Language Servers")) + 40);
+    };
+    for (QSpinBox *spin : {uiScaleSpin, treeScaleSpin, menuScaleSpin}) {
+        QObject::connect(spin, &QSpinBox::valueChanged, &dialog, applyScalesLive);
+    }
+
     pages->addWidget(appearancePage);
 
     QObject::connect(themeCombo, &QComboBox::currentIndexChanged, &dialog,
@@ -2994,6 +3060,9 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
 
     if (dialog.exec() == QDialog::Accepted) {
         appSettings->saveTheme(themeCombo->currentData().toString());
+        appSettings->saveUiFontScales(static_cast<quint32>(uiScaleSpin->value()),
+                                       static_cast<quint32>(treeScaleSpin->value()),
+                                       static_cast<quint32>(menuScaleSpin->value()));
         appSettings->saveEditorFont(fontFamilyEdit->text(),
                                      static_cast<quint32>(fontSizeSpin->value()));
         appSettings->saveEditorColors(*backgroundColor, *foregroundColor, *currentLineColor);
@@ -3019,6 +3088,7 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
         aiProviderEditor->revert();
         syntaxColorEditor->revert();
         applyTheme(originalTheme);
+        applyUiFontScales(originalScales, uiFontTargets);
         editorTabs->refreshHighlighting();
         editorTabs->setEditorFont(QFont(originalFont.family, static_cast<int>(originalFont.size)));
         editorTabs->setEditorColors(originalColors.background, originalColors.foreground,
@@ -3041,6 +3111,10 @@ struct CentralWidgets
 {
     EditorTabs *editorTabs;
     ads::CDockManager *dockManager;
+    // Only reason it escapes: the project tree carries its own interface
+    // font scale, so buildMainWindow has to be able to hand it to
+    // applyUiFontScales().
+    QTreeView *projectTree;
     SearchResultsPanel *searchResultsPanel;
     ads::CDockWidget *searchResultsDock;
     ClassViewPanel *classViewPanel;
@@ -3478,11 +3552,11 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
           }
       });
 
-    return CentralWidgets{editorTabs,      dockManager,    searchResultsPanel,
-                           searchResultsDock, classViewPanel, classViewDock,
-                           terminalDock,    terminalWidget, findUsagesPanel,
-                           findUsagesDock,  searchEverywhereDialog,
-                           problemsPanel,   problemsDock,   aiChatPanel,
+    return CentralWidgets{editorTabs,        dockManager,     treeView,
+                           searchResultsPanel, searchResultsDock, classViewPanel,
+                           classViewDock,     terminalDock,    terminalWidget,
+                           findUsagesPanel,   findUsagesDock,  searchEverywhereDialog,
+                           problemsPanel,     problemsDock,    aiChatPanel,
                            aiChatDock};
 }
 
@@ -3728,6 +3802,14 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     indexBar->setTextVisible(false);
     indexBar->setFixedWidth(90);
     indexBar->setFixedHeight(statusBar->fontMetrics().height());
+
+    // Everything a font scale has to reach now exists: the menu bar is
+    // created lazily by menuBar() just below, the tree came out of
+    // buildCentralWidget, and the indexing bar is right above. Applied here
+    // (rather than only in run_app) because the two per-widget scales have no
+    // widget to land on until this point.
+    const UiFontTargets uiFontTargets{window->menuBar(), central.projectTree, indexBar};
+    applyUiFontScales(appSettings->uiFontScales(), uiFontTargets);
     QObject::connect(searchModel, &SearchModel::indexProgress, window,
                       [indexLabel, indexBar](quint32 done, quint32 total) {
                           const QString text =
@@ -3831,12 +3913,12 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QObject::connect(preferencesAction, &QAction::triggered, window,
                       [window, appSettings, editorTabs, keymapEditor, actions, docManager,
                        mcpStatus, syntaxColorEditor, languageCatalog, languageServerEditor,
-                       languageService, aiProviderEditor, aiChat]() {
+                       languageService, aiProviderEditor, aiChat, uiFontTargets]() {
                           showSettingsDialog(window, appSettings, editorTabs, keymapEditor,
                                               *actions, docManager, mcpStatus,
                                               syntaxColorEditor, languageCatalog,
                                               languageServerEditor, languageService,
-                                              aiProviderEditor, aiChat);
+                                              aiProviderEditor, aiChat, uiFontTargets);
                       });
 
     QMenu *editMenu = window->menuBar()->addMenu(QObject::tr("&Edit"));
@@ -4241,6 +4323,11 @@ int run_app()
     // Applying the theme (T2) before anything is shown means neither the
     // splash nor the main window ever flashes an unstyled frame.
     applyTheme(appSettings->themeName());
+    // The global half of the interface font scale, before the splash for the
+    // same reason: no frame is ever painted at a size the user did not pick.
+    // The menu bar's and project tree's own scales are applied in
+    // buildMainWindow(), where those widgets exist.
+    applyUiFontScale(static_cast<int>(appSettings->uiFontScales().ui));
     // Build the language registry from what the config directory holds and
     // which languages the user turned off, before the first file can be
     // opened — otherwise a disabled language would come back every restart.

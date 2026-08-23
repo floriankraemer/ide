@@ -1,6 +1,8 @@
 #include "theme.h"
 
 #include <QApplication>
+#include <QFont>
+#include <QWidget>
 
 namespace ui_shell {
 
@@ -529,6 +531,50 @@ void applyTheme(const QString &themeName)
     // `palette(...)` reference in it, including the ones inside the dock
     // manager's own sheet.
     qApp->setStyleSheet(styleSheetForTheme(themeName));
+}
+
+namespace {
+
+// The platform's own UI font, captured before anything scales it. Static
+// rather than re-read from qApp because applyUiFontScale() overwrites
+// qApp's font, so after the first call qApp no longer knows the original.
+QFont baseUiFont()
+{
+    static const QFont base = QApplication::font();
+    return base;
+}
+
+QFont scaled(const QFont &base, int percent)
+{
+    QFont font = base;
+    // A font carries either a point size or a pixel size; the unused one
+    // reads back as -1, and setting it would discard the other.
+    if (base.pointSizeF() > 0.0) {
+        font.setPointSizeF(base.pointSizeF() * percent / 100.0);
+    } else if (base.pixelSize() > 0) {
+        font.setPixelSize(qMax(1, qRound(base.pixelSize() * percent / 100.0)));
+    }
+    return font;
+}
+
+} // namespace
+
+void applyUiFontScale(int percent)
+{
+    qApp->setFont(scaled(baseUiFont(), percent));
+    // Widgets built before this call keep the metrics QStyleSheetStyle
+    // computed for them when it first polished them, so a live change from
+    // the Settings dialog would not show until the next restart. Re-setting
+    // the sheet re-polishes every widget against the new application font —
+    // the same trick applyTheme() uses to re-resolve palette() references.
+    qApp->setStyleSheet(styleSheetForTheme(activeThemeName()));
+}
+
+void applyWidgetFontScale(QWidget *widget, int percent)
+{
+    if (widget != nullptr) {
+        widget->setFont(scaled(baseUiFont(), percent));
+    }
 }
 
 QColor tinted(const QColor &base, int darkFactor, int lightFactor)

@@ -63,6 +63,18 @@ mod ffi {
         size: u32,
     }
 
+    /// Interface font scales in percent, one per area of chrome that gets its
+    /// own knob. Always resolved and clamped by `app-config`, so the view
+    /// applies what it is given without range-checking it.
+    #[derive(Default)]
+    struct FfiUiFontScales {
+        /// Everything that has no scale of its own: tabs, docks, dialogs,
+        /// the status bar.
+        ui: u32,
+        project_tree: u32,
+        menu: u32,
+    }
+
     /// Editor text colors (S2), hex strings ("#rrggbb") or empty for "use
     /// the theme's default palette role" — the view (not this struct)
     /// decides what empty means.
@@ -1146,6 +1158,16 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "saveEditorFont"]
         fn save_editor_font(self: &AppSettings, family: &QString, size: u32);
+
+        /// Interface font scales, always resolved and clamped.
+        #[qinvokable]
+        #[cxx_name = "uiFontScales"]
+        fn ui_font_scales(self: &AppSettings) -> FfiUiFontScales;
+
+        /// Persist the interface font scales (the Appearance page, on OK).
+        #[qinvokable]
+        #[cxx_name = "saveUiFontScales"]
+        fn save_ui_font_scales(self: &AppSettings, ui: u32, project_tree: u32, menu: u32);
 
         /// Editor text colors, empty when unset (S2).
         #[qinvokable]
@@ -3081,7 +3103,10 @@ use cxx_qt::Threading;
 use cxx_qt_lib::{
     QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QStringList, QVariant,
 };
-use ffi::{FfiEditorColors, FfiEditorFont, FfiOpenResult, FfiResult, FfiWindowGeometry, Roles};
+use ffi::{
+    FfiEditorColors, FfiEditorFont, FfiOpenResult, FfiResult, FfiUiFontScales, FfiWindowGeometry,
+    Roles,
+};
 use syntax_core::theme;
 
 thread_local! {
@@ -3431,6 +3456,23 @@ impl ffi::AppSettings {
         settings.editor_font_family = family.to_string();
         settings.editor_font_size = size;
         let _ = app_config::save(&config_dir, &settings);
+    }
+
+    pub fn ui_font_scales(&self) -> FfiUiFontScales {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        FfiUiFontScales {
+            ui: settings.ui_font_scale_or_default(),
+            project_tree: settings.project_tree_font_scale_or_default(),
+            menu: settings.menu_font_scale_or_default(),
+        }
+    }
+
+    pub fn save_ui_font_scales(&self, ui: u32, project_tree: u32, menu: u32) {
+        let _ = app_config::update(&app_core::resolve_config_dir(), |settings| {
+            settings.ui_font_scale = ui;
+            settings.project_tree_font_scale = project_tree;
+            settings.menu_font_scale = menu;
+        });
     }
 
     pub fn mcp_discovery_file_path(&self) -> QString {
