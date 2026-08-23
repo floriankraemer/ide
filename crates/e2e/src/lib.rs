@@ -31,6 +31,18 @@ pub use wait::{wait_for, wait_for_within};
 /// Search Everywhere and preview dialogs are separate toplevels.
 const MAIN_WINDOW_TITLE: &str = "^IDE$";
 
+/// A position in the marker stream, from [`Ide::mark`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Mark(usize);
+
+impl Mark {
+    /// The beginning of the stream — for a wait on something the app
+    /// published during startup, before the test could take a mark.
+    pub fn start() -> Mark {
+        Mark(0)
+    }
+}
+
 /// A seeded, isolated IDE process.
 pub struct Ide {
     name: String,
@@ -81,11 +93,11 @@ impl Ide {
         ide
     }
 
-    /// Quit and come back with the same config dir and project. The
-    /// persistence flow's whole subject: `app-config`'s round-trip is
+    /// Come back with the same config dir and project, after a [`Ide::quit`].
+    /// The persistence flow's whole subject: `app-config`'s round-trip is
     /// unit-tested, the view rebuilding itself from it is not.
-    pub fn restart(&mut self) {
-        self.quit();
+    pub fn relaunch(&mut self) {
+        assert!(self.child.is_none(), "quit before relaunching");
         self.spawn();
     }
 
@@ -173,8 +185,7 @@ impl Ide {
     /// would let the app's own idea of the buffer answer for the file.
     pub fn read_project_file(&self, relative: impl AsRef<Path>) -> String {
         let path = self.project_root().join(relative.as_ref());
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("reading {}: {e}", path.display()))
     }
 
     /// Every regular file under the project root, by relative path, with its
@@ -193,23 +204,48 @@ impl Ide {
         read_events(&self.events_path)
     }
 
-    /// Wait for a marker matching `predicate` and return it.
-    pub fn wait_for_event(&self, what: &str, predicate: impl Fn(&Value) -> bool) -> Value {
-        let events = self.events_path.clone();
-        wait_for(what, || {
-            read_events(&events).into_iter().find(|e| predicate(e))
-        })
+    /// A position in the marker stream. Taken *before* a gesture, so what
+    /// follows can be asserted about without the app's startup marks — or a
+    /// previous step's — answering the question by accident.
+    pub fn mark(&self) -> Mark {
+        Mark(self.events().len())
     }
 
-    pub fn wait_for_ev(&self, kind: &str) -> Value {
-        self.wait_for_event(&format!("a `{kind}` marker"), |e| e["ev"] == kind)
+    /// Markers published since `mark`.
+    pub fn events_since(&self, mark: Mark) -> Vec<Value> {
+        let mut all = self.events();
+        if mark.0 >= all.len() {
+            return Vec::new();
+        }
+        all.split_off(mark.0)
     }
 
-    pub fn events_of(&self, kind: &str) -> Vec<Value> {
-        self.events()
+    /// Markers of one kind published since `mark`.
+    pub fn events_since_of(&self, mark: Mark, kind: &str) -> Vec<Value> {
+        self.events_since(mark)
             .into_iter()
             .filter(|e| e["ev"] == kind)
             .collect()
+    }
+
+    /// Wait for a marker published since `mark` that matches `predicate`.
+    pub fn wait_for_event(
+        &self,
+        mark: Mark,
+        what: &str,
+        predicate: impl Fn(&Value) -> bool,
+    ) -> Value {
+        let events = self.events_path.clone();
+        wait_for(what, || {
+            read_events(&events)
+                .into_iter()
+                .skip(mark.0)
+                .find(|e| predicate(e))
+        })
+    }
+
+    pub fn wait_for_ev(&self, mark: Mark, kind: &str) -> Value {
+        self.wait_for_event(mark, &format!("a `{kind}` marker"), |e| e["ev"] == kind)
     }
 
     // --- observation ------------------------------------------------------
@@ -272,6 +308,22 @@ impl Ide {
         &self.window
     }
 
+    /// Give the input focus back to the main window.
+    ///
+    /// Needed after every dialog closes, and only because there is no window
+    /// manager under bare Xvfb. Qt's shortcuts default to
+    /// `Qt::WindowShortcut`, which fires only for the *active* window, so
+    /// without this a Ctrl+S after a dialog is silently dropped while plain
+    /// typing still reaches the editor — a divergence from every real desktop
+    /// and a fine way to spend an afternoon.
+    pub fn focus_main(&self) {
+        let window = self.window.clone();
+        xdotool::run(&["windowfocus", "--sync", &window]);
+        wait_for("the main window to take the input focus back", || {
+            xdotool::focused_window().filter(|focused| *focused == window)
+        });
+    }
+
     // --- shutdown ----------------------------------------------------------
 
     /// Ctrl+Q, then wait for the process to actually exit. Returns its code.
@@ -292,7 +344,9 @@ impl Ide {
                 .is_empty()
                 .then_some(())
         });
-        status.code().unwrap_or_else(|| panic!("the app was killed: {status}"))
+        status
+            .code()
+            .unwrap_or_else(|| panic!("the app was killed: {status}"))
     }
 }
 

@@ -40,8 +40,8 @@ impl Mcp {
     /// One JSON-RPC call over the flat method surface, returning `result`.
     pub fn call(&self, method: &str, params: Value) -> Value {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let body = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params})
-            .to_string();
+        let body =
+            json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string();
         let response = self.post(&body);
         let parsed: Value = serde_json::from_str(&response)
             .unwrap_or_else(|e| panic!("MCP {method} returned {response:?}: {e}"));

@@ -1166,7 +1166,15 @@ private:
         splitVerticalAction->setEnabled(group->count() > 1);
         splitHorizontalAction->setEnabled(group->count() > 1);
 
+        // A popup menu takes a keyboard grab rather than the input focus, so
+        // this mark is the only way anything outside the process can know it
+        // is up. `exec()` does not return until it is gone, hence the mark
+        // before rather than after.
+        e2eMark("{\"ev\":\"dialog_shown\",\"name\":\"tab_context_menu\"}");
         QAction *chosen = menu.exec(group->tabBar()->mapToGlobal(pos));
+        e2eMark(QStringLiteral("{\"ev\":\"dialog_closed\",\"name\":\"tab_context_menu\","
+                                "\"accepted\":%1}")
+                  .arg(chosen != nullptr ? QLatin1String("true") : QLatin1String("false")));
         if (chosen == closeAction) {
             requestCloseTab(group, index);
         } else if (chosen == closeOthersAction) {
@@ -1426,12 +1434,22 @@ private:
     void markTab(const char *event, quint64 tabId, QTabWidget *group, int index,
                   const QString &title)
     {
+        // `rect` is the tab's own label on screen, in global coordinates. A
+        // test that has to click a tab would otherwise compute it from the
+        // window geometry, the style's metrics and the font — three things
+        // that move for reasons unrelated to whatever it is testing.
+        const QRect rect = group->tabBar()->tabRect(index);
+        const QPoint origin = rect.isEmpty() ? QPoint() : group->tabBar()->mapToGlobal(rect.topLeft());
         e2eMark(QStringLiteral("{\"ev\":\"%1\",\"index\":%2,\"tab_id\":%3,\"pane\":%4,"
-                                "\"title\":%5}")
+                                "\"rect\":[%5,%6,%7,%8],\"title\":%9}")
                   .arg(QLatin1String(event))
                   .arg(index)
                   .arg(tabId)
                   .arg(groups_.indexOf(group))
+                  .arg(origin.x())
+                  .arg(origin.y())
+                  .arg(rect.width())
+                  .arg(rect.height())
                   .arg(e2eJson(title)));
     }
 
