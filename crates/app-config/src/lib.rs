@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fs;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -23,6 +24,10 @@ pub use syntax_colors::{LanguageScopeStyles, ScopeStyle, ScopeStyles};
 
 /// File name used to persist settings inside the config directory.
 const SETTINGS_FILE: &str = "settings.toml";
+/// Where [`save`] stages the new content before renaming it over
+/// [`SETTINGS_FILE`]. Same directory, so the rename stays within one
+/// filesystem and is therefore atomic.
+const TEMP_SETTINGS_FILE: &str = "settings.toml.tmp";
 
 /// Window position and size, as last saved by the view (`QMainWindow`
 /// geometry). Every field is individually defaulted so a TOML file that only
@@ -37,6 +42,15 @@ pub struct WindowGeometry {
     pub width: u32,
     #[serde(default)]
     pub height: u32,
+}
+
+impl WindowGeometry {
+    /// Whether this geometry is worth persisting or restoring. A zero-sized
+    /// rect is what the window reports while it is minimised or already torn
+    /// down, and restoring it next launch would open a window nobody can see.
+    pub fn is_usable(&self) -> bool {
+        self.width > 0 && self.height > 0
+    }
 }
 
 /// One `[[language_server]]` entry: what the user says about the language
@@ -404,16 +418,153 @@ pub fn load(config_dir: &Path) -> Result<Settings, ConfigError> {
 
 /// Save `settings` to `<config_dir>/settings.toml`, creating `config_dir` if
 /// it doesn't exist yet.
+///
+/// The write is atomic: the content goes to a temporary file in the same
+/// directory and is then renamed over the real one. A plain truncate-then-write
+/// leaves a window in which the settings file is empty or half-written, and
+/// anything that reads it in that window — another window of the app, the next
+/// launch after a crash or a SIGTERM — sees no settings at all, defaults them,
+/// and can then write those defaults back over everything the user configured.
 pub fn save(config_dir: &Path, settings: &Settings) -> Result<(), ConfigError> {
     fs::create_dir_all(config_dir)?;
     let content = toml::to_string_pretty(settings).expect("Settings always serializes");
-    fs::write(config_dir.join(SETTINGS_FILE), content)?;
+    let path = config_dir.join(SETTINGS_FILE);
+    let temp_path = config_dir.join(TEMP_SETTINGS_FILE);
+    // fsync before the rename: the rename can otherwise reach the disk before
+    // the content does, which after a power loss leaves an empty settings file
+    // where a complete old one used to be.
+    let write_temp = || -> io::Result<()> {
+        let mut file = fs::File::create(&temp_path)?;
+        file.write_all(content.as_bytes())?;
+        file.sync_all()
+    };
+    if let Err(err) = write_temp() {
+        let _ = fs::remove_file(&temp_path);
+        return Err(ConfigError::Io(err));
+    }
+    if let Err(err) = fs::rename(&temp_path, &path) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(ConfigError::Io(err));
+    }
     Ok(())
+}
+
+/// Load, edit, save — the shape every "change one setting" path needs.
+///
+/// A load failure aborts the update instead of editing a `Settings::default()`
+/// and saving that: the file on disk holds everything the user configured, so
+/// writing defaults over it because it could not be read (or was momentarily
+/// unreadable) is data loss, not a fresh start.
+pub fn update(config_dir: &Path, edit: impl FnOnce(&mut Settings)) -> Result<(), ConfigError> {
+    let mut settings = load(config_dir)?;
+    edit(&mut settings);
+    save(config_dir, &settings)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_edits_one_field_and_keeps_the_rest() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            theme: "light".to_string(),
+            editor_font_family: "Monospace".to_string(),
+            ..Settings::default()
+        };
+        save(dir.path(), &settings).unwrap();
+
+        update(dir.path(), |settings| {
+            settings.window_geometry = WindowGeometry {
+                x: 10,
+                y: 20,
+                width: 900,
+                height: 700,
+            };
+        })
+        .unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+        assert_eq!(loaded.theme, "light");
+        assert_eq!(loaded.editor_font_family, "Monospace");
+        assert_eq!(loaded.window_geometry.width, 900);
+    }
+
+    #[test]
+    fn update_refuses_to_write_defaults_over_an_unreadable_file() {
+        // The whole point of the bail-out: a file that cannot be parsed still
+        // holds the user's settings, so it must survive the failed update.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(SETTINGS_FILE);
+        fs::write(&path, "theme = \"light\"\nthis is not toml").unwrap();
+
+        let err = update(dir.path(), |settings| settings.theme = "dark".to_string()).unwrap_err();
+
+        assert!(matches!(err, ConfigError::Parse(_)));
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("this is not toml"));
+    }
+
+    #[test]
+    fn save_leaves_no_temporary_file_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        save(dir.path(), &Settings::default()).unwrap();
+
+        assert!(!dir.path().join(TEMP_SETTINGS_FILE).exists());
+    }
+
+    #[test]
+    fn save_never_exposes_a_half_written_settings_file() {
+        // A truncate-then-write save lets a concurrent reader see an empty or
+        // partial file and default the settings away; renaming a complete
+        // temporary file over the old one cannot.
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings {
+            theme: "light".to_string(),
+            ..Settings::default()
+        };
+        settings
+            .editor_colors
+            .insert("background".to_string(), "#ffffff".to_string());
+        save(dir.path(), &settings).unwrap();
+
+        let reader_dir = dir.path().to_path_buf();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let reader_stop = std::sync::Arc::clone(&stop);
+        let reader = std::thread::spawn(move || {
+            while !reader_stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let loaded = load(&reader_dir).expect("settings.toml is always parseable");
+                assert_eq!(loaded.theme, "light", "a reader saw defaulted settings");
+            }
+        });
+
+        for _ in 0..200 {
+            save(dir.path(), &settings).unwrap();
+        }
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn a_zero_sized_window_geometry_is_not_usable() {
+        assert!(!WindowGeometry::default().is_usable());
+        assert!(!WindowGeometry {
+            x: 10,
+            y: 10,
+            width: 800,
+            height: 0,
+        }
+        .is_usable());
+        assert!(WindowGeometry {
+            x: 10,
+            y: 10,
+            width: 800,
+            height: 600,
+        }
+        .is_usable());
+    }
 
     #[test]
     fn mcp_defaults_to_enabled_on_an_os_assigned_port() {

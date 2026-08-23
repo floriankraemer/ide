@@ -2122,9 +2122,13 @@ protected:
             return;
         }
         if (appSettings_) {
-            const QRect g = geometry();
-            appSettings_->saveWindowGeometry(g.x(), g.y(), static_cast<quint32>(g.width()),
-                                              static_cast<quint32>(g.height()));
+            // normalGeometry(), not geometry(): a maximised or minimised
+            // window reports its current screen rect (0x0 while minimised),
+            // and restoring that is not what the user last sized the window
+            // to. Rust drops a rect it cannot use.
+            const QRect g = normalGeometry();
+            appSettings_->saveWindowGeometry(g.x(), g.y(), static_cast<quint32>(qMax(0, g.width())),
+                                              static_cast<quint32>(qMax(0, g.height())));
             if (dockManager_) {
                 // D4: window_state is a plain Rust String (must be valid
                 // UTF-8); ADS's saveState() returns raw QByteArray, so
