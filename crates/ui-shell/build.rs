@@ -289,6 +289,13 @@ fn main() {
         .cpp_file("cpp/syntax_highlighter.cpp")
         .cpp_file("cpp/terminal_widget.h")
         .cpp_file("cpp/terminal_widget.cpp")
+        // The chat panel declares Q_OBJECT, so its header is listed too
+        // (passing a header to cpp_file() is what runs moc on it); the
+        // providers page is a free function like every other settings
+        // page and needs none.
+        .cpp_file("cpp/ai_chat_panel.h")
+        .cpp_file("cpp/ai_chat_panel.cpp")
+        .cpp_file("cpp/ai_providers_page.cpp")
         .include_dir("cpp")
         .include_dir(ads_dir)
         .cpp_file(compile_ads_qrc(ads_dir, &tool_dirs))

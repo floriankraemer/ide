@@ -19,13 +19,13 @@ A fresh session should read this table (and `git log`) before picking up work, p
 | AC10 | done | this change (#61) |
 | AC11 | done | this change (#61) |
 | AC12 | done | this change (#61) |
-| AC13 | open | |
-| AC14 | open | |
-| AC15 | open | |
-| AC16 | open | |
-| AC17 | open | |
-| AC18 | open | |
-| AC19 | open | |
+| AC13 | done | this change (#61) |
+| AC14 | done | this change (#61) |
+| AC15 | done | this change (#61) |
+| AC16 | done | this change (#61) |
+| AC17 | done | this change (#61) |
+| AC18 | done | this change (#61) |
+| AC19 | done | this change (#61) |
 
 ## Context
 

@@ -1,5 +1,7 @@
 #include "main_window.h"
 
+#include "ai_chat_panel.h"
+#include "ai_providers_page.h"
 #include "code_editor.h"
 #include "find_bar.h"
 #include "keymap_page.h"
@@ -515,6 +517,18 @@ public:
         QTextCursor cursor = editor->textCursor();
         cursor.select(QTextCursor::WordUnderCursor);
         return cursor.selectedText();
+    }
+
+    // What the user has selected, as plain text. QTextCursor reports a
+    // paragraph separator (U+2029) where the document has a newline, which
+    // no consumer of this text — least of all a model prompt — expects.
+    QString selectedText() const
+    {
+        auto *editor = currentEditor();
+        if (!editor) {
+            return QString();
+        }
+        return editor->textCursor().selectedText().replace(QChar(0x2029), QLatin1Char('\n'));
     }
 
     QString currentPath() const { return docManager_->tabPath(currentTabId()); }
@@ -1323,6 +1337,10 @@ private:
         editor->setPalette(pal);
     }
 
+    // Public for the same reason onBufferEditedExternally is: an agent's
+    // tool can open a tab (AiChat::toolOpenedTab), and that relay lives in
+    // buildMainWindow beside MCP's.
+public:
     void onTabOpened(quint64 tabId, const QString &title)
     {
         QTabWidget *group = activeGroup_ ? activeGroup_ : groups_.first();
@@ -1476,6 +1494,7 @@ private:
         applyDiagnostics();
     }
 
+private:
     void onTabClosed(quint64 tabId)
     {
         const TabLoc loc = locate(tabId);
@@ -1494,6 +1513,10 @@ private:
         }
     }
 
+    // Public alongside onTabOpened: an agent's tool can save a buffer
+    // (AiChat::toolSavedBuffer), which is the same "no longer modified"
+    // event DocumentManager reports.
+public:
     void onTabModifiedChanged(quint64 tabId, bool modified)
     {
         const TabLoc loc = locate(tabId);
@@ -1502,6 +1525,8 @@ private:
         }
         renderTabText(loc.group, loc.index, docManager_->tabTitle(tabId), modified);
     }
+
+private:
 
     QJsonObject serializeSplitter(const QSplitter *splitter) const
     {
@@ -2082,6 +2107,20 @@ private:
 // which sites of a name-based rename start ticked is decided before the
 // dialog is built. Every branch below is on a flag or a signal, never on a
 // judgement made here.
+// One line of an edit, for the preview. A multi-line insertion is shown by
+// its first line: the dialog says what is changing and where, not what the
+// new text is in full. Free rather than a member of RefactorController: the
+// AI panel's Apply runs the same preview over the same FfiTextEdit rows
+// (ADR-0020 §5), and a second copy of this would drift.
+QString previewText(const QString &newText)
+{
+    const QString first = newText.split(QLatin1Char('\n')).value(0).trimmed();
+    if (first.isEmpty()) {
+        return QObject::tr("(removed)");
+    }
+    return first.size() > 80 ? first.left(77) + QStringLiteral("...") : first;
+}
+
 class RefactorController : public QObject
 {
 public:
@@ -2386,18 +2425,6 @@ private:
         return paths.size();
     }
 
-    // One line of an edit, for the preview. A multi-line insertion is shown
-    // by its first line: the dialog says what is changing and where, not
-    // what the new text is in full.
-    static QString previewText(const QString &newText)
-    {
-        const QString first = newText.split(QLatin1Char('\n')).value(0).trimmed();
-        if (first.isEmpty()) {
-            return tr("(removed)");
-        }
-        return first.size() > 80 ? first.left(77) + QStringLiteral("...") : first;
-    }
-
     void report(const QString &message) { window_->statusBar()->showMessage(message, 6000); }
 
     LanguageService *languageService_;
@@ -2675,7 +2702,8 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
                         DocumentManager *docManager, const std::shared_ptr<QString> &mcpStatus,
                         SyntaxColorEditor *syntaxColorEditor, LanguageCatalog *languageCatalog,
                         LanguageServerEditor *languageServerEditor,
-                        LanguageService *languageService)
+                        LanguageService *languageService,
+                        AiProviderEditor *aiProviderEditor, AiChat *aiChat)
 {
     const QString originalTheme = appSettings->themeName();
     const FfiEditorFont originalFont = appSettings->editorFont();
@@ -2697,6 +2725,7 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     categoryList->addItem(QObject::tr("Keymap"));
     categoryList->addItem(QObject::tr("Languages"));
     categoryList->addItem(QObject::tr("Language Servers"));
+    categoryList->addItem(QObject::tr("AI Providers"));
     categoryList->addItem(QObject::tr("MCP"));
     categoryList->setMaximumWidth(150);
 
@@ -2826,6 +2855,13 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     languageServerEditor->beginEdit();
     pages->addWidget(buildLanguageServersPage(&dialog, languageServerEditor, languageService));
 
+    // AI Providers sits next to Language Servers — both configure an
+    // external process the IDE talks to — and commits on OK for the same
+    // reason: a half-typed base URL is not a setting worth applying. There
+    // is no API key field on the page, by ADR-0020 decision 3.
+    aiProviderEditor->beginEdit();
+    pages->addWidget(buildAiProvidersPage(&dialog, aiProviderEditor));
+
     // MCP, like Keymap and unlike Appearance/Editor, commits on OK rather
     // than applying live: restarting the server on every keystroke in the
     // port field would bind a series of half-typed port numbers.
@@ -2874,7 +2910,16 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     categoryList->setCurrentRow(0);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    // OK runs the AI page's commit first, because it is the one page that
+    // can refuse: `settings-model` validates the draft and says what is
+    // wrong with it, and a false answer means the dialog stays open on the
+    // field the user has to fix. Nothing else is committed until it passes.
+    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog,
+                      [&dialog, aiProviderEditor]() {
+                          if (commitAiProvidersPage(&dialog, aiProviderEditor)) {
+                              dialog.accept();
+                          }
+                      });
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
     auto *bodyLayout = new QHBoxLayout();
@@ -2898,6 +2943,10 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
         // whether anything changed here would be the view deciding
         // something the Rust side already decides.
         docManager->applyMcpSettings();
+        // The AI draft was already committed by the OK handler above; this
+        // is the chat session re-reading the provider, the mode and the
+        // persistence setting it had cached.
+        aiChat->applyAiSettings();
         languageServerEditor->commit();
         // Reconciling is the Rust side's decision: it stops what the new
         // settings no longer describe and leaves the rest running, and the
@@ -2905,6 +2954,7 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
         languageService->applyServerSettings();
         editorTabs->reannounceDocuments();
     } else {
+        aiProviderEditor->revert();
         syntaxColorEditor->revert();
         applyTheme(originalTheme);
         editorTabs->refreshHighlighting();
@@ -2940,6 +2990,8 @@ struct CentralWidgets
     SearchEverywhereDialog *searchEverywhereDialog;
     ProblemsPanel *problemsPanel;
     ads::CDockWidget *problemsDock;
+    AiChatPanel *aiChatPanel;
+    ads::CDockWidget *aiChatDock;
 };
 
 // ProjectTreeModel::Roles are offsets from Qt::UserRole, not role numbers —
@@ -2954,7 +3006,7 @@ int treeRole(ProjectTreeModel::Roles role)
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
                                    DocumentManager *docManager, AppSettings *appSettings,
                                    SearchModel *searchModel, TerminalSession *terminalSession,
-                                   LanguageService *languageService)
+                                   LanguageService *languageService, AiChat *aiChat)
 {
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
@@ -3022,7 +3074,19 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
       dockManager);
     auto *classViewDock = new ads::CDockWidget(dockManager, QObject::tr("Class View"));
     classViewDock->setWidget(classViewPanel);
-    dockManager->addDockWidget(ads::RightDockWidgetArea, classViewDock, editorArea);
+    auto *rightArea =
+      dockManager->addDockWidget(ads::RightDockWidgetArea, classViewDock, editorArea);
+
+    // AC16/AC17: the AI Chat dock, tabbed into the right-hand area
+    // (CenterDockWidgetArea) exactly as Find Usages and Problems tab into
+    // the bottom one — it sits beside the code it is talking about rather
+    // than squeezing a third split into the window. Its callbacks (the
+    // current buffer text, and applying a code block) are set in
+    // buildMainWindow, which is where the editor lives.
+    auto *aiChatPanel = new AiChatPanel(aiChat, searchModel, dockManager);
+    auto *aiChatDock = new ads::CDockWidget(dockManager, QObject::tr("AI Chat"));
+    aiChatDock->setWidget(aiChatPanel);
+    dockManager->addDockWidget(ads::CenterDockWidgetArea, aiChatDock, rightArea);
 
     // Search Everywhere: a transient popup parented to the top-level window
     // (not the dock manager) since it's a floating overlay, not a dock
@@ -3307,7 +3371,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                            searchResultsDock, classViewPanel, classViewDock,
                            terminalDock,    terminalWidget, findUsagesPanel,
                            findUsagesDock,  searchEverywhereDialog,
-                           problemsPanel,   problemsDock};
+                           problemsPanel,   problemsDock,   aiChatPanel,
+                           aiChatDock};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -3361,6 +3426,13 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // per-window QObjects. It launches nothing until a project is opened and
     // a file of a configured language is opened in it.
     auto *languageService = new LanguageService(window);
+    // ADR-0020: one AI chat session per window, alongside the other
+    // per-window QObjects, plus the Settings > AI Providers draft — the same
+    // arrangement KeymapEditor and LanguageServerEditor use, parented to the
+    // window so it outlives each dialog. Both read the persisted AI settings
+    // on the way up, so both are built after appSettings.
+    auto *aiChat = new AiChat(window);
+    auto *aiProviderEditor = new AiProviderEditor(window);
     // One MCP server per process, brought up right after the shared
     // DocumentManager exists — the listener thread it spawns dispatches
     // every EditorCommand back onto this same QObject's Qt thread. Whether
@@ -3382,7 +3454,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     progress(3, QObject::tr("Building workspace..."));
     const CentralWidgets central =
       buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession,
-                          languageService);
+                          languageService, aiChat);
     EditorTabs *editorTabs = central.editorTabs;
     window->setEditorTabs(editorTabs);
     window->setAppSettings(appSettings);
@@ -3397,6 +3469,88 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     const FfiEditorColors savedColors = appSettings->editorColors();
     editorTabs->setEditorColors(savedColors.background, savedColors.foreground,
                                  savedColors.current_line);
+
+    // The AI panel has no route to the editor, so the window hands it the
+    // two things it asks for: the buffer the user is looking at, and what
+    // Apply means.
+    AiChatPanel *aiChatPanel = central.aiChatPanel;
+    aiChatPanel->setCurrentTextProvider([editorTabs]() { return editorTabs->currentContent(); });
+    aiChatPanel->setApplyHandler(
+      [window, aiChat, aiChatPanel, editorTabs, searchModel](quint64 messageIndex,
+                                                              quint64 blockIndex) {
+          // The same protocol — and the same discipline — a refactoring
+          // runs (ADR-0020 §5): the revision is read *before* the plan is
+          // made and handed back to `takePendingEdits`, so an answer
+          // applied to a buffer that has since moved is refused by
+          // `lsp_core::EditGate` instead of being spliced in blind.
+          const int revision = editorTabs->documentRevision();
+          const FfiRefactorSummary summary =
+            aiChat->prepareApply(messageIndex, blockIndex, aiChatPanel->currentText(), revision);
+          if (summary.title.isEmpty()) {
+              // Nothing was planned. Why is `ai-chat-core`'s sentence, and
+              // the user pressed a button, so it is said out loud rather
+              // than dropped in the status bar.
+              QMessageBox::information(window, QObject::tr("AI Chat"),
+                                        aiChat->applyRefusal().message);
+              return;
+          }
+
+          // A change confined to the file the user is looking at applies
+          // straight away and is undone with Ctrl+Z; anything wider is
+          // shown first — and which of the two this is was decided in Rust,
+          // exactly as for a refactoring.
+          if (summary.touches_other_files) {
+              QList<RefactorPreviewDialog::Row> rows;
+              for (const FfiTextEdit &edit : aiChat->pendingEdits()) {
+                  rows.append({edit.path, static_cast<int>(edit.start_line),
+                                previewText(edit.new_text), true, true});
+              }
+              RefactorPreviewDialog dialog(
+                summary.title,
+                QObject::tr("%n change(s) across %1 file(s). Changes to files that are not open "
+                            "are written to disk and cannot be undone.",
+                            "", static_cast<int>(summary.edit_count))
+                  .arg(summary.document_count),
+                rows, window);
+              if (dialog.exec() != QDialog::Accepted) {
+                  aiChat->cancelApply();
+                  return;
+              }
+              for (const QString &path : dialog.excludedPaths()) {
+                  aiChat->excludeFromApply(path);
+              }
+          }
+
+          const ::rust::Vec<FfiTextEdit> edits = aiChat->takePendingEdits(revision);
+          if (edits.empty()) {
+              window->statusBar()->showMessage(
+                QObject::tr("The file changed while the change was being prepared; nothing was "
+                            "applied."),
+                6000);
+              return;
+          }
+          editorTabs->applyBufferEdits(edits);
+          // Files nobody has open are rewritten and re-indexed by the index
+          // worker; it ignores the buffer edits in the same vector.
+          searchModel->applyFileEdits(edits);
+      });
+
+    // Agent-mode tools take the same route MCP's edit_buffer does: the run
+    // thread has already marshalled these onto the Qt thread
+    // (CxxQtThread::queue), and each lands on the handler DocumentManager's
+    // own signal would have reached. Without them the Rust Document moves
+    // under an agent's edit while the widget keeps showing stale text.
+    QObject::connect(aiChat, &AiChat::toolOpenedTab, editorTabs,
+                      [editorTabs](quint64 tabId, const QString &title) {
+                          editorTabs->onTabOpened(tabId, title);
+                      });
+    QObject::connect(aiChat, &AiChat::toolEditedBuffer, editorTabs,
+                      [editorTabs](quint64 tabId, const QString &content) {
+                          editorTabs->onBufferEditedExternally(tabId, content);
+                      });
+    QObject::connect(aiChat, &AiChat::toolSavedBuffer, editorTabs, [editorTabs](quint64 tabId) {
+        editorTabs->onTabModifiedChanged(tabId, false);
+    });
 
     // L3: line:col + language update per current tab / cursor move; "UTF-8"
     // is static since only UTF-8 is supported today (US-2b's binary-file
@@ -3499,11 +3653,12 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QObject::connect(preferencesAction, &QAction::triggered, window,
                       [window, appSettings, editorTabs, keymapEditor, actions, docManager,
                        mcpStatus, syntaxColorEditor, languageCatalog, languageServerEditor,
-                       languageService]() {
+                       languageService, aiProviderEditor, aiChat]() {
                           showSettingsDialog(window, appSettings, editorTabs, keymapEditor,
                                               *actions, docManager, mcpStatus,
                                               syntaxColorEditor, languageCatalog,
-                                              languageServerEditor, languageService);
+                                              languageServerEditor, languageService,
+                                              aiProviderEditor, aiChat);
                       });
 
     QMenu *editMenu = window->menuBar()->addMenu(QObject::tr("&Edit"));
@@ -3616,6 +3771,8 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
         append(QStringLiteral("refactor.extractMethod"));
         append(QStringLiteral("refactor.extractClass"));
         append(QStringLiteral("refactor.refactorThis"));
+        menu->addSeparator();
+        append(QStringLiteral("ai.addSelection"));
     });
 
     QMenu *viewMenu = window->menuBar()->addMenu(QObject::tr("&View"));
@@ -3742,6 +3899,78 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     };
     editorTabs->setNavigationChangedCallback(refreshNavigationActions);
     refreshNavigationActions();
+
+    // ADR-0020: the AI menu. Every entry is a registered action, so its
+    // shortcut comes from the persisted keymap and Settings > Keymap can
+    // rebind it like any other.
+    QMenu *aiMenu = window->menuBar()->addMenu(QObject::tr("&AI"));
+    QAction *aiAddSelectionAction =
+      registerAction(aiMenu, QStringLiteral("ai.addSelection"),
+                      QObject::tr("Add Selection to AI Chat"), appSettings, *actions);
+    QObject::connect(aiAddSelectionAction, &QAction::triggered, window,
+                      [window, aiChat, central, editorTabs]() {
+                          // The protocol positions the editor reports are
+                          // 0-based; an attachment names the lines the way
+                          // the user reads them off the gutter.
+                          const auto range = editorTabs->selectionRange();
+                          const FfiResult result =
+                            aiChat->attachSelection(editorTabs->currentPath(),
+                                                     range.first.first + 1,
+                                                     range.second.first + 1,
+                                                     editorTabs->selectedText());
+                          if (result.code != 0) {
+                              // An attachment can be refused — a
+                              // secret-shaped file, a path outside the
+                              // project — and the reason is Rust's sentence,
+                              // not one composed here.
+                              QMessageBox::information(window, QObject::tr("AI Chat"),
+                                                        result.message);
+                              return;
+                          }
+                          central.aiChatDock->toggleView(true);
+                          central.aiChatDock->raise();
+                          central.aiChatPanel->attachAndFocus();
+                      });
+
+    QAction *aiAddFileAction = registerAction(aiMenu, QStringLiteral("ai.addFile"),
+                                               QObject::tr("Add File to AI Chat"), appSettings,
+                                               *actions);
+    QObject::connect(aiAddFileAction, &QAction::triggered, window,
+                      [window, aiChat, central, editorTabs]() {
+                          const FfiResult result = aiChat->attachFile(editorTabs->currentPath());
+                          if (result.code != 0) {
+                              QMessageBox::information(window, QObject::tr("AI Chat"),
+                                                        result.message);
+                              return;
+                          }
+                          central.aiChatDock->toggleView(true);
+                          central.aiChatDock->raise();
+                          central.aiChatPanel->attachAndFocus();
+                      });
+
+    aiMenu->addSeparator();
+    QAction *aiNewChatAction = registerAction(aiMenu, QStringLiteral("ai.newChat"),
+                                               QObject::tr("New AI Chat"), appSettings, *actions);
+    QObject::connect(aiNewChatAction, &QAction::triggered, window, [central, aiChat]() {
+        aiChat->newConversation();
+        central.aiChatDock->toggleView(true);
+        central.aiChatDock->raise();
+        central.aiChatPanel->attachAndFocus();
+    });
+
+    QAction *aiTogglePanelAction = registerAction(aiMenu, QStringLiteral("ai.togglePanel"),
+                                                   QObject::tr("AI Chat"), appSettings, *actions);
+    QObject::connect(aiTogglePanelAction, &QAction::triggered, window, [central]() {
+        // A real toggle, unlike the View menu's panels: this one has a
+        // shortcut of its own, and a shortcut that only ever opens a panel
+        // gives the user no way back with the same keys.
+        const bool show = central.aiChatDock->isClosed();
+        central.aiChatDock->toggleView(show);
+        if (show) {
+            central.aiChatDock->raise();
+            central.aiChatPanel->focusComposer();
+        }
+    });
 
     QObject::connect(undoAction, &QAction::triggered, window, [editorTabs]() {
         if (auto *editor = editorTabs->currentEditor()) {

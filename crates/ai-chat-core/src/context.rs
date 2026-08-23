@@ -360,6 +360,91 @@ pub fn accept_attachment(
     Ok(())
 }
 
+/// The image formats every dialect in this crate accepts, and the IANA
+/// media type each is sent as.
+///
+/// A closed list rather than a sniff of the bytes: the media type is what
+/// goes on the wire, and a provider rejects a `image/svg+xml` or a TIFF with
+/// its own wording after the file has already been uploaded. Refusing here
+/// costs nothing and says which formats do work.
+const IMAGE_MEDIA_TYPES: &[(&str, &str)] = &[
+    ("png", "image/png"),
+    ("jpg", "image/jpeg"),
+    ("jpeg", "image/jpeg"),
+    ("gif", "image/gif"),
+    ("webp", "image/webp"),
+];
+
+/// Builds an image attachment from a file's bytes, choosing the media type
+/// from its extension and encoding the payload the way every dialect wants
+/// it on the wire.
+///
+/// The bytes are the caller's to read: `ui-shell` reads files for half a
+/// dozen other reasons already and reports an unreadable one in its own
+/// words, so an `io::Error` never has to become a [`ChatError`]. What is
+/// decided here — which formats are acceptable, and what each is called on
+/// the wire — is the part that deserves a test.
+///
+/// This does *not* check the provider's image capability, the project root
+/// or the secret-shaped list. [`accept_attachment`] is still the gate, and
+/// is still the only gate.
+pub fn load_image(path: &Path, bytes: &[u8]) -> Result<Attachment, ChatError> {
+    let extension = path
+        .extension()
+        .map(|extension| extension.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let Some((_, media_type)) = IMAGE_MEDIA_TYPES
+        .iter()
+        .find(|(candidate, _)| *candidate == extension)
+    else {
+        return Err(ChatError::UnsupportedImageFormat(path.to_path_buf()));
+    };
+    Ok(Attachment::Image {
+        path: path.to_path_buf(),
+        media_type: (*media_type).to_string(),
+        data_base64: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
+    })
+}
+
+/// The instructions the model is given ahead of the transcript.
+///
+/// Here rather than in the bridge for the reason ADR-0020 §6 gives: what an
+/// assistant is told about the user's project shapes every answer it gives,
+/// which makes it a rule and not a string the adapter happens to hold. The
+/// two modes differ in exactly one paragraph, because they are one feature
+/// with a toggle and not two assistants.
+///
+/// The root is named when there is one, because a model that knows the
+/// project's own path writes a code block naming a file that
+/// [`crate::proposal::plan_apply`] can then match, instead of inventing one.
+pub fn system_prompt(agent_mode: bool, project_root: Option<&Path>) -> String {
+    let mut prompt = String::from(
+        "You are an assistant inside a code editor. Answer about the code the \
+         user shows you, be concise, and prefer showing code over describing \
+         it. When you write code the user should apply, put it in a fenced \
+         block whose info string names the file, like ```rust:src/main.rs — \
+         that is what the editor's Apply button matches against.",
+    );
+    if let Some(root) = project_root {
+        prompt.push_str(&format!(
+            " The open project's root is {}; paths you name are taken as \
+             relative to it.",
+            root.display()
+        ));
+    }
+    if agent_mode {
+        prompt.push_str(
+            " You can also call tools to search, read and change the project. \
+             Read tools run immediately; a tool that changes something may \
+             need the user's approval first, and they can decline. A decline \
+             is an answer, not a failure: when it happens, say what you would \
+             do instead rather than asking again. You cannot run shell \
+             commands, and you cannot reach anything outside the project.",
+        );
+    }
+    prompt
+}
+
 /// One attachment that did not fit whole, and by how much.
 ///
 /// Reported, never silent: a model answering about a file it only saw the
@@ -586,6 +671,74 @@ fn fair_shares(wanted: &[u32], budget: u32) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_image_is_loaded_as_the_media_type_its_extension_names() {
+        let attachment = load_image(Path::new("/p/shot.PNG"), b"bytes").unwrap();
+        let Attachment::Image {
+            media_type,
+            data_base64,
+            ..
+        } = &attachment
+        else {
+            panic!("expected an image attachment, got {attachment:?}");
+        };
+        assert_eq!(media_type, "image/png", "the extension is case-insensitive");
+        assert_eq!(data_base64, "Ynl0ZXM=");
+    }
+
+    #[test]
+    fn both_spellings_of_a_jpeg_are_the_one_media_type_the_wire_knows() {
+        for name in ["a.jpg", "a.jpeg"] {
+            let Ok(Attachment::Image { media_type, .. }) = load_image(Path::new(name), b"") else {
+                panic!("{name} should load");
+            };
+            assert_eq!(media_type, "image/jpeg");
+        }
+    }
+
+    #[test]
+    fn a_format_no_provider_reads_is_refused_before_it_is_uploaded() {
+        // An SVG is a document, not a bitmap, and every dialect rejects it —
+        // after the bytes have already left the machine.
+        let error = load_image(Path::new("/p/diagram.svg"), b"<svg/>").unwrap_err();
+        assert_eq!(error.code(), ChatError::CODE_UNSUPPORTED_IMAGE_FORMAT);
+        assert!(
+            error.to_string().contains("PNG"),
+            "the refusal has to say which formats do work: {error}"
+        );
+    }
+
+    #[test]
+    fn a_file_with_no_extension_at_all_is_refused_rather_than_guessed_at() {
+        assert!(load_image(Path::new("/p/screenshot"), b"").is_err());
+    }
+
+    #[test]
+    fn the_system_prompt_names_the_project_root_so_paths_can_be_matched_back() {
+        let prompt = system_prompt(false, Some(Path::new("/home/dev/ide")));
+        assert!(prompt.contains("/home/dev/ide"), "{prompt}");
+    }
+
+    #[test]
+    fn ask_mode_is_never_told_about_tools_it_cannot_call() {
+        let ask = system_prompt(false, None);
+        assert!(
+            !ask.contains("tool"),
+            "offering tools to a mode that sends no schemas invites calls \
+             the request cannot carry: {ask}"
+        );
+        assert!(system_prompt(true, None).contains("tool"));
+    }
+
+    #[test]
+    fn agent_mode_is_told_that_a_decline_is_an_answer_and_a_shell_is_absent() {
+        // Both are behaviours the ADR promises the user, and a model that
+        // was never told either will re-ask and will invent a shell tool.
+        let prompt = system_prompt(true, None);
+        assert!(prompt.contains("decline"), "{prompt}");
+        assert!(prompt.contains("shell"), "{prompt}");
+    }
     use crate::providers::{default_catalog, ProviderKind};
 
     fn config_for(kind: ProviderKind) -> ProviderConfig {

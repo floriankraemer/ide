@@ -90,7 +90,7 @@ pub struct AiProviderSetting {
     #[serde(default)]
     pub id: String,
     /// Provider dialect, e.g. `"anthropic"`, `"openai"`,
-    /// `"openai_compatible"`, `"gemini"`. Opaque to this crate.
+    /// `"openai-compatible"`, `"gemini"`. Opaque to this crate.
     #[serde(default)]
     pub kind: String,
     /// API base URL. Empty means "use the kind's default", which is what an

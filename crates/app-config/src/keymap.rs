@@ -147,6 +147,33 @@ pub const ACTIONS: &[ActionDef] = &[
         category: "View",
         default_shortcut: "Ctrl+Shift+N",
     },
+    // AI assistant (ADR-0020). Ctrl+L matches what every other IDE with a
+    // chat panel binds "send this selection to the assistant" to, and was
+    // unbound here.
+    ActionDef {
+        id: "ai.addSelection",
+        label: "Add Selection to AI Chat",
+        category: "AI",
+        default_shortcut: "Ctrl+L",
+    },
+    ActionDef {
+        id: "ai.addFile",
+        label: "Add File to AI Chat",
+        category: "AI",
+        default_shortcut: "",
+    },
+    ActionDef {
+        id: "ai.newChat",
+        label: "New AI Chat",
+        category: "AI",
+        default_shortcut: "Ctrl+Shift+L",
+    },
+    ActionDef {
+        id: "ai.togglePanel",
+        label: "AI Chat",
+        category: "AI",
+        default_shortcut: "",
+    },
     ActionDef {
         id: "view.findAction",
         label: "Find Action...",

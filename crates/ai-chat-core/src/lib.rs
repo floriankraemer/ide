@@ -165,6 +165,11 @@ pub enum ChatError {
     },
     /// Reading or writing the conversation store failed.
     HistoryIo { detail: String },
+    /// A file offered as an image attachment is not one of the formats the
+    /// dialects accept. Distinct from [`ChatError::UnsupportedCapability`],
+    /// which is about the *provider*: switching provider fixes that one and
+    /// cannot fix this one.
+    UnsupportedImageFormat(PathBuf),
 }
 
 impl ChatError {
@@ -189,6 +194,7 @@ impl ChatError {
     pub const CODE_SECRET_SHAPED_FILE: i32 = 17;
     pub const CODE_UNSUPPORTED_CAPABILITY: i32 = 18;
     pub const CODE_HISTORY_IO: i32 = 19;
+    pub const CODE_UNSUPPORTED_IMAGE_FORMAT: i32 = 20;
 
     /// The variant's stable numeric code (ADR-0003). These numbers are part
     /// of the FFI contract the panel branches on — a cancellation is shown
@@ -215,6 +221,7 @@ impl ChatError {
             ChatError::SecretShapedFile(_) => Self::CODE_SECRET_SHAPED_FILE,
             ChatError::UnsupportedCapability { .. } => Self::CODE_UNSUPPORTED_CAPABILITY,
             ChatError::HistoryIo { .. } => Self::CODE_HISTORY_IO,
+            ChatError::UnsupportedImageFormat(_) => Self::CODE_UNSUPPORTED_IMAGE_FORMAT,
         }
     }
 }
@@ -375,6 +382,12 @@ impl fmt::Display for ChatError {
                 "The conversation history could not be read or written: \
                  {detail}. The conversation on screen is unaffected."
             ),
+            ChatError::UnsupportedImageFormat(path) => write!(
+                f,
+                "\"{}\" is not an image format a model can read. PNG, JPEG, \
+                 GIF and WebP are the ones every provider accepts.",
+                path.display()
+            ),
         }
     }
 }
@@ -530,6 +543,11 @@ mod tests {
             .code(),
             19
         );
+        assert_eq!(
+            ChatError::UnsupportedImageFormat(PathBuf::new()).code(),
+            20,
+            "a new variant appends; it never takes a number already in use"
+        );
     }
 
     #[test]
@@ -545,6 +563,7 @@ mod tests {
             },
             ChatError::Cancelled,
             ChatError::PathOutsideProject(PathBuf::from("/etc/passwd")),
+            ChatError::UnsupportedImageFormat(PathBuf::from("/p/diagram.svg")),
         ];
         for error in samples {
             let text = error.to_string();

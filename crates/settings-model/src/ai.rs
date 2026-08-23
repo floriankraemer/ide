@@ -44,14 +44,14 @@ impl ProviderKind {
         match kind {
             "anthropic" => Ok(ProviderKind::Anthropic),
             "openai" => Ok(ProviderKind::OpenAi),
-            "openai_compatible" => Ok(ProviderKind::OpenAiCompatible),
+            "openai-compatible" => Ok(ProviderKind::OpenAiCompatible),
             "gemini" => Ok(ProviderKind::Gemini),
             other => Err(ValidationProblem {
                 provider_id: String::new(),
                 field: ProviderField::Kind,
                 sentence: format!(
                     "\"{other}\" is not a provider type this build knows. \
-                     Expected anthropic, openai, openai_compatible or gemini."
+                     Expected anthropic, openai, openai-compatible or gemini."
                 ),
             }),
         }
@@ -62,7 +62,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::OpenAi => "openai",
-            ProviderKind::OpenAiCompatible => "openai_compatible",
+            ProviderKind::OpenAiCompatible => "openai-compatible",
             ProviderKind::Gemini => "gemini",
         }
     }
@@ -120,6 +120,27 @@ pub enum KeyStatus {
     Missing(String),
 }
 
+impl KeyStatus {
+    /// The Status column's finished sentence.
+    ///
+    /// Written here and rendered verbatim, like every other sentence in this
+    /// crate: what an unset variable *means* is the environment-only key
+    /// design talking (ADR-0020 §3), and a settings page that composed it
+    /// would be a rule half in Rust and half in `cpp/` — which is exactly
+    /// what `docs/architecture/layering.md` forbids the view to hold.
+    pub fn sentence(&self) -> String {
+        match self {
+            KeyStatus::Present => "The key is set in this environment.".to_string(),
+            KeyStatus::Missing(name) => format!(
+                "{name} is not set in this environment, so requests to this \
+                 provider will fail. Set it in the shell you start the IDE \
+                 from — keys are read from the environment and are never \
+                 stored in settings."
+            ),
+        }
+    }
+}
+
 /// One entry of the shipped provider catalog.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DefaultProvider {
@@ -152,7 +173,7 @@ const DEFAULT_PROVIDERS: &[DefaultProvider] = &[
         id: "openai",
         label: "OpenAI",
         kind: ProviderKind::OpenAi,
-        base_url: "https://api.openai.com/v1",
+        base_url: "https://api.openai.com",
         model: "gpt-4o",
         api_key_env: "OPENAI_API_KEY",
         enabled: true,
@@ -161,13 +182,13 @@ const DEFAULT_PROVIDERS: &[DefaultProvider] = &[
         id: "gemini",
         label: "Google Gemini",
         kind: ProviderKind::Gemini,
-        base_url: "https://generativelanguage.googleapis.com/v1beta",
+        base_url: "https://generativelanguage.googleapis.com",
         model: "gemini-2.5-pro",
         api_key_env: "GEMINI_API_KEY",
         enabled: true,
     },
     DefaultProvider {
-        id: "openai_compatible",
+        id: "openai-compatible",
         label: "OpenAI-compatible",
         kind: ProviderKind::OpenAiCompatible,
         base_url: "",
@@ -579,6 +600,24 @@ pub fn set_tool_policy(settings: &mut Settings, tool: &str, policy: ToolPolicy) 
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_missing_key_status_names_the_variable_and_says_what_to_do() {
+        let sentence = KeyStatus::Missing("ANTHROPIC_API_KEY".into()).sentence();
+        assert!(sentence.contains("ANTHROPIC_API_KEY"), "{sentence}");
+        assert!(sentence.ends_with('.'), "{sentence}");
+        assert!(
+            !sentence.contains('{') && !sentence.contains('}'),
+            "unfilled placeholder: {sentence}"
+        );
+    }
+
+    #[test]
+    fn a_present_key_status_still_reads_as_a_finished_sentence() {
+        let sentence = KeyStatus::Present.sentence();
+        assert!(sentence.ends_with('.'), "{sentence}");
+    }
+
     use super::*;
 
     fn draft() -> AiProviderDraft {
@@ -594,7 +633,7 @@ mod tests {
         assert_eq!(anthropic.api_key_env, "ANTHROPIC_API_KEY");
         assert!(anthropic.enabled);
         // The generic endpoint ships blank and off.
-        let generic = draft.row("openai_compatible").expect("row");
+        let generic = draft.row("openai-compatible").expect("row");
         assert_eq!(generic.base_url, "");
         assert!(!generic.enabled);
     }
@@ -624,19 +663,19 @@ mod tests {
     #[test]
     fn a_draft_round_trips_through_settings() {
         let mut draft = draft();
-        draft.set_base_url("openai_compatible", "http://localhost:11434/v1");
-        draft.set_model("openai_compatible", "qwen2.5-coder");
-        draft.set_key_env_var("openai_compatible", "");
-        draft.set_enabled("openai_compatible", true);
+        draft.set_base_url("openai-compatible", "http://localhost:11434/v1");
+        draft.set_model("openai-compatible", "qwen2.5-coder");
+        draft.set_key_env_var("openai-compatible", "");
+        draft.set_enabled("openai-compatible", true);
         draft.set_enabled("gemini", false);
-        draft.set_active_provider("openai_compatible");
+        draft.set_active_provider("openai-compatible");
 
         let mut settings = Settings::default();
         draft.commit(&mut settings);
 
         let reloaded = AiProviderDraft::begin(&settings);
         assert_eq!(reloaded.rows(), draft.rows());
-        assert_eq!(reloaded.active_provider(), "openai_compatible");
+        assert_eq!(reloaded.active_provider(), "openai-compatible");
         assert!(!reloaded.row("gemini").expect("row").enabled);
     }
 
@@ -658,7 +697,7 @@ mod tests {
         let settings = Settings {
             ai_providers: vec![AiProviderSetting {
                 id: "groq".into(),
-                kind: "openai_compatible".into(),
+                kind: "openai-compatible".into(),
                 base_url: "https://api.groq.com/openai/v1".into(),
                 model: "llama-3.3-70b".into(),
                 api_key_env: "GROQ_API_KEY".into(),
@@ -718,17 +757,17 @@ mod tests {
     #[test]
     fn an_openai_compatible_provider_needs_a_base_url_and_a_model() {
         let mut draft = draft();
-        draft.set_enabled("openai_compatible", true);
+        draft.set_enabled("openai-compatible", true);
 
         let problem = draft.validate_all().expect_err("no base URL");
-        assert_eq!(problem.provider_id, "openai_compatible");
+        assert_eq!(problem.provider_id, "openai-compatible");
         assert_eq!(problem.field, ProviderField::BaseUrl);
 
-        draft.set_base_url("openai_compatible", "http://localhost:11434/v1");
+        draft.set_base_url("openai-compatible", "http://localhost:11434/v1");
         let problem = draft.validate_all().expect_err("no model");
         assert_eq!(problem.field, ProviderField::Model);
 
-        draft.set_model("openai_compatible", "qwen2.5-coder");
+        draft.set_model("openai-compatible", "qwen2.5-coder");
         assert_eq!(draft.validate_all(), Ok(()));
     }
 
@@ -799,9 +838,9 @@ mod tests {
         assert_eq!(key_status(&provider), KeyStatus::Present);
 
         let mut draft = draft();
-        draft.set_key_env_var("openai_compatible", "  ");
+        draft.set_key_env_var("openai-compatible", "  ");
         assert_eq!(
-            draft.row("openai_compatible").expect("row").key_status(),
+            draft.row("openai-compatible").expect("row").key_status(),
             KeyStatus::Present
         );
     }
@@ -865,5 +904,41 @@ mod tests {
         sorted.sort_unstable();
         sorted.dedup();
         assert_eq!(sorted.len(), tools.len(), "{tools:?}");
+    }
+    /// The settings catalogue and `ai-chat-core`'s must not drift.
+    ///
+    /// They are separate on purpose — `settings-model` owns the settings
+    /// vocabulary and may not depend on `ai-chat-core` (ADR-0017) — but a
+    /// base URL that disagrees is not a style difference: `endpoint_url`
+    /// appends the version path itself, so a base carrying `/v1` produced
+    /// `…/v1/v1/chat/completions` and made OpenAI and Gemini unusable out
+    /// of the box until this test existed. The kind spellings must match
+    /// too, because the persisted string is parsed by *that* crate's
+    /// `ProviderKind::from_str`.
+    #[test]
+    fn the_shipped_catalogue_agrees_with_the_one_that_builds_the_requests() {
+        for core in ai_chat_core::providers::default_catalog() {
+            let Some(ours) = default_providers()
+                .iter()
+                .find(|entry| entry.kind.as_str() == core.kind.as_str())
+            else {
+                panic!("no settings row for {}", core.kind.as_str());
+            };
+
+            assert_eq!(
+                ours.id, core.id,
+                "the provider id is what a saved settings file names"
+            );
+            assert_eq!(
+                ours.base_url, core.base_url,
+                "{}: a base URL carrying the version path is doubled by endpoint_url",
+                core.id
+            );
+            assert_eq!(
+                ours.api_key_env, core.api_key_env,
+                "{}: the environment variable named here is the one read there",
+                core.id
+            );
+        }
     }
 }

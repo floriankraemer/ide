@@ -220,6 +220,50 @@ pub fn new_id(seed_unix: u64, counter: u64) -> String {
     format!("{seed_unix:010}-{counter:04}")
 }
 
+/// A [`ConversationSummary::updated_unix`] as the sidebar shows it:
+/// `YYYY-MM-DD HH:MM`, UTC.
+///
+/// Here rather than in the bridge because a calendar conversion is
+/// arithmetic that can be wrong — leap years and the century rule are the
+/// classic way a date list is off by a day for two months every four years —
+/// and arithmetic that can be wrong gets a test, which is `layering.md`'s
+/// test for where something belongs.
+///
+/// UTC rather than local time, deliberately: this build carries no time-zone
+/// database, and guessing an offset would put a *wrong* local time in front
+/// of the user, which is worse than an honest one they can read as UTC.
+pub fn format_updated(unix_seconds: u64) -> String {
+    let days = (unix_seconds / 86_400) as i64;
+    let seconds_of_day = unix_seconds % 86_400;
+    let (year, month, day) = civil_from_days(days);
+    let (hour, minute) = (seconds_of_day / 3_600, (seconds_of_day / 60) % 60);
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
+}
+
+/// Days since the Unix epoch to a civil `(year, month, day)`.
+///
+/// Howard Hinnant's `civil_from_days`, which is the standard branch-free
+/// form of this conversion: it shifts the era to start in March so that the
+/// leap day lands at the end of a year and the 400-year cycle divides
+/// exactly, which is what removes every special case for the century rule.
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let day_of_era = z.rem_euclid(146_097);
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let year = year_of_era + era * 400;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let shifted_month = (5 * day_of_year + 2) / 153;
+    let day = (day_of_year - (153 * shifted_month + 2) / 5 + 1) as u32;
+    let month = if shifted_month < 10 {
+        shifted_month + 3
+    } else {
+        shifted_month - 9
+    } as u32;
+    (if month <= 2 { year + 1 } else { year }, month, day)
+}
+
 /// A title derived from the conversation itself: the first non-empty line
 /// the user wrote, trimmed to something a sidebar can show.
 ///
@@ -357,6 +401,22 @@ fn io_error(path: &Path, error: &std::io::Error) -> ChatError {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_timestamp_reads_as_a_calendar_date_and_a_clock_time() {
+        // 2024-02-29T13:45:07Z — a leap day, which is the case a
+        // hand-rolled conversion gets wrong.
+        assert_eq!(format_updated(1_709_214_307), "2024-02-29 13:45");
+    }
+
+    #[test]
+    fn the_epoch_itself_and_a_century_boundary_both_come_out_right() {
+        assert_eq!(format_updated(0), "1970-01-01 00:00");
+        // 2000 is a leap year and 1900 is not; a naive rule gets one of the
+        // two wrong and this date sits just past both.
+        assert_eq!(format_updated(951_782_400), "2000-02-29 00:00");
+    }
+
     use super::*;
     use crate::conversation::Block;
     use serde_json::json;

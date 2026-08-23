@@ -2528,6 +2528,7 @@ dependencies = [
 name = "settings-model"
 version = "0.1.0"
 dependencies = [
+ "ai-chat-core",
  "app-config",
  "lsp-core",
  "serde",
@@ -3528,6 +3529,7 @@ checksum = "e421abadd41a4225275504ea4d6566923418b7f05506fbc9c0fe86ba7396114b"
 name = "ui-shell"
 version = "0.1.0"
 dependencies = [
+ "ai-chat-core",
  "app-config",
  "app-core",
  "cxx",
@@ -3540,6 +3542,7 @@ dependencies = [
  "mcp-server",
  "project-model",
  "pty-core",
+ "serde_json",
  "settings-model",
  "syntax-core",
  "terminal-core",
