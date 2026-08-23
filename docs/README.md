@@ -26,6 +26,7 @@ ADR numbers 0006 and 0013–0015 were never used; the gaps are historical and in
 - [ADR-0018: single-source language detection](architecture/decisions/0018-single-source-language-detection.md) — one source of truth for file→language detection: `syntax-core`'s registry.
 - [ADR-0019: LSP refactoring](architecture/decisions/0019-lsp-refactoring.md) — refactoring over LSP: code actions, rename, applying workspace edits.
 - [ADR-0020: tab kinds and the binary viewer](architecture/decisions/0020-tab-kinds-and-the-binary-viewer.md) — a tab has an explicit kind; binary files open a read-only hex view instead of erroring.
+- [ADR-0021: AI chat](architecture/decisions/0021-ai-chat.md) — a docked assistant with four providers, environment-only keys, and a policy-gated agent whose edits go through the refactoring path.
 
 ## Plans
 

@@ -10,6 +10,7 @@ It is a Rust Cargo workspace with a Qt6 Widgets UI, bridged via `cxx-qt` per [AD
 
 It has grown past the original MVP (open a folder, browse a tree, edit and save tabs — see the [MVP proposal](../product/mvp-proposal.md)).
 Shipped since: a settings window and keymap, ADS-based docking, theming, tree-sitter syntax highlighting and folding, a Class View outline, an embedded terminal, a project-wide text and symbol index, find and replace, code navigation (Go to Declaration, Find Usages, Go to Implementation, jump history), a language platform with 29 bundled tree-sitter grammar crates covering roughly 35 languages (see `crates/syntax-core/Cargo.toml`) and an LSP client, and refactoring (rename, Extract Method/Class through code actions).
+In progress: an in-IDE AI assistant — a docked chat panel with attachable context, four configurable providers, an Ask mode whose code blocks apply through the refactoring preview, and a policy-gated Agent mode that drives the editor and the index through the same tools the MCP server exposes ([ADR-0021](decisions/0021-ai-chat.md)).
 
 ## 2. Quality goals
 
@@ -32,7 +33,7 @@ graph TB
         view["view: cpp/*.cpp<br/>widgets, layout, wiring"] --> adapter["adapter: src/bridge.rs<br/>thin QObject translation"]
     end
     adapter --> appcore["application: app-core<br/>AppSession, commands, AppError"]
-    adapter --> support["support: app-config, syntax-core,<br/>index-core, lsp-core, settings-model,<br/>pty-core, terminal-core, mcp-server"]
+    adapter --> support["support: app-config, syntax-core,<br/>index-core, lsp-core, settings-model,<br/>pty-core, terminal-core, mcp-server,<br/>ai-chat-core"]
     appcore --> editorcore["domain: editor-core"]
     appcore --> projectmodel["domain: project-model"]
     support --> editorcore
@@ -51,6 +52,7 @@ graph TB
 | `pty-core` | support | Cross-platform PTY transport for the embedded terminal | No |
 | `terminal-core` | support | VT100/grid state over `alacritty_terminal` | No |
 | `mcp-server` | support | MCP server (protocol + transport) so an agent can read and drive the editor and query the project index ([ADR-0004](decisions/0004-mcp-transport.md), [ADR-0012](decisions/0012-mcp-protocol-index-and-lifecycle.md)) | No |
+| `ai-chat-core` | support | AI assistant rules: provider dialects and capabilities, the conversation block model, token accounting, context assembly and its budget, the tool catalog and approval policy, the agent loop, conversation history, and turning a code block into an edit ([ADR-0021](decisions/0021-ai-chat.md)) | No |
 | `ui-shell` | adapter + view | `src/bridge.rs`: cxx-qt QObject translation; `cpp/`: Widgets, layout, menus, dialogs, `QApplication` | Yes |
 | `app` | main | Thin binary; hands off to `ui-shell` | Yes |
 

@@ -63,6 +63,67 @@ pub struct LanguageServerSetting {
     pub enabled: Option<bool>,
 }
 
+/// One `[[ai_provider]]` entry: what the user says about one AI chat
+/// provider.
+///
+/// Every field is defaulted so a `settings.toml` written before AI chat
+/// existed still loads, and so `enabled = false` alone switches a shipped
+/// provider off without wiping the rest of its configuration.
+///
+/// `kind` is a plain `String` here on purpose. This crate stores a provider
+/// kind exactly the way it stores a language id: as an opaque string it
+/// never interprets, so a kind a newer build understands survives a
+/// load/save cycle in an older one. What the four kinds *mean* is
+/// `settings_model::ai`'s business (ADR-0017), and the dialect behind each
+/// is `ai-chat-core`'s.
+///
+/// **There is deliberately no API-key field, and there must never be one.**
+/// The IDE never writes a key to disk. `api_key_env` holds the *name* of an
+/// environment variable, and the key itself is read with `std::env::var` at
+/// request time. A future reader who "fixes" the missing field by adding
+/// `api_key: String` would move every user's secret into a plain-text file
+/// under the config directory.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct AiProviderSetting {
+    /// Stable id of the provider entry, e.g. `"anthropic"`. The key both the
+    /// default catalog and this table are keyed by.
+    #[serde(default)]
+    pub id: String,
+    /// Provider dialect, e.g. `"anthropic"`, `"openai"`,
+    /// `"openai-compatible"`, `"gemini"`. Opaque to this crate.
+    #[serde(default)]
+    pub kind: String,
+    /// API base URL. Empty means "use the kind's default", which is what an
+    /// OpenAI-compatible endpoint (Ollama, Groq, vLLM) overrides.
+    #[serde(default)]
+    pub base_url: String,
+    /// Model id sent with each request, e.g. `"claude-sonnet-4-5"`.
+    #[serde(default)]
+    pub model: String,
+    /// Name of the environment variable the API key is read from — never the
+    /// key. Empty is legitimate: a local endpoint needs no key at all.
+    #[serde(default)]
+    pub api_key_env: String,
+    #[serde(default)]
+    pub enabled: bool,
+}
+
+/// One `[[ai_tool_policy]]` entry: how far the agent may go with one tool.
+///
+/// `policy` is one of `auto`, `ask`, `never`, as a plain string for the same
+/// reason `AiProviderSetting::kind` is: this crate stores the vocabulary, it
+/// does not own it. The read/write classification that decides the *default*
+/// for a tool with no entry here lives in `settings_model::ai` (ADR-0017),
+/// so a tool added to the catalog needs no change in this crate.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct AiToolPolicySetting {
+    /// Tool name as the tool catalog spells it, e.g. `"edit_buffer"`.
+    #[serde(default)]
+    pub tool: String,
+    #[serde(default)]
+    pub policy: String,
+}
+
 /// Structured application settings, round-tripped to `settings.toml` in the
 /// config directory. Every field is `#[serde(default)]` so old or partially
 /// written settings files still parse.
@@ -148,6 +209,33 @@ pub struct Settings {
     /// this crate only stores them.
     #[serde(default, rename = "language_server")]
     pub language_servers: Vec<LanguageServerSetting>,
+    /// AI chat providers, written as `[[ai_provider]]` blocks. Only entries
+    /// that differ from the default catalog are written, so changing a
+    /// shipped default still reaches a user who never touched it — the same
+    /// rule the keymap and `[[language_server]]` follow.
+    #[serde(default, rename = "ai_provider")]
+    pub ai_providers: Vec<AiProviderSetting>,
+    /// Id of the provider AI chat sends to. Empty means "never chosen"; the
+    /// rules layer picks the first usable entry.
+    #[serde(default)]
+    pub ai_active_provider: String,
+    /// Per-tool agent policies, written as `[[ai_tool_policy]]` blocks. A
+    /// tool absent from this list uses the default from
+    /// `settings_model::ai::tool_policy`.
+    #[serde(default, rename = "ai_tool_policy")]
+    pub ai_tool_policies: Vec<AiToolPolicySetting>,
+    /// `"ask"` or `"agent"` — whether the panel only answers, or runs the
+    /// tool loop. Empty means "never chosen".
+    #[serde(default)]
+    pub ai_mode: String,
+    /// Whether transcripts are written to disk at all. `None` means "never
+    /// chosen", which resolves to [`DEFAULT_AI_PERSIST_CONVERSATIONS`], for
+    /// the same reason `mcp_enabled` is an `Option`: a bare `bool` would make
+    /// the derived `Default` say "off" and silently stop persisting for
+    /// everyone whose `settings.toml` predates this field.
+    /// Read through [`Settings::ai_persist_conversations_or_default`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ai_persist_conversations: Option<bool>,
     /// Stable ids of languages the user turned off. A disabled language is
     /// still *listed* by the Languages page — otherwise it could never be
     /// switched back on — but the registry refuses to resolve it, so its
@@ -176,6 +264,12 @@ const DEFAULT_EDITOR_FONT_SIZE: u32 = 11;
 /// of having one is that an agent can attach to a running instance without
 /// the human first hunting for a switch.
 const DEFAULT_MCP_ENABLED: bool = true;
+
+/// Conversations are kept unless the user says otherwise: a chat panel that
+/// forgets every transcript on restart is a chat panel nobody trusts with a
+/// long investigation. The transcripts are written `0600` per project, and
+/// the switch is there for the times that is still not enough.
+const DEFAULT_AI_PERSIST_CONVERSATIONS: bool = true;
 
 impl Settings {
     /// The active theme name, defaulting to [`DEFAULT_THEME`] when unset —
@@ -212,6 +306,13 @@ impl Settings {
     /// [`DEFAULT_MCP_ENABLED`] when the user has never chosen.
     pub fn mcp_enabled_or_default(&self) -> bool {
         self.mcp_enabled.unwrap_or(DEFAULT_MCP_ENABLED)
+    }
+
+    /// Whether AI chat transcripts are persisted, defaulting to
+    /// [`DEFAULT_AI_PERSIST_CONVERSATIONS`] when the user has never chosen.
+    pub fn ai_persist_conversations_or_default(&self) -> bool {
+        self.ai_persist_conversations
+            .unwrap_or(DEFAULT_AI_PERSIST_CONVERSATIONS)
     }
 
     /// The keyboard shortcuts in force, defaults included — the view asks
@@ -402,6 +503,21 @@ mod tests {
                 ..LanguageServerSetting::default()
             }],
             disabled_languages: vec!["vala".to_string()],
+            ai_providers: vec![AiProviderSetting {
+                id: "local".to_string(),
+                kind: "openai_compatible".to_string(),
+                base_url: "http://localhost:11434/v1".to_string(),
+                model: "qwen2.5-coder".to_string(),
+                api_key_env: String::new(),
+                enabled: true,
+            }],
+            ai_active_provider: "local".to_string(),
+            ai_tool_policies: vec![AiToolPolicySetting {
+                tool: "edit_buffer".to_string(),
+                policy: "never".to_string(),
+            }],
+            ai_mode: "agent".to_string(),
+            ai_persist_conversations: Some(false),
         };
 
         save(dir.path(), &settings).unwrap();
@@ -726,6 +842,75 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(SETTINGS_FILE), "theme = \"light\"\n").unwrap();
         assert!(load(dir.path()).unwrap().disabled_languages.is_empty());
+    }
+
+    #[test]
+    fn ai_providers_and_tool_policies_round_trip_as_arrays_of_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = Settings {
+            ai_providers: vec![
+                AiProviderSetting {
+                    id: "anthropic".into(),
+                    kind: "anthropic".into(),
+                    model: "claude-sonnet-4-5".into(),
+                    api_key_env: "ANTHROPIC_API_KEY".into(),
+                    enabled: true,
+                    ..AiProviderSetting::default()
+                },
+                AiProviderSetting {
+                    id: "ollama".into(),
+                    kind: "openai_compatible".into(),
+                    base_url: "http://localhost:11434/v1".into(),
+                    model: "qwen2.5-coder".into(),
+                    enabled: false,
+                    ..AiProviderSetting::default()
+                },
+            ],
+            ai_active_provider: "anthropic".into(),
+            ai_tool_policies: vec![AiToolPolicySetting {
+                tool: "save_buffer".into(),
+                policy: "never".into(),
+            }],
+            ..Settings::default()
+        };
+
+        save(dir.path(), &settings).unwrap();
+        let toml = fs::read_to_string(dir.path().join(SETTINGS_FILE)).unwrap();
+        assert!(toml.contains("[[ai_provider]]"), "{toml}");
+        assert!(toml.contains("[[ai_tool_policy]]"), "{toml}");
+        // The one field that must never reach the disk.
+        assert!(!toml.contains("api_key ="), "{toml}");
+
+        let loaded = load(dir.path()).unwrap();
+        assert_eq!(loaded, settings);
+    }
+
+    #[test]
+    fn a_settings_file_written_before_ai_chat_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join(SETTINGS_FILE),
+            concat!(
+                "theme = \"light\"\n",
+                "editor_font_size = 13\n",
+                "\n",
+                "[[language_server]]\n",
+                "language_id = \"rust\"\n",
+            ),
+        )
+        .unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+
+        assert_eq!(loaded.theme_name(), "light");
+        assert!(loaded.ai_providers.is_empty());
+        assert!(loaded.ai_tool_policies.is_empty());
+        assert_eq!(loaded.ai_active_provider, "");
+        assert_eq!(loaded.ai_mode, "");
+        // Unset means on, so an upgrade does not silently stop keeping
+        // transcripts.
+        assert_eq!(loaded.ai_persist_conversations, None);
+        assert!(loaded.ai_persist_conversations_or_default());
     }
 
     #[test]

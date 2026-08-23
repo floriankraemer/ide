@@ -1,6 +1,7 @@
-//! Rules behind the three language-platform Settings pages (plan tasks T4,
-//! G3, L6), kept out of `ui-shell` because they deserve unit tests and
-//! neither `bridge.rs` nor `cpp/` may hold a rule
+//! Rules behind the Settings pages that have to interpret what they persist
+//! — the three language-platform ones (plan tasks T4, G3, L6) and AI
+//! Providers (AC12) — kept out of `ui-shell` because they deserve unit tests
+//! and neither `bridge.rs` nor `cpp/` may hold a rule
 //! (`docs/architecture/layering.md`).
 //!
 //! It exists as its own crate rather than living in `app-config` because
@@ -12,10 +13,16 @@
 //!
 //! Qt-free, like every crate below `ui-shell`.
 
+pub mod ai;
 pub mod languages;
 pub mod servers;
 pub mod syntax_colors;
 
+pub use ai::{
+    default_provider, default_providers, default_tool_policy, key_status, known_tools,
+    set_tool_policy, tool_policy, validate as validate_provider, AiProviderDraft, AiProviderRow,
+    DefaultProvider, KeyStatus, ProviderField, ProviderKind, ToolPolicy, ValidationProblem,
+};
 pub use languages::{
     explain, scan_manifests, toggle, LanguageAction, LanguageRow, LanguageSource, LanguageStatus,
     LanguageToggle, ManifestInfo, Problem,

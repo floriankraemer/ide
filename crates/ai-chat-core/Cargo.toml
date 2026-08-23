@@ -1,0 +1,24 @@
+[package]
+name = "ai-chat-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# The apply path is `lsp-core`'s, not a second one: `proposal::plan_apply`
+# yields `Vec<lsp_core::DocumentEdits>` so a model-written edit flows through
+# `plan_edit`/`apply_to_text` exactly as a rename does (ADR-0020 §5).
+lsp-core = { path = "../lsp-core" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Image attachments cross the wire base64-encoded in every dialect.
+base64 = "0.22"
+# Local, exact token counting for the OpenAI dialects; Anthropic and Gemini
+# are counted over their own endpoints instead (ADR-0020, "token counting").
+tiktoken-rs = "0.6"
+# Blocking HTTP on a `std::thread`, never a tokio runtime (ADR-0020 §4), and
+# `rustls-tls` rather than the default `native-tls` so the MXE Windows
+# cross-build never has to vendor OpenSSL.
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "rustls-tls", "json"] }
+
+[dev-dependencies]
+tempfile = "3"

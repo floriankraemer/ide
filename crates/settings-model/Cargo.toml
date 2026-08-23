@@ -12,4 +12,11 @@ toml = "0.8"
 tree-sitter = "0.26"
 
 [dev-dependencies]
+# Tests only: the regression guard that this crate's provider catalogue
+# still agrees with `ai-chat-core`'s, which is the one that actually
+# builds the requests. Deliberately not a normal dependency (the two
+# vocabularies are kept separate per ADR-0017) — a dev-dependency is
+# invisible to `cargo tree -e normal`, the same trick ADR-0018 uses to
+# put lsp-core's language guard next to the code it guards.
+ai-chat-core = { path = "../ai-chat-core" }
 tempfile = "3"

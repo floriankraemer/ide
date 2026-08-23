@@ -2537,6 +2537,513 @@ mod ffi {
         fn commit(self: &LanguageServerEditor);
     }
 
+    /// One turn as the transcript renders it. `text` is every text block of
+    /// the turn joined; `kind` is `text`, `tool` or `error`, so the panel
+    /// picks a bubble style without inspecting the text. `streaming` marks
+    /// the one turn still being written into — `messages()` includes it, so
+    /// the panel can show a bubble the moment the request is accepted.
+    #[derive(Default)]
+    struct FfiChatMessage {
+        role: QString,
+        text: QString,
+        streaming: bool,
+        kind: QString,
+    }
+
+    /// One pending context attachment, as its chip shows it. `tokens` is
+    /// what this attachment alone costs, so the panel can say why the
+    /// counter moved when it was added.
+    #[derive(Default)]
+    struct FfiAttachment {
+        kind: QString,
+        label: QString,
+        detail: QString,
+        tokens: u32,
+    }
+
+    /// One fenced code block of an answer. `path` is empty when the block
+    /// named no file — which `prepareApply` refuses rather than guesses at
+    /// (`ai_chat_core::proposal::ApplyRefusal::NoTarget`).
+    #[derive(Default)]
+    struct FfiCodeBlock {
+        language: QString,
+        path: QString,
+        text: QString,
+    }
+
+    /// One provider as the chat's own picker lists it. Capabilities are
+    /// *declared* by `ai_chat_core::providers` and carried here so the panel
+    /// can grey out Agent mode or the image button, rather than sending a
+    /// request that comes back 400 (ADR-0021 §2).
+    #[derive(Default)]
+    struct FfiAiProvider {
+        id: QString,
+        label: QString,
+        model: QString,
+        key_present: bool,
+        active: bool,
+        supports_tools: bool,
+        supports_images: bool,
+    }
+
+    /// One row of Settings > AI Providers. `status` is a finished sentence
+    /// from `settings_model::ai::key_status`, rendered verbatim;
+    /// `key_present` exists only so the page can pick a colour for it. The
+    /// page never composes either (ADR-0002).
+    #[derive(Default)]
+    struct FfiAiProviderRow {
+        id: QString,
+        label: QString,
+        kind: QString,
+        base_url: QString,
+        model: QString,
+        key_env_var: QString,
+        enabled: bool,
+        key_present: bool,
+        status: QString,
+    }
+
+    /// One row of the agent's tool-policy table. `policy` is the persisted
+    /// spelling (`auto`/`ask`/`never`) and `writes` is
+    /// `ai_chat_core::tools::ToolKind`, so the page groups reads apart from
+    /// writes without an `if` in C++ deciding which is which.
+    #[derive(Default)]
+    struct FfiAiToolPolicyRow {
+        tool: QString,
+        policy: QString,
+        writes: bool,
+    }
+
+    /// A tool call waiting on the user. `summary` is the sentence
+    /// `ai_chat_core::tools::summarise` composed — the one the user actually
+    /// consents to — and `arguments` is the raw JSON for the "show details"
+    /// disclosure. An empty `call_id` means nothing is waiting.
+    ///
+    /// `needs_approval` is always true at this seam: `toolCallPending` is
+    /// emitted only when the loop is genuinely blocked on a decision, since
+    /// the panel disables the composer while a card is up and a card that
+    /// needed no answer would wedge it.
+    #[derive(Default)]
+    struct FfiToolCall {
+        call_id: QString,
+        tool: QString,
+        summary: QString,
+        arguments: QString,
+        needs_approval: bool,
+    }
+
+    /// What became of a tool call. `status` is `ok` or `error`; a call the
+    /// user declined is `ok`, because a denial is data and not a failure
+    /// (ADR-0021 §1).
+    #[derive(Default)]
+    struct FfiToolOutcome {
+        call_id: QString,
+        tool: QString,
+        status: QString,
+        detail: QString,
+    }
+
+    /// The composer's live counter. `exact` says which of the two kinds of
+    /// number this is (`ai_chat_core::tokens::TokenCount`), so the panel can
+    /// mark an estimate as an estimate rather than presenting a guess as a
+    /// measurement (ADR-0021 §6).
+    #[derive(Default)]
+    struct FfiTokenUsage {
+        context_tokens: u32,
+        exact: bool,
+        budget: u32,
+        input_tokens: u32,
+        output_tokens: u32,
+    }
+
+    /// One saved conversation, as the history sidebar lists it. `updated` is
+    /// already formatted (`ai_chat_core::history::format_updated`).
+    #[derive(Default)]
+    struct FfiConversation {
+        id: QString,
+        title: QString,
+        updated: QString,
+        message_count: u32,
+    }
+
+    extern "RustQt" {
+        /// The AI chat panel's FFI surface (ADR-0021): the transcript, the
+        /// pending attachments, the streaming request, the agent loop's
+        /// approval protocol, applying an answer, and the conversation
+        /// store.
+        ///
+        /// Translation only, like every other QObject here: every rule —
+        /// what may be attached, what a tool may do, when a run must stop,
+        /// how a code block becomes an edit, what a failure means in
+        /// English — lives in `ai-chat-core`, and every sentence crossing
+        /// this seam was composed there (ADR-0002, ADR-0021 §6).
+        #[qobject]
+        type AiChat = super::AiChatRust;
+
+        /// Send `text` with whatever is attached. Returns as soon as the
+        /// request is queued: one `std::thread` owns the blocking HTTP and
+        /// marshals every delta back with `CxxQtThread::queue`, so the Qt
+        /// thread never waits on a provider (ADR-0021 §4).
+        #[qinvokable]
+        #[cxx_name = "sendMessage"]
+        fn send_message(self: Pin<&mut AiChat>, text: &QString) -> FfiResult;
+
+        /// Stop whatever is in flight — a stream, or a whole agent run,
+        /// including one parked on an approval card.
+        #[qinvokable]
+        #[cxx_name = "cancelRequest"]
+        fn cancel_request(self: Pin<&mut AiChat>);
+
+        /// Drop the transcript and the attachments and start over. The
+        /// conversation already saved to history is left on disk.
+        #[qinvokable]
+        #[cxx_name = "newConversation"]
+        fn new_conversation(self: Pin<&mut AiChat>);
+
+        #[qinvokable]
+        #[cxx_name = "isStreaming"]
+        fn is_streaming(self: &AiChat) -> bool;
+
+        /// `"ask"` or `"agent"`. Agent mode against a provider that
+        /// declares no tool support is refused here, with the provider
+        /// named, rather than at the API (ADR-0021 §2).
+        #[qinvokable]
+        #[cxx_name = "setMode"]
+        fn set_mode(self: Pin<&mut AiChat>, mode: &QString) -> FfiResult;
+
+        #[qinvokable]
+        fn mode(self: &AiChat) -> QString;
+
+        /// What the user typed but has not sent, so the live counter can
+        /// charge for it. Cheap to call per keystroke: the token counter
+        /// memoises what it measured.
+        #[qinvokable]
+        #[cxx_name = "setComposerText"]
+        fn set_composer_text(self: Pin<&mut AiChat>, text: &QString);
+
+        /// Every attachment goes through `context::accept_attachment`,
+        /// which is the single gate refusing a credentials-shaped file, a
+        /// path outside the project, and an image a provider cannot read.
+        #[qinvokable]
+        #[cxx_name = "attachSelection"]
+        fn attach_selection(
+            self: Pin<&mut AiChat>,
+            path: &QString,
+            start_line: u32,
+            end_line: u32,
+            text: &QString,
+        ) -> FfiResult;
+
+        #[qinvokable]
+        #[cxx_name = "attachFile"]
+        fn attach_file(self: Pin<&mut AiChat>, path: &QString) -> FfiResult;
+
+        /// Refused when the active provider declares no image support, and
+        /// refused again for a format no dialect reads — the second is a
+        /// property of the file and switching provider cannot fix it.
+        #[qinvokable]
+        #[cxx_name = "attachImage"]
+        fn attach_image(self: Pin<&mut AiChat>, path: &QString) -> FfiResult;
+
+        /// The symbol's definition, resolved through the same project index
+        /// the agent's `find_definitions` tool queries.
+        #[qinvokable]
+        #[cxx_name = "attachSymbol"]
+        fn attach_symbol(self: Pin<&mut AiChat>, name: &QString) -> FfiResult;
+
+        /// Everything the language servers currently report.
+        #[qinvokable]
+        #[cxx_name = "attachDiagnostics"]
+        fn attach_diagnostics(self: Pin<&mut AiChat>) -> FfiResult;
+
+        #[qinvokable]
+        #[cxx_name = "attachTerminalOutput"]
+        fn attach_terminal_output(self: Pin<&mut AiChat>, text: &QString) -> FfiResult;
+
+        #[qinvokable]
+        #[cxx_name = "removeAttachment"]
+        fn remove_attachment(self: Pin<&mut AiChat>, index: u64);
+
+        #[qinvokable]
+        fn attachments(self: &AiChat) -> Vec<FfiAttachment>;
+
+        /// The transcript, in-flight turn included.
+        #[qinvokable]
+        fn messages(self: &AiChat) -> Vec<FfiChatMessage>;
+
+        /// The fenced blocks of one turn, in the order they appear — the
+        /// index a per-block Apply button carries back to `prepareApply`.
+        #[qinvokable]
+        #[cxx_name = "codeBlocks"]
+        fn code_blocks(self: &AiChat, message_index: u64) -> Vec<FfiCodeBlock>;
+
+        #[qinvokable]
+        #[cxx_name = "tokenUsage"]
+        fn token_usage(self: &AiChat) -> FfiTokenUsage;
+
+        #[qinvokable]
+        fn providers(self: &AiChat) -> Vec<FfiAiProvider>;
+
+        #[qinvokable]
+        #[cxx_name = "setActiveProvider"]
+        fn set_active_provider(self: Pin<&mut AiChat>, id: &QString) -> FfiResult;
+
+        /// Re-read `settings.toml` after the settings dialog closed.
+        #[qinvokable]
+        #[cxx_name = "applyAiSettings"]
+        fn apply_ai_settings(self: Pin<&mut AiChat>);
+
+        // --- the agent loop's approval protocol ------------------------
+
+        /// Let the waiting call run. `remember` promotes that tool to
+        /// `Auto` for the rest of this run.
+        #[qinvokable]
+        #[cxx_name = "approveTool"]
+        fn approve_tool(self: Pin<&mut AiChat>, call_id: &QString, remember: bool) -> FfiResult;
+
+        /// Decline the waiting call. `reason` may be empty — the sentence
+        /// the model is told is `ai-chat-core`'s either way, because it is
+        /// model-facing wording and not the view's to compose.
+        #[qinvokable]
+        #[cxx_name = "denyTool"]
+        fn deny_tool(self: Pin<&mut AiChat>, call_id: &QString, reason: &QString) -> FfiResult;
+
+        /// The call waiting on a decision; an empty `call_id` means none.
+        #[qinvokable]
+        #[cxx_name = "pendingToolCall"]
+        fn pending_tool_call(self: &AiChat) -> FfiToolCall;
+
+        /// End the run without applying anything still pending. Unblocks a
+        /// worker parked on an approval card, which is what stops closing
+        /// the panel mid-approval from stranding the thread forever.
+        #[qinvokable]
+        #[cxx_name = "stopRun"]
+        fn stop_run(self: Pin<&mut AiChat>);
+
+        /// Round trips taken in the current (or last) run.
+        #[qinvokable]
+        #[cxx_name = "runStepCount"]
+        fn run_step_count(self: &AiChat) -> u32;
+
+        // --- applying an answer, mirroring LanguageService's protocol ---
+
+        /// Plan the apply of one code block against the buffer whose text
+        /// is `current_text`, at `buffer_revision`. The summary is empty
+        /// (`document_count == 0`) when it was refused — `applyRefusal`
+        /// then says why, in `ai-chat-core`'s words.
+        #[qinvokable]
+        #[cxx_name = "prepareApply"]
+        fn prepare_apply(
+            self: Pin<&mut AiChat>,
+            message_index: u64,
+            block_index: u64,
+            current_text: &QString,
+            buffer_revision: i64,
+        ) -> FfiRefactorSummary;
+
+        /// Every edit the pending apply would make, for the preview.
+        #[qinvokable]
+        #[cxx_name = "pendingEdits"]
+        fn pending_edits(self: &AiChat) -> Vec<FfiTextEdit>;
+
+        #[qinvokable]
+        #[cxx_name = "excludeFromApply"]
+        fn exclude_from_apply(self: Pin<&mut AiChat>, path: &QString);
+
+        /// Take the edits to apply them. Empty when the buffer moved since
+        /// `prepareApply` recorded its revision — the staleness rule is
+        /// `lsp_core::EditGate`'s, exactly as for a rename (ADR-0021 §5).
+        #[qinvokable]
+        #[cxx_name = "takePendingEdits"]
+        fn take_pending_edits(self: Pin<&mut AiChat>, buffer_revision: i64) -> Vec<FfiTextEdit>;
+
+        #[qinvokable]
+        #[cxx_name = "cancelApply"]
+        fn cancel_apply(self: Pin<&mut AiChat>);
+
+        /// Why the last `prepareApply` produced nothing. Code `0` means it
+        /// did produce something. These codes are
+        /// `ai_chat_core::proposal::ApplyRefusal`'s own space, not
+        /// `ChatError`'s — the panel only reads them straight after a
+        /// refused `prepareApply`, so the two never mix.
+        #[qinvokable]
+        #[cxx_name = "applyRefusal"]
+        fn apply_refusal(self: &AiChat) -> FfiResult;
+
+        // --- history ---------------------------------------------------
+
+        #[qinvokable]
+        fn conversations(self: &AiChat) -> Vec<FfiConversation>;
+
+        #[qinvokable]
+        #[cxx_name = "loadConversation"]
+        fn load_conversation(self: Pin<&mut AiChat>, id: &QString) -> FfiResult;
+
+        #[qinvokable]
+        #[cxx_name = "deleteConversation"]
+        fn delete_conversation(self: Pin<&mut AiChat>, id: &QString) -> FfiResult;
+
+        #[qinvokable]
+        #[cxx_name = "renameConversation"]
+        fn rename_conversation(self: Pin<&mut AiChat>, id: &QString, title: &QString) -> FfiResult;
+
+        /// Keep this conversation out of the store entirely, or put it back
+        /// in. Persisted, so the choice survives a restart.
+        #[qinvokable]
+        #[cxx_name = "setPersistenceEnabled"]
+        fn set_persistence_enabled(self: Pin<&mut AiChat>, enabled: bool);
+
+        // --- signals ---------------------------------------------------
+
+        /// The user's turn was appended at this index, so the panel can add
+        /// one bubble instead of rebuilding the transcript.
+        #[qsignal]
+        #[cxx_name = "messageAppended"]
+        fn message_appended(self: Pin<&mut AiChat>, index: u64);
+
+        /// The assistant turn at this index exists and is streaming.
+        #[qsignal]
+        #[cxx_name = "messageStarted"]
+        fn message_started(self: Pin<&mut AiChat>, index: u64);
+
+        /// Append this text to that turn.
+        #[qsignal]
+        #[cxx_name = "deltaReceived"]
+        fn delta_received(self: Pin<&mut AiChat>, index: u64, text: QString);
+
+        /// That turn is complete; `codeBlocks(index)` is readable.
+        #[qsignal]
+        #[cxx_name = "messageFinished"]
+        fn message_finished(self: Pin<&mut AiChat>, index: u64);
+
+        /// The turn ended in an error. `code` is
+        /// `ai_chat_core::ChatError`'s stable code — 12 is "the user
+        /// pressed Stop", which the panel shows as nothing at all.
+        #[qsignal]
+        #[cxx_name = "chatFailed"]
+        fn chat_failed(self: Pin<&mut AiChat>, error: FfiResult);
+
+        #[qsignal]
+        #[cxx_name = "attachmentsChanged"]
+        fn attachments_changed(self: Pin<&mut AiChat>);
+
+        #[qsignal]
+        #[cxx_name = "providersChanged"]
+        fn providers_changed(self: Pin<&mut AiChat>);
+
+        #[qsignal]
+        #[cxx_name = "tokenUsageChanged"]
+        fn token_usage_changed(self: Pin<&mut AiChat>);
+
+        /// Show the approval card: the run is blocked until `approveTool`,
+        /// `denyTool` or `stopRun` answers it.
+        #[qsignal]
+        #[cxx_name = "toolCallPending"]
+        fn tool_call_pending(self: Pin<&mut AiChat>, call: FfiToolCall);
+
+        #[qsignal]
+        #[cxx_name = "toolCallFinished"]
+        fn tool_call_finished(self: Pin<&mut AiChat>, outcome: FfiToolOutcome);
+
+        /// The agent loop ended; code `0` means it ended on an answer.
+        #[qsignal]
+        #[cxx_name = "runFinished"]
+        fn run_finished(self: Pin<&mut AiChat>, result: FfiResult);
+
+        #[qsignal]
+        #[cxx_name = "conversationsChanged"]
+        fn conversations_changed(self: Pin<&mut AiChat>);
+
+        /// A tool opened a tab. Relayed by `main_window.cpp` to the same
+        /// handler `DocumentManager::tabOpened` drives.
+        ///
+        /// These three exist because a tool runs against the shared
+        /// `AppSession` from *this* QObject, and only `DocumentManager` can
+        /// emit its own signals — without them an agent's edit would change
+        /// the `Document` while the widget on screen kept the old text.
+        #[qsignal]
+        #[cxx_name = "toolOpenedTab"]
+        fn tool_opened_tab(self: Pin<&mut AiChat>, tab_id: u64, title: QString);
+
+        /// A tool replaced a buffer's text; same handler as
+        /// `DocumentManager::bufferEditedExternally`.
+        #[qsignal]
+        #[cxx_name = "toolEditedBuffer"]
+        fn tool_edited_buffer(self: Pin<&mut AiChat>, tab_id: u64, content: QString);
+
+        /// A tool wrote a buffer to disk; same handler as
+        /// `DocumentManager::tabModifiedChanged(id, false)`.
+        #[qsignal]
+        #[cxx_name = "toolSavedBuffer"]
+        fn tool_saved_buffer(self: Pin<&mut AiChat>, tab_id: u64);
+    }
+
+    // The streaming thread's one cross-thread hop, same pattern as
+    // `TerminalSession`'s PTY reader and `LanguageService`'s LSP listener.
+    impl cxx_qt::Threading for AiChat {}
+
+    extern "RustQt" {
+        /// Settings > AI Providers (AC14): the draft of the
+        /// `[[ai_provider]]` and `[[ai_tool_policy]]` tables, committed on
+        /// OK. Isomorphic to `LanguageServerEditor`, and draft-and-commit
+        /// for the same reason: a half-typed base URL must not become the
+        /// endpoint a request is sent to.
+        #[qobject]
+        type AiProviderEditor = super::AiProviderEditorRust;
+
+        #[qinvokable]
+        #[cxx_name = "beginEdit"]
+        fn begin_edit(self: &AiProviderEditor);
+
+        #[qinvokable]
+        fn rows(self: &AiProviderEditor) -> Vec<FfiAiProviderRow>;
+
+        /// The tool-policy table, reads first, in
+        /// `settings_model::ai::known_tools` order.
+        #[qinvokable]
+        #[cxx_name = "toolPolicies"]
+        fn tool_policies(self: &AiProviderEditor) -> Vec<FfiAiToolPolicyRow>;
+
+        #[qinvokable]
+        #[cxx_name = "setBaseUrl"]
+        fn set_base_url(self: &AiProviderEditor, id: &QString, base_url: &QString);
+
+        #[qinvokable]
+        #[cxx_name = "setModel"]
+        fn set_model(self: &AiProviderEditor, id: &QString, model: &QString);
+
+        #[qinvokable]
+        #[cxx_name = "setKeyEnvVar"]
+        fn set_key_env_var(self: &AiProviderEditor, id: &QString, key_env_var: &QString);
+
+        #[qinvokable]
+        #[cxx_name = "setEnabled"]
+        fn set_enabled(self: &AiProviderEditor, id: &QString, enabled: bool);
+
+        /// `auto`, `ask` or `never`. An unrecognised spelling is ignored
+        /// rather than widening the agent's authority on a typo.
+        #[qinvokable]
+        #[cxx_name = "setToolPolicy"]
+        fn set_tool_policy(self: &AiProviderEditor, tool: &QString, policy: &QString);
+
+        #[qinvokable]
+        #[cxx_name = "isDirty"]
+        fn is_dirty(self: &AiProviderEditor, id: &QString) -> bool;
+
+        /// The first problem that would stop the dialog closing, as the
+        /// finished sentence `settings_model::ai::validate` composed. Code
+        /// `0` means the page is savable.
+        #[qinvokable]
+        fn validate(self: &AiProviderEditor) -> FfiResult;
+
+        /// Write the draft to `settings.toml`.
+        #[qinvokable]
+        fn commit(self: &AiProviderEditor) -> FfiResult;
+
+        #[qinvokable]
+        fn revert(self: &AiProviderEditor);
+    }
+
     unsafe extern "C++" {
         include!("main_window.h");
 
@@ -3994,18 +4501,7 @@ fn hit(kind: ffi::FfiHitKind, text: &str, detail: &str, positions: Vec<u32>) -> 
 
 /// Human label for a symbol hit's secondary column.
 fn symbol_detail(m: &index_core::SymbolMatch) -> String {
-    let kind = m
-        .kind
-        .map(|k| match k {
-            syntax_core::SymbolKind::Class => "class",
-            syntax_core::SymbolKind::Struct => "struct",
-            syntax_core::SymbolKind::Enum => "enum",
-            syntax_core::SymbolKind::Interface => "interface",
-            syntax_core::SymbolKind::Method => "method",
-            syntax_core::SymbolKind::Function => "function",
-            syntax_core::SymbolKind::Field => "field",
-        })
-        .unwrap_or("symbol");
+    let kind = symbol_kind_word(m.kind);
     match &m.container {
         Some(container) => format!("{kind} in {container}"),
         None => kind.to_string(),
@@ -5296,7 +5792,10 @@ pub struct LanguageServiceRust {
     /// Open document path -> language id, so a change/save/close for a file we
     /// never opened against a server is dropped rather than sent.
     open_docs: RefCell<std::collections::HashMap<String, String>>,
-    store: RefCell<lsp_core::DiagnosticStore>,
+    /// Shared with `AiChat`, which reads it for `attachDiagnostics` — two
+    /// stores would mean the chat attaching a different set of problems
+    /// than the Problems panel shows.
+    store: SharedDiagnostics,
     /// L3: which hover request is still the current one. The rule is
     /// `lsp_core`'s; what is kept here is only its state.
     hover: RefCell<lsp_core::HoverTracker>,
@@ -6706,6 +7205,1938 @@ impl ffi::LanguageServerEditor {
     }
 }
 
+// ---------------------------------------------------------------------------
+// AI chat (ADR-0021, plan tasks AC13-AC15)
+// ---------------------------------------------------------------------------
+
+use ai_chat_core::agent::{self, AgentCallbacks, Decision, RunLimits, RunOutcome};
+use ai_chat_core::context::{self, Attachment, DiagnosticNote};
+use ai_chat_core::conversation::{Block, Conversation, Role};
+use ai_chat_core::history::{ConversationRecord, HistoryStore};
+use ai_chat_core::proposal::{self, ApplyRefusal, ApplyTarget, CodeBlock};
+use ai_chat_core::providers::{ProviderConfig, ProviderKind};
+use ai_chat_core::tokens::TokenCounter;
+use ai_chat_core::tools::{self, ToolCall, ToolOutcome, ToolPolicy};
+use ai_chat_core::{transport, ChatError};
+
+/// How long a worker parked on an approval card waits before it gives up.
+///
+/// A wait with no ceiling is a leaked thread: the user closes the panel, the
+/// window, or walks away, and the run never ends. Ten minutes is far longer
+/// than a decision takes and far shorter than a session, and the timeout
+/// resolves to a *denial* rather than an approval — the one direction that
+/// cannot do something the user never agreed to.
+const APPROVAL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// How long the worker waits for the Qt thread to run one tool.
+///
+/// The Qt thread never blocks on the worker, so this can only expire if the
+/// UI thread is wedged for two minutes — at which point answering the model
+/// with a failure beats parking the run forever.
+const TOOL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// The one diagnostic store in this process, shared by `LanguageService`
+/// (which fills it from the servers) and `AiChat` (which reads it for
+/// `attachDiagnostics`).
+///
+/// Same reasoning as the `APP_SESSION` thread-local and `index_slot`: cxx-qt
+/// builds QObjects through `Default` with no injection point, and two stores
+/// would mean the chat attaching a different set of problems than the
+/// Problems panel shows. A newtype rather than a bare `Rc` so
+/// `LanguageServiceRust` keeps its derived `Default`.
+pub struct SharedDiagnostics(Rc<RefCell<lsp_core::DiagnosticStore>>);
+
+thread_local! {
+    static DIAGNOSTICS: Rc<RefCell<lsp_core::DiagnosticStore>> = Rc::default();
+}
+
+impl Default for SharedDiagnostics {
+    fn default() -> Self {
+        SharedDiagnostics(DIAGNOSTICS.with(Rc::clone))
+    }
+}
+
+impl std::ops::Deref for SharedDiagnostics {
+    type Target = RefCell<lsp_core::DiagnosticStore>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+/// A `ChatError` as the typed result the seam carries (ADR-0003).
+fn to_chat_result(error: ChatError) -> FfiResult {
+    FfiResult {
+        code: error.code(),
+        message: QString::from(error.to_string().as_str()),
+    }
+}
+
+/// `settings-model` and `ai-chat-core` spell the compatible kind with an
+/// underscore and a hyphen respectively — two vocabularies that ADR-0017
+/// deliberately keeps apart, so translating between them is exactly this
+/// layer's job. An unknown string stays a `ChatError::UnknownProvider`,
+/// which is what the settings page already shows for one.
+fn to_core_kind(settings_kind: &str) -> Result<ProviderKind, ChatError> {
+    ProviderKind::from_str(settings_kind)
+}
+
+fn load_settings() -> app_config::Settings {
+    app_config::load(&app_core::resolve_config_dir()).unwrap_or_default()
+}
+
+/// The provider the chat sends to, as `ai-chat-core` wants it.
+///
+/// Nothing is chosen here: an unset or disabled active provider is
+/// `NoProviderConfigured`, whose own sentence tells the user to pick one.
+/// Guessing "the first enabled row" would be this layer deciding which third
+/// party the user's source code goes to.
+fn active_provider(settings: &app_config::Settings) -> Result<ProviderConfig, ChatError> {
+    let draft = settings_model::ai::AiProviderDraft::begin(settings);
+    let active = draft.active_provider().to_string();
+    let row = draft
+        .rows()
+        .iter()
+        .find(|row| row.id == active && row.enabled)
+        .ok_or(ChatError::NoProviderConfigured)?;
+    Ok(ProviderConfig {
+        // The label, not the id: `ProviderConfig::label` is what every error
+        // sentence names, and "Anthropic" reads better than "anthropic".
+        id: row.label.clone(),
+        kind: to_core_kind(&row.kind)?,
+        base_url: row.base_url.clone(),
+        model: row.model.clone(),
+        api_key_env: row.api_key_env.clone(),
+        enabled: true,
+    })
+}
+
+/// Seconds since the epoch, for the ids and timestamps `history` takes from
+/// its caller because it reads no clock itself.
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default()
+}
+
+/// The `ApplyRefusal` variants as codes the panel can branch on. Their own
+/// space, not `ChatError`'s: the two are read at different moments and never
+/// travel the same signal (see `applyRefusal`'s declaration).
+fn apply_refusal_code(refusal: &ApplyRefusal) -> i32 {
+    match refusal {
+        ApplyRefusal::NoCodeBlock => 1,
+        ApplyRefusal::NoTarget => 2,
+        ApplyRefusal::TargetNotOpen(_) => 3,
+        ApplyRefusal::OutsideProject(_) => 4,
+        ApplyRefusal::Unchanged => 5,
+    }
+}
+
+/// The lock is only ever held for a field assignment, so a poisoned one
+/// carries no broken invariant — recovering beats taking the run down.
+fn recover<T>(result: std::sync::LockResult<T>) -> T {
+    result.unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The rendezvous between `agent::run`'s `approve` callback, which blocks on
+/// the worker thread, and the human clicking a card on the Qt thread.
+///
+/// `agent::run` calls `approve` synchronously and expects an answer, but the
+/// answer comes from a widget. So the worker parks here while the Qt thread
+/// shows the card, and `approveTool`/`denyTool`/`stopRun` — all of which run
+/// on the Qt thread — wake it. Every exit is a *decision*: an answer, a
+/// stop, or the timeout, and the last two resolve to a denial, because
+/// nothing else can be inferred from silence.
+#[derive(Default)]
+struct GateInner {
+    /// The call currently parked, so a stale click from a card the user
+    /// left open cannot answer the next call.
+    waiting: Option<String>,
+    answer: Option<Decision>,
+    /// Set by `stopRun`/`cancelRequest`: the run is over, so nothing may
+    /// park here again either.
+    abandoned: bool,
+}
+
+#[derive(Default)]
+struct ApprovalGate {
+    inner: std::sync::Mutex<GateInner>,
+    answered: std::sync::Condvar,
+}
+
+impl ApprovalGate {
+    /// Parks the worker until the Qt thread answers, the run is abandoned,
+    /// or [`APPROVAL_TIMEOUT`] expires.
+    ///
+    /// The denial reason is left empty on purpose in both silent exits:
+    /// `agent::run` composes what the model is told, and a sentence written
+    /// here would be model-facing wording in the adapter (ADR-0021 §6).
+    fn wait_for_decision(&self, call_id: &str) -> Decision {
+        let mut inner = recover(self.inner.lock());
+        if inner.abandoned {
+            return Decision::Denied(String::new());
+        }
+        inner.waiting = Some(call_id.to_string());
+        inner.answer = None;
+        let (mut inner, wait) = recover(self.answered.wait_timeout_while(
+            inner,
+            APPROVAL_TIMEOUT,
+            |gate| gate.answer.is_none() && !gate.abandoned,
+        ));
+        inner.waiting = None;
+        match inner.answer.take() {
+            Some(decision) => decision,
+            // Timed out, or stopped: a denial either way. Silence is never
+            // read as consent.
+            None => {
+                let _ = wait.timed_out();
+                Decision::Denied(String::new())
+            }
+        }
+    }
+
+    /// Answers the parked call. False when `call_id` is not the one waiting
+    /// — a card the user left on screen from an earlier run answers nothing.
+    fn answer(&self, call_id: &str, decision: Decision) -> bool {
+        let mut inner = recover(self.inner.lock());
+        if inner.waiting.as_deref() != Some(call_id) {
+            return false;
+        }
+        inner.answer = Some(decision);
+        self.answered.notify_all();
+        true
+    }
+
+    /// The run is over. Wakes anything parked and refuses to park anything
+    /// else — this is what stops a user who closes the panel mid-approval
+    /// from stranding the worker forever.
+    fn abandon(&self) {
+        let mut inner = recover(self.inner.lock());
+        inner.abandoned = true;
+        inner.waiting = None;
+        self.answered.notify_all();
+    }
+}
+
+/// What the Qt thread keeps hold of while one request or run is in flight.
+struct ActiveRun {
+    /// Read by `transport::stream_chat` between SSE events and by the agent
+    /// loop between steps.
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    gate: std::sync::Arc<ApprovalGate>,
+    /// Tools promoted to `Auto` by "always allow" during this run. Per run,
+    /// never persisted: a promotion the user made for one task must not
+    /// silently widen the agent's authority tomorrow.
+    promoted: std::sync::Arc<std::sync::Mutex<HashMap<String, ToolPolicy>>>,
+    /// True for a run driven by `agent::run`, so the end of it reports
+    /// through `runFinished` rather than `chatFailed`.
+    agent_mode: bool,
+}
+
+/// The apply waiting for the preview's verdict — the same shape
+/// `PendingRefactor` has, minus the `workspace/applyEdit` gate a model's
+/// answer never has anything to settle with.
+struct PendingApply {
+    plan: lsp_core::EditPlan,
+    excluded: Vec<String>,
+}
+
+/// Rust side of the `AiChat` QObject.
+///
+/// Everything here is either state the panel reads back or a handle to
+/// something that decides elsewhere. The transcript is `ai-chat-core`'s
+/// `Conversation`, the attachments are its `Attachment`s, the token counter
+/// is its `TokenCounter`, and the store is its `HistoryStore`.
+pub struct AiChatRust {
+    session: Rc<RefCell<AppSession>>,
+    /// The same index `SearchModel` builds and the MCP server queries, so
+    /// an in-IDE agent can never see a different project than an attached
+    /// one (ADR-0021 §1).
+    index: mcp_server::IndexHandle,
+    diagnostics: SharedDiagnostics,
+    /// The Qt thread's copy of the transcript. During a run the worker owns
+    /// the authoritative one and this mirrors it event by event, so the
+    /// panel can render mid-stream; the worker hands the real one back when
+    /// the run ends, and it replaces this wholesale.
+    conversation: RefCell<Conversation>,
+    /// The pending context for the *next* message — deliberately not part
+    /// of the transcript (see `ai_chat_core::conversation`'s module docs).
+    attachments: RefCell<Vec<Attachment>>,
+    counter: RefCell<TokenCounter>,
+    /// What the user has typed and not sent, so the live counter charges
+    /// for it.
+    composer: RefCell<String>,
+    agent_mode: std::cell::Cell<bool>,
+    run: RefCell<Option<ActiveRun>>,
+    /// The card on screen, so `pendingToolCall` can answer without the
+    /// panel having to remember what the signal carried.
+    pending_call: RefCell<Option<ToolCall>>,
+    /// Assistant turns already in the transcript when the run started —
+    /// `runStepCount` is the difference, which is one per round trip.
+    run_baseline: std::cell::Cell<usize>,
+    /// What the provider said it charged, as `StreamEvent::Usage` reported
+    /// it. Ask mode only: `agent::run` has no usage callback, so an agent
+    /// run leaves these at their last value.
+    usage: std::cell::Cell<(u32, u32)>,
+    history: HistoryStore,
+    /// The record this transcript is saved as, once it has been saved.
+    conversation_id: RefCell<Option<String>>,
+    /// Distinguishes conversations started within the same second;
+    /// `history::new_id` takes it because that module reads no clock.
+    id_counter: std::cell::Cell<u64>,
+    persist: std::cell::Cell<bool>,
+    pending_apply: RefCell<Option<PendingApply>>,
+    apply_refusal: RefCell<Option<ApplyRefusal>>,
+    /// RF2's staleness rule, the same gate a rename goes through.
+    edits: RefCell<lsp_core::EditGate>,
+    /// The active provider, resolved from `settings.toml` once and kept
+    /// until something invalidates it. The live token counter runs on the
+    /// keystroke path, and re-parsing the settings file per character typed
+    /// is the difference between a live counter and a stuttering one.
+    provider: RefCell<Option<ProviderConfig>>,
+}
+
+impl Default for AiChatRust {
+    fn default() -> Self {
+        let settings = load_settings();
+        AiChatRust {
+            session: shared_session(),
+            index: index_slot(),
+            diagnostics: SharedDiagnostics::default(),
+            conversation: RefCell::default(),
+            attachments: RefCell::default(),
+            counter: RefCell::default(),
+            composer: RefCell::default(),
+            agent_mode: std::cell::Cell::new(settings.ai_mode == "agent"),
+            run: RefCell::default(),
+            pending_call: RefCell::default(),
+            run_baseline: std::cell::Cell::default(),
+            usage: std::cell::Cell::default(),
+            history: HistoryStore::new(&app_core::resolve_config_dir()),
+            conversation_id: RefCell::default(),
+            id_counter: std::cell::Cell::default(),
+            persist: std::cell::Cell::new(settings.ai_persist_conversations_or_default()),
+            pending_apply: RefCell::default(),
+            apply_refusal: RefCell::default(),
+            edits: RefCell::default(),
+            provider: RefCell::default(),
+        }
+    }
+}
+
+impl ffi::AiChat {
+    /// The active provider, from the cache when it is warm.
+    ///
+    /// Invalidated by [`Self::set_active_provider`] and
+    /// [`Self::apply_ai_settings`], which are the only two ways the answer
+    /// can change while the panel is open — the settings dialog routes
+    /// through the second.
+    fn provider(&self) -> Result<ProviderConfig, ChatError> {
+        if let Some(config) = self.provider.borrow().as_ref() {
+            return Ok(config.clone());
+        }
+        let config = active_provider(&load_settings())?;
+        *self.provider.borrow_mut() = Some(config.clone());
+        Ok(config)
+    }
+
+    // --- sending ---------------------------------------------------------
+
+    pub fn send_message(mut self: Pin<&mut Self>, text: &QString) -> FfiResult {
+        // The panel disables the composer while a run is in flight; this is
+        // the belt to that pair of braces, and it must not start a second
+        // worker against the same transcript.
+        if self.run.borrow().is_some() {
+            return FfiResult::default();
+        }
+        let settings = load_settings();
+        let config = match self.provider() {
+            Ok(config) => config,
+            Err(error) => return to_chat_result(error),
+        };
+        let api_key = match ai_chat_core::providers::resolve_api_key(&config) {
+            Ok(key) => key,
+            Err(error) => return to_chat_result(error),
+        };
+        let agent_mode = self.agent_mode.get();
+        if agent_mode && !config.capabilities().tools {
+            return to_chat_result(ChatError::UnsupportedCapability {
+                provider: config.label().to_string(),
+                capability: ai_chat_core::providers::Capability::Tools,
+            });
+        }
+
+        let root = self.session.borrow().root_path().map(Path::to_path_buf);
+        let typed = text.to_string();
+        let blocks = self.as_mut().compose_user_turn(&config, typed);
+        if blocks.is_empty() {
+            // Every dialect rejects a message with no content, so an empty
+            // composer with nothing attached is a no-op rather than a 400.
+            return FfiResult::default();
+        }
+        self.conversation.borrow_mut().push_user_blocks(blocks);
+        let index = self.conversation.borrow().len() as u64 - 1;
+        self.as_mut().message_appended(index);
+        self.attachments.borrow_mut().clear();
+        self.as_mut().attachments_changed();
+
+        let conversation = self.conversation.borrow().clone();
+        self.run_baseline.set(assistant_turns(&conversation));
+
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let gate = std::sync::Arc::new(ApprovalGate::default());
+        let promoted = std::sync::Arc::new(std::sync::Mutex::new(HashMap::new()));
+        *self.run.borrow_mut() = Some(ActiveRun {
+            cancel: std::sync::Arc::clone(&cancel),
+            gate: std::sync::Arc::clone(&gate),
+            promoted: std::sync::Arc::clone(&promoted),
+            agent_mode,
+        });
+
+        let system = context::system_prompt(agent_mode, root.as_deref());
+        let policies = self.tool_policy_snapshot(&settings);
+        let qt_thread = self.as_mut().qt_thread();
+
+        // One thread owns the blocking HTTP and marshals everything back
+        // with `queue` — the PTY reader's pattern (ADR-0021 §4). The Qt
+        // thread returns from this call immediately and never waits on it.
+        std::thread::spawn(move || {
+            let mut conversation = conversation;
+            let outcome = if agent_mode {
+                run_agent(
+                    &qt_thread,
+                    &config,
+                    &api_key,
+                    &mut conversation,
+                    &system,
+                    policies,
+                    promoted,
+                    &cancel,
+                    &gate,
+                    root,
+                )
+            } else {
+                run_ask(
+                    &qt_thread,
+                    &config,
+                    &api_key,
+                    &mut conversation,
+                    &system,
+                    &cancel,
+                )
+            };
+            let (code, message) = outcome;
+            let _ = qt_thread.queue(move |chat: Pin<&mut Self>| {
+                chat.finish_run(conversation, code, message);
+            });
+        });
+
+        FfiResult::default()
+    }
+
+    /// The blocks the user's turn carries: the rendered attachments, what
+    /// they typed, and any images `render_context` set aside.
+    ///
+    /// Order is context first: a model reads the question last and answers
+    /// about what it just read.
+    fn compose_user_turn(
+        self: Pin<&mut Self>,
+        config: &ProviderConfig,
+        typed: String,
+    ) -> Vec<Block> {
+        let attachments = self.attachments.borrow();
+        let mut counter = self.counter.borrow_mut();
+        let budget = self.context_budget(config, &mut counter);
+        let rendered = context::render_context(config, &mut counter, &attachments, budget);
+
+        let mut blocks = Vec::new();
+        if !rendered.text.trim().is_empty() {
+            blocks.push(Block::Text(rendered.text));
+        }
+        if !typed.trim().is_empty() {
+            blocks.push(Block::Text(typed));
+        }
+        for image in rendered.images {
+            if let Attachment::Image {
+                media_type,
+                data_base64,
+                ..
+            } = image
+            {
+                blocks.push(Block::Image {
+                    media_type,
+                    data_base64,
+                });
+            }
+        }
+        blocks
+    }
+
+    /// What the attachments are allowed to spend: the model's window, less
+    /// the room the answer needs and what the transcript already costs.
+    ///
+    /// Arithmetic over three numbers `ai-chat-core` owns, not a policy of
+    /// this layer's own — the truncation *order* within that budget is
+    /// `render_context`'s, and it is the part that decides anything.
+    fn context_budget(&self, config: &ProviderConfig, counter: &mut TokenCounter) -> u32 {
+        let spent = counter
+            .count_conversation(config, &self.conversation.borrow())
+            .value();
+        ai_chat_core::tokens::context_window(config)
+            .saturating_sub(ai_chat_core::request::DEFAULT_MAX_TOKENS)
+            .saturating_sub(spent)
+    }
+
+    /// Every tool's policy as it stands right now, so the worker never
+    /// touches `settings.toml`. The resolution is
+    /// `settings_model::ai::tool_policy`'s; an unclassified name falls to
+    /// `tools::default_policy`, which never returns `Auto` for one.
+    fn tool_policy_snapshot(&self, settings: &app_config::Settings) -> HashMap<String, ToolPolicy> {
+        settings_model::ai::known_tools()
+            .filter_map(|tool| {
+                let policy = settings_model::ai::tool_policy(settings, tool);
+                ToolPolicy::parse(policy.as_str()).map(|policy| (tool.to_string(), policy))
+            })
+            .collect()
+    }
+
+    pub fn cancel_request(self: Pin<&mut Self>) {
+        self.stop_run();
+    }
+
+    pub fn stop_run(self: Pin<&mut Self>) {
+        let Some(run) = self.run.borrow().as_ref().map(|run| {
+            (
+                std::sync::Arc::clone(&run.cancel),
+                std::sync::Arc::clone(&run.gate),
+            )
+        }) else {
+            return;
+        };
+        run.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        // Unparks a worker sitting on an approval card. Without this, a
+        // user who closes the panel mid-approval leaves the thread waiting
+        // for a click that can no longer happen.
+        run.1.abandon();
+    }
+
+    pub fn is_streaming(&self) -> bool {
+        self.run.borrow().is_some()
+    }
+
+    pub fn new_conversation(mut self: Pin<&mut Self>) {
+        self.as_mut().stop_run();
+        self.conversation.borrow_mut().clear();
+        self.attachments.borrow_mut().clear();
+        self.composer.borrow_mut().clear();
+        *self.conversation_id.borrow_mut() = None;
+        *self.pending_call.borrow_mut() = None;
+        self.usage.set((0, 0));
+        self.as_mut().attachments_changed();
+        self.as_mut().token_usage_changed();
+    }
+
+    pub fn set_mode(mut self: Pin<&mut Self>, mode: &QString) -> FfiResult {
+        let agent_mode = mode.to_string() == "agent";
+        if agent_mode {
+            // Declared, not discovered: a provider with no tool support is
+            // refused here rather than by a request that comes back 400.
+            match self.provider() {
+                Ok(config) if !config.capabilities().tools => {
+                    return to_chat_result(ChatError::UnsupportedCapability {
+                        provider: config.label().to_string(),
+                        capability: ai_chat_core::providers::Capability::Tools,
+                    })
+                }
+                Ok(_) => {}
+                Err(error) => return to_chat_result(error),
+            }
+        }
+        self.agent_mode.set(agent_mode);
+        let mut settings = load_settings();
+        settings.ai_mode = if agent_mode { "agent" } else { "ask" }.to_string();
+        let _ = app_config::save(&app_core::resolve_config_dir(), &settings);
+        self.as_mut().token_usage_changed();
+        FfiResult::default()
+    }
+
+    pub fn mode(&self) -> QString {
+        QString::from(if self.agent_mode.get() {
+            "agent"
+        } else {
+            "ask"
+        })
+    }
+
+    pub fn set_composer_text(mut self: Pin<&mut Self>, text: &QString) {
+        let text = text.to_string();
+        if *self.composer.borrow() == text {
+            return;
+        }
+        *self.composer.borrow_mut() = text;
+        self.as_mut().token_usage_changed();
+    }
+}
+
+/// How many assistant turns a transcript holds — one per round trip, which
+/// is what `runStepCount` reports.
+fn assistant_turns(conversation: &Conversation) -> usize {
+    conversation
+        .turns()
+        .iter()
+        .filter(|turn| turn.role == Role::Assistant)
+        .count()
+}
+
+/// A tool call as the approval card shows it. `summary` is the sentence
+/// `tools::summarise` composed — deciding what a call *means* is a rule, and
+/// it is the sentence the user consents to.
+fn to_ffi_tool_call(call: &ToolCall) -> ffi::FfiToolCall {
+    ffi::FfiToolCall {
+        call_id: QString::from(call.call_id.as_str()),
+        tool: QString::from(call.tool.as_str()),
+        summary: QString::from(tools::summarise(call).as_str()),
+        arguments: QString::from(
+            serde_json::to_string_pretty(&call.arguments)
+                .unwrap_or_else(|_| call.arguments.to_string())
+                .as_str(),
+        ),
+        // Always true here: `toolCallPending` is emitted only when the loop
+        // is genuinely blocked, since the panel disables the composer while
+        // a card is up.
+        needs_approval: true,
+    }
+}
+
+/// Ask mode: one request, one streamed answer, no tools.
+///
+/// Written out rather than driven through `agent::run` with everything
+/// denied, because the two differ in what is *sent*: Ask sends no tool
+/// schemas at all, and some OpenAI-compatible runtimes change their answer
+/// format for a present-but-empty `tools` key.
+fn run_ask(
+    qt_thread: &cxx_qt::CxxQtThread<ffi::AiChat>,
+    config: &ProviderConfig,
+    api_key: &str,
+    conversation: &mut Conversation,
+    system: &str,
+    cancel: &std::sync::atomic::AtomicBool,
+) -> (i32, String) {
+    let body = match ai_chat_core::request::build_body(config, conversation, system, &[], false) {
+        Ok(body) => body,
+        Err(error) => return (error.code(), error.to_string()),
+    };
+    let url = match ai_chat_core::request::endpoint_url(config) {
+        Ok(url) => url,
+        Err(error) => return (error.code(), error.to_string()),
+    };
+    let spec = transport::RequestSpec {
+        url,
+        headers: ai_chat_core::request::protocol_headers(config),
+        body,
+    };
+
+    conversation.begin_assistant();
+    let mut sink = |event: ai_chat_core::stream::StreamEvent| match event {
+        ai_chat_core::stream::StreamEvent::TextDelta(text) => {
+            conversation.append_text_delta(&text);
+            let _ = qt_thread.queue(move |chat: Pin<&mut ffi::AiChat>| chat.on_delta(text));
+        }
+        ai_chat_core::stream::StreamEvent::Usage {
+            input_tokens,
+            output_tokens,
+        } => {
+            let _ = qt_thread.queue(move |chat: Pin<&mut ffi::AiChat>| {
+                chat.on_usage(input_tokens, output_tokens)
+            });
+        }
+        _ => {}
+    };
+    let result = transport::stream_chat(config, spec, api_key, cancel, &mut sink);
+    conversation.finish_assistant();
+    match result {
+        Ok(()) => (ChatError::CODE_OK, String::new()),
+        Err(error) => (error.code(), error.to_string()),
+    }
+}
+
+/// Agent mode: `agent::run` with the three callbacks it needs, each of which
+/// crosses back to the Qt thread.
+///
+/// `approve` parks on the [`ApprovalGate`]; `execute` hands the call to the
+/// Qt thread and waits on a channel for the answer. Neither direction can
+/// deadlock: the Qt thread never blocks on this one.
+#[allow(clippy::too_many_arguments)]
+fn run_agent(
+    qt_thread: &cxx_qt::CxxQtThread<ffi::AiChat>,
+    config: &ProviderConfig,
+    api_key: &str,
+    conversation: &mut Conversation,
+    system: &str,
+    base_policies: HashMap<String, ToolPolicy>,
+    promoted: std::sync::Arc<std::sync::Mutex<HashMap<String, ToolPolicy>>>,
+    cancel: &std::sync::atomic::AtomicBool,
+    gate: &ApprovalGate,
+    root: Option<std::path::PathBuf>,
+) -> (i32, String) {
+    let limits = RunLimits::default();
+
+    let policies = |tool: &str| -> ToolPolicy {
+        if let Some(policy) = recover(promoted.lock()).get(tool) {
+            return *policy;
+        }
+        base_policies
+            .get(tool)
+            .copied()
+            .unwrap_or_else(|| tools::default_policy(tool))
+    };
+
+    let mut approve = |call: &ToolCall| -> Decision {
+        let shown = call.clone();
+        let _ = qt_thread.queue(move |chat: Pin<&mut ffi::AiChat>| chat.on_tool_pending(shown));
+        gate.wait_for_decision(&call.call_id)
+    };
+
+    let mut execute = |call: &ToolCall| -> ToolOutcome {
+        // SECURITY: confinement is the executor's job, because the project
+        // root is the executor's knowledge — `agent::run` deliberately takes
+        // no root (see its module docs). A path that leaves the project, or
+        // names a credentials-shaped file, becomes a result the model can
+        // read and route around, never a panic.
+        if let Err(error) = tools::validate_call(call, root.as_deref()) {
+            return ToolOutcome {
+                content: error.to_string(),
+                is_error: true,
+            };
+        }
+        let (answer, wait) = std::sync::mpsc::channel();
+        let call_for_qt = call.clone();
+        let queued = qt_thread.queue(move |chat: Pin<&mut ffi::AiChat>| {
+            let outcome = chat.execute_tool(&call_for_qt);
+            let _ = answer.send(outcome);
+        });
+        if queued.is_err() {
+            return ToolOutcome {
+                content: ChatError::Cancelled.to_string(),
+                is_error: true,
+            };
+        }
+        wait.recv_timeout(TOOL_TIMEOUT).unwrap_or(ToolOutcome {
+            content: ChatError::Cancelled.to_string(),
+            is_error: true,
+        })
+    };
+
+    let mut on_text_delta = |text: &str| {
+        let text = text.to_string();
+        let _ = qt_thread.queue(move |chat: Pin<&mut ffi::AiChat>| chat.on_delta(text));
+    };
+    let mut on_tool_started = |call: &ToolCall| {
+        let call = call.clone();
+        let _ = qt_thread.queue(move |chat: Pin<&mut ffi::AiChat>| chat.on_tool_started(call));
+    };
+    let mut on_tool_finished = |call: &ToolCall, outcome: &ToolOutcome| {
+        let (call, outcome) = (call.clone(), outcome.clone());
+        let _ = qt_thread
+            .queue(move |chat: Pin<&mut ffi::AiChat>| chat.on_tool_finished(call, outcome));
+    };
+
+    let mut callbacks = AgentCallbacks {
+        approve: &mut approve,
+        execute: &mut execute,
+        on_text_delta: &mut on_text_delta,
+        on_tool_started: &mut on_tool_started,
+        on_tool_finished: &mut on_tool_finished,
+    };
+
+    let outcome = agent::run(
+        config,
+        api_key,
+        conversation,
+        system,
+        &policies,
+        limits,
+        cancel,
+        &mut callbacks,
+    );
+    match outcome {
+        // Both are "the loop ended and there is nothing further to say":
+        // one because the model answered, one because it produced nothing
+        // to answer with, and repeating the request would send the same
+        // bytes for the same nothing.
+        RunOutcome::Answered | RunOutcome::Stopped => (ChatError::CODE_OK, String::new()),
+        RunOutcome::CeilingHit(limit) => {
+            let ceiling = match limit {
+                ai_chat_core::RunLimit::Steps => u64::from(limits.max_steps),
+                ai_chat_core::RunLimit::Seconds => limits.max_seconds,
+                ai_chat_core::RunLimit::Tokens => u64::from(limits.max_tokens),
+            };
+            let error = ChatError::RunCeilingExceeded { limit, ceiling };
+            (error.code(), error.to_string())
+        }
+        RunOutcome::Cancelled => (
+            ChatError::Cancelled.code(),
+            ChatError::Cancelled.to_string(),
+        ),
+        RunOutcome::Failed(error) => (error.code(), error.to_string()),
+    }
+}
+
+/// The index rows as JSON for the model. Shape only — the queries
+/// themselves are `index_core`'s, the same methods the MCP tools call, so
+/// there is no second implementation of "search the project".
+fn search_match_json(hit: &index_core::SearchMatch) -> serde_json::Value {
+    serde_json::json!({
+        "path": hit.path.to_string_lossy(),
+        "line": hit.line,
+        "start": hit.start,
+        "end": hit.end,
+        "text": hit.line_text,
+    })
+}
+
+fn file_match_json(hit: &index_core::FileMatch) -> serde_json::Value {
+    serde_json::json!({ "path": hit.path.to_string_lossy(), "relative": hit.relative })
+}
+
+fn symbol_match_json(hit: &index_core::SymbolMatch) -> serde_json::Value {
+    serde_json::json!({
+        "name": hit.name,
+        "kind": symbol_kind_word(hit.kind),
+        "path": hit.path.to_string_lossy(),
+        "line": hit.line,
+        "column": hit.col,
+        "is_definition": hit.is_definition,
+        "container": hit.container,
+    })
+}
+
+/// The severity word the server itself used, kept as a string rather than
+/// re-classified — `context::DiagnosticNote` takes it that way on purpose.
+fn severity_word(severity: lsp_core::Severity) -> &'static str {
+    match severity {
+        lsp_core::Severity::Error => "error",
+        lsp_core::Severity::Warning => "warning",
+        lsp_core::Severity::Information => "information",
+        lsp_core::Severity::Hint => "hint",
+    }
+}
+
+/// The chip's kind, which the panel picks an icon from.
+fn attachment_kind(attachment: &Attachment) -> &'static str {
+    match attachment {
+        Attachment::Selection { .. } => "selection",
+        Attachment::File { .. } => "file",
+        Attachment::Symbol { .. } => "symbol",
+        Attachment::Diagnostics(_) => "diagnostics",
+        Attachment::TerminalOutput(_) => "terminal",
+        Attachment::Image { .. } => "image",
+    }
+}
+
+impl ffi::AiChat {
+    // --- what the worker queues back onto the Qt thread -------------------
+
+    /// Mirror one text delta into the Qt-side transcript and tell the panel
+    /// which bubble to append to.
+    fn on_delta(mut self: Pin<&mut Self>, text: String) {
+        let (index, started) = {
+            let mut conversation = self.conversation.borrow_mut();
+            let started = !conversation.is_streaming();
+            conversation.append_text_delta(&text);
+            (conversation.len().saturating_sub(1) as u64, started)
+        };
+        if started {
+            self.as_mut().message_started(index);
+        }
+        self.as_mut()
+            .delta_received(index, QString::from(text.as_str()));
+    }
+
+    fn on_usage(mut self: Pin<&mut Self>, input_tokens: u32, output_tokens: u32) {
+        let (input, output) = self.usage.get();
+        // Anthropic sends the input count at the start and the output count
+        // at the end, so one answer legitimately reports twice.
+        self.usage
+            .set((input.max(input_tokens), output + output_tokens));
+        self.as_mut().token_usage_changed();
+    }
+
+    fn on_tool_pending(mut self: Pin<&mut Self>, call: ToolCall) {
+        let shown = to_ffi_tool_call(&call);
+        *self.pending_call.borrow_mut() = Some(call);
+        self.as_mut().tool_call_pending(shown);
+    }
+
+    fn on_tool_started(mut self: Pin<&mut Self>, call: ToolCall) {
+        self.as_mut().conversation.borrow_mut().push_tool_use(
+            call.call_id,
+            call.tool,
+            call.arguments,
+        );
+    }
+
+    fn on_tool_finished(mut self: Pin<&mut Self>, call: ToolCall, outcome: ToolOutcome) {
+        self.conversation.borrow_mut().push_tool_result(
+            &call.call_id,
+            &outcome.content,
+            outcome.is_error,
+        );
+        *self.pending_call.borrow_mut() = None;
+        let row = ffi::FfiToolOutcome {
+            call_id: QString::from(call.call_id.as_str()),
+            tool: QString::from(call.tool.as_str()),
+            // A declined call is `ok`: a denial is data, not a failure
+            // (ADR-0021 §1), and painting it red would teach the user that
+            // saying no broke something.
+            status: QString::from(if outcome.is_error { "error" } else { "ok" }),
+            detail: QString::from(outcome.content.as_str()),
+        };
+        self.as_mut().tool_call_finished(row);
+    }
+
+    /// The run is over: the worker's transcript is the authoritative one, so
+    /// it replaces the mirror wholesale before anything is saved or read
+    /// back.
+    fn finish_run(
+        mut self: Pin<&mut Self>,
+        conversation: Conversation,
+        code: i32,
+        message: String,
+    ) {
+        let agent_mode = self
+            .run
+            .borrow()
+            .as_ref()
+            .map(|run| run.agent_mode)
+            .unwrap_or(false);
+        let last = conversation.len().saturating_sub(1) as u64;
+        *self.conversation.borrow_mut() = conversation;
+        *self.run.borrow_mut() = None;
+        *self.pending_call.borrow_mut() = None;
+
+        self.as_mut().message_finished(last);
+        let result = FfiResult {
+            code,
+            message: QString::from(message.as_str()),
+        };
+        if agent_mode {
+            self.as_mut().run_finished(result);
+        } else if code != ChatError::CODE_OK {
+            self.as_mut().chat_failed(result);
+        }
+        self.as_mut().save_conversation();
+        self.as_mut().token_usage_changed();
+    }
+
+    // --- tool execution, on the Qt thread ---------------------------------
+
+    /// Runs one already-validated call against the shared `AppSession` and
+    /// the shared project index — the same objects the MCP server's tools
+    /// reach through `dispatch_editor_command`, so an in-IDE agent and an
+    /// attached one see one project and one set of buffers.
+    fn execute_tool(mut self: Pin<&mut Self>, call: &ToolCall) -> ToolOutcome {
+        let string = |name: &str| -> String {
+            call.arguments
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        let flag = |name: &str| -> bool {
+            call.arguments
+                .get(name)
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+        };
+        let number = |name: &str| -> Option<u64> {
+            call.arguments.get(name).and_then(serde_json::Value::as_u64)
+        };
+        let limit = number("limit").unwrap_or(100) as usize;
+        let tab_id = || TabId::from_raw(number("tab_id").unwrap_or_default());
+
+        let outcome = match call.tool.as_str() {
+            "search_text" => self.query_index(|index| {
+                let hits = index.search_with(
+                    &string("pattern"),
+                    flag("is_regex"),
+                    flag("case_sensitive"),
+                    limit,
+                    &std::sync::atomic::AtomicBool::new(false),
+                )?;
+                Ok(serde_json::json!({
+                    "matches": hits.iter().map(search_match_json).collect::<Vec<_>>(),
+                }))
+            }),
+            "find_files" => self.query_index(|index| {
+                let hits = index.find_files(&string("query"), limit);
+                Ok(serde_json::json!({
+                    "files": hits.iter().map(file_match_json).collect::<Vec<_>>(),
+                }))
+            }),
+            "find_definitions" => self.query_index(|index| {
+                let hits = index.find_definitions_ranked(&string("query"), limit)?;
+                Ok(serde_json::json!({
+                    "symbols": hits.iter().map(symbol_match_json).collect::<Vec<_>>(),
+                }))
+            }),
+            "find_usages" => self.query_index(|index| {
+                let hits = index.find_usages(&string("name"))?;
+                Ok(serde_json::json!({
+                    "symbols": hits.iter().map(symbol_match_json).collect::<Vec<_>>(),
+                }))
+            }),
+            "find_implementations" => self.query_index(|index| {
+                let hits = index.find_implementations(&string("supertype"))?;
+                Ok(serde_json::json!({
+                    "symbols": hits.iter().map(symbol_match_json).collect::<Vec<_>>(),
+                }))
+            }),
+            "resolve_declaration" => {
+                let path = std::path::PathBuf::from(string("path"));
+                // The open buffer wins over the file, exactly as the MCP
+                // tool does it: the user may be sitting on unsaved edits,
+                // and resolving against disk would answer about text that
+                // is no longer on screen.
+                let content = self
+                    .session
+                    .borrow()
+                    .content_for_path(&path)
+                    .map(Ok)
+                    .unwrap_or_else(|| std::fs::read_to_string(&path));
+                match content {
+                    Ok(content) => {
+                        let offset = number("byte_offset").unwrap_or_default() as usize;
+                        self.query_index(|index| {
+                            let resolution = index.resolve_declaration(&path, &content, offset)?;
+                            Ok(serde_json::json!({
+                                "name": resolution.name,
+                                "candidates": resolution
+                                    .candidates
+                                    .iter()
+                                    .map(symbol_match_json)
+                                    .collect::<Vec<_>>(),
+                            }))
+                        })
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
+            }
+            "list_project_tree" => {
+                let entries: Vec<serde_json::Value> = self
+                    .session
+                    .borrow()
+                    .project_tree_entries()
+                    .into_iter()
+                    .map(|(path, is_dir)| {
+                        serde_json::json!({ "path": path.to_string_lossy(), "is_dir": is_dir })
+                    })
+                    .collect();
+                Ok(serde_json::json!({ "entries": entries }))
+            }
+            "read_buffer" => match self.session.borrow().tab_content(tab_id()) {
+                Some(content) => Ok(serde_json::json!({ "content": content })),
+                None => Err(AppError::NoSuchTab.to_string()),
+            },
+            "open_file" => {
+                let path = std::path::PathBuf::from(string("path"));
+                let opened = self.session.borrow_mut().open_file(&path);
+                match opened {
+                    Ok(opened) => {
+                        if opened.newly_opened {
+                            // The tab strip is `DocumentManager`'s to
+                            // change, so this is relayed rather than emitted
+                            // here — see the signal's declaration.
+                            self.as_mut().tool_opened_tab(
+                                opened.id.raw(),
+                                QString::from(opened.title.as_str()),
+                            );
+                        }
+                        Ok(serde_json::json!({ "tab_id": opened.id.raw() }))
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
+            }
+            "edit_buffer" => {
+                let (id, content) = (tab_id(), string("content"));
+                let edited = self.session.borrow_mut().edit_tab(id, &content);
+                match edited {
+                    Ok(()) => {
+                        self.as_mut()
+                            .tool_edited_buffer(id.raw(), QString::from(content.as_str()));
+                        Ok(serde_json::Value::Null)
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
+            }
+            "save_buffer" => {
+                let id = tab_id();
+                let saved = self.session.borrow_mut().save_buffer(id);
+                match saved {
+                    Ok(()) => {
+                        self.as_mut().tool_saved_buffer(id.raw());
+                        Ok(serde_json::Value::Null)
+                    }
+                    Err(error) => Err(error.to_string()),
+                }
+            }
+            // `agent::run` already refuses a name with no spec before it
+            // gets here; this arm exists so the match is total.
+            other => Err(format!("{other} is not a tool this IDE has.")),
+        };
+
+        match outcome {
+            Ok(value) => ToolOutcome {
+                content: serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string()),
+                is_error: false,
+            },
+            Err(detail) => ToolOutcome {
+                content: ChatError::ToolFailed {
+                    tool: call.tool.clone(),
+                    detail,
+                }
+                .to_string(),
+                is_error: true,
+            },
+        }
+    }
+
+    /// Runs one read against the project index, or reports why it could not.
+    fn query_index<T>(
+        &self,
+        query: impl FnOnce(&index_core::TextIndex) -> Result<T, index_core::IndexError>,
+    ) -> Result<T, String> {
+        let guard = self
+            .index
+            .read()
+            .map_err(|_| "the index is unavailable".to_string())?;
+        let Some(index) = guard.ready() else {
+            return Err(guard
+                .unavailable_reason()
+                .unwrap_or_else(|| "the project index is not ready yet".to_string()));
+        };
+        query(index).map_err(|error| error.to_string())
+    }
+}
+
+impl ffi::AiChat {
+    // --- attachments ------------------------------------------------------
+
+    /// The one gate every attachment passes: a credentials-shaped name, a
+    /// path outside the open project, and an image a provider cannot read
+    /// are all refused here, in `ai-chat-core`'s words (ADR-0021 §1). No
+    /// `attach_*` slot may push around it.
+    fn accept(mut self: Pin<&mut Self>, attachment: Attachment) -> FfiResult {
+        let config = match self.provider() {
+            Ok(config) => config,
+            Err(error) => return to_chat_result(error),
+        };
+        let root = self.session.borrow().root_path().map(Path::to_path_buf);
+        if let Err(error) = context::accept_attachment(&config, root.as_deref(), &attachment) {
+            return to_chat_result(error);
+        }
+        self.attachments.borrow_mut().push(attachment);
+        self.as_mut().attachments_changed();
+        self.as_mut().token_usage_changed();
+        FfiResult::default()
+    }
+
+    pub fn attach_selection(
+        self: Pin<&mut Self>,
+        path: &QString,
+        start_line: u32,
+        end_line: u32,
+        text: &QString,
+    ) -> FfiResult {
+        self.accept(Attachment::Selection {
+            path: std::path::PathBuf::from(path.to_string()),
+            start_line,
+            end_line,
+            text: text.to_string(),
+        })
+    }
+
+    pub fn attach_file(self: Pin<&mut Self>, path: &QString) -> FfiResult {
+        let path = std::path::PathBuf::from(path.to_string());
+        // The open buffer wins over the file: attaching what is on screen,
+        // unsaved edits included, is what the user means by "this file".
+        let text = match self.session.borrow().content_for_path(&path) {
+            Some(content) => Ok(content),
+            None => std::fs::read_to_string(&path),
+        };
+        match text {
+            Ok(text) => self.accept(Attachment::File { path, text }),
+            Err(error) => FfiResult {
+                code: 1,
+                message: QString::from(error.to_string().as_str()),
+            },
+        }
+    }
+
+    pub fn attach_image(self: Pin<&mut Self>, path: &QString) -> FfiResult {
+        let path = std::path::PathBuf::from(path.to_string());
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                return FfiResult {
+                    code: 1,
+                    message: QString::from(error.to_string().as_str()),
+                }
+            }
+        };
+        match context::load_image(&path, &bytes) {
+            Ok(attachment) => self.accept(attachment),
+            Err(error) => to_chat_result(error),
+        }
+    }
+
+    pub fn attach_symbol(self: Pin<&mut Self>, name: &QString) -> FfiResult {
+        let name = name.to_string();
+        let found = self.query_index(|index| index.find_definitions_ranked(&name, 1));
+        let hit = match found {
+            Ok(mut hits) if !hits.is_empty() => hits.remove(0),
+            Ok(_) => {
+                return to_chat_result(ChatError::ToolFailed {
+                    tool: "find_definitions".to_string(),
+                    detail: format!("nothing in this project defines {name}"),
+                })
+            }
+            Err(detail) => {
+                return to_chat_result(ChatError::ToolFailed {
+                    tool: "find_definitions".to_string(),
+                    detail,
+                })
+            }
+        };
+        let content = match self.session.borrow().content_for_path(&hit.path) {
+            Some(content) => Ok(content),
+            None => std::fs::read_to_string(&hit.path),
+        };
+        let Ok(content) = content else {
+            return FfiResult {
+                code: 1,
+                message: QString::from(
+                    ChatError::ToolFailed {
+                        tool: "find_definitions".to_string(),
+                        detail: format!("{} could not be read", hit.path.display()),
+                    }
+                    .to_string()
+                    .as_str(),
+                ),
+            };
+        };
+        self.accept(Attachment::Symbol {
+            name: hit.name.clone(),
+            kind: symbol_kind_word(hit.kind).to_string(),
+            path: hit.path.clone(),
+            line: hit.line as u32,
+            text: definition_text(&hit, &content),
+        })
+    }
+
+    pub fn attach_diagnostics(self: Pin<&mut Self>) -> FfiResult {
+        let notes: Vec<DiagnosticNote> = self
+            .diagnostics
+            .borrow()
+            .rows()
+            .into_iter()
+            .map(|row| DiagnosticNote {
+                path: std::path::PathBuf::from(row.path),
+                line: row.line,
+                severity: severity_word(row.severity).to_string(),
+                message: row.message,
+            })
+            .collect();
+        self.accept(Attachment::Diagnostics(notes))
+    }
+
+    pub fn attach_terminal_output(self: Pin<&mut Self>, text: &QString) -> FfiResult {
+        self.accept(Attachment::TerminalOutput(text.to_string()))
+    }
+
+    pub fn remove_attachment(mut self: Pin<&mut Self>, index: u64) {
+        let index = index as usize;
+        if index >= self.attachments.borrow().len() {
+            return;
+        }
+        self.attachments.borrow_mut().remove(index);
+        self.as_mut().attachments_changed();
+        self.as_mut().token_usage_changed();
+    }
+
+    pub fn attachments(&self) -> Vec<ffi::FfiAttachment> {
+        let Ok(config) = self.provider() else {
+            return Vec::new();
+        };
+        let attachments = self.attachments.borrow();
+        let mut counter = self.counter.borrow_mut();
+        attachments
+            .iter()
+            .map(|attachment| {
+                // Rendered alone and unbudgeted, so the chip reports what
+                // this attachment costs rather than what survived the fit.
+                let tokens = context::render_context(
+                    &config,
+                    &mut counter,
+                    std::slice::from_ref(attachment),
+                    u32::MAX,
+                )
+                .tokens
+                .value();
+                ffi::FfiAttachment {
+                    kind: QString::from(attachment_kind(attachment)),
+                    label: QString::from(attachment.label().as_str()),
+                    detail: QString::from(attachment.detail().as_str()),
+                    tokens,
+                }
+            })
+            .collect()
+    }
+
+    // --- the transcript ---------------------------------------------------
+
+    pub fn messages(&self) -> Vec<ffi::FfiChatMessage> {
+        let conversation = self.conversation.borrow();
+        let streaming = conversation.streaming_index();
+        conversation
+            .turns()
+            .iter()
+            .enumerate()
+            .map(|(index, turn)| {
+                let text = turn.text_content();
+                ffi::FfiChatMessage {
+                    role: QString::from(turn.role.as_str()),
+                    text: QString::from(text.as_str()),
+                    streaming: streaming == Some(index),
+                    // A turn with no prose at all is tool traffic: the model
+                    // asking, or the editor answering.
+                    kind: QString::from(if text.is_empty() { "tool" } else { "text" }),
+                }
+            })
+            .collect()
+    }
+
+    pub fn code_blocks(&self, message_index: u64) -> Vec<ffi::FfiCodeBlock> {
+        self.blocks_of(message_index)
+            .into_iter()
+            .map(|block| ffi::FfiCodeBlock {
+                language: QString::from(block.language.as_str()),
+                path: QString::from(
+                    block
+                        .path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                        .as_str(),
+                ),
+                text: QString::from(block.text.as_str()),
+            })
+            .collect()
+    }
+
+    fn blocks_of(&self, message_index: u64) -> Vec<CodeBlock> {
+        let conversation = self.conversation.borrow();
+        match conversation.turns().get(message_index as usize) {
+            Some(turn) => proposal::extract_code_blocks(&turn.text_content()),
+            None => Vec::new(),
+        }
+    }
+
+    pub fn token_usage(&self) -> ffi::FfiTokenUsage {
+        let Ok(config) = self.provider() else {
+            return ffi::FfiTokenUsage::default();
+        };
+        let (input_tokens, output_tokens) = self.usage.get();
+        let mut counter = self.counter.borrow_mut();
+        let budget = self.context_budget(&config, &mut counter);
+        let attachments = self.attachments.borrow();
+        let rendered = context::render_context(&config, &mut counter, &attachments, budget);
+        let composer = counter.count_text(&config, &self.composer.borrow());
+        let transcript = counter.count_conversation(&config, &self.conversation.borrow());
+        ffi::FfiTokenUsage {
+            context_tokens: rendered.tokens.value() + composer.value() + transcript.value(),
+            // Exact only if all three were: one estimate makes the total an
+            // estimate, and `Exact` has to mean exact (ADR-0021 §6).
+            exact: rendered.tokens.is_exact() && composer.is_exact() && transcript.is_exact(),
+            budget: ai_chat_core::tokens::context_window(&config),
+            input_tokens,
+            output_tokens,
+        }
+    }
+
+    pub fn run_step_count(&self) -> u32 {
+        assistant_turns(&self.conversation.borrow()).saturating_sub(self.run_baseline.get()) as u32
+    }
+
+    pub fn pending_tool_call(&self) -> ffi::FfiToolCall {
+        match self.pending_call.borrow().as_ref() {
+            Some(call) => to_ffi_tool_call(call),
+            None => ffi::FfiToolCall::default(),
+        }
+    }
+
+    pub fn approve_tool(mut self: Pin<&mut Self>, call_id: &QString, remember: bool) -> FfiResult {
+        let call_id = call_id.to_string();
+        let Some(run) = self.run.borrow().as_ref().map(|run| {
+            (
+                std::sync::Arc::clone(&run.gate),
+                std::sync::Arc::clone(&run.promoted),
+            )
+        }) else {
+            return FfiResult::default();
+        };
+        if remember {
+            if let Some(call) = self.pending_call.borrow().as_ref() {
+                // For this run only: a promotion made for one task must not
+                // silently widen the agent's authority tomorrow.
+                recover(run.1.lock()).insert(call.tool.clone(), ToolPolicy::Auto);
+            }
+        }
+        run.0.answer(&call_id, Decision::Approved);
+        *self.pending_call.borrow_mut() = None;
+        self.as_mut().token_usage_changed();
+        FfiResult::default()
+    }
+
+    pub fn deny_tool(mut self: Pin<&mut Self>, call_id: &QString, reason: &QString) -> FfiResult {
+        let Some(gate) = self
+            .run
+            .borrow()
+            .as_ref()
+            .map(|run| std::sync::Arc::clone(&run.gate))
+        else {
+            return FfiResult::default();
+        };
+        // An empty reason is expected and fine: `agent::run` composes the
+        // sentence the model is told either way, so the view never writes
+        // model-facing wording.
+        gate.answer(&call_id.to_string(), Decision::Denied(reason.to_string()));
+        *self.pending_call.borrow_mut() = None;
+        self.as_mut().token_usage_changed();
+        FfiResult::default()
+    }
+}
+
+/// The kind word `index_core` recorded, or "symbol" for an occurrence with
+/// no `tags.scm` entry of its own.
+fn symbol_kind_word(kind: Option<syntax_core::SymbolKind>) -> &'static str {
+    match kind {
+        Some(syntax_core::SymbolKind::Class) => "class",
+        Some(syntax_core::SymbolKind::Struct) => "struct",
+        Some(syntax_core::SymbolKind::Enum) => "enum",
+        Some(syntax_core::SymbolKind::Interface) => "interface",
+        Some(syntax_core::SymbolKind::Method) => "method",
+        Some(syntax_core::SymbolKind::Function) => "function",
+        Some(syntax_core::SymbolKind::Field) => "field",
+        None => "symbol",
+    }
+}
+
+/// The text of a symbol's definition, taken from the outline `syntax_core`
+/// already produces for the Structure panel rather than by guessing where a
+/// definition ends. Falls back to the one line the index pointed at, which
+/// is still true and still useful.
+fn definition_text(hit: &index_core::SymbolMatch, content: &str) -> String {
+    let language = syntax_core::language_for_path(&hit.path);
+    let mut flat = Vec::new();
+    flatten_symbol_tree(&syntax_core::outline(language, content), 0, &mut flat);
+    let node = flat
+        .iter()
+        .find(|node| node.name.to_string() == hit.name && node.start <= content.len());
+    match node {
+        Some(node) => content
+            .get(node.start..node.end.min(content.len()))
+            .unwrap_or_default()
+            .to_string(),
+        None => content
+            .lines()
+            .nth(hit.line.saturating_sub(1))
+            .unwrap_or_default()
+            .to_string(),
+    }
+}
+
+impl ffi::AiChat {
+    // --- applying an answer, mirroring LanguageService's protocol ----------
+
+    pub fn prepare_apply(
+        self: Pin<&mut Self>,
+        message_index: u64,
+        block_index: u64,
+        current_text: &QString,
+        buffer_revision: i64,
+    ) -> ffi::FfiRefactorSummary {
+        *self.apply_refusal.borrow_mut() = None;
+        *self.pending_apply.borrow_mut() = None;
+        self.edits.borrow_mut().begin(buffer_revision);
+
+        let blocks = self.blocks_of(message_index);
+        let Some(block) = blocks.get(block_index as usize) else {
+            *self.apply_refusal.borrow_mut() = Some(ApplyRefusal::NoCodeBlock);
+            return ffi::FfiRefactorSummary::default();
+        };
+        let Some(path) = self
+            .session
+            .borrow()
+            .active_tab()
+            .and_then(|id| self.session.borrow().tab_path(id))
+        else {
+            *self.apply_refusal.borrow_mut() = Some(ApplyRefusal::NoTarget);
+            return ffi::FfiRefactorSummary::default();
+        };
+
+        let current_text = current_text.to_string();
+        let target = ApplyTarget {
+            path: &path,
+            current_text: &current_text,
+            // No selection: the panel applies a whole block against the
+            // buffer it names, and a selection-scoped apply would need the
+            // range in protocol units, which only the editor has.
+            selection: None,
+        };
+        let documents = match proposal::plan_apply(block, &target) {
+            Ok(documents) => documents,
+            Err(refusal) => {
+                *self.apply_refusal.borrow_mut() = Some(refusal);
+                return ffi::FfiRefactorSummary::default();
+            }
+        };
+
+        // The same `plan_edit` a rename goes through, so the model's edit
+        // inherits the preview, the single-undo splice and the staleness
+        // check unchanged (ADR-0021 §5).
+        let open_paths = self.open_document_paths();
+        let path_text = path.to_string_lossy().into_owned();
+        let plan = match lsp_core::plan_edit(documents, &open_paths, &path_text, &|_| None) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return ffi::FfiRefactorSummary {
+                    title: QString::from(error.to_string().as_str()),
+                    ..Default::default()
+                }
+            }
+        };
+        let summary = ffi::FfiRefactorSummary {
+            title: QString::from(format!("Apply to {}", file_name_of(&path)).as_str()),
+            document_count: plan.document_count() as u32,
+            edit_count: plan.edit_count() as u32,
+            touches_other_files: plan.touches_other_files,
+        };
+        *self.pending_apply.borrow_mut() = Some(PendingApply {
+            plan,
+            excluded: Vec::new(),
+        });
+        summary
+    }
+
+    pub fn pending_edits(&self) -> Vec<ffi::FfiTextEdit> {
+        match self.pending_apply.borrow().as_ref() {
+            Some(pending) => to_ffi_edits(&pending.plan, &[]),
+            None => Vec::new(),
+        }
+    }
+
+    pub fn exclude_from_apply(self: Pin<&mut Self>, path: &QString) {
+        if let Some(pending) = self.pending_apply.borrow_mut().as_mut() {
+            pending.excluded.push(path.to_string());
+        }
+    }
+
+    pub fn take_pending_edits(self: Pin<&mut Self>, buffer_revision: i64) -> Vec<ffi::FfiTextEdit> {
+        let fresh = self.edits.borrow_mut().accept(buffer_revision);
+        let Some(pending) = self.pending_apply.borrow_mut().take() else {
+            return Vec::new();
+        };
+        if !fresh {
+            // The buffer moved while the user read the answer. Applying it
+            // would rewrite the wrong bytes, so it is dropped — the same
+            // rule, and the same gate, a rename is held to.
+            return Vec::new();
+        }
+        to_ffi_edits(&pending.plan, &pending.excluded)
+    }
+
+    pub fn cancel_apply(self: Pin<&mut Self>) {
+        self.edits.borrow_mut().cancel();
+        *self.pending_apply.borrow_mut() = None;
+    }
+
+    pub fn apply_refusal(&self) -> FfiResult {
+        match self.apply_refusal.borrow().as_ref() {
+            Some(refusal) => FfiResult {
+                code: apply_refusal_code(refusal),
+                message: QString::from(refusal.to_string().as_str()),
+            },
+            None => FfiResult::default(),
+        }
+    }
+
+    /// The files open in a tab, which is what `lsp_core::plan_edit` splits a
+    /// set of document edits against.
+    fn open_document_paths(&self) -> Vec<String> {
+        let session = self.session.borrow();
+        session
+            .open_tabs()
+            .into_iter()
+            .filter_map(|(id, _)| session.tab_path(id))
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    // --- providers --------------------------------------------------------
+
+    pub fn providers(&self) -> Vec<ffi::FfiAiProvider> {
+        let settings = load_settings();
+        let draft = settings_model::ai::AiProviderDraft::begin(&settings);
+        let active = draft.active_provider().to_string();
+        draft
+            .rows()
+            .iter()
+            .filter(|row| row.enabled)
+            .map(|row| {
+                let capabilities = to_core_kind(&row.kind).ok().map(ProviderKind::capabilities);
+                ffi::FfiAiProvider {
+                    id: QString::from(row.id.as_str()),
+                    label: QString::from(row.label.as_str()),
+                    model: QString::from(row.model.as_str()),
+                    key_present: row.key_status() == settings_model::ai::KeyStatus::Present,
+                    active: row.id == active,
+                    supports_tools: capabilities.is_some_and(|c| c.tools),
+                    supports_images: capabilities.is_some_and(|c| c.images),
+                }
+            })
+            .collect()
+    }
+
+    pub fn set_active_provider(mut self: Pin<&mut Self>, id: &QString) -> FfiResult {
+        let config_dir = app_core::resolve_config_dir();
+        let mut settings = load_settings();
+        settings.ai_active_provider = id.to_string();
+        let _ = app_config::save(&config_dir, &settings);
+        *self.provider.borrow_mut() = None;
+        // Agent mode against a provider that cannot use tools is not a mode
+        // this build offers, so switching to one drops back to Ask rather
+        // than leaving a toggle that would fail on the next send.
+        if self.agent_mode.get()
+            && !active_provider(&settings).is_ok_and(|c| c.capabilities().tools)
+        {
+            self.agent_mode.set(false);
+        }
+        self.as_mut().providers_changed();
+        self.as_mut().token_usage_changed();
+        FfiResult::default()
+    }
+
+    pub fn apply_ai_settings(mut self: Pin<&mut Self>) {
+        *self.provider.borrow_mut() = None;
+        let settings = load_settings();
+        self.persist
+            .set(settings.ai_persist_conversations_or_default());
+        self.agent_mode.set(settings.ai_mode == "agent");
+        self.as_mut().providers_changed();
+        self.as_mut().token_usage_changed();
+        self.as_mut().conversations_changed();
+    }
+
+    // --- history ----------------------------------------------------------
+
+    pub fn conversations(&self) -> Vec<ffi::FfiConversation> {
+        let Some(project) = self.session.borrow().root_path().map(Path::to_path_buf) else {
+            return Vec::new();
+        };
+        self.history
+            .list(&project)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|summary| ffi::FfiConversation {
+                id: QString::from(summary.id.as_str()),
+                title: QString::from(summary.title.as_str()),
+                updated: QString::from(
+                    ai_chat_core::history::format_updated(summary.updated_unix).as_str(),
+                ),
+                message_count: summary.message_count,
+            })
+            .collect()
+    }
+
+    pub fn load_conversation(mut self: Pin<&mut Self>, id: &QString) -> FfiResult {
+        let Some(project) = self.session.borrow().root_path().map(Path::to_path_buf) else {
+            return to_chat_result(ChatError::NoProviderConfigured);
+        };
+        match self.history.load(&project, &id.to_string()) {
+            Ok(record) => {
+                self.as_mut().stop_run();
+                *self.conversation.borrow_mut() = record.conversation;
+                *self.conversation_id.borrow_mut() = Some(record.id);
+                self.attachments.borrow_mut().clear();
+                self.as_mut().attachments_changed();
+                self.as_mut().token_usage_changed();
+                FfiResult::default()
+            }
+            Err(error) => to_chat_result(error),
+        }
+    }
+
+    pub fn delete_conversation(mut self: Pin<&mut Self>, id: &QString) -> FfiResult {
+        let Some(project) = self.session.borrow().root_path().map(Path::to_path_buf) else {
+            return FfiResult::default();
+        };
+        let id = id.to_string();
+        match self.history.delete(&project, &id) {
+            Ok(()) => {
+                if self.conversation_id.borrow().as_deref() == Some(id.as_str()) {
+                    // The record it was saved as is gone, so what is on
+                    // screen is an unsaved conversation again rather than
+                    // something that would resurrect the file on next save.
+                    *self.conversation_id.borrow_mut() = None;
+                }
+                self.as_mut().conversations_changed();
+                FfiResult::default()
+            }
+            Err(error) => to_chat_result(error),
+        }
+    }
+
+    pub fn rename_conversation(
+        mut self: Pin<&mut Self>,
+        id: &QString,
+        title: &QString,
+    ) -> FfiResult {
+        let Some(project) = self.session.borrow().root_path().map(Path::to_path_buf) else {
+            return FfiResult::default();
+        };
+        match self
+            .history
+            .rename(&project, &id.to_string(), &title.to_string())
+        {
+            Ok(()) => {
+                self.as_mut().conversations_changed();
+                FfiResult::default()
+            }
+            Err(error) => to_chat_result(error),
+        }
+    }
+
+    pub fn set_persistence_enabled(mut self: Pin<&mut Self>, enabled: bool) {
+        self.persist.set(enabled);
+        let config_dir = app_core::resolve_config_dir();
+        let mut settings = load_settings();
+        settings.ai_persist_conversations = Some(enabled);
+        let _ = app_config::save(&config_dir, &settings);
+        if enabled {
+            self.as_mut().save_conversation();
+        }
+        self.as_mut().conversations_changed();
+    }
+
+    /// Write the transcript to the store, if this conversation is being
+    /// persisted at all. Called after every completed turn, so a crash
+    /// costs the answer in flight and nothing before it.
+    fn save_conversation(mut self: Pin<&mut Self>) {
+        if !self.persist.get() {
+            return;
+        }
+        let Some(project) = self.session.borrow().root_path().map(Path::to_path_buf) else {
+            return;
+        };
+        let conversation = self.conversation.borrow().clone();
+        if conversation.is_empty() {
+            return;
+        }
+        let now = now_unix();
+        let id = self.conversation_id.borrow().clone().unwrap_or_else(|| {
+            // `history` reads no clock and issues no ids; the counter tells
+            // apart two conversations started in the same second.
+            self.id_counter.set(self.id_counter.get() + 1);
+            ai_chat_core::history::new_id(now, self.id_counter.get())
+        });
+        let record = ConversationRecord {
+            id: id.clone(),
+            title: ai_chat_core::history::derive_title(&conversation),
+            project,
+            updated_unix: now,
+            conversation,
+        };
+        if self.history.save(&record).is_ok() {
+            *self.conversation_id.borrow_mut() = Some(id);
+            self.as_mut().conversations_changed();
+        }
+    }
+}
+
+/// The file name, for the apply summary's title.
+fn file_name_of(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+/// Rust side of the `AiProviderEditor` QObject — the same draft-and-commit
+/// shape as `LanguageServerEditor`, plus the tool-policy table, which
+/// `settings_model::ai` keeps on `Settings` rather than on the draft.
+#[derive(Default)]
+pub struct AiProviderEditorRust {
+    draft: RefCell<Option<settings_model::ai::AiProviderDraft>>,
+    /// The policies as the page has them, applied to settings on commit.
+    policies: RefCell<HashMap<String, settings_model::ai::ToolPolicy>>,
+}
+
+impl ffi::AiProviderEditor {
+    pub fn begin_edit(&self) {
+        let settings = load_settings();
+        *self.policies.borrow_mut() = settings_model::ai::known_tools()
+            .map(|tool| {
+                (
+                    tool.to_string(),
+                    settings_model::ai::tool_policy(&settings, tool),
+                )
+            })
+            .collect();
+        *self.draft.borrow_mut() = Some(settings_model::ai::AiProviderDraft::begin(&settings));
+    }
+
+    pub fn rows(&self) -> Vec<ffi::FfiAiProviderRow> {
+        let draft = self.draft.borrow();
+        let Some(draft) = draft.as_ref() else {
+            return Vec::new();
+        };
+        draft
+            .rows()
+            .iter()
+            .map(|row| {
+                let status = row.key_status();
+                ffi::FfiAiProviderRow {
+                    id: QString::from(row.id.as_str()),
+                    label: QString::from(row.label.as_str()),
+                    kind: QString::from(row.kind.as_str()),
+                    base_url: QString::from(row.base_url.as_str()),
+                    model: QString::from(row.model.as_str()),
+                    key_env_var: QString::from(row.api_key_env.as_str()),
+                    enabled: row.enabled,
+                    key_present: status == settings_model::ai::KeyStatus::Present,
+                    // The sentence is `settings_model`'s; the page shows it
+                    // verbatim and never composes one (ADR-0002).
+                    status: QString::from(status.sentence().as_str()),
+                }
+            })
+            .collect()
+    }
+
+    pub fn tool_policies(&self) -> Vec<ffi::FfiAiToolPolicyRow> {
+        let policies = self.policies.borrow();
+        settings_model::ai::known_tools()
+            .map(|tool| ffi::FfiAiToolPolicyRow {
+                tool: QString::from(tool),
+                policy: QString::from(
+                    policies
+                        .get(tool)
+                        .copied()
+                        .unwrap_or_else(|| settings_model::ai::default_tool_policy(tool))
+                        .as_str(),
+                ),
+                // The read/write split is `ai-chat-core`'s catalog, so the
+                // page groups rows without an `if` in C++ deciding which
+                // tool changes the project.
+                writes: tools::spec(tool).is_some_and(|spec| spec.kind == tools::ToolKind::Write),
+            })
+            .collect()
+    }
+
+    pub fn set_base_url(&self, id: &QString, base_url: &QString) {
+        if let Some(draft) = self.draft.borrow_mut().as_mut() {
+            draft.set_base_url(&id.to_string(), &base_url.to_string());
+        }
+    }
+
+    pub fn set_model(&self, id: &QString, model: &QString) {
+        if let Some(draft) = self.draft.borrow_mut().as_mut() {
+            draft.set_model(&id.to_string(), &model.to_string());
+        }
+    }
+
+    pub fn set_key_env_var(&self, id: &QString, key_env_var: &QString) {
+        if let Some(draft) = self.draft.borrow_mut().as_mut() {
+            draft.set_key_env_var(&id.to_string(), &key_env_var.to_string());
+        }
+    }
+
+    pub fn set_enabled(&self, id: &QString, enabled: bool) {
+        if let Some(draft) = self.draft.borrow_mut().as_mut() {
+            draft.set_enabled(&id.to_string(), enabled);
+        }
+    }
+
+    pub fn set_tool_policy(&self, tool: &QString, policy: &QString) {
+        // An unrecognised spelling is dropped rather than defaulted: silently
+        // reading an unreadable policy as `Auto` would widen the agent's
+        // authority on a typo.
+        if let Some(policy) = settings_model::ai::ToolPolicy::parse(&policy.to_string()) {
+            self.policies.borrow_mut().insert(tool.to_string(), policy);
+        }
+    }
+
+    pub fn is_dirty(&self, id: &QString) -> bool {
+        match self.draft.borrow().as_ref() {
+            Some(draft) => draft.is_dirty(&id.to_string()),
+            None => false,
+        }
+    }
+
+    pub fn validate(&self) -> FfiResult {
+        let draft = self.draft.borrow();
+        let Some(draft) = draft.as_ref() else {
+            return FfiResult::default();
+        };
+        match draft.validate_all() {
+            Ok(()) => FfiResult::default(),
+            Err(problem) => FfiResult {
+                code: 1,
+                message: QString::from(problem.sentence.as_str()),
+            },
+        }
+    }
+
+    pub fn commit(&self) -> FfiResult {
+        let refusal = self.validate();
+        if refusal.code != 0 {
+            return refusal;
+        }
+        let draft = self.draft.borrow().clone();
+        let Some(draft) = draft else {
+            return FfiResult::default();
+        };
+        let config_dir = app_core::resolve_config_dir();
+        let mut settings = load_settings();
+        draft.commit(&mut settings);
+        for (tool, policy) in self.policies.borrow().iter() {
+            settings_model::ai::set_tool_policy(&mut settings, tool, *policy);
+        }
+        match app_config::save(&config_dir, &settings) {
+            Ok(()) => FfiResult::default(),
+            Err(error) => FfiResult {
+                code: 1,
+                message: QString::from(error.to_string().as_str()),
+            },
+        }
+    }
+
+    pub fn revert(&self) {
+        if let Some(draft) = self.draft.borrow_mut().as_mut() {
+            draft.revert();
+        }
+        let settings = load_settings();
+        *self.policies.borrow_mut() = settings_model::ai::known_tools()
+            .map(|tool| {
+                (
+                    tool.to_string(),
+                    settings_model::ai::tool_policy(&settings, tool),
+                )
+            })
+            .collect();
+    }
+}
+
 pub use ffi::run_app;
 
 #[cfg(test)]
@@ -6726,5 +9157,114 @@ mod tests {
             );
         }
         assert_ne!(user_role(Roles::Path), user_role(Roles::IsDir));
+    }
+
+    /// The approval gate is the one piece of `AiChat` that is pure Rust and
+    /// can deadlock, so it is the one piece with tests here rather than in a
+    /// Qt-free crate: what is being checked is the marshalling itself, which
+    /// has no home anywhere else.
+    fn park(
+        gate: &std::sync::Arc<ApprovalGate>,
+        call_id: &str,
+    ) -> std::sync::mpsc::Receiver<Decision> {
+        let (answered, decisions) = std::sync::mpsc::channel();
+        let gate = std::sync::Arc::clone(gate);
+        let call_id = call_id.to_string();
+        std::thread::spawn(move || {
+            let _ = answered.send(gate.wait_for_decision(&call_id));
+        });
+        decisions
+    }
+
+    /// Waits for the parked worker to answer, failing rather than hanging
+    /// the suite if it never does.
+    fn decision_within(decisions: &std::sync::mpsc::Receiver<Decision>) -> Decision {
+        decisions
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("the worker was left parked on the approval gate")
+    }
+
+    #[test]
+    fn stopping_a_run_while_an_approval_is_pending_releases_the_worker() {
+        // The deadlock this exists to prevent: the user closes the panel
+        // mid-approval, the click that would have answered can never come,
+        // and the worker waits on a condvar for the life of the process.
+        let gate = std::sync::Arc::new(ApprovalGate::default());
+        let decisions = park(&gate, "call-1");
+        // Give the worker time to actually reach the wait, so this tests
+        // the wake-up and not a race it happened to win.
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        gate.abandon();
+        assert!(
+            matches!(decision_within(&decisions), Decision::Denied(_)),
+            "an abandoned run must resolve to a denial: silence is never consent"
+        );
+    }
+
+    #[test]
+    fn a_run_abandoned_before_a_call_parks_never_parks_it_at_all() {
+        // `stopRun` can land between the model asking and the worker
+        // reaching the gate, and the second call of a step must not wait
+        // for a card the panel will never show.
+        let gate = std::sync::Arc::new(ApprovalGate::default());
+        gate.abandon();
+        assert!(matches!(
+            decision_within(&park(&gate, "call-2")),
+            Decision::Denied(_)
+        ));
+    }
+
+    #[test]
+    fn an_answer_meant_for_another_call_leaves_the_worker_parked() {
+        // A card the user left open from an earlier call must not approve
+        // whatever happens to be waiting now.
+        let gate = std::sync::Arc::new(ApprovalGate::default());
+        let decisions = park(&gate, "call-now");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !gate.answer("call-stale", Decision::Approved),
+            "a stale call id must be refused, not applied to the current call"
+        );
+        assert!(decisions
+            .recv_timeout(std::time::Duration::from_millis(100))
+            .is_err());
+        gate.abandon();
+    }
+
+    #[test]
+    fn an_approval_reaches_the_worker_that_asked_for_it() {
+        let gate = std::sync::Arc::new(ApprovalGate::default());
+        let decisions = park(&gate, "call-3");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(gate.answer("call-3", Decision::Approved));
+        assert_eq!(decision_within(&decisions), Decision::Approved);
+    }
+
+    #[test]
+    fn a_denial_carries_the_users_words_and_survives_them_being_empty() {
+        // The panel sends an empty reason; `agent::run` composes the
+        // sentence the model is told, so an empty string has to travel
+        // through unchanged rather than being papered over here.
+        let gate = std::sync::Arc::new(ApprovalGate::default());
+        let decisions = park(&gate, "call-4");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(gate.answer("call-4", Decision::Denied(String::new())));
+        assert_eq!(decision_within(&decisions), Decision::Denied(String::new()));
+    }
+
+    #[test]
+    fn the_two_provider_vocabularies_map_onto_each_other_completely() {
+        // `settings-model` spells the compatible kind with an underscore and
+        // `ai-chat-core` with a hyphen (ADR-0017 keeps the vocabularies
+        // apart). Every shipped kind has to survive the crossing, or a
+        // provider is configurable and unusable.
+        for entry in settings_model::ai::default_providers() {
+            assert!(
+                to_core_kind(entry.kind.as_str()).is_ok(),
+                "settings kind {:?} has no ai-chat-core counterpart",
+                entry.kind.as_str()
+            );
+        }
+        assert!(to_core_kind("something_new").is_err());
     }
 }
