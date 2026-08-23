@@ -24,10 +24,16 @@ exempt() {
 
 # Grandfathered files: ratcheted baselines. A listed file may shrink, never
 # grow. Lower or delete the entry in the same commit that shrinks the file.
+#
+# Measure these against the tip of main at the moment the change MERGES, not
+# when the branch was cut. The first version of this gate was measured on a
+# main that two open pull requests then landed on top of, so it turned main
+# red the moment it merged — the numbers were correct when written and stale
+# by the time they were enforced.
 baseline() {
 	case "$1" in
-	crates/ui-shell/src/bridge.rs) echo 9346 ;;        # split planned (F0-2/F0-3)
-	crates/ui-shell/cpp/main_window.cpp) echo 4263 ;;  # split planned (F0-4/F0-5)
+	crates/ui-shell/src/bridge.rs) echo 9388 ;;        # split planned (F0-2/F0-3)
+	crates/ui-shell/cpp/main_window.cpp) echo 4393 ;;  # split planned (F0-4/F0-5)
 	crates/index-core/src/lib.rs) echo 4099 ;;         # no split planned; ratcheted so it cannot grow
 	crates/syntax-core/src/lib.rs) echo 2572 ;;        # no split planned; ratcheted so it cannot grow
 	crates/mcp-server/src/lib.rs) echo 1836 ;;         # no split planned; ratcheted so it cannot grow
