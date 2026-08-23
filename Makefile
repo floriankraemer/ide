@@ -26,9 +26,10 @@ linux-image: ## Build the linux-builder Docker image
 test: linux-image ## Run cargo test --workspace in Docker
 	$(RUN_LINUX) cargo test --workspace
 
-lint: linux-image ## Run clippy + rustfmt check in Docker
+lint: linux-image ## Run clippy + rustfmt + file-size checks in Docker
 	$(RUN_LINUX) cargo clippy --workspace --all-targets -- -D warnings
 	$(RUN_LINUX) cargo fmt --all -- --check
+	$(RUN_LINUX) scripts/check-file-size.sh
 
 build: build-linux build-windows ## Build Linux and Windows artifacts
 

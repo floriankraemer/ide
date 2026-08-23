@@ -66,20 +66,33 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # Steps are ordered cheapest-failure-first: the two gates that need no
+      # compilation run before clippy and the test suite.
       - name: Format check
         run: cargo fmt --all --check
+
+      # Full parity with the Verification section of docs/architecture/layering.md.
+      - name: Layering gate (Qt and tokio must not leak into core crates)
+        run: |
+          check() {
+            if cargo tree -p "$1" -e normal | grep -qi "$2"; then
+              echo "::error::$1 depends on $2 — layering violation (docs/architecture/layering.md)"
+              exit 1
+            fi
+          }
+          for crate in editor-core project-model app-core pty-core terminal-core \
+                       app-config index-core mcp-server lsp-core ai-chat-core; do
+            check "$crate" qt
+          done
+          for crate in pty-core terminal-core index-core lsp-core; do
+            check "$crate" tokio
+          done
+
+      - name: File-size gate
+        run: scripts/check-file-size.sh
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Tests
         run: xvfb-run -a cargo test --workspace
-
-      - name: Layering gate (Qt must not leak into core crates)
-        run: |
-          for crate in editor-core project-model app-core; do
-            if cargo tree -p "$crate" -e normal | grep -qi qt; then
-              echo "::error::$crate depends on Qt — layering violation (docs/architecture/layering.md)"
-              exit 1
-            fi
-          done
