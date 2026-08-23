@@ -33,14 +33,14 @@ Page-down timings are deliberately not compared: `PageDown` steps by *visual* li
 
 | # | Task | Status | Commit |
 | --- | --- | --- | --- |
-| A1 | Word wrap off by default in `CodeEditor` | done | (#64) |
-| A2 | Highlighting size ceilings (`MAX_HIGHLIGHT_BYTES`, `MAX_HIGHLIGHT_LINE_BYTES`) in `syntax-core` | done | (#64) |
-| A3 | O(1) fold-start lookup in the gutter paint | done | (#64) |
-| B1 | Tab kinds in `app-core`; `open_file` opens binary files | done | (#65) |
-| B2 | `BinaryFile` + hex row formatting in `editor-core` | done | (#65) |
-| B3 | `HexViewer` widget and its FFI seam | done | (#65) |
-| B4 | Wire the viewer into the tab area; audit the `CodeEditor` casts | done | (#65) |
-| B5 | Stop `looks_binary_file` reporting unreadable files as binary | done | (#65) |
+| A1 | Word wrap off by default in `CodeEditor` | done | `f71cf8b` (#64) |
+| A2 | Highlighting size ceilings (`MAX_HIGHLIGHT_BYTES`, `MAX_HIGHLIGHT_LINE_BYTES`) in `syntax-core` | done | `f71cf8b` (#64) |
+| A3 | O(1) fold-start lookup in the gutter paint | done | `f71cf8b` (#64) |
+| B1 | Tab kinds in `app-core`; `open_file` opens binary files | done | (#66) |
+| B2 | `BinaryFile` + hex row formatting in `editor-core` | done | (#66) |
+| B3 | `HexViewer` widget and its FFI seam | done | (#66) |
+| B4 | Wire the viewer into the tab area; audit the `CodeEditor` casts | done | (#66) |
+| B5 | Stop `looks_binary_file` reporting unreadable files as binary | done | (#66) |
 
 ## Part A — large files
 
