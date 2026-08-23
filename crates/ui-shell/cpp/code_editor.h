@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QColor>
+#include <QHash>
 #include <QPlainTextEdit>
 #include <QSize>
 #include <QPair>
@@ -253,6 +254,12 @@ private:
     int currentMatch_ = -1;
     QString currentLineColor_;
     QVector<FoldRange> foldRanges_;
+    // `foldRanges_` indexed by start block, so the gutter paint can ask
+    // "does a fold start on this line?" without scanning. The gutter
+    // repaints on every scroll step and asks once per painted line, so a
+    // linear scan here made scrolling cost O(visible lines x fold ranges) —
+    // which a multi-megabyte file has hundreds of thousands of.
+    QHash<int, FoldRange> foldStarts_;
     QVector<FoldRange> collapsedRanges_;
     QVector<DiagnosticSpan> diagnosticSpans_;
     // The Ctrl-hovered word, as [start, end) document positions, or
