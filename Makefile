@@ -1,6 +1,7 @@
 DOCKER ?= docker
 DOCKERFILE := docker/Dockerfile
 LINUX_IMAGE := ide-linux-builder
+LSP_IMAGE := ide-lsp-conformance
 # Named volumes, not bind mounts: the crate registry and the ccache object
 # store must outlive `--rm`, and neither belongs in the source tree. Without
 # them every container start re-downloads the registry and recompiles every
@@ -10,7 +11,8 @@ DOCKER_MOUNTS = -v "$(CURDIR)":/workspace -w /workspace \
 	-v ide-ccache:/ccache
 RUN_LINUX = $(DOCKER) run --rm $(DOCKER_MOUNTS) $(LINUX_IMAGE)
 
-.PHONY: help all test lint e2e e2e-repeat build build-linux build-windows linux-image shell clean
+.PHONY: help all test lint e2e e2e-repeat build build-linux build-windows linux-image shell clean \
+	lsp-image lsp-conformance
 
 .DEFAULT_GOAL := help
 
@@ -25,6 +27,16 @@ linux-image: ## Build the linux-builder Docker image
 
 test: linux-image ## Run cargo test --workspace in Docker
 	$(RUN_LINUX) cargo test --workspace
+
+# The conformance suite runs against a REAL language server, so it is opt-in:
+# it needs its own image, takes minutes, and can go red because upstream
+# changed rather than because we did. Nightly and on demand, never per-PR.
+lsp-image: ## Build the lsp-conformance image (linux-builder + rust-analyzer)
+	$(DOCKER) build --target lsp-conformance -t $(LSP_IMAGE) -f $(DOCKERFILE) .
+
+lsp-conformance: lsp-image ## Check the LSP client against a real rust-analyzer
+	$(DOCKER) run --rm $(DOCKER_MOUNTS) $(LSP_IMAGE) \
+		cargo test -p lsp-core --test real_server_conformance -- --ignored --nocapture
 
 lint: linux-image ## Run clippy + rustfmt + file-size checks in Docker
 	$(RUN_LINUX) cargo clippy --workspace --all-targets -- -D warnings

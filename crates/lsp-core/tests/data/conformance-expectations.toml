@@ -1,0 +1,35 @@
+# What a real rust-analyzer actually does, as observed by
+# `crates/lsp-core/tests/real_server_conformance.rs`.
+#
+# This file IS the conformance report. A prose document listing which server
+# supports what rots within a fortnight and nobody notices; this one is
+# asserted against on every run, so it cannot silently disagree with reality.
+#
+# When the suite fails with a diff against this file, one of two things
+# happened: our client changed what it asks for, or the server changed what it
+# answers. Both are worth a human deciding about, which is why regenerating is
+# deliberate:
+#
+#     CONFORMANCE_BLESS=1 make lsp-conformance
+#
+# and the regenerated diff is what gets reviewed in the PR.
+
+[rust-analyzer]
+version = "2025-08-11"
+
+# The client advertises `"positionEncodings": ["utf-16"]`. This records what
+# the server agreed to. It is the highest-value line in the file: byte-vs-
+# UTF-16 confusion is invisible on ASCII and wrong on every other line, and
+# the fixture deliberately contains an emoji and CJK text to catch it.
+position_encoding = "utf-16"
+
+# Which of the surfaces the client implements actually answered on a real
+# server. `false` means "asked, got nothing usable" — a gap to design around,
+# not necessarily a bug.
+hover = true
+definition = true
+completion = true
+diagnostics = true
+code_action = true
+rename = true
+prepare_rename = true
