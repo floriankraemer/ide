@@ -14,7 +14,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use editor_core::Document;
+use editor_core::{BinaryFile, Document, HexRow};
 use project_model::{FileOpError, OpenFolderError, Project, ProjectSession};
 
 /// Stable per-session tab identity (ADR-0003): issued monotonically from 1,
@@ -54,8 +54,9 @@ pub enum AppError {
     NoSuchTab,
     /// "Open Folder" failed; the current project is left unchanged (US-1).
     OpenFolder(OpenFolderError),
-    /// The binary-open rule (US-2b): the file's content looks binary — or
-    /// couldn't be sniffed at all, which is treated the same way.
+    /// The old binary-open rejection (US-2b). No longer produced: a binary
+    /// file now opens a read-only hex tab (ADR-0020). Retained because the
+    /// numeric codes below are an append-only FFI contract.
     BinaryFile(PathBuf),
     /// Reading the file into a document failed (e.g. not valid UTF-8).
     OpenFile(io::Error),
@@ -69,6 +70,11 @@ pub enum AppError {
     /// The mutation itself succeeded but re-snapshotting the tree from disk
     /// failed afterwards (e.g. the root vanished mid-operation).
     TreeRebuild(io::Error),
+    /// The tab exists but holds a binary file, and the command asked for
+    /// something only a text document can do (edit, save, reload). Distinct
+    /// from [`AppError::NoSuchTab`] so the view can tell "that tab is gone"
+    /// from "that tab is not editable".
+    NotATextTab(PathBuf),
 }
 
 impl AppError {
@@ -82,6 +88,7 @@ impl AppError {
     pub const CODE_FILE_OP: i32 = 6;
     pub const CODE_RELOAD: i32 = 7;
     pub const CODE_TREE_REBUILD: i32 = 8;
+    pub const CODE_NOT_A_TEXT_TAB: i32 = 9;
 
     /// The variant's stable numeric code (ADR-0003). These are part of the
     /// FFI contract — `main_window.cpp` branches on them — so existing
@@ -96,6 +103,7 @@ impl AppError {
             AppError::FileOp(_) => Self::CODE_FILE_OP,
             AppError::Reload(_) => Self::CODE_RELOAD,
             AppError::TreeRebuild(_) => Self::CODE_TREE_REBUILD,
+            AppError::NotATextTab(_) => Self::CODE_NOT_A_TEXT_TAB,
         }
     }
 }
@@ -115,6 +123,11 @@ impl fmt::Display for AppError {
             AppError::FileOp(e) => write!(f, "{e}"),
             AppError::Reload(e) => write!(f, "{e}"),
             AppError::TreeRebuild(e) => write!(f, "{e}"),
+            AppError::NotATextTab(p) => write!(
+                f,
+                "\"{}\" is open as a binary file and cannot be edited.",
+                p.display()
+            ),
         }
     }
 }
@@ -129,6 +142,8 @@ pub struct OpenedTab {
     pub id: TabId,
     pub title: String,
     pub newly_opened: bool,
+    /// Which widget the adapter must build for this tab.
+    pub kind: TabKind,
 }
 
 /// An open tab whose title changed as a side effect of a tree mutation — a
@@ -140,9 +155,87 @@ pub struct RetitledTab {
     pub title: String,
 }
 
+/// What kind of view a tab needs. Crosses the FFI seam so the adapter can
+/// build the right widget for a newly opened tab; the view never decides
+/// this from the path or the content itself (ADR-0002, ADR-0020).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabKind {
+    /// An editable text document.
+    Text,
+    /// A read-only hex view of a file whose bytes aren't text.
+    Binary,
+}
+
+impl TabKind {
+    /// Stable numeric code at the FFI seam, same contract as
+    /// [`AppError::code`]: append only, never renumber.
+    pub const CODE_TEXT: i32 = 0;
+    pub const CODE_BINARY: i32 = 1;
+
+    pub fn code(self) -> i32 {
+        match self {
+            TabKind::Text => Self::CODE_TEXT,
+            TabKind::Binary => Self::CODE_BINARY,
+        }
+    }
+}
+
+/// A tab's backing content. Everything a tab needs regardless of kind —
+/// path, title, rename retargeting, delete flagging — is answered here, so
+/// only the genuinely text-only operations (edit, save, reload, dirty
+/// state) have to care which variant they got.
+enum TabContent {
+    Text(Document),
+    Binary(BinaryFile),
+}
+
+impl TabContent {
+    fn kind(&self) -> TabKind {
+        match self {
+            TabContent::Text(_) => TabKind::Text,
+            TabContent::Binary(_) => TabKind::Binary,
+        }
+    }
+
+    fn path(&self) -> &Path {
+        match self {
+            TabContent::Text(doc) => doc.path(),
+            TabContent::Binary(file) => file.path(),
+        }
+    }
+
+    fn set_path(&mut self, path: PathBuf) {
+        match self {
+            TabContent::Text(doc) => doc.set_path(path),
+            TabContent::Binary(file) => file.set_path(path),
+        }
+    }
+
+    fn title(&self) -> String {
+        match self {
+            TabContent::Text(doc) => doc.title(),
+            TabContent::Binary(file) => file.title(),
+        }
+    }
+
+    fn is_deleted(&self) -> bool {
+        match self {
+            TabContent::Text(doc) => doc.is_deleted(),
+            TabContent::Binary(file) => file.is_deleted(),
+        }
+    }
+
+    fn mark_deleted(&mut self) {
+        match self {
+            TabContent::Text(doc) => doc.mark_deleted(),
+            TabContent::Binary(file) => file.mark_deleted(),
+        }
+    }
+}
+
 struct TabEntry {
     id: TabId,
-    doc: Document,
+    content: TabContent,
 }
 
 /// The config dir the session persists "last opened project" into:
@@ -345,14 +438,15 @@ impl AppSession {
     // --- tab commands -----------------------------------------------------
 
     /// Open `path` as a new tab, or focus the existing tab if the file is
-    /// already open (US-3: focus, don't duplicate). Enforces the binary-open
-    /// rule (US-2b): a file whose content looks binary — or that can't be
-    /// sniffed at all, which is treated the same — is rejected with
-    /// [`AppError::BinaryFile`] before any tab is created.
+    /// already open (US-3: focus, don't duplicate).
+    ///
+    /// The binary sniff decides which *kind* of tab to open, not whether to
+    /// open one (ADR-0020): a file whose content looks binary gets a
+    /// read-only hex tab instead of the "cannot open" dialog it used to get.
+    /// A file that can't be sniffed at all is a genuine error and is
+    /// reported as one, rather than being silently called binary.
     pub fn open_file(&mut self, path: &Path) -> Result<OpenedTab, AppError> {
-        if editor_core::looks_binary_file(path).unwrap_or(true) {
-            return Err(AppError::BinaryFile(path.to_path_buf()));
-        }
+        let is_binary = editor_core::looks_binary_file(path).map_err(AppError::OpenFile)?;
         if let Some(id) = self.find_tab_by_path(path) {
             self.active = Some(id);
             let title = self.tab_title(id).expect("tab found by path exists");
@@ -360,19 +454,59 @@ impl AppSession {
                 id,
                 title,
                 newly_opened: false,
+                kind: self.tab_kind(id).expect("tab found by path exists"),
             });
         }
-        let doc = Document::open(path).map_err(AppError::OpenFile)?;
+        let content = if is_binary {
+            TabContent::Binary(BinaryFile::open(path).map_err(AppError::OpenFile)?)
+        } else {
+            TabContent::Text(Document::open(path).map_err(AppError::OpenFile)?)
+        };
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
-        let title = doc.title();
-        self.docs.push(TabEntry { id, doc });
+        let title = content.title();
+        let kind = content.kind();
+        self.docs.push(TabEntry { id, content });
         self.active = Some(id);
         Ok(OpenedTab {
             id,
             title,
             newly_opened: true,
+            kind,
         })
+    }
+
+    /// Which kind of view `id` needs, or `None` for an unknown tab.
+    pub fn tab_kind(&self, id: TabId) -> Option<TabKind> {
+        self.entry(id).map(|e| e.content.kind())
+    }
+
+    /// How many hex rows the binary tab `id` spans — the viewer's scroll
+    /// range. `None` for an unknown tab or a text tab.
+    pub fn binary_row_count(&self, id: TabId) -> Option<u64> {
+        match self.entry(id).map(|e| &e.content) {
+            Some(TabContent::Binary(file)) => Some(file.row_count()),
+            _ => None,
+        }
+    }
+
+    /// Size in bytes of the binary tab `id`. `None` for an unknown tab or a
+    /// text tab.
+    pub fn binary_len(&self, id: TabId) -> Option<u64> {
+        match self.entry(id).map(|e| &e.content) {
+            Some(TabContent::Binary(file)) => Some(file.len()),
+            _ => None,
+        }
+    }
+
+    /// The hex rows the viewer needs for its current scroll window. Only
+    /// that window is read from disk, so this stays cheap on a huge binary.
+    /// Empty for an unknown tab, a text tab, or a window past the end.
+    pub fn binary_rows(&mut self, id: TabId, first_row: u64, count: usize) -> Vec<HexRow> {
+        match self.entry_mut(id).map(|e| &mut e.content) {
+            Some(TabContent::Binary(file)) => file.rows(first_row, count).unwrap_or_default(),
+            _ => Vec::new(),
+        }
     }
 
     /// Close the tab `id`. Returns whether a tab was actually closed. The
@@ -395,10 +529,7 @@ impl AppSession {
     /// silent data loss). The written path is recorded so the watcher's echo
     /// of our own write isn't reported as an external change.
     pub fn save_tab(&mut self, id: TabId, content: &str) -> Result<(), AppError> {
-        let Some(pos) = self.docs.iter().position(|e| e.id == id) else {
-            return Err(AppError::NoSuchTab);
-        };
-        let doc = &mut self.docs[pos].doc;
+        let doc = self.text_doc_mut(id)?;
         doc.replace_content(content);
         let path = doc.path().to_path_buf();
         doc.save().map_err(AppError::Save)?;
@@ -412,10 +543,7 @@ impl AppSession {
     /// re-render the tab's title afterward. Dirty flag left set on failure
     /// (US-4: no silent data loss), same as `save_tab`.
     pub fn save_tab_as(&mut self, id: TabId, path: PathBuf, content: &str) -> Result<(), AppError> {
-        let Some(pos) = self.docs.iter().position(|e| e.id == id) else {
-            return Err(AppError::NoSuchTab);
-        };
-        let doc = &mut self.docs[pos].doc;
+        let doc = self.text_doc_mut(id)?;
         doc.replace_content(content);
         doc.set_path(path.clone());
         doc.save().map_err(AppError::Save)?;
@@ -430,7 +558,7 @@ impl AppSession {
     /// to reflect the new content in its widget, mirroring how `save_tab`'s
     /// caller already owns telling the view the dirty flag changed.
     pub fn edit_tab(&mut self, id: TabId, content: &str) -> Result<(), AppError> {
-        let doc = self.doc_mut(id).ok_or(AppError::NoSuchTab)?;
+        let doc = self.text_doc_mut(id)?;
         doc.replace_content(content);
         doc.set_dirty(true);
         Ok(())
@@ -443,7 +571,7 @@ impl AppSession {
     /// keystrokes were never synced into the rope (ADR-0003 — that
     /// asymmetry is why `save_tab` needs `content` and this doesn't).
     pub fn save_buffer(&mut self, id: TabId) -> Result<(), AppError> {
-        let doc = self.doc_mut(id).ok_or(AppError::NoSuchTab)?;
+        let doc = self.text_doc_mut(id)?;
         let path = doc.path().to_path_buf();
         doc.save().map_err(AppError::Save)?;
         self.suppressed_changes.insert(path, Instant::now());
@@ -453,7 +581,7 @@ impl AppSession {
     /// Update which tab is considered active. Ignores unknown ids (the tab
     /// strip can report a page that was closed in the same event burst).
     pub fn set_active_tab(&mut self, id: TabId) {
-        if self.doc(id).is_some() {
+        if self.entry(id).is_some() {
             self.active = Some(id);
         }
     }
@@ -475,8 +603,15 @@ impl AppSession {
         }
     }
 
+    /// Whether the tab has unsaved edits. A binary tab is read-only, so it
+    /// is never dirty — answering `Some(false)` rather than `None` keeps the
+    /// close-without-saving prompt from treating it as an unknown tab.
     pub fn tab_is_dirty(&self, id: TabId) -> Option<bool> {
-        self.doc(id).map(|d| d.is_dirty())
+        match self.entry(id).map(|e| &e.content) {
+            Some(TabContent::Text(doc)) => Some(doc.is_dirty()),
+            Some(TabContent::Binary(_)) => Some(false),
+            None => None,
+        }
     }
 
     /// The tab's current buffer content, used to populate a newly created
@@ -526,7 +661,7 @@ impl AppSession {
     /// reported, the same "Rust remembers, view forwards" split dirty state
     /// already uses (ADR-0003). Ignores unknown ids (mirrors `set_tab_dirty`).
     pub fn set_cursor_position(&mut self, id: TabId, line: u32, column: u32) {
-        if self.doc(id).is_some() {
+        if self.entry(id).is_some() {
             self.cursor_positions.insert(id, (line, column));
         }
     }
@@ -568,7 +703,8 @@ impl AppSession {
     /// `Dockerfile`/`Makefile` have no extension, and the language
     /// registry matches on either.
     pub fn tab_file_name(&self, id: TabId) -> Option<String> {
-        self.doc(id)?
+        self.entry(id)?
+            .content
             .path()
             .file_name()
             .map(|name| name.to_string_lossy().into_owned())
@@ -578,11 +714,11 @@ impl AppSession {
     /// once the tree deleted its backing file (US-2b). The view renders this
     /// verbatim (its own dirty marker aside).
     pub fn tab_title(&self, id: TabId) -> Option<String> {
-        self.doc(id).map(|d| {
-            if d.is_deleted() {
-                format!("{} (deleted)", d.title())
+        self.entry(id).map(|e| {
+            if e.content.is_deleted() {
+                format!("{} (deleted)", e.content.title())
             } else {
-                d.title()
+                e.content.title()
             }
         })
     }
@@ -590,13 +726,13 @@ impl AppSession {
     /// The tab's backing file path. The view persists it so a split editor
     /// layout can reopen the same files into the same groups next launch.
     pub fn tab_path(&self, id: TabId) -> Option<PathBuf> {
-        self.doc(id).map(|d| d.path().to_path_buf())
+        self.entry(id).map(|e| e.content.path().to_path_buf())
     }
 
     /// Re-read the tab's backing file from disk, discarding any in-editor
     /// edits (the "Reload" choice on the external-change prompt, US-3).
     pub fn reload_tab(&mut self, id: TabId) -> Result<(), AppError> {
-        let doc = self.doc_mut(id).ok_or(AppError::NoSuchTab)?;
+        let doc = self.text_doc_mut(id)?;
         doc.reload().map_err(AppError::Reload)
     }
 
@@ -632,8 +768,9 @@ impl AppSession {
         let Some(id) = self.find_tab_by_path(path) else {
             return Ok(None);
         };
-        self.doc_mut(id)
+        self.entry_mut(id)
             .expect("tab found by path exists")
+            .content
             .set_path(new_path.clone());
         self.suppressed_changes.insert(new_path, Instant::now());
         let title = self.tab_title(id).expect("tab found by path exists");
@@ -651,8 +788,9 @@ impl AppSession {
         let Some(id) = self.find_tab_by_path(path) else {
             return Ok(None);
         };
-        self.doc_mut(id)
+        self.entry_mut(id)
             .expect("tab found by path exists")
+            .content
             .mark_deleted();
         let title = self.tab_title(id).expect("tab found by path exists");
         Ok(Some(RetitledTab { id, title }))
@@ -669,7 +807,7 @@ impl AppSession {
     /// onto `path`) rather than externally.
     pub fn check_external_change(&mut self, path: &Path) -> Option<TabId> {
         let id = self.find_tab_by_path(path)?;
-        if self.doc(id).map(|d| d.is_deleted()).unwrap_or(true) {
+        if self.entry(id).map(|e| e.content.is_deleted()).unwrap_or(true) {
             return None;
         }
         let is_own_change = self
@@ -688,19 +826,44 @@ impl AppSession {
     fn find_tab_by_path(&self, path: &Path) -> Option<TabId> {
         self.docs
             .iter()
-            .find(|e| e.doc.path() == path)
+            .find(|e| e.content.path() == path)
             .map(|e| e.id)
     }
 
+    fn entry(&self, id: TabId) -> Option<&TabEntry> {
+        self.docs.iter().find(|e| e.id == id)
+    }
+
+    fn entry_mut(&mut self, id: TabId) -> Option<&mut TabEntry> {
+        self.docs.iter_mut().find(|e| e.id == id)
+    }
+
+    /// The tab's text document — `None` for an unknown tab *and* for a
+    /// binary tab, since neither has one. Callers that need to tell those
+    /// two apart use [`AppSession::text_doc_mut`].
     fn doc(&self, id: TabId) -> Option<&Document> {
-        self.docs.iter().find(|e| e.id == id).map(|e| &e.doc)
+        match self.entry(id).map(|e| &e.content) {
+            Some(TabContent::Text(doc)) => Some(doc),
+            _ => None,
+        }
     }
 
     fn doc_mut(&mut self, id: TabId) -> Option<&mut Document> {
-        self.docs
-            .iter_mut()
-            .find(|e| e.id == id)
-            .map(|e| &mut e.doc)
+        match self.entry_mut(id).map(|e| &mut e.content) {
+            Some(TabContent::Text(doc)) => Some(doc),
+            _ => None,
+        }
+    }
+
+    /// The tab's text document for a command that only makes sense on one,
+    /// distinguishing "no such tab" from "that tab is a binary file" so the
+    /// user gets told which it was.
+    fn text_doc_mut(&mut self, id: TabId) -> Result<&mut Document, AppError> {
+        match self.entry_mut(id).map(|e| &mut e.content) {
+            Some(TabContent::Text(doc)) => Ok(doc),
+            Some(TabContent::Binary(file)) => Err(AppError::NotATextTab(file.path().to_path_buf())),
+            None => Err(AppError::NoSuchTab),
+        }
     }
 }
 
@@ -770,29 +933,96 @@ mod tests {
     }
 
     #[test]
-    fn open_file_rejects_binary_content() {
+    fn open_file_opens_binary_content_as_a_hex_tab() {
         let (project_dir, _config, mut session) = session_with_project();
         let binary = project_dir.path().join("blob.bin");
         fs::write(&binary, [0u8, 159, 146, 150, 0, 1, 2]).unwrap();
 
-        let err = session.open_file(&binary).unwrap_err();
-        assert_eq!(err.code(), AppError::CODE_BINARY_FILE);
-        assert!(err.to_string().contains("binary"));
-        assert!(
-            session.docs.is_empty(),
-            "no tab may be created on rejection"
-        );
+        let opened = session.open_file(&binary).unwrap();
+
+        assert_eq!(opened.kind, TabKind::Binary);
+        assert_eq!(opened.title, "blob.bin");
+        assert!(opened.newly_opened);
+        assert_eq!(session.tab_kind(opened.id), Some(TabKind::Binary));
+        assert_eq!(session.binary_len(opened.id), Some(7));
+        assert_eq!(session.binary_row_count(opened.id), Some(1));
+
+        let rows = session.binary_rows(opened.id, 0, 4);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].offset, "00000000");
+        assert!(rows[0].hex.starts_with("00 9f 92 96 00 01 02"));
     }
 
     #[test]
-    fn open_file_treats_unsniffable_files_as_binary() {
-        // Matches the pre-refactor UI behavior: if the sniff itself fails
-        // (unreadable/missing file), the user gets the binary-file message.
+    fn a_text_file_opens_as_a_text_tab_with_no_hex_answers() {
+        let (project_dir, _config, mut session) = session_with_project();
+
+        let opened = session.open_file(&project_dir.path().join("a.txt")).unwrap();
+
+        assert_eq!(opened.kind, TabKind::Text);
+        assert_eq!(session.tab_kind(opened.id), Some(TabKind::Text));
+        assert_eq!(session.binary_len(opened.id), None);
+        assert_eq!(session.binary_row_count(opened.id), None);
+        assert!(session.binary_rows(opened.id, 0, 4).is_empty());
+        assert_eq!(session.tab_content(opened.id).as_deref(), Some("alpha"));
+    }
+
+    #[test]
+    fn open_file_reports_an_unreadable_file_as_an_error_not_as_binary() {
+        // Previously an unsniffable file was reported as "is a binary file",
+        // which was already misleading and becomes actively wrong now that
+        // binary files open: it would open an empty hex view of a file that
+        // isn't there.
         let (project_dir, _config, mut session) = session_with_project();
         let missing = project_dir.path().join("ghost.txt");
 
         let err = session.open_file(&missing).unwrap_err();
-        assert_eq!(err.code(), AppError::CODE_BINARY_FILE);
+
+        assert_eq!(err.code(), AppError::CODE_OPEN_FILE);
+        assert!(session.docs.is_empty(), "no tab may be created on failure");
+    }
+
+    #[test]
+    fn editing_commands_refuse_a_binary_tab_and_say_why() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let binary = project_dir.path().join("blob.bin");
+        fs::write(&binary, [0u8, 1, 2, 3]).unwrap();
+        let id = session.open_file(&binary).unwrap().id;
+
+        for err in [
+            session.save_tab(id, "nope").unwrap_err(),
+            session.edit_tab(id, "nope").unwrap_err(),
+            session.reload_tab(id).unwrap_err(),
+            session.save_buffer(id).unwrap_err(),
+        ] {
+            assert_eq!(err.code(), AppError::CODE_NOT_A_TEXT_TAB);
+            assert!(err.to_string().contains("cannot be edited"));
+        }
+
+        // Not dirty, so closing it must not prompt, and it has no text.
+        assert_eq!(session.tab_is_dirty(id), Some(false));
+        assert_eq!(session.tab_content(id), None);
+        // The file on disk is untouched by the refused writes.
+        assert_eq!(fs::read(&binary).unwrap(), [0u8, 1, 2, 3]);
+    }
+
+    #[test]
+    fn a_binary_tab_behaves_like_any_tab_for_title_path_rename_and_delete() {
+        let (project_dir, _config, mut session) = session_with_project();
+        let binary = project_dir.path().join("blob.bin");
+        fs::write(&binary, [0u8, 1, 2, 3]).unwrap();
+        let id = session.open_file(&binary).unwrap().id;
+
+        assert_eq!(session.tab_title(id).as_deref(), Some("blob.bin"));
+        assert_eq!(session.tab_path(id).as_deref(), Some(binary.as_path()));
+
+        let renamed = session.rename_entry(&binary, "other.bin").unwrap().unwrap();
+        assert_eq!(renamed.id, id);
+        assert_eq!(renamed.title, "other.bin");
+
+        let new_path = project_dir.path().join("other.bin");
+        let deleted = session.delete_entry(&new_path).unwrap().unwrap();
+        assert_eq!(deleted.title, "other.bin (deleted)");
     }
 
     #[test]
