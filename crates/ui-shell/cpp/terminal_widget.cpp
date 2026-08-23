@@ -1,6 +1,6 @@
 #include "terminal_widget.h"
 
-#include "ui-shell/src/bridge.cxxqt.h"
+#include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include <algorithm>
 #include <cstddef>

@@ -1,7 +1,7 @@
 #include "language_servers_page.h"
 
 #include "theme.h"
-#include "ui-shell/src/bridge.cxxqt.h"
+#include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include <QCheckBox>
 #include <QHBoxLayout>

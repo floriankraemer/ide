@@ -1,7 +1,7 @@
 #include "find_bar.h"
 
 #include "code_editor.h"
-#include "ui-shell/src/bridge.cxxqt.h"
+#include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include <QCheckBox>
 #include <QEvent>

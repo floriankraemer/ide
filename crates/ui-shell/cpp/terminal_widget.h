@@ -5,7 +5,7 @@
 #include <QPoint>
 #include <QWidget>
 
-#include "ui-shell/src/bridge.cxxqt.h"
+#include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 class QAction;
 class QContextMenuEvent;
