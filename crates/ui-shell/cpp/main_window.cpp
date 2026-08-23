@@ -131,12 +131,54 @@ void moveCursorToLine(QPlainTextEdit *editor, int line, int column)
     if (auto *codeEditor = qobject_cast<CodeEditor *>(editor)) {
         codeEditor->ensureBlockVisible(blockNumber);
     }
-    QTextCursor cursor(editor->document()->findBlockByNumber(blockNumber));
+    const QTextBlock block = editor->document()->findBlockByNumber(blockNumber);
+    QTextCursor cursor(block);
     cursor.movePosition(QTextCursor::StartOfBlock);
-    cursor.movePosition(QTextCursor::Right, QTextCursor::MoveAnchor, qMax(0, column));
+    // Clamped to the block: QTextCursor::Right walks on into the *next* line
+    // rather than stopping at the end of this one, so a column past the end
+    // of the line would land the caret on the line below.
+    cursor.movePosition(QTextCursor::Right, QTextCursor::MoveAnchor,
+                         qBound(0, column, block.length() - 1));
     editor->setTextCursor(cursor);
     editor->centerCursor();
     editor->setFocus();
+}
+
+// UTF-16 column for a UTF-8 *byte* column into `lineText`.
+//
+// The project index and tree-sitter both report columns as byte offsets;
+// QTextCursor counts UTF-16 code units. The two agree exactly on ASCII and
+// diverge on everything else, which is why passing one for the other looks
+// correct until a line contains an accent.
+//
+// A byte column landing inside a character snaps back to that character's
+// start, and one past the end of the line clamps to it.
+int utf16ColumnForByteColumn(const QString &lineText, int byteColumn)
+{
+    if (byteColumn <= 0) {
+        return 0;
+    }
+    const QByteArray utf8 = lineText.toUtf8();
+    int at = std::clamp(byteColumn, 0, static_cast<int>(utf8.size()));
+    // Continuation bytes are 0b10xxxxxx; walking back off them puts `at` on a
+    // character boundary, so decoding the prefix cannot produce a replacement
+    // character and miscount the column by one.
+    while (at > 0 && (static_cast<unsigned char>(utf8.at(at)) & 0xC0) == 0x80) {
+        --at;
+    }
+    return QString::fromUtf8(utf8.constData(), at).size();
+}
+
+// Jump to a column reported in bytes rather than UTF-16 units — the form the
+// project index and tree-sitter use. Every byte-column caller goes through
+// here; `moveCursorToLine` keeps taking UTF-16 columns, because the jump
+// history stores what QTextCursor::columnNumber() gave it and must round-trip
+// unchanged.
+void moveCursorToByteColumn(QPlainTextEdit *editor, int line, int byteColumn)
+{
+    const int blockNumber = qBound(0, line - 1, editor->blockCount() - 1);
+    const QTextBlock block = editor->document()->findBlockByNumber(blockNumber);
+    moveCursorToLine(editor, line, utf16ColumnForByteColumn(block.text(), byteColumn));
 }
 
 // Humble view for the editor area (ADR-0002): owns the QTabWidget <->
@@ -257,9 +299,7 @@ public:
     // Task H: open `path` (reusing openFile's own dialog/focus behavior
     // above) and move the caret to a Find-in-Files match. `line` is
     // 1-based; `column` is a byte offset within that line from
-    // `index_core::SearchMatch` — treated as a character offset here,
-    // which is exact for ASCII lines and only approximate on lines with
-    // multi-byte UTF-8, since QTextCursor counts characters, not bytes.
+    // `index_core::SearchMatch`, converted to a UTF-16 column on the way in.
     //
     // N5: this and `jumpWithinCurrentTab` are the two functions every jump
     // in the app funnels through, so recording the pre-jump position here
@@ -273,12 +313,13 @@ public:
         if (!editor) {
             return;
         }
-        moveCursorToLine(editor, line, column);
+        moveCursorToByteColumn(editor, line, column);
         recordCurrentPosition();
         navigationChanged();
     }
 
     // A jump that stays inside the tab already open, recorded the same way.
+    // `column` is a byte offset, as in openFileAtLine.
     void jumpWithinCurrentTab(int line, int column)
     {
         auto *editor = currentEditor();
@@ -286,7 +327,7 @@ public:
             return;
         }
         recordCurrentPosition();
-        moveCursorToLine(editor, line, column);
+        moveCursorToByteColumn(editor, line, column);
         recordCurrentPosition();
         navigationChanged();
     }
@@ -592,6 +633,9 @@ public:
         // and the stack would never move.
         openFile(location.path);
         if (auto *editor = currentEditor()) {
+            // moveCursorToLine, not moveCursorToByteColumn: recordCurrentPosition
+            // stored QTextCursor::columnNumber(), which is already UTF-16.
+            // Converting here would corrupt Back/Forward on non-ASCII lines.
             moveCursorToLine(editor, static_cast<int>(location.line),
                               static_cast<int>(location.column));
         }
@@ -678,10 +722,8 @@ public:
     // (unlike Find in Files' openFileAtLine) never needs to open a
     // different file, since Class View always describes the active tab.
     // `byteOffset` is a UTF-8 byte offset into the tab's content (matching
-    // `syntax_core::SymbolNode`); converted to a line + in-line byte
-    // column here, then treated as a character offset within that line —
-    // the same documented ASCII-exact/UTF-8-approximate convention
-    // openFileAtLine uses for Find in Files' match column.
+    // `syntax_core::SymbolNode`); converted to a line + in-line byte column
+    // here, then to a UTF-16 column by moveCursorToByteColumn.
     void jumpToByteOffset(quint64 byteOffset)
     {
         auto *editor = currentEditor();
@@ -699,7 +741,8 @@ public:
                 lineStart = i + 1;
             }
         }
-        moveCursorToLine(editor, line + 1, static_cast<int>(qMax<qsizetype>(0, clamped - lineStart)));
+        moveCursorToByteColumn(editor, line + 1,
+                                static_cast<int>(qMax<qsizetype>(0, clamped - lineStart)));
         recordCurrentPosition();
         navigationChanged();
     }
