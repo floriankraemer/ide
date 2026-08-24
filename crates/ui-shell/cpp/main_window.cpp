@@ -3,6 +3,7 @@
 #include "ai_chat_panel.h"
 #include "ai_providers_page.h"
 #include "code_editor.h"
+#include "e2e_mark.h"
 #include "find_bar.h"
 #include "hex_viewer.h"
 #include "keymap_page.h"
@@ -1023,6 +1024,7 @@ public:
         }
         QTabWidget *group = restoredActiveGroup_ ? restoredActiveGroup_ : groups_.first();
         setActiveGroup(group, group->currentIndex());
+        markPaneCount();
     }
 
 private:
@@ -1164,7 +1166,15 @@ private:
         splitVerticalAction->setEnabled(group->count() > 1);
         splitHorizontalAction->setEnabled(group->count() > 1);
 
+        // A popup menu takes a keyboard grab rather than the input focus, so
+        // this mark is the only way anything outside the process can know it
+        // is up. `exec()` does not return until it is gone, hence the mark
+        // before rather than after.
+        e2eMark("{\"ev\":\"dialog_shown\",\"name\":\"tab_context_menu\"}");
         QAction *chosen = menu.exec(group->tabBar()->mapToGlobal(pos));
+        e2eMark(QStringLiteral("{\"ev\":\"dialog_closed\",\"name\":\"tab_context_menu\","
+                                "\"accepted\":%1}")
+                  .arg(chosen != nullptr ? QLatin1String("true") : QLatin1String("false")));
         if (chosen == closeAction) {
             requestCloseTab(group, index);
         } else if (chosen == closeOthersAction) {
@@ -1245,6 +1255,9 @@ private:
         target->setSizes(evenSizes(target));
         setActiveGroup(newGroup, newGroup->indexOf(page));
         page->setFocus();
+        e2eMark(QStringLiteral("{\"ev\":\"split_created\",\"orientation\":\"%1\"}")
+                  .arg(orientation == Qt::Horizontal ? QLatin1String("h") : QLatin1String("v")));
+        markPaneCount();
     }
 
     static QList<int> evenSizes(QSplitter *splitter)
@@ -1414,6 +1427,37 @@ private:
     // Builds the page for a binary tab: a read-only hex view (ADR-0020).
     // None of the editor wiring below applies — there is no document, so no
     // highlighter, no find bar, no dirty tracking and no LSP.
+    // The marker stream (e2e_mark.h). `index` is the tab's position in its
+    // own group and `tab_id` the session's stable id: a test asserting the
+    // two agree with MCP's view is what catches an index/id mix-up at the
+    // model edge.
+    void markTab(const char *event, quint64 tabId, QTabWidget *group, int index,
+                  const QString &title)
+    {
+        // `rect` is the tab's own label on screen, in global coordinates. A
+        // test that has to click a tab would otherwise compute it from the
+        // window geometry, the style's metrics and the font — three things
+        // that move for reasons unrelated to whatever it is testing.
+        const QRect rect = group->tabBar()->tabRect(index);
+        const QPoint origin = rect.isEmpty() ? QPoint() : group->tabBar()->mapToGlobal(rect.topLeft());
+        e2eMark(QStringLiteral("{\"ev\":\"%1\",\"index\":%2,\"tab_id\":%3,\"pane\":%4,"
+                                "\"rect\":[%5,%6,%7,%8],\"title\":%9}")
+                  .arg(QLatin1String(event))
+                  .arg(index)
+                  .arg(tabId)
+                  .arg(groups_.indexOf(group))
+                  .arg(origin.x())
+                  .arg(origin.y())
+                  .arg(rect.width())
+                  .arg(rect.height())
+                  .arg(e2eJson(title)));
+    }
+
+    void markPaneCount()
+    {
+        e2eMark(QStringLiteral("{\"ev\":\"pane_count\",\"n\":%1}").arg(groups_.size()));
+    }
+
     void addHexTab(QTabWidget *group, quint64 tabId, const QString &title)
     {
         auto *viewer = new HexViewer(group);
@@ -1430,6 +1474,7 @@ private:
             return rows;
         });
         group->addTab(viewer, title);
+        markTab("tab_added", tabId, group, group->indexOf(viewer), title);
     }
 
     // Public for the same reason onBufferEditedExternally is: an agent's
@@ -1592,6 +1637,7 @@ public:
                  qOverload<>(&QTimer::start));
 
         group->addTab(editor, title);
+        markTab("tab_added", tabId, group, group->indexOf(editor), title);
         applyDiagnostics();
     }
 
@@ -1609,9 +1655,11 @@ private:
         }
         loc.group->removeTab(loc.index);
         delete widget;
+        markTab("tab_closed", tabId, loc.group, loc.index, QString());
         if (loc.group->count() == 0) {
             collapseGroup(loc.group);
         }
+        markPaneCount();
     }
 
     // Public alongside onTabOpened: an agent's tool can save a buffer
@@ -1625,6 +1673,10 @@ public:
             return;
         }
         renderTabText(loc.group, loc.index, docManager_->tabTitle(tabId), modified);
+        e2eMark(QStringLiteral("{\"ev\":\"tab_dirty\",\"index\":%1,\"tab_id\":%2,\"dirty\":%3}")
+                  .arg(loc.index)
+                  .arg(tabId)
+                  .arg(modified ? QLatin1String("true") : QLatin1String("false")));
     }
 
 private:
@@ -2141,7 +2193,11 @@ protected:
     void keyPressEvent(QKeyEvent *event) override
     {
         static constexpr int kDoubleShiftMs = 300;
-        if (event->key() == Qt::Key_Shift && !event->isAutoRepeat()) {
+        // A Shift held together with another modifier is part of a
+        // shortcut, not a gesture: Ctrl+Shift+N followed within the window by
+        // any capital letter would otherwise open the popup a second time.
+        const bool bareShift = (event->modifiers() & ~Qt::ShiftModifier) == Qt::NoModifier;
+        if (event->key() == Qt::Key_Shift && !event->isAutoRepeat() && bareShift) {
             if (lastShift_.isValid() && lastShift_.elapsed() < kDoubleShiftMs) {
                 lastShift_.invalidate();
                 if (searchEverywhere_) {
@@ -2426,9 +2482,12 @@ private:
         if (edits.empty()) {
             report(tr("The file changed while the refactoring was being prepared; nothing was "
                       "applied."));
+            e2eMark("{\"ev\":\"workspace_edit_refused\",\"reason\":\"stale\"}");
             return;
         }
         bufferFiles_ = countBufferFiles(edits);
+        e2eMark(QStringLiteral("{\"ev\":\"workspace_edit_applied\",\"documents\":%1}")
+                  .arg(countFiles(edits)));
         editorTabs_->applyBufferEdits(edits);
         // Files nobody has open are rewritten and re-indexed by the index
         // worker; it ignores the buffer edits in the same vector.
@@ -2484,6 +2543,8 @@ private:
                 editorTabs_->applyBufferEdits(edits);
             }
         }
+        e2eMark(QStringLiteral("{\"ev\":\"workspace_edit_applied\",\"documents\":%1}")
+                  .arg(countPaths(rows) - dialog.excludedPaths().size()));
         searchModel_->applyIndexRename();
     }
 
@@ -2519,6 +2580,24 @@ private:
     }
 
     // How many distinct files a batch of edits changes in their buffers.
+    static int countFiles(const ::rust::Vec<FfiTextEdit> &edits)
+    {
+        QSet<QString> paths;
+        for (const FfiTextEdit &edit : edits) {
+            paths.insert(edit.path);
+        }
+        return paths.size();
+    }
+
+    static int countPaths(const QList<RefactorPreviewDialog::Row> &rows)
+    {
+        QSet<QString> paths;
+        for (const RefactorPreviewDialog::Row &row : rows) {
+            paths.insert(row.path);
+        }
+        return paths.size();
+    }
+
     static int countBufferFiles(const ::rust::Vec<FfiTextEdit> &edits)
     {
         QSet<QString> paths;
@@ -3357,6 +3436,12 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                       &ProjectTreeModel::projectOpened,
                       searchModel,
                       [searchModel](const QString &rootPath) { searchModel->openIndex(rootPath); });
+
+    QObject::connect(treeModel, &ProjectTreeModel::projectOpened, treeModel,
+                      [](const QString &rootPath) {
+                          e2eMark(QStringLiteral("{\"ev\":\"project_opened\",\"root\":%1}")
+                                    .arg(e2eJson(rootPath)));
+                      });
 
     // Same project-open lifecycle event for the language servers: the root is
     // what `initialize` reports, and re-opening a project must not leave the
@@ -4386,6 +4471,7 @@ int run_app()
     window->show();
     // Closes the splash exactly when the main window is up — no timer, no gap.
     splash.finish(window);
+    e2eMark("{\"ev\":\"main_window_shown\"}");
 
     return QApplication::exec();
 }

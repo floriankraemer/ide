@@ -51,6 +51,12 @@ public:
     // dialog reports the subtractions from it.
     QStringList excludedPaths() const;
 
+protected:
+    // Marker-stream reporting only (e2e_mark.h): the base behaviour is
+    // unchanged. Overridden rather than hooked onto accepted/rejected so a
+    // close by the window manager is reported too.
+    void done(int result) override;
+
 private:
     QTreeWidget *tree_ = nullptr;
     QLabel *statusLabel_ = nullptr;

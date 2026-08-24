@@ -5,3 +5,15 @@ edition = "2021"
 
 [dependencies]
 ui-shell = { path = "../ui-shell" }
+
+# The E2E harness lives in `crates/e2e` but its tests live here, because
+# `CARGO_BIN_EXE_app` is only set for integration tests of the crate that
+# declares the binary — and guessing at `target/<profile>/app` is wrong under
+# every profile but one (see `lsp-core/tests/stub_server_session.rs:15`).
+# `app-config` is the one workspace crate a test may read: the window-state
+# flow must parse the persisted TOML with the app's own types rather than a
+# regex, or it asserts against its own re-implementation.
+[dev-dependencies]
+e2e = { path = "../e2e" }
+app-config = { path = "../app-config" }
+serde_json = "1"

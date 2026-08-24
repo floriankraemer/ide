@@ -48,6 +48,9 @@ public:
 
 protected:
     void keyPressEvent(QKeyEvent *event) override;
+    // Marker-stream reporting only (e2e_mark.h); the base behaviour is
+    // unchanged.
+    void done(int result) override;
 
 private:
     void scheduleQuery();

@@ -269,6 +269,7 @@ fn main() {
     let mut builder = cxx_qt_build::CxxQtBuilder::new()
         .file("src/bridge/ffi.rs")
         .cpp_file("cpp/main_window.cpp")
+        .cpp_file("cpp/e2e_mark.cpp")
         // First hand-written (non-generated) QObject in this crate: header
         // passed to cpp_file() auto-enables moc (CppFile::from, cxx-qt-build
         // 0.9), so this is also the first place build.rs runs moc directly.

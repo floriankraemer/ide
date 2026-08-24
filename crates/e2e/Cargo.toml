@@ -1,0 +1,13 @@
+[package]
+name = "e2e"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# No workspace crate, deliberately (ADR-0024): this drives the built `app`
+# binary over X11 and the filesystem exactly as a user does. A dependency on
+# `app-core` or `ui-shell` would let a test assert against the same code it is
+# supposed to be checking from the outside.
+[dependencies]
+serde_json = "1"
+tempfile = "3"

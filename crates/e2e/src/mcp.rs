@@ -1,0 +1,86 @@
+//! The MCP control channel, used for *observation only*.
+//!
+//! `read_buffer` is the cheapest way to ask what a document actually contains
+//! and `index_status` the only honest way to know the index finished — the
+//! step a naive harness would spell `sleep`. It never drives the app: an
+//! `open_file` over MCP routes through `AppSession` and never touches a
+//! widget.
+//!
+//! A round-trip here is also the suite's quiescence probe. Editor-touching
+//! tool calls are marshalled onto the Qt thread, so a reply proves the event
+//! loop has drained past everything queued before the request.
+
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use serde_json::{json, Value};
+
+pub struct Mcp {
+    port: u16,
+    token: String,
+    next_id: AtomicU64,
+}
+
+impl Mcp {
+    /// Read the discovery file the app writes into its config dir. Returns
+    /// `None` until the server is listening, which is what makes this
+    /// pollable.
+    pub fn discover(config_dir: &Path) -> Option<Mcp> {
+        let raw = std::fs::read_to_string(config_dir.join("mcp-discovery.json")).ok()?;
+        let value: Value = serde_json::from_str(&raw).ok()?;
+        Some(Mcp {
+            port: value.get("port")?.as_u64()? as u16,
+            token: value.get("token")?.as_str()?.to_string(),
+            next_id: AtomicU64::new(1),
+        })
+    }
+
+    /// One JSON-RPC call over the flat method surface, returning `result`.
+    pub fn call(&self, method: &str, params: Value) -> Value {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let body =
+            json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params}).to_string();
+        let response = self.post(&body);
+        let parsed: Value = serde_json::from_str(&response)
+            .unwrap_or_else(|e| panic!("MCP {method} returned {response:?}: {e}"));
+        if let Some(error) = parsed.get("error").filter(|e| !e.is_null()) {
+            panic!("MCP {method} failed: {error}");
+        }
+        parsed
+            .get("result")
+            .cloned()
+            .unwrap_or_else(|| panic!("MCP {method} returned no result: {parsed}"))
+    }
+
+    // A hand-rolled HTTP/1.1 POST rather than a client crate: `Connection:
+    // close` makes the body length the rest of the socket, so this is the
+    // whole protocol we need and it keeps the harness dependency-free.
+    fn post(&self, body: &str) -> String {
+        let mut stream = TcpStream::connect(("127.0.0.1", self.port))
+            .unwrap_or_else(|e| panic!("connecting to the MCP server on {}: {e}", self.port));
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {}\r\n\
+             Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            self.token,
+            body.len(),
+            body
+        );
+        stream
+            .write_all(request.as_bytes())
+            .expect("writing the MCP request");
+        let mut raw = String::new();
+        stream
+            .read_to_string(&mut raw)
+            .expect("reading the MCP response");
+        let (head, payload) = raw
+            .split_once("\r\n\r\n")
+            .unwrap_or_else(|| panic!("malformed HTTP response: {raw:?}"));
+        assert!(
+            head.starts_with("HTTP/1.1 200"),
+            "MCP replied {head:?} to {body}"
+        );
+        payload.to_string()
+    }
+}
