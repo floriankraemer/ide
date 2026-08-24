@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 use editor_core::{BinaryFile, Document, HexRow};
 use project_model::{FileOpError, OpenFolderError, Project, ProjectSession};
 
-/// File operations a workspace edit asks for (ADR-0026).
+/// File operations a workspace edit asks for (F2; its ADR is unwritten).
 pub mod file_ops;
 /// Where plugins and icon packs are joined (ADR-0026, ADR-0027).
 pub mod icons;
@@ -78,7 +78,7 @@ pub enum AppError {
     /// failed afterwards (e.g. the root vanished mid-operation).
     TreeRebuild(io::Error),
     /// A workspace edit's file operations were refused, or failed partway
-    /// (ADR-0026).
+    /// (F2; its ADR is unwritten).
     ResourceOp(ResourceOpError),
     /// The tab exists but holds a binary file, and the command asked for
     /// something only a text document can do (edit, save, reload). Distinct

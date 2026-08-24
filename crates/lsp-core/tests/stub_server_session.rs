@@ -778,7 +778,7 @@ fn the_refactoring_capabilities_are_advertised() {
     assert_eq!(
         capabilities["workspace"]["workspaceEdit"]["resourceOperations"],
         json!(["create", "rename", "delete"]),
-        "advertised because app_core::apply_file_ops performs them (ADR-0026); \
+        "advertised because app_core::apply_file_ops performs them (F2); \
          without these, every extract-to-new-file refactoring is refused whole",
     );
     assert_eq!(

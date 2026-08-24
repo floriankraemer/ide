@@ -1,5 +1,5 @@
 //! File operations a workspace edit asks for: create, rename, delete
-//! (ADR-0026).
+//! (F2; its ADR is unwritten).
 //!
 //! These are `app-core`'s own types rather than `lsp-core`'s, because
 //! performing one means deciding what happens to an open tab whose file moved
@@ -19,7 +19,7 @@ use crate::{AppError, AppSession, RetitledTab};
 /// means deciding what happens to an open tab whose file moved underneath it,
 /// and that is a rule about this application's state. `app-core` may not
 /// depend on `lsp-core`, so the adapter maps one to the other and decides
-/// nothing (ADR-0026).
+/// nothing (F2; its ADR is unwritten).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileOp {
     Create {
@@ -126,7 +126,7 @@ impl fmt::Display for ResourceOpError {
 
 impl AppSession {
     /// Perform the file operations a refactoring asked for, then retarget
-    /// any open tabs they moved (ADR-0026).
+    /// any open tabs they moved (F2; its ADR is unwritten).
     ///
     /// Order is the server's, and it matters: a refactoring that renames a
     /// type and then renames its file to match sends the text edit first and
@@ -308,7 +308,7 @@ mod tests {
     use super::*;
     use std::fs;
     // -----------------------------------------------------------------
-    // File operations from a workspace edit (ADR-0026)
+    // File operations from a workspace edit (F2)
     // -----------------------------------------------------------------
 
     fn project_session() -> (AppSession, tempfile::TempDir) {
