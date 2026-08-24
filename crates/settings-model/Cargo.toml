@@ -5,6 +5,12 @@ edition = "2021"
 
 [dependencies]
 app-config = { path = "../app-config" }
+# The editing rules resolve into the very types the editing crates take:
+# `edit_ops::IndentStyle` and `editor_core::SaveRules`. Naming them here is
+# what lets the view pass one resolved value straight through instead of
+# unpacking it into loose arguments at the seam.
+edit-ops = { path = "../edit-ops" }
+editor-core = { path = "../editor-core" }
 syntax-core = { path = "../syntax-core" }
 lsp-core = { path = "../lsp-core" }
 serde = { version = "1", features = ["derive"] }

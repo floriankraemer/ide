@@ -2565,6 +2565,8 @@ version = "0.1.0"
 dependencies = [
  "ai-chat-core",
  "app-config",
+ "edit-ops",
+ "editor-core",
  "lsp-core",
  "serde",
  "syntax-core",
