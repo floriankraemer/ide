@@ -284,6 +284,12 @@ fn main() {
         .cpp_file("cpp/editor_tabs.cpp")
         .cpp_file("cpp/editor_tabs_panes.cpp")
         .cpp_file("cpp/editor_tabs_lsp.cpp")
+        // The two navigation docks and the QMainWindow subclass, likewise
+        // Q_OBJECT-free (they subclass QWidget/QMainWindow but declare no
+        // signals or slots of their own), so only the sources are listed.
+        .cpp_file("cpp/class_view_panel.cpp")
+        .cpp_file("cpp/find_usages_panel.cpp")
+        .cpp_file("cpp/ide_main_window.cpp")
         .cpp_file("cpp/keymap_page.cpp")
         .cpp_file("cpp/syntax_colors_page.cpp")
         .cpp_file("cpp/languages_page.cpp")
