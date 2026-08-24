@@ -1,7 +1,6 @@
 #include "main_window.h"
 
 #include "ai_chat_panel.h"
-#include "ai_providers_page.h"
 #include "appearance_page.h"
 #include "class_view_panel.h"
 #include "code_editor.h"
@@ -14,10 +13,6 @@
 #include "icon_cache.h"
 #include "ide_main_window.h"
 #include "keymap_page.h"
-#include "language_servers_page.h"
-#include "languages_page.h"
-#include "plugins_page.h"
-#include "syntax_colors_page.h"
 #include "search_everywhere_dialog.h"
 #include "problems_panel.h"
 #include "icon_decoration_proxy.h"
@@ -26,6 +21,7 @@
 #include "refactor_controller.h"
 #include "refactor_preview_dialog.h"
 #include "search_results_panel.h"
+#include "settings_dialog.h"
 #include "splash_screen.h"
 #include "syntax_highlighter.h"
 #include "terminal_widget.h"
@@ -37,7 +33,6 @@
 
 #include <QApplication>
 #include <QByteArray>
-#include <QCheckBox>
 #include <QCloseEvent>
 #include <QElapsedTimer>
 #include <QKeyEvent>
@@ -49,24 +44,18 @@
 #include <QVector>
 #include <QTreeWidget>
 #include <QColor>
-#include <QColorDialog>
 #include <QComboBox>
 #include <QDialog>
-#include <QDialogButtonBox>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QFont>
-#include <QFormLayout>
 #include <QHash>
 #include <algorithm>
 #include <cstdint>
 #include <functional>
-#include <QHBoxLayout>
 #include <QHash>
 #include <QInputDialog>
 #include <QLabel>
-#include <QLineEdit>
-#include <QListWidget>
 #include <QProgressBar>
 #include <QStatusBar>
 #include <QTextCursor>
@@ -76,14 +65,10 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
-#include <QPalette>
 #include <QPlainTextEdit>
 #include <QPoint>
-#include <QPushButton>
 #include <QRect>
 #include <QSet>
-#include <QSpinBox>
-#include <QStackedWidget>
 #include <QStringList>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -97,304 +82,11 @@
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVariant>
-#include <QVBoxLayout>
 #include <QWidget>
 
 namespace ui_shell {
 
 namespace {
-
-// Settings dialog (S1: category list + stacked detail pane; S2: font +
-// editor colors on the Editor page). Every control applies live as it's
-// changed (theme via applyTheme(), font/colors via `editorTabs`) so
-// the effect is visible immediately; OK persists that already-applied state
-// through `appSettings`, Cancel restores exactly what was active when the
-// dialog opened. Modal and blocking, so every lambda below capturing
-// `&dialog` only ever runs while `dialog` is still alive on this stack frame.
-
-void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *editorTabs,
-                        KeymapEditor *keymapEditor, const QHash<QString, QAction *> &actions,
-                        DocumentManager *docManager, const std::shared_ptr<QString> &mcpStatus,
-                        SyntaxColorEditor *syntaxColorEditor, LanguageCatalog *languageCatalog,
-                        LanguageServerEditor *languageServerEditor,
-                        LanguageService *languageService,
-                        AiProviderEditor *aiProviderEditor, AiChat *aiChat,
-                        PluginCatalog *pluginCatalog,
-                        const UiFontTargets &uiFontTargets)
-{
-    const FfiEditorFont originalFont = appSettings->editorFont();
-    const FfiEditorColors originalColors = appSettings->editorColors();
-
-    QDialog dialog(parent);
-    dialog.setWindowTitle(QObject::tr("Settings"));
-    // The pages' own minimums add up to roughly 740x510, which is enough to
-    // lay a page out but not enough to read one: the Languages tree needs
-    // room for four columns before Matches has anything to elide. Sized here
-    // rather than in the pages because the dialog is what the user sees, and
-    // one number beats four minimums fighting over the same window.
-    dialog.resize(960, 640);
-
-    auto *categoryList = new QListWidget(&dialog);
-    categoryList->addItem(QObject::tr("Appearance"));
-    categoryList->addItem(QObject::tr("Editor"));
-    categoryList->addItem(QObject::tr("Syntax Colors"));
-    categoryList->addItem(QObject::tr("Keymap"));
-    categoryList->addItem(QObject::tr("Languages"));
-    categoryList->addItem(QObject::tr("Language Servers"));
-    categoryList->addItem(QObject::tr("AI Providers"));
-    categoryList->addItem(QObject::tr("Plugins"));
-    categoryList->addItem(QObject::tr("MCP"));
-    // Derived from the widest category rather than a fixed 150px: the
-    // interface font scale below can make "Language Servers" wider than any
-    // constant chosen for one font size, and a clipped category list is the
-    // first thing a user of the scale setting would see.
-    categoryList->setMaximumWidth(
-      categoryList->fontMetrics().horizontalAdvance(QObject::tr("Language Servers")) + 40);
-
-    auto *pages = new QStackedWidget(&dialog);
-
-    // Every cached icon behind the tree, dropped: called by the Appearance
-    // page when either theme changes, and by the Plugins page when a plugin
-    // that contributes icons is switched off.
-    auto refreshIcons = [uiFontTargets, editorTabs]() {
-        refreshTreeIcons(uiFontTargets.projectTree);
-        editorTabs->refreshTabIcons();
-    };
-
-    const AppearancePage appearance = buildAppearancePage(
-      &dialog, appSettings, uiFontTargets,
-      AppearanceHooks{
-        [editorTabs]() { editorTabs->refreshHighlighting(); },
-        refreshIcons,
-        [categoryList]() {
-            // The dialog is scaling under its own feet: its category list
-            // was sized for the font in force when it opened.
-            categoryList->setMaximumWidth(
-              categoryList->fontMetrics().horizontalAdvance(QObject::tr("Language Servers")) + 40);
-        },
-      });
-    pages->addWidget(appearance.widget);
-
-    auto *editorPage = new QWidget(&dialog);
-    auto *editorForm = new QFormLayout(editorPage);
-    auto *fontFamilyEdit = new QLineEdit(originalFont.family, editorPage);
-    auto *fontSizeSpin = new QSpinBox(editorPage);
-    fontSizeSpin->setRange(6, 72);
-    fontSizeSpin->setValue(static_cast<int>(originalFont.size));
-    editorForm->addRow(QObject::tr("Font family:"), fontFamilyEdit);
-    editorForm->addRow(QObject::tr("Font size:"), fontSizeSpin);
-
-    auto applyFontLive = [editorTabs, fontFamilyEdit, fontSizeSpin]() {
-        editorTabs->setEditorFont(QFont(fontFamilyEdit->text(), fontSizeSpin->value()));
-    };
-    QObject::connect(fontFamilyEdit, &QLineEdit::textChanged, &dialog, applyFontLive);
-    QObject::connect(fontSizeSpin, &QSpinBox::valueChanged, &dialog, applyFontLive);
-
-    // Boxed so the color-picker lambdas (which need to both read and update
-    // the chosen value across separate clicks) share one instance rather
-    // than each capturing a stale copy.
-    auto backgroundColor = std::make_shared<QString>(originalColors.background);
-    auto foregroundColor = std::make_shared<QString>(originalColors.foreground);
-    auto currentLineColor = std::make_shared<QString>(originalColors.current_line);
-    auto applyColorsLive = [editorTabs, backgroundColor, foregroundColor, currentLineColor]() {
-        editorTabs->setEditorColors(*backgroundColor, *foregroundColor, *currentLineColor);
-    };
-
-    auto *backgroundButton = new QPushButton(QObject::tr("Background Color..."), editorPage);
-    QObject::connect(backgroundButton, &QPushButton::clicked, &dialog,
-                      [&dialog, backgroundColor, applyColorsLive]() {
-                          const QColor initial = backgroundColor->isEmpty()
-                            ? QColor(Qt::white)
-                            : QColor(*backgroundColor);
-                          const QColor chosen = QColorDialog::getColor(
-                            initial, &dialog, QObject::tr("Background Color"));
-                          if (chosen.isValid()) {
-                              *backgroundColor = chosen.name();
-                              applyColorsLive();
-                          }
-                      });
-    editorForm->addRow(backgroundButton);
-
-    auto *foregroundButton = new QPushButton(QObject::tr("Text Color..."), editorPage);
-    QObject::connect(foregroundButton, &QPushButton::clicked, &dialog,
-                      [&dialog, foregroundColor, applyColorsLive]() {
-                          const QColor initial = foregroundColor->isEmpty()
-                            ? QColor(Qt::black)
-                            : QColor(*foregroundColor);
-                          const QColor chosen = QColorDialog::getColor(
-                            initial, &dialog, QObject::tr("Text Color"));
-                          if (chosen.isValid()) {
-                              *foregroundColor = chosen.name();
-                              applyColorsLive();
-                          }
-                      });
-    editorForm->addRow(foregroundButton);
-
-    auto *currentLineButton = new QPushButton(QObject::tr("Current Line Color..."), editorPage);
-    QObject::connect(currentLineButton, &QPushButton::clicked, &dialog,
-                      [&dialog, currentLineColor, applyColorsLive]() {
-                          // Empty means "derived from the theme", which has no
-                          // single hex to seed the picker with — the editor
-                          // background is the closest starting point.
-                          const QColor initial = currentLineColor->isEmpty()
-                            ? qApp->palette().color(QPalette::Base)
-                            : QColor(*currentLineColor);
-                          const QColor chosen = QColorDialog::getColor(
-                            initial, &dialog, QObject::tr("Current Line Color"));
-                          if (chosen.isValid()) {
-                              *currentLineColor = chosen.name();
-                              applyColorsLive();
-                          }
-                      });
-    editorForm->addRow(currentLineButton);
-
-    pages->addWidget(editorPage);
-
-    // Syntax Colors follows Appearance rather than Keymap: it applies live,
-    // so the user sees the colour in the open editor while picking it, and
-    // the Cancel branch below reverts it the same way the theme is reverted.
-    syntaxColorEditor->beginEdit();
-    pages->addWidget(buildSyntaxColorsPage(
-      &dialog, syntaxColorEditor, QFont(originalFont.family, static_cast<int>(originalFont.size)),
-      [editorTabs]() { editorTabs->refreshHighlighting(); }));
-
-    // Unlike Appearance/Editor, the keymap isn't applied live: the page edits
-    // a draft held in Rust, so Cancel discards it by never committing, and
-    // the next beginEdit() re-reads from disk.
-    keymapEditor->beginEdit();
-    pages->addWidget(buildKeymapPage(&dialog, keymapEditor));
-
-    // Languages needs no draft: nothing on it is a setting. Adding a
-    // language, clearing a quarantine and reloading all take effect when
-    // pressed, which is why the page offers no OK-shaped promise.
-    pages->addWidget(buildLanguagesPage(
-      &dialog, languageCatalog,
-      [&dialog, editorTabs](const QString &path) {
-          editorTabs->openFileAtLine(path, 1, 1);
-          dialog.accept();
-      },
-      [editorTabs]() { editorTabs->reloadHighlighterLanguages(); }));
-
-    // Language Servers commits on OK, like Keymap and MCP: starting and
-    // stopping a server on every keystroke in a command field is not a
-    // preview.
-    languageServerEditor->beginEdit();
-    pages->addWidget(buildLanguageServersPage(&dialog, languageServerEditor, languageService));
-
-    // AI Providers sits next to Language Servers — both configure an
-    // external process the IDE talks to — and commits on OK for the same
-    // reason: a half-typed base URL is not a setting worth applying. There
-    // is no API key field on the page, by ADR-0021 decision 3.
-    aiProviderEditor->beginEdit();
-    pages->addWidget(buildAiProvidersPage(&dialog, aiProviderEditor));
-
-    // Plugins needs no draft, for the reason Languages needs none: nothing
-    // on it is a setting the dialog holds. Switching a plugin off rebuilds
-    // the registry there and then, which is why the page makes no
-    // OK-shaped promise.
-    pages->addWidget(buildPluginsPage(&dialog, pluginCatalog, refreshIcons));
-
-    // MCP, like Keymap and unlike Appearance/Editor, commits on OK rather
-    // than applying live: restarting the server on every keystroke in the
-    // port field would bind a series of half-typed port numbers.
-    auto *mcpPage = new QWidget(&dialog);
-    auto *mcpForm = new QFormLayout(mcpPage);
-    auto *mcpEnabledCheck = new QCheckBox(QObject::tr("Enable MCP server"), mcpPage);
-    mcpEnabledCheck->setChecked(appSettings->mcpEnabled());
-    mcpForm->addRow(mcpEnabledCheck);
-
-    auto *mcpPortSpin = new QSpinBox(mcpPage);
-    mcpPortSpin->setRange(0, 65535);
-    mcpPortSpin->setSpecialValueText(QObject::tr("Automatic"));
-    mcpPortSpin->setValue(static_cast<int>(appSettings->mcpPort()));
-    mcpPortSpin->setEnabled(mcpEnabledCheck->isChecked());
-    mcpForm->addRow(QObject::tr("Port:"), mcpPortSpin);
-    QObject::connect(mcpEnabledCheck, &QCheckBox::toggled, mcpPortSpin, &QSpinBox::setEnabled);
-
-    auto *mcpStatusLabel = new QLabel(*mcpStatus, mcpPage);
-    mcpStatusLabel->setWordWrap(true);
-    mcpForm->addRow(QObject::tr("Status:"), mcpStatusLabel);
-    // Live only while the dialog is open, so a failed restart on OK is
-    // visible without reopening Settings.
-    QObject::connect(docManager, &DocumentManager::mcpStarted, &dialog,
-                      [mcpStatusLabel](std::uint16_t port) {
-                          mcpStatusLabel->setText(
-                            QObject::tr("Listening on 127.0.0.1:%1").arg(port));
-                      });
-    QObject::connect(docManager, &DocumentManager::mcpStopped, &dialog, [mcpStatusLabel]() {
-        mcpStatusLabel->setText(QObject::tr("Disabled"));
-    });
-    QObject::connect(docManager, &DocumentManager::mcpFailed, &dialog,
-                      [mcpStatusLabel](const QString &message) {
-                          mcpStatusLabel->setText(message);
-                      });
-
-    // The port and token an agent needs are written here on every start,
-    // so the useful thing to show is where to read them from.
-    auto *mcpDiscoveryEdit = new QLineEdit(appSettings->mcpDiscoveryFilePath(), mcpPage);
-    mcpDiscoveryEdit->setReadOnly(true);
-    mcpForm->addRow(QObject::tr("Discovery file:"), mcpDiscoveryEdit);
-
-    pages->addWidget(mcpPage);
-
-    QObject::connect(categoryList, &QListWidget::currentRowChanged, pages,
-                      &QStackedWidget::setCurrentIndex);
-    categoryList->setCurrentRow(0);
-
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
-    // OK runs the AI page's commit first, because it is the one page that
-    // can refuse: `settings-model` validates the draft and says what is
-    // wrong with it, and a false answer means the dialog stays open on the
-    // field the user has to fix. Nothing else is committed until it passes.
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog,
-                      [&dialog, aiProviderEditor]() {
-                          if (commitAiProvidersPage(&dialog, aiProviderEditor)) {
-                              dialog.accept();
-                          }
-                      });
-    QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-
-    auto *bodyLayout = new QHBoxLayout();
-    bodyLayout->addWidget(categoryList);
-    bodyLayout->addWidget(pages, 1);
-
-    auto *mainLayout = new QVBoxLayout(&dialog);
-    mainLayout->addLayout(bodyLayout);
-    mainLayout->addWidget(buttons);
-
-    if (dialog.exec() == QDialog::Accepted) {
-        appearance.commit();
-        appSettings->saveEditorFont(fontFamilyEdit->text(),
-                                     static_cast<quint32>(fontSizeSpin->value()));
-        appSettings->saveEditorColors(*backgroundColor, *foregroundColor, *currentLineColor);
-        keymapEditor->commit();
-        applyKeymap(actions, appSettings);
-        appSettings->saveMcpSettings(mcpEnabledCheck->isChecked(),
-                                      static_cast<quint16>(mcpPortSpin->value()));
-        // Unconditional: applyMcpSettings is idempotent, and working out
-        // whether anything changed here would be the view deciding
-        // something the Rust side already decides.
-        docManager->applyMcpSettings();
-        // The AI draft was already committed by the OK handler above; this
-        // is the chat session re-reading the provider, the mode and the
-        // persistence setting it had cached.
-        aiChat->applyAiSettings();
-        languageServerEditor->commit();
-        // Reconciling is the Rust side's decision: it stops what the new
-        // settings no longer describe and leaves the rest running, and the
-        // re-announcement below starts the replacements.
-        languageService->applyServerSettings();
-        editorTabs->reannounceDocuments();
-    } else {
-        aiProviderEditor->revert();
-        syntaxColorEditor->revert();
-        appearance.revert();
-        editorTabs->refreshHighlighting();
-        editorTabs->setEditorFont(QFont(originalFont.family, static_cast<int>(originalFont.size)));
-        editorTabs->setEditorColors(originalColors.background, originalColors.foreground,
-                                     originalColors.current_line);
-    }
-}
 
 // Sidebar tree + tabbed editor area, PHPStorm-style (US-5): each panel is
 // its own ADS CDockWidget (D3) — float/redock each independently, room left
@@ -1051,17 +743,29 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
         editorTabs->saveCurrentTabAs();
     });
 
+    // Built once, outside the lambda, and captured whole: fourteen separate
+    // captures is what the parameter object exists to replace (see
+    // SettingsContext). Every member is a pointer or a handle that outlives
+    // the window, so a by-value capture holds nothing that can dangle.
+    const SettingsContext settingsContext{
+      appSettings,
+      editorTabs,
+      keymapEditor,
+      actions,
+      docManager,
+      mcpStatus,
+      syntaxColorEditor,
+      languageCatalog,
+      languageServerEditor,
+      languageService,
+      aiProviderEditor,
+      aiChat,
+      pluginCatalog,
+      uiFontTargets,
+    };
     QObject::connect(preferencesAction, &QAction::triggered, window,
-                      [window, appSettings, editorTabs, keymapEditor, actions, docManager,
-                       mcpStatus, syntaxColorEditor, languageCatalog, languageServerEditor,
-                       languageService, aiProviderEditor, aiChat, pluginCatalog,
-                       uiFontTargets]() {
-                          showSettingsDialog(window, appSettings, editorTabs, keymapEditor,
-                                              *actions, docManager, mcpStatus,
-                                              syntaxColorEditor, languageCatalog,
-                                              languageServerEditor, languageService,
-                                              aiProviderEditor, aiChat,
-                                              pluginCatalog, uiFontTargets);
+                      [window, settingsContext]() {
+                          showSettingsDialog(window, settingsContext);
                       });
 
     QMenu *editMenu = window->menuBar()->addMenu(QObject::tr("&Edit"));
