@@ -12,6 +12,7 @@ members = [
     "crates/index-core",
     "crates/lsp-core",
     "crates/ai-chat-core",
+    "crates/plugin-api",
     "crates/settings-model",
     "crates/app-core",
     "crates/ui-shell",

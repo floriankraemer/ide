@@ -31,10 +31,11 @@ ADR-0023 (multi-caret) is reserved and lands with the editor-ergonomics work.
 - [ADR-0022: per-project settings](architecture/decisions/0022-per-project-settings.md) — a sparse `.ide/settings.toml` layered over the global file; precedence resolved by `settings-model`.
 - [ADR-0024: verification foundation](architecture/decisions/0024-verification-foundation.md) — a headless E2E harness driving the real binary, and a pinned real-server LSP conformance gate that runs nightly.
 - [ADR-0025: seam split and file-size ceiling](architecture/decisions/0025-seam-split-and-file-size-ceiling.md) — `bridge.rs` and `main_window.cpp` split per feature; a ratcheted size gate; the split proven by byte-identical FFI headers.
+- [ADR-0026: plugin host](architecture/decisions/0026-plugin-host.md) — `plugin-api` as the contract and `plugin-host` as the machinery; declarative contributions, built-ins loaded as plugins, `api_version` the one compatibility lever.
 
 ## Plans
 
-All plan documents are complete except the next-five-features plan, which is the one currently being delivered; the rest remain as historical records of how each feature phase was delivered.
+All plan documents are complete except the next-five-features plan and the plugin-host-and-icon-themes plan, which are the two currently being delivered; the rest remain as historical records of how each feature phase was delivered.
 (An earlier version of this line called the index-performance and large-files plans incomplete. Both of their Progress tables are fully `done`; the claim was stale.)
 
 - [MVP implementation plan](architecture/mvp-implementation-plan.md) — MVP editor shell; marked historical.
@@ -48,6 +49,7 @@ All plan documents are complete except the next-five-features plan, which is the
 - [Index performance plan](architecture/index-performance-plan.md) — faster project index build and a status-bar indexing indicator.
 - [Large files and the binary viewer plan](architecture/large-files-and-binary-viewer-plan.md) — no-wrap default, highlighting size ceilings, O(1) fold lookup, read-only hex view for binary files.
 - [Next five features plan](architecture/next-five-features-plan.md) — the current roadmap: verification foundation, editor ergonomics, Alt+Enter intentions, Git v1, run configurations. Carries the living Progress table.
+- [Plugin host and icon themes plan](architecture/plugin-host-and-icon-themes-plan.md) — a two-tier plugin host and the Material icon themes built on it; in delivery, carries its own Progress table.
 
 - [LSP conformance](architecture/lsp-conformance.md) — checking the LSP client against a real rust-analyzer; the executable expectations file and why it is not a per-PR gate.
 
