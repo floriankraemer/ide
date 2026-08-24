@@ -14,6 +14,7 @@ use ropey::Rope;
 mod binary_detect;
 pub use binary_detect::{looks_binary, looks_binary_file};
 
+pub mod diff;
 pub mod hex;
 
 /// Byte <-> UTF-16 offset conversion, shared by every place Rust text meets
