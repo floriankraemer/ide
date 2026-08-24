@@ -34,7 +34,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F0-1b — promote `Utf16Cursor` to `editor_core::offsets` | done | febd6c0 (#74) |
 | F0-2 — bridge.rs split, part 1 | in review | #78 |
 | F0-3 — bridge.rs split, part 2 | in review | #78 |
-| F0-4a — main_window.cpp split, part 1: `EditorTabs` | in review |  |
+| F0-4a — main_window.cpp split, part 1: `EditorTabs` | in review | #100 |
 | F0-4b — main_window.cpp split, part 1: `ClassViewPanel`, `FindUsagesPanel`, `IdeMainWindow` | todo |  |
 | F0-5 — main_window.cpp split, part 2 | blocked on F0-4b |  |
 | F0-6 — settings dialog extraction + `SettingsContext` | blocked on F0-5 |  |
