@@ -31,6 +31,11 @@ Every `…Rust` state struct and every `impl` block moves to a per-feature modul
 There is no `Q_OBJECT` anywhere in that file — deliberately, with comments explaining that it uses `std::function` callbacks precisely to avoid a second moc target.
 So each extracted unit costs one `.cpp_file(...)` line in `build.rs` and no header registration.
 
+**Amended by F0-4a**: one translation unit per class turned out not to hold for `EditorTabs`.
+The class plus the four cursor/highlighter helpers only it used is ~1,790 lines, which no single `.cpp` may be under section 3's ceiling, and granting it a baseline would have added an entry to the very list this ADR exists to empty.
+It is therefore declared once in `cpp/editor_tabs.h` and defined across three sources — `editor_tabs.cpp` (the tab surface), `editor_tabs_panes.cpp` (the `QSplitter` tree of tab groups and its save/restore) and `editor_tabs_lsp.cpp` (the language-server leg).
+Defining members of one class across several translation units is ordinary C++; the rule this ADR actually needs is *one class per header*, with as many sources behind it as the ceiling requires.
+
 ### 3. A ceiling, enforced as a gate
 
 1500 lines per Rust module, 1200 per C++ translation unit, checked by `scripts/check-file-size.sh` in `make lint` and in CI.

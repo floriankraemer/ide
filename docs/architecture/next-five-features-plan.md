@@ -34,8 +34,9 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F0-1b — promote `Utf16Cursor` to `editor_core::offsets` | done | febd6c0 (#74) |
 | F0-2 — bridge.rs split, part 1 | in review | #78 |
 | F0-3 — bridge.rs split, part 2 | in review | #78 |
-| F0-4 — main_window.cpp split, part 1 | blocked on #76 + #78 |  |
-| F0-5 — main_window.cpp split, part 2 | blocked on F0-4 |  |
+| F0-4a — main_window.cpp split, part 1: `EditorTabs` | in review |  |
+| F0-4b — main_window.cpp split, part 1: `ClassViewPanel`, `FindUsagesPanel`, `IdeMainWindow` | todo |  |
+| F0-5 — main_window.cpp split, part 2 | blocked on F0-4b |  |
 | F0-6 — settings dialog extraction + `SettingsContext` | blocked on F0-5 |  |
 | F0-7 — dock registry and general reconciliation | blocked on F0-6 |  |
 | F0-8 — byte-column fix in `moveCursorToLine` | done | febd6c0 (#74) |
@@ -441,8 +442,8 @@ Every task is a single commit that keeps `cargo test --workspace` green and is r
 | F0-1b | Promote `Utf16Cursor`/`utf16_at` (`editor-core/src/search.rs:178-201`) to a public `editor_core::offsets`, so the byte↔UTF-16 conversion has one home before five features reimplement it | — |
 | F0-2 | `bridge.rs` split part 1: `bridge/mod.rs` + `bridge/ffi.rs`; `tree.rs`, `editor.rs`, `settings.rs`, `terminal.rs`, `convert.rs` moved | — |
 | F0-3 | `bridge.rs` split part 2: `search.rs`, `language.rs`, `ai/chat.rs` + `ai/agent.rs`, `registry.rs` moved; the mixed `mod tests` divided; `bridge.rs` deleted | F0-2 |
-| F0-4 | `main_window.cpp` split part 1: `editor_tabs`, `class_view_panel`, `find_usages_panel`, `ide_main_window` extracted with their shared-helper headers, registered in `build.rs` | F0-12 |
-| F0-5 | `main_window.cpp` split part 2: `refactor_controller`, `declaration_navigator`, `action_registry` extracted | F0-4 |
+| F0-4 | `main_window.cpp` split part 1: `editor_tabs`, `class_view_panel`, `find_usages_panel`, `ide_main_window` extracted with their shared-helper headers, registered in `build.rs`. Split in two on delivery: **F0-4a** moved `EditorTabs` (and the cursor/highlighter helpers only it used) to `cpp/editor_tabs.{h,cpp}` plus `cpp/editor_tabs_panes.cpp` and `cpp/editor_tabs_lsp.cpp` — one class, three translation units, because the class does not fit under the 1200-line ceiling and adding a baseline would defeat F0-1. **F0-4b** is the rest: `ClassViewPanel`, `FindUsagesPanel`, `IdeMainWindow` | F0-12 |
+| F0-5 | `main_window.cpp` split part 2: `refactor_controller`, `declaration_navigator`, `action_registry` extracted | F0-4b |
 | F0-6 | Settings dialog extraction + `SettingsContext`; the 14-parameter signature replaced; one `buildXPage` per page | F0-5 |
 | F0-7 | Dock registry and general reconciliation in `dock_layout.{h,cpp}`; `showAiChatDock`'s workaround deleted | F0-6 |
 | F0-8 | Byte-column fix **inside `moveCursorToLine`** (`main_window.cpp:128-140`): convert byte column → UTF-16 column against `block.text()` via `editor_core::offsets`, and clamp to the block (`QTextCursor::Right` does not stop at a block boundary). One place fixes all five call sites (`:1935`, `:2065`, `:2622`, `:3200`) **and** `jumpToByteOffset` (`:685-704`). Routing through `AppSession` cannot work — the conversion needs the *live* line text, and the rope is stale (§1) | F0-1b |
@@ -456,7 +457,7 @@ Every task is a single commit that keeps `cargo test --workspace` green and is r
 | F0-16 | Conformance fixes — one commit per defect. **Unbounded by nature**: F0-15 produces the list, and each entry becomes its own Progress row rather than hiding behind this one | F0-15 |
 | F0-17 | Docs: ADR-0022/0024/0025, this plan, `layering.md`, `overview.md`, `docs/README.md`; stale `lib.rs` doc comments and `settings-model`'s wrong ADR citation fixed in the same pass | all F0 |
 
-Lanes: `{F0-11→F0-12→F0-4→F0-5→F0-6→F0-7}` is the critical path — the seed flows are the regression net for the C++ split, so they gate F0-4 rather than depending on F0-7 (an earlier draft had that edge and it made a cycle). Running alongside: `{F0-2→F0-3}`, `{F0-14→F0-15}`, `F0-1`, `F0-1b→F0-8`, `F0-9`. They converge at F0-10 and F0-13.
+Lanes: `{F0-11→F0-12→F0-4a→F0-4b→F0-5→F0-6→F0-7}` is the critical path — the seed flows are the regression net for the C++ split, so they gate F0-4 rather than depending on F0-7 (an earlier draft had that edge and it made a cycle). Running alongside: `{F0-2→F0-3}`, `{F0-14→F0-15}`, `F0-1`, `F0-1b→F0-8`, `F0-9`. They converge at F0-10 and F0-13.
 
 Two more F0 rows worth their own commits: **F0-18**, route `FindBar::replaceCurrent` (`find_bar.cpp:241`) and `CodeEditor::insertCompletion` (`code_editor.cpp:155`) through `applyBufferEdits` so §5's "every buffer change crosses as `Vec<FfiTextEdit>`" is true rather than aspirational, and fix the latent bug at `main_window.cpp:399`/`:408` where `beginEditBlock`/`endEditBlock` run on two different `textCursor()` **copies** (it works only because Qt's counter is per-`QTextDocument`, and it is the first thing a reviewer of the multi-caret change will stare at). **F0-19**, an ADR-0003 amendment introducing the error-code ranges below, replacing the five hardcoded `code: 1` literals (`bridge.rs:5627, :5638, :7005, :7111, :7129`).
 
