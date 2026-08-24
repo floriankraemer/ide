@@ -395,6 +395,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     auto *syntaxColorEditor = new SyntaxColorEditor(window);
     auto *languageCatalog = new LanguageCatalog(window);
     auto *languageServerEditor = new LanguageServerEditor(window);
+    auto *editingEditor = new EditingEditor(window);
     // P7's Plugins page, the same arrangement again: it holds the rows of
     // the last scan between the dialog's refresh() calls.
     auto *pluginCatalog = new PluginCatalog(window);
@@ -735,6 +736,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
       syntaxColorEditor,
       languageCatalog,
       languageServerEditor,
+      editingEditor,
       languageService,
       aiProviderEditor,
       aiChat,

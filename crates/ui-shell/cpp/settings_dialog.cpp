@@ -3,6 +3,7 @@
 #include "ai_providers_page.h"
 #include "appearance_page.h"
 #include "editor_page.h"
+#include "editing_page.h"
 #include "editor_tabs.h"
 #include "keymap_page.h"
 #include "language_servers_page.h"
@@ -45,6 +46,7 @@ void showSettingsDialog(QWidget *parent, const SettingsContext &context)
     categoryList->addItem(QObject::tr("Appearance"));
     categoryList->addItem(QObject::tr("Editor"));
     categoryList->addItem(QObject::tr("Syntax Colors"));
+    categoryList->addItem(QObject::tr("Editing"));
     categoryList->addItem(QObject::tr("Keymap"));
     categoryList->addItem(QObject::tr("Languages"));
     categoryList->addItem(QObject::tr("Language Servers"));
@@ -84,6 +86,12 @@ void showSettingsDialog(QWidget *parent, const SettingsContext &context)
 
     const EditorPage editor = buildEditorPage(&dialog, appSettings, editorTabs);
     pages->addWidget(editor.widget);
+
+    // Editing commits on OK, like Keymap and Language Servers: the tab
+    // width a user is halfway through typing is not a setting worth
+    // applying keystroke by keystroke.
+    context.editingEditor->beginEdit();
+    pages->addWidget(buildEditingPage(&dialog, context.editingEditor));
 
     // Syntax Colors follows Appearance rather than Keymap: it applies live,
     // so the user sees the colour in the open editor while picking it, and
@@ -144,12 +152,15 @@ void showSettingsDialog(QWidget *parent, const SettingsContext &context)
     // can refuse: `settings-model` validates the draft and says what is
     // wrong with it, and a false answer means the dialog stays open on the
     // field the user has to fix. Nothing else is committed until it passes.
-    QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog,
-                      [&dialog, aiProviderEditor = context.aiProviderEditor]() {
-                          if (commitAiProvidersPage(&dialog, aiProviderEditor)) {
-                              dialog.accept();
-                          }
-                      });
+    QObject::connect(
+      buttons, &QDialogButtonBox::accepted, &dialog,
+      [&dialog, aiProviderEditor = context.aiProviderEditor,
+       editingEditor = context.editingEditor]() {
+          if (commitAiProvidersPage(&dialog, aiProviderEditor)
+              && commitEditingPage(&dialog, editingEditor)) {
+              dialog.accept();
+          }
+      });
     QObject::connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
 
     auto *bodyLayout = new QHBoxLayout();

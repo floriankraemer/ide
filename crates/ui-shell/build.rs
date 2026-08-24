@@ -312,6 +312,7 @@ fn main() {
         // wired with lambdas — so only the sources are listed.
         .cpp_file("cpp/settings_dialog.cpp")
         .cpp_file("cpp/editor_page.cpp")
+        .cpp_file("cpp/editing_page.cpp")
         .cpp_file("cpp/mcp_page.cpp")
         .cpp_file("cpp/problems_panel.cpp")
         .cpp_file("cpp/icon_cache.cpp")

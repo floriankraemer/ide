@@ -41,6 +41,7 @@ struct SettingsContext
     SyntaxColorEditor *syntaxColorEditor;
     LanguageCatalog *languageCatalog;
     LanguageServerEditor *languageServerEditor;
+    EditingEditor *editingEditor;
     LanguageService *languageService;
     AiProviderEditor *aiProviderEditor;
     AiChat *aiChat;
