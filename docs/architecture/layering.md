@@ -24,11 +24,11 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `plugin-api` | (std, serde, toml) — a leaf on purpose, see [ADR-0026](decisions/0026-plugin-host.md) | **No** |
 | `plugin-host` | `plugin-api` (+ std, wasmtime) — discovery, the registry and the built-ins ([ADR-0026](decisions/0026-plugin-host.md)), plus the sandboxed wasm tier ([ADR-0028](decisions/0028-wasm-plugin-tier.md)); `icon-theme` as a **dev**-dependency only, to check the vendored Material pack through the real load path | **No** |
 | `icon-theme` | (std, serde, toml, resvg) — **not** `syntax-core` and **not** `plugin-host`, see [ADR-0027](decisions/0027-icon-themes.md) | **No** |
-| `settings-model` | `app-config`, `syntax-core`, `lsp-core`, `edit-ops`, `editor-core` (+ std, serde, toml, tree-sitter) | **No** |
+| `settings-model` | `app-config`, `syntax-core`, `lsp-core`, `edit-ops`, `editor-core`, `plugin-api`, `plugin-host` (+ std, serde, toml, tree-sitter) | **No** |
 | `edit-ops` | `editor-core`, `syntax-core` (+ std, tree-sitter) | **No** |
 | `app-core` | `editor-core`, `project-model`, `plugin-host`, `icon-theme`, `syntax-core` — the last three only for the icon-theme join, see below | **No** |
 | `ai-chat-core` | `lsp-core` (+ std, serde, serde_json, base64, tiktoken-rs, reqwest/rustls) | **No** |
-| `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `settings-model`, `syntax-core`, `mcp-server`, `index-core`, `lsp-core`, `ai-chat-core`, `pty-core`, `terminal-core` (+ tokio, cxx, cxx-qt, cxx-qt-lib) | Yes (adapter + view live here) |
+| `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `settings-model`, `syntax-core`, `mcp-server`, `index-core`, `lsp-core`, `ai-chat-core`, `pty-core`, `terminal-core`, `plugin-host` (+ tokio, cxx, cxx-qt, cxx-qt-lib) | Yes (adapter + view live here) |
 | `app` | `ui-shell` | Yes |
 | `e2e` | (std, serde_json, tempfile) — **no workspace crate**; drives the built `app` binary over X11 and the filesystem, as a user does (ADR-0024) | **No** |
 
@@ -53,6 +53,10 @@ That test target is the one place `app-config` may be read from a test rather th
   Reading a plugin's files goes through `LoadedPlugin::read_asset`, the single place that turns a manifest-supplied string into a filesystem read, so a built-in's embedded bytes and an installed plugin's directory look the same to every consumer.
 - **What a plugin's own code may do** — the wasmtime component runtime, the fuel/epoch/memory limits, the capability-gated host functions, and running a contributed command — lives in `plugin_host::wasm` (ADR-0028), layered on top of discovery: a `WasmTier` is built from a finished `PluginRegistry` and can only start a plugin the registry already accepted.
   A trap disables that one plugin with a typed error and never the process, which is the property that made a sandbox worth choosing over ADR-0001's native dylib tier.
+  That typed error is what Settings > Plugins renders as a sentence, which is where the property becomes visible to a user rather than only true.
+- **What the Plugins page says** — which rows exist, which of them the user turned off, and what a `LoadErrorKind` or a `WasmError` means in English — lives in `settings_model::plugins`, which is why `plugin-api` and `plugin-host` appear in that crate's dependency row (P7).
+  Exactly the arrangement `settings_model::languages` already has with `syntax-core`'s runtime, for exactly the reason ADR-0017 gives: the page's value is that it never prints a Rust error, and that mapping deserves unit tests neither `bridge.rs` nor `cpp/` can have.
+  The page scans with nothing filtered rather than reading the live registry, because the live one has already dropped every disabled plugin and a page that cannot list one could never switch it back on.
 - **Which icon a row gets** lives in `icon-theme` (ADR-0027), and it is handed the language id rather than deriving one: `IconPack::file_icon` takes `language_id: Option<&str>` and the crate does not depend on `syntax-core`, so ADR-0018's single detection table stays single.
   Its own extension table answers "which art", never "which language", and nothing may ask it the second question.
   Reading a pack's files is the caller's job through the `IconAssets` trait, because a built-in plugin's SVGs are embedded in the binary and an installed plugin's are on disk; `icon-theme` therefore depends on `plugin-host` no more than `plugin-api` does, and `app-core` joins the two.
@@ -60,6 +64,7 @@ That test target is the one place `app-config` may be read from a test rather th
   It owns the active theme — the registry snapshot, the resolved `IconPack`, the `IconAssets` implementation backed by `LoadedPlugin::read_asset`, and the `IconRenderer` — and answers exactly two questions: the `"<pack-id>/<icon-id>"` key for a row, and the premultiplied RGBA8 behind a key.
   It is also the one place that asks `syntax_core::language_for_path` on an icon's behalf, which is the ADR-0018 join `icon-theme` refuses to make itself.
   Mapping a colour theme name to a light or dark icon set is a rule and lives here too, not in `theme.cpp`.
+  Which icon theme is active is the same kind of answer: `IconService` is handed the persisted id and falls back to the first theme there is when nothing offers it, so a setting that outlives its plugin costs the user no icons (P7).
   This is why `app-core`'s dependency row grew past the two domain crates: all three additions are Qt-free, so the hard rule below is untouched, and the `cargo tree` gate is what proves it rather than the claim.
 - **Which kind of page a tab needs** is `app-core`'s answer, carried across the seam as `TabKind` (ADR-0020). The view builds a `CodeEditor` or a `HexViewer` from it and never infers the kind from the path or the bytes. What a hex row *says* — offset format, byte grouping, printable-byte rule, short-row padding — belongs to `editor_core::hex`, next to the `binary_detect` rule that decides what counts as binary in the first place.
 - **Rules the AI assistant needs** (how attachments are assembled into a prompt and in what order they are truncated, how many tokens that costs, which files are too secret to attach or read, whether a model-supplied path escapes the project, which tool an approval policy allows, how a code block or an approved tool call becomes an edit, and when an agent run must stop) live in `ai-chat-core` (ADR-0021).

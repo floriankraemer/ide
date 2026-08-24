@@ -280,6 +280,8 @@ fn main() {
         .cpp_file("cpp/keymap_page.cpp")
         .cpp_file("cpp/syntax_colors_page.cpp")
         .cpp_file("cpp/languages_page.cpp")
+        .cpp_file("cpp/plugins_page.cpp")
+        .cpp_file("cpp/appearance_page.cpp")
         .cpp_file("cpp/language_servers_page.cpp")
         .cpp_file("cpp/problems_panel.cpp")
         .cpp_file("cpp/icon_cache.cpp")

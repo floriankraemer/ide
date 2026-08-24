@@ -30,6 +30,7 @@ pub mod editor;
 pub mod ffi;
 pub mod icons;
 pub mod language;
+pub mod plugins;
 pub mod registry;
 pub mod search;
 pub mod settings;

@@ -48,10 +48,14 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use plugin_api::{
     CommandContribution, IconThemeContribution, LoadErrorKind, PluginLoadError, PluginManifest,
-    MANIFEST_FILE, PLUGINS_DIR, QUARANTINE_DIR,
+    MANIFEST_FILE, QUARANTINE_DIR,
 };
 
 pub use plugin::{BuiltinPlugin, LoadedPlugin, PluginSource};
+/// Re-exported because "where do installed plugins live" is a question
+/// about the host, and a consumer that only asks it should not have to
+/// depend on the contract crate to hear the answer.
+pub use plugin_api::PLUGINS_DIR;
 pub use wasm::{HostServices, LogLevel, StderrServices, WasmError, WasmLimits, WasmTier};
 
 /// The plugins shipped inside the binary.
@@ -324,6 +328,39 @@ pub fn reload(config_dir: &Path, disabled: &[String]) -> Vec<PluginLoadError> {
     let errors = rebuilt.errors.clone();
     *REGISTRY.write().expect("plugin registry lock poisoned") = Arc::new(rebuilt);
     errors
+}
+
+/// The wasm tier this process is running, in the same shape and for the
+/// same reasons as [`REGISTRY`] above.
+///
+/// It starts empty rather than lazily starting itself over whatever the
+/// registry happens to hold: activating a component runs the plugin's own
+/// code, and that must happen at a moment the application chose, not the
+/// first time something asks a question about it.
+static TIER: LazyLock<RwLock<Arc<WasmTier>>> =
+    LazyLock::new(|| RwLock::new(Arc::new(WasmTier::default())));
+
+/// The running tier. Cheap (one `Arc` clone).
+pub fn tier() -> Arc<WasmTier> {
+    TIER.read().expect("plugin tier lock poisoned").clone()
+}
+
+/// Start — or restart — the tier over the registry as it stands now, and
+/// return it.
+///
+/// Called after [`reload`], because the two are one fact: the tier's slots
+/// come from the registry's manifests, and a tier built over a registry
+/// that has since been swapped would keep running a plugin the user just
+/// disabled. Dropping the previous tier is what deactivates those plugins,
+/// and it happens here rather than being something a caller must remember.
+///
+/// `services` is the host's side of the sandbox — where a plugin's `log`
+/// and `notify` go. [`StderrServices`] is the honest default until there is
+/// a UI surface to route them to.
+pub fn start_tier(services: Arc<dyn HostServices>, limits: WasmLimits) -> Arc<WasmTier> {
+    let started = Arc::new(WasmTier::start(registry(), services, limits));
+    *TIER.write().expect("plugin tier lock poisoned") = Arc::clone(&started);
+    started
 }
 
 #[cfg(test)]

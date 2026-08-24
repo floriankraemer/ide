@@ -108,6 +108,20 @@ impl ffi::AppSettings {
         let _ = app_config::save(&config_dir, &settings);
     }
 
+    pub fn icon_theme_id(&self) -> QString {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        QString::from(settings.icon_theme.as_str())
+    }
+
+    pub fn save_icon_theme(&self, id: &QString) {
+        let config_dir = app_core::resolve_config_dir();
+        let Ok(mut settings) = app_config::load(&config_dir) else {
+            return;
+        };
+        settings.icon_theme = id.to_string();
+        let _ = app_config::save(&config_dir, &settings);
+    }
+
     pub fn editor_font(&self) -> FfiEditorFont {
         let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
         FfiEditorFont {

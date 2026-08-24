@@ -76,6 +76,22 @@ It is the price of the decision above, not a departure from it: the alternative 
 All three are Qt-free, so `app-core`'s no-Qt rule is untouched, and CI's layering gate (`cargo tree -p app-core -e normal | grep -i qt`) is what enforces that rather than the claim.
 The join lives in one module, `app_core::icons`, and nothing outside it knows an `icon-themes` contribution names a pack file.
 
+### Amendment (P7): `settings-model` gains the two plugin crates, and the wasm tier gains an owner
+
+The Plugins page promised above is `settings_model::plugins`, and building it cost that crate `plugin-api` and `plugin-host` in its dependency row.
+That is the same shape `settings_model::languages` already has with `syntax-core`'s runtime and rests on the same argument as [ADR-0017](0017-settings-model-crate.md): the page's whole value is that it never prints a Rust error, so the mapping from a typed failure to a sentence is a rule with tests, not view code.
+Both crates are Qt-free, so nothing about the hard layering rule changes.
+
+Two things this decision implied without stating, and which the implementation had to settle:
+
+- **The page scans with nothing disabled.**
+  `plugin_host::load` filters a disabled plugin out before it opens the manifest, which is right for the running editor and wrong for the page: reading the live registry would list every plugin except the ones the page exists to switch back on.
+  The Languages page reads its overlay directly for the same reason, so this is the existing idiom rather than a new one.
+- **The wasm tier needed a home.**
+  [ADR-0028](0028-wasm-plugin-tier.md) built `WasmTier` and left it un-owned; nothing in the application started one, so the trap rows this page exists for could never have appeared.
+  The tier now sits beside the registry in `plugin-host` as a `RwLock<Arc<WasmTier>>` — same shape, same reasoning — started over the registry after each scan and restarted when a plugin is switched off or on.
+  Which `HostServices` it runs with is chosen in `ui-shell`, because an implementation that routes a plugin's `notify` to the editor is a Qt object; until such a surface exists, the host's stderr default keeps a plugin's diagnostics reaching the log.
+
 ### Rejected alternatives
 
 **A hardcoded icon table.**

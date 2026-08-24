@@ -2,6 +2,7 @@
 
 #include "ai_chat_panel.h"
 #include "ai_providers_page.h"
+#include "appearance_page.h"
 #include "code_editor.h"
 #include "e2e_mark.h"
 #include "find_bar.h"
@@ -10,9 +11,11 @@
 #include "keymap_page.h"
 #include "language_servers_page.h"
 #include "languages_page.h"
+#include "plugins_page.h"
 #include "syntax_colors_page.h"
 #include "search_everywhere_dialog.h"
 #include "problems_panel.h"
+#include "icon_decoration_proxy.h"
 #include "project_tree_dock.h"
 #include "refactor_preview_dialog.h"
 #include "search_results_panel.h"
@@ -2864,28 +2867,19 @@ void populateRecentProjectsMenu(QMenu *menu, AppSettings *appSettings, ProjectTr
 // through `appSettings`, Cancel restores exactly what was active when the
 // dialog opened. Modal and blocking, so every lambda below capturing
 // `&dialog` only ever runs while `dialog` is still alive on this stack frame.
-// The two widgets that carry an interface font scale of their own, plus the
-// one widget whose size is derived from a font metric and therefore has to be
-// recomputed whenever a scale changes.
-struct UiFontTargets
+// Forgets every cached QIcon behind the project tree and repaints it: the
+// icon theme changed, or the colour theme did and the pack has light art for
+// it. Not a decision — the page that calls this has already made it.
+void refreshTreeIcons(QWidget *projectTree)
 {
-    QWidget *menuBar;
-    QWidget *projectTree;
-    QWidget *indexBar;
-};
-
-// One sink for all three scales, used at startup and by the Settings
-// dialog's live preview and its Cancel path alike.
-void applyUiFontScales(const FfiUiFontScales &scales, const UiFontTargets &targets)
-{
-    applyUiFontScale(static_cast<int>(scales.ui));
-    applyWidgetFontScale(targets.menuBar, static_cast<int>(scales.menu));
-    applyWidgetFontScale(targets.projectTree, static_cast<int>(scales.project_tree));
-    // Fixed at build time from the status bar's font metrics, so a scaled
-    // status bar would otherwise leave the indexing bar at the old height.
-    if (targets.indexBar != nullptr) {
-        targets.indexBar->setFixedHeight(targets.indexBar->fontMetrics().height());
+    auto *tree = qobject_cast<QTreeView *>(projectTree);
+    if (tree == nullptr) {
+        return;
     }
+    if (auto *proxy = qobject_cast<IconDecorationProxy *>(tree->model())) {
+        proxy->clearIcons();
+    }
+    tree->viewport()->update();
 }
 
 void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *editorTabs,
@@ -2895,10 +2889,9 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
                         LanguageServerEditor *languageServerEditor,
                         LanguageService *languageService,
                         AiProviderEditor *aiProviderEditor, AiChat *aiChat,
+                        PluginCatalog *pluginCatalog,
                         const UiFontTargets &uiFontTargets)
 {
-    const QString originalTheme = appSettings->themeName();
-    const FfiUiFontScales originalScales = appSettings->uiFontScales();
     const FfiEditorFont originalFont = appSettings->editorFont();
     const FfiEditorColors originalColors = appSettings->editorColors();
 
@@ -2919,6 +2912,7 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     categoryList->addItem(QObject::tr("Languages"));
     categoryList->addItem(QObject::tr("Language Servers"));
     categoryList->addItem(QObject::tr("AI Providers"));
+    categoryList->addItem(QObject::tr("Plugins"));
     categoryList->addItem(QObject::tr("MCP"));
     // Derived from the widest category rather than a fixed 150px: the
     // interface font scale below can make "Language Servers" wider than any
@@ -2929,58 +2923,24 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
 
     auto *pages = new QStackedWidget(&dialog);
 
-    auto *appearancePage = new QWidget(&dialog);
-    auto *appearanceForm = new QFormLayout(appearancePage);
-    auto *themeCombo = new QComboBox(appearancePage);
-    themeCombo->addItem(QObject::tr("Dark"), QStringLiteral("dark"));
-    themeCombo->addItem(QObject::tr("Light"), QStringLiteral("light"));
-    themeCombo->addItem(QObject::tr("VS Code Dark"), QStringLiteral("vscode-dark"));
-    // findData() of an unknown persisted name yields -1; falling back to 0
-    // lands on Dark, the same theme styleSheetForTheme() would apply for it.
-    themeCombo->setCurrentIndex(std::max(0, themeCombo->findData(originalTheme)));
-    appearanceForm->addRow(QObject::tr("Theme:"), themeCombo);
+    // Every cached icon behind the tree, dropped: called by the Appearance
+    // page when either theme changes, and by the Plugins page when a plugin
+    // that contributes icons is switched off.
+    auto refreshIcons = [uiFontTargets]() { refreshTreeIcons(uiFontTargets.projectTree); };
 
-    // Percentages of the platform's own UI font rather than absolute point
-    // sizes, so the same settings.toml stays sane on a machine whose default
-    // UI font is a different size. The editor keeps its own absolute font
-    // (Settings > Editor) — it is content, not chrome.
-    auto makeScaleSpin = [appearancePage](quint32 value) {
-        auto *spin = new QSpinBox(appearancePage);
-        spin->setRange(50, 300);
-        spin->setSingleStep(10);
-        spin->setSuffix(QStringLiteral(" %"));
-        spin->setValue(static_cast<int>(value));
-        return spin;
-    };
-    QSpinBox *uiScaleSpin = makeScaleSpin(originalScales.ui);
-    QSpinBox *treeScaleSpin = makeScaleSpin(originalScales.project_tree);
-    QSpinBox *menuScaleSpin = makeScaleSpin(originalScales.menu);
-    appearanceForm->addRow(QObject::tr("Interface font scale:"), uiScaleSpin);
-    appearanceForm->addRow(QObject::tr("Project tree font scale:"), treeScaleSpin);
-    appearanceForm->addRow(QObject::tr("Menu font scale:"), menuScaleSpin);
-
-    auto applyScalesLive = [uiScaleSpin, treeScaleSpin, menuScaleSpin, uiFontTargets,
-                             categoryList]() {
-        applyUiFontScales(FfiUiFontScales{static_cast<quint32>(uiScaleSpin->value()),
-                                           static_cast<quint32>(treeScaleSpin->value()),
-                                           static_cast<quint32>(menuScaleSpin->value())},
-                           uiFontTargets);
-        // The dialog is scaling under its own feet: its category list was
-        // sized for the font in force when it opened.
-        categoryList->setMaximumWidth(
-          categoryList->fontMetrics().horizontalAdvance(QObject::tr("Language Servers")) + 40);
-    };
-    for (QSpinBox *spin : {uiScaleSpin, treeScaleSpin, menuScaleSpin}) {
-        QObject::connect(spin, &QSpinBox::valueChanged, &dialog, applyScalesLive);
-    }
-
-    pages->addWidget(appearancePage);
-
-    QObject::connect(themeCombo, &QComboBox::currentIndexChanged, &dialog,
-                     [themeCombo, editorTabs]() {
-                         applyTheme(themeCombo->currentData().toString());
-                         editorTabs->refreshHighlighting();
-                     });
+    const AppearancePage appearance = buildAppearancePage(
+      &dialog, appSettings, uiFontTargets,
+      AppearanceHooks{
+        [editorTabs]() { editorTabs->refreshHighlighting(); },
+        refreshIcons,
+        [categoryList]() {
+            // The dialog is scaling under its own feet: its category list
+            // was sized for the font in force when it opened.
+            categoryList->setMaximumWidth(
+              categoryList->fontMetrics().horizontalAdvance(QObject::tr("Language Servers")) + 40);
+        },
+      });
+    pages->addWidget(appearance.widget);
 
     auto *editorPage = new QWidget(&dialog);
     auto *editorForm = new QFormLayout(editorPage);
@@ -3095,6 +3055,12 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     aiProviderEditor->beginEdit();
     pages->addWidget(buildAiProvidersPage(&dialog, aiProviderEditor));
 
+    // Plugins needs no draft, for the reason Languages needs none: nothing
+    // on it is a setting the dialog holds. Switching a plugin off rebuilds
+    // the registry there and then, which is why the page makes no
+    // OK-shaped promise.
+    pages->addWidget(buildPluginsPage(&dialog, pluginCatalog, refreshIcons));
+
     // MCP, like Keymap and unlike Appearance/Editor, commits on OK rather
     // than applying live: restarting the server on every keystroke in the
     // port field would bind a series of half-typed port numbers.
@@ -3164,10 +3130,7 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     mainLayout->addWidget(buttons);
 
     if (dialog.exec() == QDialog::Accepted) {
-        appSettings->saveTheme(themeCombo->currentData().toString());
-        appSettings->saveUiFontScales(static_cast<quint32>(uiScaleSpin->value()),
-                                       static_cast<quint32>(treeScaleSpin->value()),
-                                       static_cast<quint32>(menuScaleSpin->value()));
+        appearance.commit();
         appSettings->saveEditorFont(fontFamilyEdit->text(),
                                      static_cast<quint32>(fontSizeSpin->value()));
         appSettings->saveEditorColors(*backgroundColor, *foregroundColor, *currentLineColor);
@@ -3192,8 +3155,7 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     } else {
         aiProviderEditor->revert();
         syntaxColorEditor->revert();
-        applyTheme(originalTheme);
-        applyUiFontScales(originalScales, uiFontTargets);
+        appearance.revert();
         editorTabs->refreshHighlighting();
         editorTabs->setEditorFont(QFont(originalFont.family, static_cast<int>(originalFont.size)));
         editorTabs->setEditorColors(originalColors.background, originalColors.foreground,
@@ -3530,6 +3492,9 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     auto *syntaxColorEditor = new SyntaxColorEditor(window);
     auto *languageCatalog = new LanguageCatalog(window);
     auto *languageServerEditor = new LanguageServerEditor(window);
+    // P7's Plugins page, the same arrangement again: it holds the rows of
+    // the last scan between the dialog's refresh() calls.
+    auto *pluginCatalog = new PluginCatalog(window);
 
     const FfiWindowGeometry savedGeometry = appSettings->windowGeometry();
     if (savedGeometry.width > 0 && savedGeometry.height > 0) {
@@ -3856,12 +3821,14 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QObject::connect(preferencesAction, &QAction::triggered, window,
                       [window, appSettings, editorTabs, keymapEditor, actions, docManager,
                        mcpStatus, syntaxColorEditor, languageCatalog, languageServerEditor,
-                       languageService, aiProviderEditor, aiChat, uiFontTargets]() {
+                       languageService, aiProviderEditor, aiChat, pluginCatalog,
+                       uiFontTargets]() {
                           showSettingsDialog(window, appSettings, editorTabs, keymapEditor,
                                               *actions, docManager, mcpStatus,
                                               syntaxColorEditor, languageCatalog,
                                               languageServerEditor, languageService,
-                                              aiProviderEditor, aiChat, uiFontTargets);
+                                              aiProviderEditor, aiChat,
+                                              pluginCatalog, uiFontTargets);
                       });
 
     QMenu *editMenu = window->menuBar()->addMenu(QObject::tr("&Edit"));

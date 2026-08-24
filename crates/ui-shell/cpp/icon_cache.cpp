@@ -42,17 +42,16 @@ QPixmap pixmapFor(IconProvider *provider, const QString &key, int logicalPx, qre
     return pixmap;
 }
 
-// The provider every icon in this process is rendered through. Leaked
-// deliberately, as sharedIconCache() is: a QIcon holds a QPixmap, and
+} // namespace
+
+// Leaked deliberately, as sharedIconCache() is: a QIcon holds a QPixmap, and
 // destroying one after the QGuiApplication is gone is a crash rather than a
 // cleanup — which is exactly when a function-local static would run.
-IconProvider *sharedProvider()
+IconProvider *sharedIconProvider()
 {
     static IconProvider *provider = new IconProvider();
     return provider;
 }
-
-} // namespace
 
 IconCache::IconCache(IconProvider *provider)
   : m_provider(provider)
@@ -92,7 +91,7 @@ void IconCache::clear()
 
 IconCache &sharedIconCache()
 {
-    static IconCache *cache = new IconCache(sharedProvider());
+    static IconCache *cache = new IconCache(sharedIconProvider());
     return *cache;
 }
 
@@ -101,7 +100,7 @@ QIcon fileIcon(const QString &path, int logicalPx)
     // Whether a path resolves to an icon at all is the Rust side's answer: an
     // empty key means "no decoration", and iconFor() turns that into a null
     // QIcon.
-    return sharedIconCache().iconFor(sharedProvider()->iconKeyForPath(path, false, false),
+    return sharedIconCache().iconFor(sharedIconProvider()->iconKeyForPath(path, false, false),
                                      logicalPx);
 }
 

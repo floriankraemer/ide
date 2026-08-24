@@ -7,7 +7,7 @@
 //! Qt-thread-only state) or a `OnceLock` (for state background threads
 //! reach), and each `Default` impl takes a handle from here.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use app_core::AppSession;
@@ -39,21 +39,48 @@ pub(crate) struct SharedIcons {
     /// `&mut` only for the renderer's cache, so the interior mutability
     /// stops at this cell rather than reaching into `app-core`.
     pub(crate) service: RefCell<app_core::icons::IconService>,
-    /// Read once at startup from the persisted theme name. P7 makes the
-    /// icon theme a setting and repaints on change; until then a colour
-    /// theme switched at runtime keeps the icons it started with.
-    pub(crate) appearance: app_core::icons::Appearance,
+    /// Which art the colour theme in force asks for. A `Cell` because the
+    /// Appearance page switches themes live and the icons follow within the
+    /// same repaint — a light theme wearing the dark icon set is exactly the
+    /// mismatch the pack ships light variants to avoid.
+    pub(crate) appearance: Cell<app_core::icons::Appearance>,
 }
 
 thread_local! {
+    /// Booting the plugin host: one scan, and everything that comes out of
+    /// it. The icon theme and the wasm tier are two answers to the same
+    /// question — which plugins are loaded — so they are started together
+    /// and from the user's one `disabled_plugins` list.
     static ICONS: Rc<SharedIcons> = Rc::new({
         let config_dir = app_core::resolve_config_dir();
-        let theme = app_config::load(&config_dir).unwrap_or_default();
+        let settings = app_config::load(&config_dir).unwrap_or_default();
+        // Scans and swaps the process-wide registry, which is what the tier
+        // below is then started over — so this call has to come first.
+        let service = app_core::icons::IconService::load(
+            &config_dir,
+            &settings.disabled_plugins,
+            &settings.icon_theme,
+        );
+        start_plugin_tier();
         SharedIcons {
-            service: RefCell::new(app_core::icons::IconService::load(&config_dir)),
-            appearance: app_core::icons::appearance_for_theme(theme.theme_name()),
+            service: RefCell::new(service),
+            appearance: Cell::new(app_core::icons::appearance_for_theme(settings.theme_name())),
         }
     });
+}
+
+/// Start (or restart) the wasm tier over the registry as it stands.
+///
+/// The host services are chosen here because an implementation that routes
+/// a plugin's `notify` to the editor is a Qt object, and this crate is the
+/// only one allowed to hold one. Until that surface exists, the host's own
+/// stderr default is the honest answer — a plugin's diagnostics reach the
+/// log rather than being dropped.
+pub(crate) fn start_plugin_tier() {
+    plugin_host::start_tier(
+        std::sync::Arc::new(plugin_host::StderrServices::default()),
+        plugin_host::WasmLimits::default(),
+    );
 }
 
 pub(crate) fn shared_icons() -> Rc<SharedIcons> {

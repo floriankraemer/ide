@@ -49,7 +49,13 @@ baseline() {
 	# to be visible in a diff and argued for; the alternative — a ratchet
 	# that can never move — means a file awaiting a split can never be
 	# touched at all. The split (F0-4/F0-5) removes this entry entirely.
-	crates/ui-shell/cpp/main_window.cpp) echo 4294 ;;  # split planned (F0-4/F0-5)
+	# Lowered from 4317 by two slices. P6 moved registerAction/applyKeymap to
+	# cpp/keymap_page.cpp. P7 moved Settings > Appearance (the theme and
+	# icon-theme combos, the three font scales, and both halves of what OK and
+	# Cancel mean for them) to cpp/appearance_page.cpp, taking UiFontTargets and
+	# applyUiFontScales with it, and added the Plugins page as its own
+	# cpp/plugins_page.cpp rather than inline for the same reason.
+	crates/ui-shell/cpp/main_window.cpp) echo 4261 ;;  # split planned (F0-4/F0-5)
 	crates/index-core/src/lib.rs) echo 4099 ;;         # no split planned; ratcheted so it cannot grow
 	crates/syntax-core/src/lib.rs) echo 2572 ;;        # no split planned; ratcheted so it cannot grow
 	crates/mcp-server/src/lib.rs) echo 1836 ;;         # no split planned; ratcheted so it cannot grow

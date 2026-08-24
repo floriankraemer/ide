@@ -16,6 +16,7 @@
 pub mod ai;
 pub mod editing;
 pub mod languages;
+pub mod plugins;
 pub mod servers;
 pub mod syntax_colors;
 
@@ -29,6 +30,7 @@ pub use languages::{
     explain, scan_manifests, toggle, LanguageAction, LanguageRow, LanguageSource, LanguageStatus,
     LanguageToggle, ManifestInfo, Problem,
 };
+pub use plugins::{PluginProblem, PluginRow, PluginSource, PluginStatus, PluginToggle};
 pub use servers::{can_have_server, lsp_language_id, ServerDraft, ServerRow, ServerRowStatus};
 pub use syntax_colors::{
     ordered_scopes, scope_family, scope_sample, unknown_scope_warning, unknown_scopes, Origin,

@@ -57,11 +57,48 @@ impl ffi::IconProvider {
             is_dir,
             expanded,
             is_root,
-            self.icons.appearance,
+            self.icons.appearance.get(),
         ) {
             Some(key) => QString::from(key.as_str()),
             None => QString::default(),
         }
+    }
+
+    /// Every icon theme the loaded plugins offer, for the Appearance page's
+    /// combo.
+    pub fn icon_themes(&self) -> Vec<ffi::FfiIconTheme> {
+        app_core::icons::icon_themes(&plugin_host::registry())
+            .into_iter()
+            .map(|choice| ffi::FfiIconTheme {
+                id: QString::from(choice.id.as_str()),
+                label: QString::from(choice.label.as_str()),
+            })
+            .collect()
+    }
+
+    /// Switch the icon theme without persisting anything — the Appearance
+    /// page's live preview, and its Cancel path.
+    ///
+    /// Rebuilt over the registry that is already loaded rather than through
+    /// a rescan: nothing about the plugins on disk has changed, only which
+    /// of their contributions is being drawn.
+    pub fn apply_icon_theme(&self, id: &QString) {
+        *self.icons.service.borrow_mut() =
+            app_core::icons::IconService::from_registry(plugin_host::registry(), &id.to_string());
+    }
+
+    /// Re-read which art the colour theme wants, so a light theme switched
+    /// on in the same dialog gets the pack's light variants.
+    ///
+    /// The mapping from a theme name to an appearance is
+    /// `app_core::icons::appearance_for_theme` — the view passes the name it
+    /// applied and decides nothing.
+    pub fn apply_color_theme(&self, theme_name: &QString) {
+        self.icons
+            .appearance
+            .set(app_core::icons::appearance_for_theme(
+                &theme_name.to_string(),
+            ));
     }
 
     /// Premultiplied RGBA8 for `key` at `px` by `px`, or an empty

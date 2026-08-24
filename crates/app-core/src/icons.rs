@@ -52,6 +52,33 @@ pub fn appearance_for_theme(theme_name: &str) -> Appearance {
 /// back apart unambiguously.
 const KEY_SEPARATOR: char = '/';
 
+/// One entry of the Appearance page's icon-theme combo.
+///
+/// The id is the contribution's, not the plugin's: one plugin may offer
+/// several icon themes, and [`Settings::icon_theme`] persists exactly this
+/// id.
+///
+/// [`Settings::icon_theme`]: ../../../app_config/struct.Settings.html
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IconThemeChoice {
+    pub id: String,
+    pub label: String,
+}
+
+/// Every icon theme the loaded plugins offer, in registry order.
+///
+/// A disabled plugin contributes nothing, so it is absent here — which is
+/// what keeps the combo a list of themes the user can actually get.
+pub fn icon_themes(registry: &PluginRegistry) -> Vec<IconThemeChoice> {
+    registry
+        .icon_themes()
+        .map(|(_, theme)| IconThemeChoice {
+            id: theme.id.clone(),
+            label: theme.label.clone(),
+        })
+        .collect()
+}
+
 /// The icon theme that is active right now, if any.
 ///
 /// Always constructible, even with no plugin offering an icon theme: the
@@ -82,22 +109,21 @@ struct ActiveTheme {
 }
 
 impl IconService {
-    /// Scan `<config_dir>/plugins`, swap the result into the live registry,
-    /// and take the first icon theme it offers.
-    pub fn load(config_dir: &Path) -> Self {
-        // The user's `disabled_plugins` list is P7's; until that setting
-        // exists there is nothing to filter by.
-        plugin_host::reload(config_dir, &[]);
-        Self::from_registry(plugin_host::registry())
+    /// Scan `<config_dir>/plugins` minus the plugins in `disabled`, swap the
+    /// result into the live registry, and take the icon theme `preferred`
+    /// names.
+    pub fn load(config_dir: &Path, disabled: &[String], preferred: &str) -> Self {
+        plugin_host::reload(config_dir, disabled);
+        Self::from_registry(plugin_host::registry(), preferred)
     }
 
     /// Build the service over an already-scanned registry.
     ///
     /// The registry is a parameter so a test can drive the real resolution
     /// path over its own fixtures without touching the process-wide one.
-    pub fn from_registry(registry: Arc<PluginRegistry>) -> Self {
+    pub fn from_registry(registry: Arc<PluginRegistry>, preferred: &str) -> Self {
         Self {
-            active: ActiveTheme::first(registry),
+            active: ActiveTheme::choose(registry, preferred),
         }
     }
 
@@ -173,14 +199,22 @@ impl IconService {
 }
 
 impl ActiveTheme {
-    /// The first `icon-themes` contribution the registry offers, skipping
-    /// any whose pack file does not read or parse.
+    /// The `icon-themes` contribution whose id is `preferred`, or — when
+    /// nothing offers that id — the first one the registry has, skipping in
+    /// either case any whose pack file does not read or parse.
     ///
-    /// P7 replaces this with the id persisted in settings; until there is a
-    /// setting to read there is nothing to choose between, and inventing a
-    /// key here would be inventing P7's schema.
-    fn first(registry: Arc<PluginRegistry>) -> Option<Self> {
-        let (plugin_id, pack_dir, pack) = registry.icon_themes().find_map(|(plugin, theme)| {
+    /// Falling back rather than going without is the point: `preferred`
+    /// names one plugin's contribution, and that plugin can be disabled,
+    /// uninstalled or broken between one launch and the next. A setting that
+    /// outlives its plugin must not cost the user every icon in the tree,
+    /// and the empty string — never chosen — takes the same path.
+    fn choose(registry: Arc<PluginRegistry>, preferred: &str) -> Option<Self> {
+        let mut offered: Vec<_> = registry.icon_themes().collect();
+        // A stable sort on "is not the preferred one", so the chosen theme
+        // moves to the front and every other keeps the registry's own
+        // installed-then-built-in order behind it.
+        offered.sort_by_key(|(_, theme)| theme.id != preferred);
+        let (plugin_id, pack_dir, pack) = offered.into_iter().find_map(|(plugin, theme)| {
             let text = plugin.read_asset(&theme.pack).ok()?;
             let pack = IconPack::from_toml_str(&String::from_utf8(text.into_owned()).ok()?).ok()?;
             let pack_dir = theme.pack.parent().unwrap_or(Path::new("")).to_path_buf();
@@ -247,13 +281,16 @@ mod tests {
     /// The real Material pack, embedded in the binary, loaded through the
     /// real registry — the join is only worth testing against the thing it
     /// joins.
-    fn material() -> IconService {
-        let registry = plugin_host::load(
+    fn builtin_registry(disabled: &[String]) -> Arc<PluginRegistry> {
+        Arc::new(plugin_host::load(
             Path::new("/nonexistent-config-dir"),
             plugin_host::BUILTIN_PLUGINS,
-            &[],
-        );
-        IconService::from_registry(Arc::new(registry))
+            disabled,
+        ))
+    }
+
+    fn material() -> IconService {
+        IconService::from_registry(builtin_registry(&[]), "material")
     }
 
     fn key(service: &IconService, path: &str, is_dir: bool, expanded: bool) -> String {
@@ -350,8 +387,35 @@ mod tests {
     }
 
     #[test]
+    fn the_combo_lists_what_the_loaded_plugins_offer_and_a_disabled_plugin_offers_nothing() {
+        assert_eq!(
+            icon_themes(&builtin_registry(&[])),
+            vec![IconThemeChoice {
+                id: "material".to_string(),
+                label: "Material Icon Theme".to_string(),
+            }]
+        );
+        // Disabling the plugin, by *plugin* id, takes its contribution with
+        // it — the page can no longer offer a theme nothing can draw.
+        let without = builtin_registry(&["material-icons".to_string()]);
+        assert!(icon_themes(&without).is_empty());
+        assert_eq!(
+            IconService::from_registry(without, "material").active_pack_id(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_chosen_theme_that_no_longer_exists_falls_back_instead_of_going_bare() {
+        // The setting outlives the plugin that offered it: uninstalled,
+        // renamed, or simply a typo in a hand-edited settings.toml.
+        let service = IconService::from_registry(builtin_registry(&[]), "no-such-theme");
+        assert_eq!(service.active_pack_id(), Some("material"));
+    }
+
+    #[test]
     fn a_registry_with_no_icon_theme_answers_none_rather_than_failing() {
-        let service = IconService::from_registry(Arc::new(PluginRegistry::default()));
+        let service = IconService::from_registry(Arc::new(PluginRegistry::default()), "");
         assert_eq!(service.active_pack_id(), None);
         assert_eq!(
             service.icon_key(
