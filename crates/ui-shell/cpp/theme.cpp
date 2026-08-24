@@ -1,10 +1,173 @@
 #include "theme.h"
 
 #include <QApplication>
+#include <QEvent>
 #include <QFont>
 #include <QWidget>
 
 namespace ui_shell {
+
+// Field order follows the declaration in theme.h: bar, tab, tabText,
+// selected, selectedText, hover, hoverText, accent, closeHover, pane,
+// paneBorder. The values are the ones each theme's sheet already used, plus
+// the hover and accent shades the two older themes never had.
+TabColors tabColorsForTheme(const QString &themeName)
+{
+    if (themeName == QStringLiteral("light")) {
+        return TabColors{QColor(QStringLiteral("#e6e6e6")), QColor(QStringLiteral("#eeeeee")),
+                         QColor(QStringLiteral("#5f5f5f")), QColor(QStringLiteral("#ffffff")),
+                         QColor(QStringLiteral("#000000")), QColor(QStringLiteral("#e4e4e4")),
+                         QColor(QStringLiteral("#1a1a1a")), QColor(QStringLiteral("#4b6eaf")),
+                         QColor(QStringLiteral("#cfcfcf")), QColor(QStringLiteral("#ffffff")),
+                         QColor(QStringLiteral("#d0d0d0"))};
+    }
+    if (themeName == QStringLiteral("vscode-dark")) {
+        return TabColors{QColor(QStringLiteral("#252526")), QColor(QStringLiteral("#2d2d2d")),
+                         QColor(QStringLiteral("#969696")), QColor(QStringLiteral("#1e1e1e")),
+                         QColor(QStringLiteral("#ffffff")), QColor(QStringLiteral("#1f1f1f")),
+                         QColor(QStringLiteral("#cccccc")), QColor(QStringLiteral("#007acc")),
+                         QColor(QStringLiteral("#4f4f4f")), QColor(QStringLiteral("#1e1e1e")),
+                         QColor()};
+    }
+    return TabColors{QColor(QStringLiteral("#3c3f41")), QColor(QStringLiteral("#3c3f41")),
+                     QColor(QStringLiteral("#a9b7c6")), QColor(QStringLiteral("#4e5254")),
+                     QColor(QStringLiteral("#ffffff")), QColor(QStringLiteral("#45484a")),
+                     QColor(QStringLiteral("#cbd6e2")), QColor(QStringLiteral("#4b6eaf")),
+                     QColor(QStringLiteral("#5e6060")), QColor(QStringLiteral("#2b2b2b")),
+                     QColor(QStringLiteral("#2b2b2b"))};
+}
+
+QString tabStyleSheet(const TabColors &colors)
+{
+    // The metrics below are deliberately theme-independent — a tab is one
+    // shape in this product, and only its colours change with the theme.
+    //
+    // Two of them exist to fix what the default style does:
+    //   * Qt reserves a whole close-indicator width between the label and the
+    //     [x] and leaves nothing between the [x] and the tab's edge. Here the
+    //     close button carries its own 2px gap to the label and the tab's
+    //     right padding is what separates it from the edge. That rule stays
+    //     margins-only on purpose: give the subcontrol a size, a background
+    //     or a border and QStyleSheetStyle stops asking the platform style
+    //     for the [x] glyph and draws an empty box instead.
+    //   * the top marker is reserved on every tab, selected or not, so
+    //     selecting one shifts no label by a pixel.
+    const QString paneBorder = colors.paneBorder.isValid()
+        ? QStringLiteral("1px solid %1").arg(colors.paneBorder.name())
+        : QStringLiteral("none");
+
+    return QStringLiteral(R"(
+QTabWidget::pane {
+    background-color: %1;
+    border: %2;
+}
+
+QTabBar {
+    background-color: %3;
+    border: none;
+}
+
+QTabBar::tab {
+    background-color: %4;
+    color: %5;
+    padding: 6px 8px 6px 10px;
+    border: none;
+    border-top: 2px solid transparent;
+}
+
+QTabBar::tab:selected {
+    background-color: %6;
+    color: %7;
+    border-top: 2px solid %8;
+}
+
+QTabBar::tab:hover:!selected {
+    background-color: %9;
+    color: %10;
+}
+
+QTabBar::close-button {
+    subcontrol-position: right;
+    margin-left: 2px;
+}
+)")
+        .arg(colors.pane.name(), paneBorder, colors.bar.name(), colors.tab.name(),
+             colors.tabText.name(), colors.selected.name(), colors.selectedText.name(),
+             colors.accent.name(), colors.hover.name(), colors.hoverText.name());
+}
+
+QString dockTabStyleSheet(const TabColors &colors)
+{
+    // Appended to the dock manager's own sheet by restyleDockManagers(), so
+    // these repeat ADS's selectors verbatim and win on being later. Reaching
+    // them from qApp's sheet is not possible however specific the selector is
+    // made: Qt gives a widget's own stylesheet priority over the
+    // application's, and ADS installs one on the dock manager.
+    //
+    // Vertical padding is 4px rather than the 6px a QTabBar tab gets because
+    // an ADS tab lays its label out with margins of its own on top.
+    return QStringLiteral(R"(
+ads--CDockAreaWidget, ads--CDockAreaTitleBar {
+    background-color: %1;
+    border: none;
+}
+
+ads--CDockWidgetTab {
+    background: %2;
+    border: none;
+    border-top: 2px solid transparent;
+    padding: 4px 8px 4px 4px;
+}
+
+ads--CDockWidgetTab QLabel {
+    color: %3;
+    /* The global `QWidget { background-color: ... }` rule would otherwise
+       paint a box of the window colour behind every tab label. */
+    background: transparent;
+}
+
+ads--CDockWidgetTab:hover {
+    background: %4;
+}
+
+ads--CDockWidgetTab:hover QLabel {
+    color: %5;
+    background: transparent;
+}
+
+ads--CDockWidgetTab[activeTab="true"] {
+    background: %6;
+    border-top: 2px solid %7;
+}
+
+ads--CDockWidgetTab[activeTab="true"] QLabel {
+    color: %8;
+    background: transparent;
+}
+
+ads--CDockWidgetTab #tabCloseButton {
+    background: none;
+    border: none;
+    margin: 0px 0px 0px 2px;
+    padding: 0px;
+    qproperty-iconSize: 12px;
+}
+
+ads--CDockWidgetTab #tabCloseButton:hover {
+    background: %9;
+    border: none;
+    border-radius: 3px;
+}
+
+ads--CDockWidgetTab #tabCloseButton:pressed {
+    background: %10;
+}
+)")
+        .arg(colors.bar.name(), colors.tab.name(), colors.tabText.name(), colors.hover.name(),
+             colors.hoverText.name(), colors.selected.name(), colors.accent.name(),
+             colors.selectedText.name())
+        .arg(colors.closeHover.name(), tinted(colors.closeHover, 130, 115).name());
+}
 
 // Embedded as a compile-time string constant rather than a .qrc/rcc
 // resource or an install-relative asset directory (open question from the
@@ -54,24 +217,6 @@ QTreeView::item:selected, QAbstractItemView::item:selected {
     background-color: #214283;
 }
 
-QTabWidget::pane {
-    border: 1px solid #2b2b2b;
-    background-color: #2b2b2b;
-}
-
-QTabBar::tab {
-    background-color: #3c3f41;
-    color: #a9b7c6;
-    padding: 6px 12px;
-    border: 1px solid #2b2b2b;
-    border-bottom: none;
-}
-
-QTabBar::tab:selected {
-    background-color: #4e5254;
-    color: #ffffff;
-}
-
 QSplitter::handle {
     background-color: #3c3f41;
 }
@@ -100,7 +245,7 @@ QLineEdit, QPlainTextEdit {
     color: #a9b7c6;
     border: 1px solid #3c3f41;
 }
-)");
+)") + tabStyleSheet(tabColorsForTheme(QStringLiteral("dark")));
 }
 
 QString lightStyleSheet()
@@ -145,24 +290,6 @@ QTreeView::item:selected, QAbstractItemView::item:selected {
     background-color: #90caf9;
 }
 
-QTabWidget::pane {
-    border: 1px solid #d0d0d0;
-    background-color: #ffffff;
-}
-
-QTabBar::tab {
-    background-color: #eeeeee;
-    color: #1a1a1a;
-    padding: 6px 12px;
-    border: 1px solid #d0d0d0;
-    border-bottom: none;
-}
-
-QTabBar::tab:selected {
-    background-color: #ffffff;
-    color: #000000;
-}
-
 QSplitter::handle {
     background-color: #eeeeee;
 }
@@ -191,7 +318,7 @@ QLineEdit, QPlainTextEdit {
     color: #1a1a1a;
     border: 1px solid #d0d0d0;
 }
-)");
+)") + tabStyleSheet(tabColorsForTheme(QStringLiteral("light")));
 }
 
 // Dark+ (default dark) as VS Code ships it: the same selector set as the two
@@ -250,31 +377,6 @@ QTreeView::item:hover, QAbstractItemView::item:hover {
     background-color: #2a2d2e;
 }
 
-QTabWidget::pane {
-    border: none;
-    background-color: #1e1e1e;
-}
-
-QTabBar::tab {
-    background-color: #2d2d2d;
-    color: #969696;
-    padding: 7px 12px;
-    border: none;
-    /* Reserved even when unselected, so selecting a tab shifts no label. */
-    border-top: 1px solid transparent;
-}
-
-QTabBar::tab:selected {
-    background-color: #1e1e1e;
-    color: #ffffff;
-    border-top: 1px solid #007acc;
-}
-
-QTabBar::tab:hover:!selected {
-    background-color: #1f1f1f;
-    color: #cccccc;
-}
-
 QSplitter::handle {
     background-color: #2b2b2b;
 }
@@ -328,7 +430,7 @@ QLineEdit, QPlainTextEdit {
 QLineEdit:focus, QPlainTextEdit:focus {
     border: 1px solid #007fd4;
 }
-)");
+)") + tabStyleSheet(tabColorsForTheme(QStringLiteral("vscode-dark")));
 }
 
 ThemeColors colorsForTheme(const QString &themeName)
@@ -505,6 +607,61 @@ QPalette vscodeDarkPalette()
 // Darcula, so that is what an un-applied theme reports too.
 QString activeTheme = QStringLiteral("dark");
 
+// ADS keeps the stylesheet it installed on the dock manager here, so every
+// re-style starts from its rules instead of stacking ours on themselves.
+const char *const kAdsBaseStyleSheet = "ideAdsBaseStyleSheet";
+
+void restyleDockManager(QWidget *dockManager)
+{
+    if (dockManager == nullptr) {
+        return;
+    }
+    if (!dockManager->property(kAdsBaseStyleSheet).isValid()) {
+        dockManager->setProperty(kAdsBaseStyleSheet, dockManager->styleSheet());
+    }
+    dockManager->setStyleSheet(dockManager->property(kAdsBaseStyleSheet).toString()
+                               + dockTabStyleSheet(tabColorsForTheme(activeTheme)));
+}
+
+bool isDockManager(const QObject *object)
+{
+    return object->inherits("ads::CDockManager");
+}
+
+// run_app() themes the application before any window exists, so the dock
+// manager is always born after the theme it has to wear. Rather than have
+// main_window.cpp announce it — that file may only shrink until F0-4b/F0-5
+// split it (scripts/check-file-size.sh) — theme.cpp styles every dock manager
+// the moment Qt polishes it.
+class DockManagerWatcher : public QObject
+{
+public:
+    bool eventFilter(QObject *watched, QEvent *event) override
+    {
+        if (event->type() == QEvent::Polish && isDockManager(watched)) {
+            restyleDockManager(qobject_cast<QWidget *>(watched));
+        }
+        return QObject::eventFilter(watched, event);
+    }
+};
+
+void restyleDockManagers()
+{
+    static DockManagerWatcher *watcher = [] {
+        auto *installed = new DockManagerWatcher;
+        qApp->installEventFilter(installed);
+        return installed;
+    }();
+    Q_UNUSED(watcher)
+
+    const QWidgetList widgets = QApplication::allWidgets();
+    for (QWidget *widget : widgets) {
+        if (isDockManager(widget)) {
+            restyleDockManager(widget);
+        }
+    }
+}
+
 } // namespace
 
 QPalette paletteForTheme(const QString &themeName)
@@ -531,6 +688,7 @@ void applyTheme(const QString &themeName)
     // `palette(...)` reference in it, including the ones inside the dock
     // manager's own sheet.
     qApp->setStyleSheet(styleSheetForTheme(themeName));
+    restyleDockManagers();
 }
 
 namespace {
@@ -568,6 +726,7 @@ void applyUiFontScale(int percent)
     // the sheet re-polishes every widget against the new application font —
     // the same trick applyTheme() uses to re-resolve palette() references.
     qApp->setStyleSheet(styleSheetForTheme(activeThemeName()));
+    restyleDockManagers();
 }
 
 void applyWidgetFontScale(QWidget *widget, int percent)
