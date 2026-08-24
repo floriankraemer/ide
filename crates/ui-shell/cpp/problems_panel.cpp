@@ -1,5 +1,6 @@
 #include "problems_panel.h"
 
+#include "icon_cache.h"
 #include "theme.h"
 
 #include <QApplication>
@@ -202,6 +203,7 @@ void ProblemsPanel::refresh()
             inGroup = 0;
             group = new QTreeWidgetItem(tree_);
             group->setData(0, kPathRole, path);
+            group->setIcon(0, fileIcon(path, smallIconPx(tree_)));
             group->setFirstColumnSpanned(true);
             group->setExpanded(true);
             if (path == currentFile_) {

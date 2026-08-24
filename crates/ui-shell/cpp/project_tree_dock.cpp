@@ -1,6 +1,7 @@
 #include "project_tree_dock.h"
 
 #include "ai_chat_panel.h"
+#include "icon_cache.h"
 #include "icon_decoration_proxy.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
@@ -20,7 +21,6 @@
 #include <QPoint>
 #include <QSize>
 #include <QStatusBar>
-#include <QStyle>
 #include <QTreeView>
 
 namespace ui_shell {
@@ -40,22 +40,19 @@ int treeRole(ProjectTreeModel::Roles role)
 
 QTreeView *createProjectTreeDock(ads::CDockManager *dockManager,
                                   ads::CDockAreaWidget *editorArea,
-                                  ProjectTreeModel *treeModel,
-                                  IconProvider *iconProvider)
+                                  ProjectTreeModel *treeModel)
 {
     auto *treeView = new QTreeView();
     // The style's small-icon metric rather than a literal 16: it already
     // follows the platform's own scaling settings.
-    const int iconPx = treeView->style()->pixelMetric(QStyle::PM_SmallIconSize);
+    const int iconPx = smallIconPx(treeView);
     treeView->setIconSize(QSize(iconPx, iconPx));
 
     // Between model and view, never inside the model: the icon key is the
     // Rust side's answer, and turning it into a decoration is the only part
     // that needs a QIcon. See icon_decoration_proxy.h.
-    auto *proxy = new IconDecorationProxy(treeRole(ProjectTreeModel::Roles::IconKey),
-                                          iconProvider,
-                                          iconPx,
-                                          treeView);
+    auto *proxy =
+      new IconDecorationProxy(treeRole(ProjectTreeModel::Roles::IconKey), iconPx, treeView);
     proxy->setSourceModel(treeModel);
 
     treeView->setModel(proxy);

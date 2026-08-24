@@ -6,6 +6,7 @@
 #include "e2e_mark.h"
 #include "find_bar.h"
 #include "hex_viewer.h"
+#include "icon_cache.h"
 #include "keymap_page.h"
 #include "language_servers_page.h"
 #include "languages_page.h"
@@ -1223,6 +1224,9 @@ private:
 
         QWidget *page = group->widget(index);
         const QString title = group->tabText(index);
+        // A split moves the page rather than reopening it, and removeTab
+        // drops the decoration along with the tab.
+        const QIcon icon = group->tabIcon(index);
 
         QSplitter *target = parent;
         int insertPos = parent->indexOf(group) + 1;
@@ -1250,7 +1254,7 @@ private:
         auto *newGroup = makeGroup();
         target->insertWidget(insertPos, newGroup);
         group->removeTab(index);
-        newGroup->addTab(page, title);
+        newGroup->addTab(page, icon, title);
         suspendActivation_ = false;
 
         target->setSizes(evenSizes(target));
@@ -1308,10 +1312,14 @@ private:
     }
 
     // Label rendering: the session's display title verbatim, plus the
-    // view's own unsaved-changes dot.
+    // view's own unsaved-changes dot — and the icon the tab's filename
+    // resolves to, which is why a rename or a Save As repaints it here.
     void renderTabText(QTabWidget *group, int index, const QString &title, bool modified)
     {
         group->setTabText(index, modified ? title + QStringLiteral(" •") : title);
+        group->setTabIcon(index,
+                          fileIcon(docManager_->tabPath(tabIdAt(group, index)),
+                                   group->iconSize().width()));
     }
 
     // Writes the tab's content to disk. Shows an error dialog and leaves the
@@ -1475,6 +1483,7 @@ private:
             return rows;
         });
         group->addTab(viewer, title);
+        renderTabText(group, group->indexOf(viewer), title, false);
         markTab("tab_added", tabId, group, group->indexOf(viewer), title);
     }
 
@@ -1638,6 +1647,7 @@ public:
                  qOverload<>(&QTimer::start));
 
         group->addTab(editor, title);
+        renderTabText(group, group->indexOf(editor), title, false);
         markTab("tab_added", tabId, group, group->indexOf(editor), title);
         applyDiagnostics();
     }
@@ -2854,34 +2864,6 @@ void populateRecentProjectsMenu(QMenu *menu, AppSettings *appSettings, ProjectTr
 // through `appSettings`, Cancel restores exactly what was active when the
 // dialog opened. Modal and blocking, so every lambda below capturing
 // `&dialog` only ever runs while `dialog` is still alive on this stack frame.
-// Adds a menu action whose shortcut comes from the persisted keymap rather
-// than a literal QKeySequence, and records it under its stable action id so
-// Settings > Keymap can re-apply a rebinding without rebuilding the menus.
-//
-// `id` must be one of app_config::ACTIONS' ids — that catalog, not this file,
-// is where an action's default shortcut lives.
-QAction *registerAction(QMenu *menu, const QString &id, const QString &text,
-                         AppSettings *appSettings, QHash<QString, QAction *> &actions)
-{
-    QAction *action = menu->addAction(text);
-    action->setShortcut(
-      QKeySequence(appSettings->shortcutFor(id), QKeySequence::PortableText));
-    actions.insert(id, action);
-    return action;
-}
-
-// Re-reads every registered action's shortcut from settings — run after the
-// Keymap page commits, so a rebinding takes effect without a restart. An
-// action left unbound gets an empty QKeySequence, which Qt renders as no
-// accelerator at all.
-void applyKeymap(const QHash<QString, QAction *> &actions, AppSettings *appSettings)
-{
-    for (auto it = actions.constBegin(); it != actions.constEnd(); ++it) {
-        it.value()->setShortcut(
-          QKeySequence(appSettings->shortcutFor(it.key()), QKeySequence::PortableText));
-    }
-}
-
 // The two widgets that carry an interface font scale of their own, plus the
 // one widget whose size is derived from a font metric and therefore has to be
 // recomputed whenever a scale changes.
@@ -3256,8 +3238,7 @@ struct CentralWidgets
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
                                    DocumentManager *docManager, AppSettings *appSettings,
                                    SearchModel *searchModel, TerminalSession *terminalSession,
-                                   LanguageService *languageService, AiChat *aiChat,
-                                   IconProvider *iconProvider)
+                                   LanguageService *languageService, AiChat *aiChat)
 {
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
@@ -3276,7 +3257,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // into equal shares and squeezing the editor down to nothing.
     auto *editorArea = dockManager->setCentralWidget(editorDock);
 
-    QTreeView *treeView = createProjectTreeDock(dockManager, editorArea, treeModel, iconProvider);
+    QTreeView *treeView = createProjectTreeDock(dockManager, editorArea, treeModel);
 
     auto *editorTabs = new EditorTabs(docManager, languageService, editorRoot, window);
 
@@ -3562,10 +3543,6 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     progress(2, QObject::tr("Starting services..."));
 
     auto *treeModel = new ProjectTreeModel(window);
-    // One per window, alongside the other adapters. Constructing it loads
-    // the plugin registry and the active icon pack, so it is built before
-    // the widgets that ask it for icons.
-    auto *iconProvider = new IconProvider(window);
     auto *docManager = new DocumentManager(window);
     auto *searchModel = new SearchModel(window);
     // Task F3: one terminal session for the one "Terminal" dock widget —
@@ -3605,7 +3582,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     progress(3, QObject::tr("Building workspace..."));
     const CentralWidgets central =
       buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession,
-                          languageService, aiChat, iconProvider);
+                          languageService, aiChat);
     EditorTabs *editorTabs = central.editorTabs;
 
     // Every path that shows the AI chat goes through here, because a dock

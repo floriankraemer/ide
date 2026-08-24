@@ -124,6 +124,14 @@ impl IconService {
         appearance: Appearance,
     ) -> Option<String> {
         let theme = self.active.as_ref()?;
+        // A row that names no file has nothing to resolve an icon from, and
+        // the pack's default would claim it was one anyway: Search
+        // Everywhere's action rows carry no path at all. Folders are exempt
+        // — a project opened at a filesystem root is nameless but still a
+        // folder, and the pack's root icon does not depend on its name.
+        if !is_dir && path.file_name().is_none() {
+            return None;
+        }
         let name = path
             .file_name()
             .map(|n| n.to_string_lossy())
@@ -373,6 +381,23 @@ mod tests {
         assert!(
             pixels.chunks_exact(4).any(|p| p[3] != 0),
             "a rasterised icon must have opaque pixels somewhere"
+        );
+    }
+
+    #[test]
+    fn a_row_that_names_no_file_gets_no_icon_at_all() {
+        // Search Everywhere lists actions alongside files; an action row has
+        // no path, and the pack's default file icon would dress it up as one.
+        let service = material();
+        assert_eq!(
+            service.icon_key(Path::new(""), false, false, false, Appearance::Dark),
+            None
+        );
+        // A folder is still a folder even where the filesystem gives it no
+        // name — a project opened at the root.
+        assert_eq!(
+            service.icon_key(Path::new("/"), true, false, true, Appearance::Dark),
+            Some("material/folder-root".to_string())
         );
     }
 

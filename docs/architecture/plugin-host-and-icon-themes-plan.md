@@ -36,7 +36,7 @@ A fresh session should read this table (and `git log`) before picking up work, p
 | P3 — `icon-theme`: pack model, resolver, `resvg` rasteriser, cache, ADR-0027 | done | #92 |
 | P4 — Material import script + vendored pack under `third_party/` | in review | #94 |
 | P5 — FFI seam + project tree icons | in review | #96 |
-| P6 — icons in editor tabs and the search/result lists | blocked on P5 |  |
+| P6 — icons in editor tabs and the search/result lists | in review | #97 |
 | P7 — settings: icon theme choice, disabled plugins, Plugins page | blocked on P5 |  |
 | P8 — wasm tier: runtime, capabilities, limits, `commands`, ADR-0028 | in review | #95 |
 | P9 — docs truth-up and the end-to-end pass | blocked on P6, P7, P8 |  |
@@ -99,6 +99,13 @@ Pixels cross as premultiplied RGBA8 and are wrapped with `QImage::Format_RGBA888
 
 Editor tab icons on open and rename; icons in Search Everywhere, the Search Results dock and the Problems dock.
 All four call `iconKeyForPath` plus `IconCache::iconFor` at the point they build a row — the proxy model is for the tree only.
+
+Both calls are wrapped as `ui_shell::fileIcon(path, px)` over a process-wide `sharedIconCache()`, which is also what the tree's proxy now reads through.
+Five call sites over one cache rather than five caches: the pixels behind a key are already memoised once on the Rust side, so a second cache would only decode the same image again, and P7's theme switch has one cache to clear rather than five.
+The `IconProvider` a window used to own therefore has no callers left and is gone; the shared cache builds its own, which is equivalent because the Rust struct behind it holds nothing but handles on `bridge::registry::shared_icons`.
+
+A row that names no file — Search Everywhere lists actions beside files — resolves to no icon at all rather than to the pack's default, which would dress an action up as a file.
+That is a rule, so it is `IconService::icon_key`'s and has a unit test; the view only ever sees an empty key.
 
 ### P7 — settings
 

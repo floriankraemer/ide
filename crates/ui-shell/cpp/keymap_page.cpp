@@ -2,6 +2,7 @@
 
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
+#include <QAction>
 #include <QFont>
 #include <QHash>
 #include <QHBoxLayout>
@@ -9,6 +10,7 @@
 #include <QKeySequence>
 #include <QKeySequenceEdit>
 #include <QLabel>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QStringList>
@@ -175,6 +177,23 @@ QWidget *buildKeymapPage(QWidget *parent, KeymapEditor *editor)
     });
 
     return page;
+}
+
+QAction *registerAction(QMenu *menu, const QString &id, const QString &text,
+                        AppSettings *appSettings, QHash<QString, QAction *> &actions)
+{
+    QAction *action = menu->addAction(text);
+    action->setShortcut(QKeySequence(appSettings->shortcutFor(id), QKeySequence::PortableText));
+    actions.insert(id, action);
+    return action;
+}
+
+void applyKeymap(const QHash<QString, QAction *> &actions, AppSettings *appSettings)
+{
+    for (auto it = actions.constBegin(); it != actions.constEnd(); ++it) {
+        it.value()->setShortcut(
+          QKeySequence(appSettings->shortcutFor(it.key()), QKeySequence::PortableText));
+    }
 }
 
 } // namespace ui_shell

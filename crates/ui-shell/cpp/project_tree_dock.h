@@ -4,7 +4,6 @@
 #include <functional>
 
 class AiChat;
-class IconProvider;
 class ProjectTreeModel;
 
 class QMainWindow;
@@ -45,8 +44,7 @@ struct ProjectTreeActions
 // scale.
 QTreeView *createProjectTreeDock(ads::CDockManager *dockManager,
                                  ads::CDockAreaWidget *editorArea,
-                                 ProjectTreeModel *treeModel,
-                                 IconProvider *iconProvider);
+                                 ProjectTreeModel *treeModel);
 
 // Wires the tree's gestures: click to open, right-click for the
 // create/rename/delete/attach menu (US-2b). Separate from construction only

@@ -32,7 +32,12 @@ exempt() {
 # by the time they were enforced.
 baseline() {
 	case "$1" in
-	# Lowered from 4479 by the first slice of the split: the project-tree
+	# Lowered from 4317 by P6: registerAction/applyKeymap moved next to the
+	# Settings > Keymap page they serve, which is what paid for the tab-icon
+	# lines. A baselined file cannot grow, so a change that has to touch this
+	# one has to take something out of it first — that is the ratchet working.
+	#
+	# Previously lowered from 4479 by the first slice of the split: the project-tree
 	# dock (its construction, its click and context-menu wiring, and
 	# showAiChatDock next to them) moved to cpp/project_tree_dock.cpp, which
 	# is also where P5's icon-decoration proxy is wired in. Wiring it here
@@ -44,7 +49,7 @@ baseline() {
 	# to be visible in a diff and argued for; the alternative — a ratchet
 	# that can never move — means a file awaiting a split can never be
 	# touched at all. The split (F0-4/F0-5) removes this entry entirely.
-	crates/ui-shell/cpp/main_window.cpp) echo 4317 ;;  # split planned (F0-4/F0-5)
+	crates/ui-shell/cpp/main_window.cpp) echo 4294 ;;  # split planned (F0-4/F0-5)
 	crates/index-core/src/lib.rs) echo 4099 ;;         # no split planned; ratcheted so it cannot grow
 	crates/syntax-core/src/lib.rs) echo 2572 ;;        # no split planned; ratcheted so it cannot grow
 	crates/mcp-server/src/lib.rs) echo 1836 ;;         # no split planned; ratcheted so it cannot grow

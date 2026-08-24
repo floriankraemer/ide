@@ -2,6 +2,7 @@
 
 #include "e2e_mark.h"
 #include "highlight_delegate.h"
+#include "icon_cache.h"
 #include "search_results_panel.h"
 
 #include <QAction>
@@ -214,6 +215,9 @@ void SearchEverywhereDialog::appendHits(quint64 generation, const ::rust::Vec<Ff
         auto *item = new QListWidgetItem(
           detail.isEmpty() ? text : tr("%1    %2").arg(text, detail), results_);
         item->setData(kPathRole, hit.path);
+        // A null icon for an action row, which names no file — the Rust side
+        // answers with no key at all rather than the pack's default.
+        item->setIcon(ui_shell::fileIcon(QString(hit.path), ui_shell::smallIconPx(results_)));
         item->setData(kLineRole, hit.line);
         item->setData(kActionRole, hit.action_id);
 

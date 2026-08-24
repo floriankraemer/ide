@@ -4,8 +4,6 @@
 
 #include <QIdentityProxyModel>
 
-class IconProvider;
-
 namespace ui_shell {
 
 // Answers Qt::DecorationRole from the source model's icon-key role.
@@ -24,20 +22,18 @@ class IconDecorationProxy : public QIdentityProxyModel
     Q_OBJECT
 
 public:
-    IconDecorationProxy(int iconKeyRole, IconProvider *provider, int logicalPx, QObject *parent);
+    IconDecorationProxy(int iconKeyRole, int logicalPx, QObject *parent);
 
     QVariant data(const QModelIndex &index, int role) const override;
 
     // Forget every cached QIcon — the icon theme changed, so the art behind
-    // every key did too.
+    // every key did too. Shared with the tabs and the result lists, whose art
+    // changed with it.
     void clearIcons();
 
 private:
     int m_iconKeyRole;
     int m_logicalPx;
-    // Mutable because data() is const and the cache is a memo, not state the
-    // model exposes: filling it changes nothing an observer can see.
-    mutable IconCache m_cache;
 };
 
 } // namespace ui_shell
