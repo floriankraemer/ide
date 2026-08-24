@@ -35,7 +35,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F0-2 — bridge.rs split, part 1 | done | 02b1fa2 (#78) |
 | F0-3 — bridge.rs split, part 2 | done | 02b1fa2 (#78) |
 | F0-4a — main_window.cpp split, part 1: `EditorTabs` | in review | #100 |
-| F0-4b — main_window.cpp split, part 1: `ClassViewPanel`, `FindUsagesPanel`, `IdeMainWindow` | todo |  |
+| F0-4b — main_window.cpp split, part 1: `ClassViewPanel`, `FindUsagesPanel`, `IdeMainWindow` | in review | #101 |
 | F0-5 — main_window.cpp split, part 2 | blocked on F0-4b |  |
 | F0-6 — settings dialog extraction + `SettingsContext` | blocked on F0-5 |  |
 | F0-7 — dock registry and general reconciliation | blocked on F0-6 |  |

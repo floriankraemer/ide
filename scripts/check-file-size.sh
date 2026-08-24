@@ -62,7 +62,13 @@ baseline() {
 	# cpp/editor_tabs_panes.cpp and cpp/editor_tabs_lsp.cpp — one class, three
 	# translation units, because the whole of it does not fit under the
 	# 1200-line ceiling and adding a fourth baseline would defeat the point.
-	crates/ui-shell/cpp/main_window.cpp) echo 2476 ;;  # split continues (F0-4b/F0-5)
+	# Lowered from 2476 by F0-4b: ClassViewPanel, FindUsagesPanel and
+	# IdeMainWindow moved to cpp/class_view_panel.{h,cpp},
+	# cpp/find_usages_panel.{h,cpp} and cpp/ide_main_window.{h,cpp}, taking
+	# the file-local symbolKindLabel helper (used only by ClassViewPanel)
+	# with them. One class per header, one source each — all three fit
+	# comfortably under the 1200-line ceiling.
+	crates/ui-shell/cpp/main_window.cpp) echo 2038 ;;  # split continues (F0-5)
 	crates/index-core/src/lib.rs) echo 4099 ;;         # no split planned; ratcheted so it cannot grow
 	crates/syntax-core/src/lib.rs) echo 2572 ;;        # no split planned; ratcheted so it cannot grow
 	crates/mcp-server/src/lib.rs) echo 1836 ;;         # no split planned; ratcheted so it cannot grow
