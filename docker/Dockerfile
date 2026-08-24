@@ -66,6 +66,38 @@ ENV CC="ccache gcc" \
     CCACHE_DIR=/ccache
 
 # ---------------------------------------------------------------------------
+# lsp-conformance: linux-builder plus a real language server, for the
+# conformance suite (crates/lsp-core/tests/real_server_conformance.rs).
+#
+# Deliberately NOT folded into linux-builder: that image is pulled by every CI
+# job and every developer, and this adds ~40MB and a download for a suite that
+# runs nightly. Keeping it a separate stage means the delta is all that is
+# pulled, and linux-builder's layer cache is untouched.
+#
+# rust-analyzer only, for now. It is enough to exercise the two things the
+# client has never had checked against a real server: UTF-16 position encoding
+# on non-ASCII text, and the shape of a real `textDocument/codeAction` reply.
+# pyright and clangd disagree with it in useful ways (Node runtime, different
+# encoding history, compile_commands.json, heavier use of codeAction/resolve),
+# and get added when a feature actually depends on that divergence.
+#
+# The version is PINNED on purpose. An unpinned language server turns a
+# conformance suite into a random number generator, and "upstream changed its
+# codeAction shape" arriving as a red CI on an unrelated PR is exactly how a
+# suite like this gets switched off. Bumping the pin is a deliberate commit.
+# ---------------------------------------------------------------------------
+FROM linux-builder AS lsp-conformance
+
+ARG RUST_ANALYZER_VERSION=2025-08-11
+
+RUN curl -fsSL -o /tmp/ra.gz \
+      "https://github.com/rust-lang/rust-analyzer/releases/download/${RUST_ANALYZER_VERSION}/rust-analyzer-x86_64-unknown-linux-gnu.gz" \
+    && gunzip -c /tmp/ra.gz > /usr/local/bin/rust-analyzer \
+    && chmod +x /usr/local/bin/rust-analyzer \
+    && rm /tmp/ra.gz \
+    && rust-analyzer --version
+
+# ---------------------------------------------------------------------------
 # linux-artifact-builder: linux-builder + baked-in source, for buildx
 # artifact-extraction builds. Kept separate from linux-builder (used as the
 # dev/test image via `docker run -v $(pwd):/workspace`) so that stage's

@@ -1541,6 +1541,8 @@ dependencies = [
  "serde",
  "serde_json",
  "syntax-core",
+ "tempfile",
+ "toml",
 ]
 
 [[package]]

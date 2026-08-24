@@ -49,6 +49,8 @@ All plan documents are complete except the next-five-features plan, which is the
 - [Large files and the binary viewer plan](architecture/large-files-and-binary-viewer-plan.md) — no-wrap default, highlighting size ceilings, O(1) fold lookup, read-only hex view for binary files.
 - [Next five features plan](architecture/next-five-features-plan.md) — the current roadmap: verification foundation, editor ergonomics, Alt+Enter intentions, Git v1, run configurations. Carries the living Progress table.
 
+- [LSP conformance](architecture/lsp-conformance.md) — checking the LSP client against a real rust-analyzer; the executable expectations file and why it is not a per-PR gate.
+
 ## Design
 
 - [Language platform UI](design/language-platform-ui.md) — UX spec for the three language-platform settings pages and the Problems dock.
