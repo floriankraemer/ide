@@ -81,7 +81,8 @@ jobs:
             fi
           }
           for crate in editor-core project-model app-core pty-core terminal-core \
-                       app-config index-core mcp-server lsp-core ai-chat-core; do
+                       app-config index-core mcp-server lsp-core ai-chat-core \
+                       plugin-api; do
             check "$crate" qt
           done
           for crate in pty-core terminal-core index-core lsp-core; do
