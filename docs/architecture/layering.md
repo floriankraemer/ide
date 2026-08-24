@@ -22,7 +22,7 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `lsp-core` | (std, lsp-types, serde, serde_json; `syntax-core` as a **dev**-dependency only, ADR-0018) | **No** |
 | `index-core` | `syntax-core`, `editor-core` (+ std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore, rayon, nucleo-matcher, fs4, dirs) | **No** |
 | `plugin-api` | (std, serde, toml) — a leaf on purpose, see [ADR-0026](decisions/0026-plugin-host.md) | **No** |
-| `plugin-host` | `plugin-api` (+ std) — discovery, the registry and the built-ins, see [ADR-0026](decisions/0026-plugin-host.md) | **No** |
+| `plugin-host` | `plugin-api` (+ std); `icon-theme` as a **dev**-dependency only, to check the vendored Material pack through the real load path | **No** |
 | `icon-theme` | (std, serde, toml, resvg) — **not** `syntax-core` and **not** `plugin-host`, see [ADR-0027](decisions/0027-icon-themes.md) | **No** |
 | `settings-model` | `app-config`, `syntax-core`, `lsp-core`, `edit-ops`, `editor-core` (+ std, serde, toml, tree-sitter) | **No** |
 | `edit-ops` | `editor-core`, `syntax-core` (+ std, tree-sitter) | **No** |

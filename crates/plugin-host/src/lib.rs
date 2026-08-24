@@ -35,6 +35,7 @@
 //! <config_dir>/plugins/.quarantine/<plugin-id>  crash marker
 //! ```
 
+mod builtins;
 mod plugin;
 
 use std::fs;
@@ -50,12 +51,10 @@ pub use plugin::{BuiltinPlugin, LoadedPlugin, PluginSource};
 
 /// The plugins shipped inside the binary.
 ///
-/// Empty in this build: the Material icon theme is P4 of the plugin host
-/// plan and appends its entry here. That is exactly why [`load`] takes
-/// `builtins` as an argument instead of reading this constant — with an
-/// empty catalog the built-in code path would otherwise be untested, and
-/// tests pass their own fixtures through the real path.
-pub const BUILTIN_PLUGINS: &[BuiltinPlugin] = &[];
+/// [`load`] still takes `builtins` as an argument rather than reading this
+/// constant, so a test can push its own fixtures through the real path
+/// without the vendored 1.03 MB of Material SVGs in the way.
+pub const BUILTIN_PLUGINS: &[BuiltinPlugin] = &[builtins::MATERIAL_ICON_THEME];
 
 /// Every plugin that loaded, and every one that did not.
 #[derive(Debug, Default)]
@@ -142,9 +141,9 @@ impl PluginRegistry {
 /// A missing plugins directory is not an error — it means the user has
 /// installed nothing.
 ///
-/// `builtins` is a parameter rather than [`BUILTIN_PLUGINS`] so the
-/// embedded path is testable while that catalog is still empty; `reload`
-/// is the entry point that passes the real one.
+/// `builtins` is a parameter rather than [`BUILTIN_PLUGINS`] so a test can
+/// exercise the embedded path with a small fixture; `reload` is the entry
+/// point that passes the real catalog.
 pub fn load(config_dir: &Path, builtins: &[BuiltinPlugin], disabled: &[String]) -> PluginRegistry {
     let root = config_dir.join(PLUGINS_DIR);
     let quarantine = root.join(QUARANTINE_DIR);

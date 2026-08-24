@@ -11,4 +11,9 @@ edition = "2021"
 plugin-api = { path = "../plugin-api" }
 
 [dev-dependencies]
+# Dev-only, and deliberately so: `tests/material_icon_theme.rs` checks the
+# vendored Material pack through the real load path, which means parsing it
+# with the crate that owns the format. At runtime the two crates still know
+# nothing of each other and are joined in `app-core` (ADR-0026, ADR-0027).
+icon-theme = { path = "../icon-theme" }
 tempfile = "3"

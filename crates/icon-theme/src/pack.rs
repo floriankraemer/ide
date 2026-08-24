@@ -117,10 +117,13 @@ impl IconPack {
         language_id: Option<&str>,
         appearance: Appearance,
     ) -> &str {
+        // Lowercased once for both name tables — see `extension_icon`
+        // for why the case rule is upstream's and not ours to pick.
+        let lower = file_name.to_ascii_lowercase();
         let resolved = self
             .file_names
-            .get(file_name)
-            .or_else(|| self.extension_icon(file_name))
+            .get(&lower)
+            .or_else(|| self.extension_icon(&lower))
             .or_else(|| language_id.and_then(|id| self.language_ids.get(id)))
             .unwrap_or(&self.default_file);
         self.for_appearance(resolved, appearance)
@@ -137,7 +140,9 @@ impl IconPack {
         // `folder_names_open` falls back to the *default open* icon rather
         // than to its own closed art: mixing the two states in one tree is
         // the misreading this avoids.
-        let resolved = table.get(folder_name).unwrap_or(default);
+        let resolved = table
+            .get(&folder_name.to_ascii_lowercase())
+            .unwrap_or(default);
         self.for_appearance(resolved, appearance)
     }
 
@@ -157,16 +162,19 @@ impl IconPack {
         PathBuf::from(ICONS_DIR).join(format!("{icon_id}.svg"))
     }
 
-    /// Longest matching suffix after a dot.
+    /// Longest matching suffix after a dot. `lower` is the file name,
+    /// already lowercased by [`IconPack::file_icon`].
     ///
-    /// Case matters differently on the two tables, and this is not an
-    /// oversight to be tidied away: VS Code's Material theme — the pack P4
-    /// imports — matches file *names* case-sensitively and *extensions*
-    /// case-insensitively, so `Makefile` and `makefile` are allowed to
-    /// differ while `.PNG` and `.png` are not. Diverging would silently
-    /// mis-icon files against the very table we generate from.
-    fn extension_icon(&self, file_name: &str) -> Option<&String> {
-        let lower = file_name.to_ascii_lowercase();
+    /// Every name table matches case-insensitively, which is upstream's
+    /// rule and not a convenience: VS Code lowercases a row's name before
+    /// consulting `fileNames`, `folderNames` and `fileExtensions`, so
+    /// Material ships `dockerfile` and `makefile` in lower case and means
+    /// them to match `Dockerfile` and `Makefile`. Matching by exact case
+    /// leaves those rows — and `LICENSE`, and every `META-INF` — with no
+    /// icon at all. The keys are lowercased at import time to match (see
+    /// `scripts/import-material-icons.py`), which also revives the handful
+    /// of mixed-case keys that are dead in VS Code itself.
+    fn extension_icon(&self, lower: &str) -> Option<&String> {
         // Dots left to right, so the longest suffix is tried first:
         // "a.spec.ts" yields "spec.ts" before "ts". A leading dot falls out
         // of this for free — ".gitignore" yields "gitignore".
@@ -198,7 +206,7 @@ default_root_folder = "folder-root"
 
 [file_names]
 "cargo.toml" = "cargo"
-"Makefile" = "make"
+"makefile" = "make"
 
 [file_extensions]
 rs = "rust"
@@ -286,13 +294,17 @@ folder-src = "folder-src_light"
     }
 
     #[test]
-    fn extensions_match_case_insensitively_but_filenames_do_not() {
+    fn names_and_extensions_both_match_case_insensitively() {
         // Upstream Material's rule, matched deliberately — see
         // `extension_icon`.
         let pack = pack();
         assert_eq!(pack.file_icon("MAIN.RS", None, Appearance::Dark), "rust");
         assert_eq!(pack.file_icon("Makefile", None, Appearance::Dark), "make");
-        assert_eq!(pack.file_icon("makefile", None, Appearance::Dark), "file");
+        assert_eq!(pack.file_icon("makefile", None, Appearance::Dark), "make");
+        assert_eq!(
+            pack.folder_icon("SRC", false, Appearance::Dark),
+            "folder-src"
+        );
     }
 
     #[test]
