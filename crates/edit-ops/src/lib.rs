@@ -29,11 +29,13 @@
 //!   stack that makes shrink retrace exactly.
 //! - [`indent`] — the indent of a new line, and indent/unindent of a
 //!   selection.
+//! - [`pairs`] — auto-close, type-over, smart backspace, surround.
 //!
 //! Qt-free, like every crate below the adapter.
 
 pub mod comment;
 pub mod indent;
+pub mod pairs;
 pub mod selection_expand;
 mod syntax;
 
