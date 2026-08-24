@@ -2187,6 +2187,14 @@ mod ffi {
         #[cxx_name = "matchingBracket"]
         fn matching_bracket(self: &EditorOps, tab_id: u64, text: &QString, position: u32) -> i64;
 
+        /// The edits a save would make before it writes the file (F1-11):
+        /// trim, final newline, line-ending normalisation. Splice these
+        /// into the buffer first so the tidying is one undo entry, then
+        /// read the (now tidied) text to hand to `saveTab`.
+        #[qinvokable]
+        #[cxx_name = "saveRuleEdits"]
+        fn save_rule_edits(self: &EditorOps, tab_id: u64, text: &QString) -> Vec<FfiTextEdit>;
+
         /// The carets changed without an edit — after Ctrl+D, Alt+Click, a
         /// column selection or an expansion — so the widget repaints them.
         #[qsignal]

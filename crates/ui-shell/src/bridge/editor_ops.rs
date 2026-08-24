@@ -213,6 +213,15 @@ impl EditorOpsRust {
         self.indent_style(language).tab_width.max(1)
     }
 
+    /// The save rules in force for a tab's language — trim, final newline
+    /// and line-ending policy (F1-11), through the same resolution the
+    /// indent style already uses.
+    fn save_rules(&self, language: Language) -> editor_core::save_rules::SaveRules {
+        let settings = self.settings.borrow();
+        let rules = settings_model::editing::resolve_for_language(&settings, &language.id());
+        rules.save_rules()
+    }
+
     /// The selection a tab is on, or a single caret at the start for a tab
     /// no gesture has touched yet.
     fn selection_of(&self, tab_id: u64) -> SelectionSet {
@@ -717,5 +726,28 @@ impl ffi::EditorOps {
             Some(target) => to_utf16(&text, &[target])[0] as i64,
             None => -1,
         }
+    }
+
+    /// The edits a save would make before it writes the file (F1-11): trim
+    /// trailing whitespace, a final newline, line-ending normalisation —
+    /// whichever of them the file's language has turned on. The caller
+    /// splices these into the buffer *before* reading its text to save, the
+    /// same `applyEditsTo` path every other operation here uses, so the
+    /// tidying is one undo entry and the caret the trim would otherwise
+    /// have jumped from lands wherever Qt's own cursor adjustment during
+    /// the splice puts it — never column 0.
+    ///
+    /// A pure computation: it touches no caret state and never emits
+    /// `caretsChanged`, because nothing about where the carets are changes
+    /// here — only what the text says.
+    pub fn save_rule_edits(&self, tab_id: u64, text: &QString) -> Vec<ffi::FfiTextEdit> {
+        let text = text.to_string();
+        let language = language_of(&self.session.borrow(), tab_id);
+        let rules = self.save_rules(language);
+        let transaction = editor_core::save_rules::on_save(&text, &rules);
+        if transaction.is_empty() {
+            return Vec::new();
+        }
+        self.to_ffi_edits(&text, &transaction)
     }
 }

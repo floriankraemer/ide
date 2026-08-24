@@ -67,7 +67,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F1-8 — smart typing (auto-close, type-over, surround) | done | 6c787c8 (#89); view wiring recorded at the end of this branch |
 | F1-9 — bracket match | done | 6c787c8 (#89) |
 | F1-10 — editing settings: persistence + rules | done | 3d4002d (#90) |
-| F1-11 — save rules (trim, final newline, line endings) | core done, unwired | 3d4002d (#90); `on_save` has no runtime caller — wired with F1-13…F1-17 |
+| F1-11 — save rules (trim, final newline, line endings) | done | 3d4002d (#90); wired into the save path at the end of this branch |
 | F1-12 — `lsp-core` formatting | done | 7891f57 (#82) |
 | F1-13 — bridge: `EditorOps` | done | recorded at the end of this branch |
 | F1-14 — bridge: `EditingEditor` + formatting | done | recorded at the end of this branch |
