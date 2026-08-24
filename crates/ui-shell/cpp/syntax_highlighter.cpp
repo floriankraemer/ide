@@ -2,7 +2,7 @@
 
 #include "code_editor.h"
 #include "theme.h"
-#include "ui-shell/src/bridge.cxxqt.h"
+#include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include <algorithm>
 #include <cstddef>

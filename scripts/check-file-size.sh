@@ -32,7 +32,6 @@ exempt() {
 # by the time they were enforced.
 baseline() {
 	case "$1" in
-	crates/ui-shell/src/bridge.rs) echo 9388 ;;        # split planned (F0-2/F0-3)
 	crates/ui-shell/cpp/main_window.cpp) echo 4393 ;;  # split planned (F0-4/F0-5)
 	crates/index-core/src/lib.rs) echo 4099 ;;         # no split planned; ratcheted so it cannot grow
 	crates/syntax-core/src/lib.rs) echo 2572 ;;        # no split planned; ratcheted so it cannot grow

@@ -1,6 +1,6 @@
 #include "keymap_page.h"
 
-#include "ui-shell/src/bridge.cxxqt.h"
+#include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include <QFont>
 #include <QHash>

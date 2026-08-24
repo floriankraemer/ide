@@ -262,12 +262,12 @@ fn main() {
         let path = entry.expect("readable cpp/ entry").path();
         println!("cargo:rerun-if-changed={}", path.display());
     }
-    println!("cargo:rerun-if-changed=src/bridge.rs");
+    println!("cargo:rerun-if-changed=src/bridge/ffi.rs");
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed={}", ads_dir.display());
 
     let mut builder = cxx_qt_build::CxxQtBuilder::new()
-        .file("src/bridge.rs")
+        .file("src/bridge/ffi.rs")
         .cpp_file("cpp/main_window.cpp")
         // First hand-written (non-generated) QObject in this crate: header
         // passed to cpp_file() auto-enables moc (CppFile::from, cxx-qt-build

@@ -17,7 +17,7 @@
 #include "syntax_highlighter.h"
 #include "terminal_widget.h"
 #include "theme.h"
-#include "ui-shell/src/bridge.cxxqt.h"
+#include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include "DockManager.h"
 #include "DockWidget.h"
