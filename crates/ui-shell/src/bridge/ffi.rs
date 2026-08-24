@@ -81,6 +81,18 @@ mod ffi {
         size: u32,
     }
 
+    /// Interface font scales in percent, one per area of chrome that gets its
+    /// own knob. Always resolved and clamped by `app-config`, so the view
+    /// applies what it is given without range-checking it.
+    #[derive(Default)]
+    struct FfiUiFontScales {
+        /// Everything that has no scale of its own: tabs, docks, dialogs,
+        /// the status bar.
+        ui: u32,
+        project_tree: u32,
+        menu: u32,
+    }
+
     /// Editor text colors (S2), hex strings ("#rrggbb") or empty for "use
     /// the theme's default palette role" — the view (not this struct)
     /// decides what empty means.
@@ -1164,6 +1176,16 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "saveEditorFont"]
         fn save_editor_font(self: &AppSettings, family: &QString, size: u32);
+
+        /// Interface font scales, always resolved and clamped.
+        #[qinvokable]
+        #[cxx_name = "uiFontScales"]
+        fn ui_font_scales(self: &AppSettings) -> FfiUiFontScales;
+
+        /// Persist the interface font scales (the Appearance page, on OK).
+        #[qinvokable]
+        #[cxx_name = "saveUiFontScales"]
+        fn save_ui_font_scales(self: &AppSettings, ui: u32, project_tree: u32, menu: u32);
 
         /// Editor text colors, empty when unset (S2).
         #[qinvokable]

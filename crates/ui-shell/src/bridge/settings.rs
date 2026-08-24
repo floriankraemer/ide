@@ -7,7 +7,9 @@ use cxx_qt_lib::{QString, QStringList};
 use syntax_core::theme;
 
 use crate::bridge::convert::{load_settings, user_styles};
-use crate::bridge::ffi::{self, FfiEditorColors, FfiEditorFont, FfiResult, FfiWindowGeometry};
+use crate::bridge::ffi::{
+    self, FfiEditorColors, FfiEditorFont, FfiResult, FfiUiFontScales, FfiWindowGeometry,
+};
 
 /// Rust side of the `AppSettings` QObject: stateless, every call re-reads
 /// or re-writes `settings.toml` directly (mirrors `push_recent_project`).
@@ -152,6 +154,23 @@ impl ffi::AppSettings {
     pub fn shortcut_for(&self, action_id: &QString) -> QString {
         let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
         QString::from(settings.keymap().shortcut_for(&action_id.to_string()))
+    }
+
+    pub fn ui_font_scales(&self) -> FfiUiFontScales {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        FfiUiFontScales {
+            ui: settings.ui_font_scale_or_default(),
+            project_tree: settings.project_tree_font_scale_or_default(),
+            menu: settings.menu_font_scale_or_default(),
+        }
+    }
+
+    pub fn save_ui_font_scales(&self, ui: u32, project_tree: u32, menu: u32) {
+        let _ = app_config::update(&app_core::resolve_config_dir(), |settings| {
+            settings.ui_font_scale = ui;
+            settings.project_tree_font_scale = project_tree;
+            settings.menu_font_scale = menu;
+        });
     }
 
     pub fn editor_colors(&self) -> FfiEditorColors {
