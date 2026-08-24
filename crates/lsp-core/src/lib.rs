@@ -14,6 +14,7 @@ pub mod catalog;
 pub mod code_action;
 pub mod completion;
 pub mod diagnostics;
+pub mod formatting;
 pub mod framing;
 pub mod hover;
 pub mod manager;

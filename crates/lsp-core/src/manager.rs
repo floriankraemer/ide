@@ -24,6 +24,7 @@ use crate::apply_edit::{
 use crate::catalog::ServerConfig;
 use crate::code_action::{parse_code_actions, CodeActionItem, CommandRef};
 use crate::completion::{parse_completion, parse_trigger_characters, CompletionList};
+use crate::formatting::{parse_formatting, FormattingOptions, FormattingOutcome};
 use crate::framing::{read_message, write_message};
 use crate::hover::{parse_hover, HoverText};
 use crate::navigation::{parse_definition, DefinitionTarget};
@@ -48,6 +49,17 @@ pub const REFACTOR_TIMEOUT: Duration = Duration::from_secs(30);
 /// Go to Definition is an explicit gesture and the user is waiting for it,
 /// but a jump that lands half a minute later is a bug, not a jump.
 pub const DEFINITION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Reformatting a whole file is real work — rustfmt on a large file, or a
+/// formatter that shells out — so this is generous compared with hover or
+/// completion. It is still bounded: an editor that hangs on Ctrl+Alt+L is
+/// worse than one that says the formatter took too long.
+pub const FORMATTING_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// JSON-RPC's "method not found". A server answers this for a request it
+/// does not implement, which is how an unsupported capability is discovered
+/// without having read every field of its `initialize` result.
+const METHOD_NOT_FOUND: i64 = -32601;
 /// Delay before the first respawn attempt; doubles per consecutive failure.
 const RESTART_BACKOFF_INITIAL: Duration = Duration::from_millis(200);
 /// Ceiling for the exponential backoff.
@@ -610,6 +622,78 @@ impl LspManager {
         Ok(parse_completion(&result))
     }
 
+    /// `textDocument/formatting` for a whole open document.
+    ///
+    /// A server that does not implement formatting answers with
+    /// `MethodNotFound` rather than an empty list, so that is mapped to
+    /// [`FormattingOutcome::Unsupported`] here: from the user's side
+    /// "there is no formatter for this language" and "the file is already
+    /// formatted" are different messages, and only one of them is a
+    /// disappointment worth explaining.
+    pub fn format(
+        &self,
+        uri: &str,
+        options: &FormattingOptions,
+    ) -> Result<FormattingOutcome, LspError> {
+        let language_id = self.language_of(uri)?;
+        let params = json!({
+            "textDocument": {"uri": uri},
+            "options": options.to_json(),
+        });
+        match self.request_with_timeout(
+            &language_id,
+            "textDocument/formatting",
+            params,
+            FORMATTING_TIMEOUT,
+        ) {
+            Ok(result) => Ok(parse_formatting(&result)),
+            Err(LspError::Response { code, .. }) if code == METHOD_NOT_FOUND => {
+                Ok(FormattingOutcome::Unsupported)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    /// `textDocument/rangeFormatting` for a selection.
+    ///
+    /// Servers commonly implement one of the two and not the other, so this
+    /// falls back to whole-document formatting when the range variant is
+    /// unsupported — reformatting more than was asked is a better answer
+    /// than reformatting nothing, and the preview shows what changed either
+    /// way.
+    pub fn format_range(
+        &self,
+        uri: &str,
+        start: (u32, u32),
+        end: (u32, u32),
+        options: &FormattingOptions,
+    ) -> Result<FormattingOutcome, LspError> {
+        let language_id = self.language_of(uri)?;
+        let params = json!({
+            "textDocument": {"uri": uri},
+            "range": {
+                "start": {"line": start.0, "character": start.1},
+                "end": {"line": end.0, "character": end.1},
+            },
+            "options": options.to_json(),
+        });
+        match self.request_with_timeout(
+            &language_id,
+            "textDocument/rangeFormatting",
+            params,
+            FORMATTING_TIMEOUT,
+        ) {
+            Ok(result) => match parse_formatting(&result) {
+                FormattingOutcome::Unsupported => self.format(uri, options),
+                outcome => Ok(outcome),
+            },
+            Err(LspError::Response { code, .. }) if code == METHOD_NOT_FOUND => {
+                self.format(uri, options)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     /// The version last sent for a document, if it is open.
     pub fn document_version(&self, uri: &str) -> Option<i32> {
         self.documents.lock().unwrap().get(uri).map(|d| d.version)
@@ -1029,6 +1113,11 @@ fn client_capabilities() -> Value {
                 "disabledSupport": true,
             },
             "rename": {"prepareSupport": true},
+            // F1: advertised because reformat is implemented. `dynamicRegistration`
+            // is false throughout this client — a server that wants to register
+            // capabilities later has nowhere to send them.
+            "formatting": {"dynamicRegistration": false},
+            "rangeFormatting": {"dynamicRegistration": false},
         },
         "workspace": {
             // RF5: we answer `workspace/applyEdit`, which is how the
