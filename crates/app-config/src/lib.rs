@@ -17,12 +17,15 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+/// The `[editing]` section: indentation, wrapping, and save behaviour.
+pub mod editing;
 pub mod keymap;
 pub mod syntax_colors;
 
 /// Per-project settings layered over the global file (ADR-0022).
 pub mod project_settings;
 
+pub use editing::EditingSettings;
 pub use keymap::{action, ActionDef, Binding, Keymap, ACTIONS};
 pub use syntax_colors::{LanguageScopeStyles, ScopeStyle, ScopeStyles};
 
@@ -268,6 +271,12 @@ pub struct Settings {
     /// Read through [`Settings::ai_persist_conversations_or_default`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ai_persist_conversations: Option<bool>,
+    /// How buffers indent, wrap and are written back to disk, with
+    /// per-language overrides underneath. Which of those a language may
+    /// actually override is `settings_model::editing`'s rule, not this
+    /// crate's — see [`editing`].
+    #[serde(default)]
+    pub editing: EditingSettings,
     /// Stable ids of languages the user turned off. A disabled language is
     /// still *listed* by the Languages page — otherwise it could never be
     /// switched back on — but the registry refuses to resolve it, so its
@@ -730,6 +739,11 @@ mod tests {
                 width: 1280,
                 height: 800,
             },
+            editing: EditingSettings {
+                tab_width: 2,
+                use_spaces: Some(false),
+                ..EditingSettings::default()
+            },
             window_state: "opaque-blob".to_string(),
             editor_layout: "{\"groups\":[]}".to_string(),
             keymap: HashMap::from([("view.goToLine".to_string(), "Ctrl+L".to_string())]),
@@ -862,6 +876,39 @@ mod tests {
         };
         assert_eq!(settings.editor_font_family_or_default(), "Fira Code");
         assert_eq!(settings.editor_font_size_or_default(), 14);
+    }
+
+    #[test]
+    fn a_settings_file_with_an_editing_section_parses_it_and_its_languages() {
+        let dir = tempfile::tempdir().unwrap();
+        let body = "\
+theme = \"dark\"
+
+[editing]
+tab_width = 2
+trim_trailing_whitespace = false
+
+[editing.languages.go]
+use_spaces = false
+";
+        fs::write(dir.path().join(SETTINGS_FILE), body).unwrap();
+        let loaded = load(dir.path()).unwrap();
+        assert_eq!(loaded.editing.tab_width_or_default(), 2);
+        assert!(!loaded.editing.trim_trailing_whitespace_or_default());
+        assert!(!loaded
+            .editing
+            .for_language("go")
+            .unwrap()
+            .use_spaces_or_default());
+    }
+
+    #[test]
+    fn a_settings_file_without_an_editing_section_parses() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(SETTINGS_FILE), "theme = \"dark\"\n").unwrap();
+        let loaded = load(dir.path()).unwrap();
+        assert_eq!(loaded.editing, EditingSettings::default());
+        assert_eq!(loaded.editing.tab_width_or_default(), 4);
     }
 
     #[test]

@@ -21,18 +21,20 @@
 //! configure the project, not the person reading it. Theme, fonts, keymap and
 //! AI providers stay global on purpose.
 //!
-//! Today that means language servers. Editing behaviour, run configurations
-//! and index excludes are named in the plan but have no counterpart in
-//! [`Settings`] yet, so they are deliberately absent: a key that parses and
-//! then does nothing reads as a working feature and is worse than no key.
-//! They slot in additively as their features land.
+//! Today that means language servers and editing behaviour. Run
+//! configurations and index excludes are named in the plan but have no
+//! counterpart in [`Settings`] yet, so they are deliberately absent: a key
+//! that parses and then does nothing reads as a working feature and is worse
+//! than no key. They slot in additively as their features land.
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::{load_toml, save_toml, update_toml, ConfigError, LanguageServerSetting};
+use crate::{
+    load_toml, save_toml, update_toml, ConfigError, EditingSettings, LanguageServerSetting,
+};
 
 /// Directory holding a project's IDE files, inside the project root.
 pub const PROJECT_DIR: &str = ".ide";
@@ -75,6 +77,18 @@ pub struct ProjectSettings {
     )]
     pub language_servers: Option<Vec<LanguageServerSetting>>,
 
+    /// The project's `[editing]` overrides — tab width, spaces-vs-tabs and
+    /// the save rules, with the same per-language table the global layer
+    /// has. One of the four project-scoped areas ADR-0022 names, and the
+    /// first of them whose counterpart in [`Settings`](crate::Settings) now
+    /// exists: how a project's files are indented is a property of the
+    /// project, which is exactly what a shared, committed file should say.
+    ///
+    /// Sparse like everything else here: an absent section means the project
+    /// overrides nothing, not that it overrides everything with defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editing: Option<EditingSettings>,
+
     /// Keys this build does not understand, kept verbatim so a round trip
     /// through an older binary does not delete what a newer one wrote.
     ///
@@ -87,7 +101,7 @@ pub struct ProjectSettings {
 impl ProjectSettings {
     /// True if nothing is overridden — the file, if written, would say nothing.
     pub fn is_empty(&self) -> bool {
-        self.language_servers.is_none() && self.unknown.is_empty()
+        self.language_servers.is_none() && self.editing.is_none() && self.unknown.is_empty()
     }
 }
 
@@ -299,6 +313,28 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].language_id, "rust");
         assert_eq!(servers[0].command.as_deref(), Some("/opt/rust-analyzer"));
+    }
+
+    #[test]
+    fn editing_overrides_round_trip_and_stay_sparse() {
+        let root = project();
+        update(root.path(), |s| {
+            s.editing = Some(EditingSettings {
+                tab_width: 2,
+                ..EditingSettings::default()
+            });
+        })
+        .unwrap();
+
+        let loaded = load(root.path()).unwrap();
+        let editing = loaded.editing.expect("editing section");
+        assert_eq!(editing.tab_width, 2);
+        // Everything the project did not say stays absent, so the global
+        // layer still shows through.
+        assert_eq!(editing.use_spaces, None);
+        let body =
+            fs::read_to_string(root.path().join(PROJECT_DIR).join(PROJECT_SETTINGS_FILE)).unwrap();
+        assert!(!body.contains("use_spaces"), "{body}");
     }
 
     #[test]
