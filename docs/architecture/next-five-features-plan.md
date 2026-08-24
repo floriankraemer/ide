@@ -71,7 +71,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F1-12 — `lsp-core` formatting | done | 7891f57 (#82) |
 | F1-13 — bridge: `EditorOps` | done | recorded at the end of this branch |
 | F1-14 — bridge: `EditingEditor` + formatting | todo |  |
-| F1-15 — view: multi-caret rendering and input | todo |  |
+| F1-15 — view: multi-caret rendering and input | done | recorded at the end of this branch |
 | F1-16 — view: actions and menus | todo |  |
 | F1-17 — view: editing settings page | todo |  |
 | F1-18 — E2E + ADR-0023 + docs | todo |  |

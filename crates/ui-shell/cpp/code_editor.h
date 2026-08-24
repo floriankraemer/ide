@@ -55,6 +55,25 @@ struct DiagnosticSpan
     QColor color;
 };
 
+// One caret that is not the widget's own (F1-15), view-local for the same
+// reason FoldRange and DiagnosticSpan are: [anchor, head] document (UTF-16)
+// positions, converted from the FFI type by whoever owns the mapping.
+//
+// The primary caret is never in this list — it stays the widget's
+// QTextCursor, so scrolling, Find, the status bar and Qt's own selection
+// handling keep working untouched. `editor_ops` owns the whole set and
+// decides where every caret lands; this widget paints what it is given.
+struct SecondaryCaret
+{
+    int anchor;
+    int head;
+
+    bool operator==(const SecondaryCaret &other) const
+    {
+        return anchor == other.anchor && head == other.head;
+    }
+};
+
 // One completion candidate as the popup shows it (Task L5), view-local for
 // the same reason FoldRange and DiagnosticSpan are: converted from the FFI
 // type by main_window.cpp, so this widget stays decoupled from the cxx-qt
@@ -146,6 +165,17 @@ public:
     // contract the editor background/foreground overrides use).
     void setCurrentLineColor(const QString &hex);
 
+    // F1-15: the carets other than this widget's own, painted as solid bars
+    // and (where they select) as extra selections. Pushed in after every
+    // operation, exactly like setFoldRanges and setDiagnosticSpans — the
+    // widget never computes a caret position itself.
+    void setSecondaryCarets(const QVector<SecondaryCaret> &carets);
+
+    // Whether a keystroke is a multi-caret operation. A branch about which
+    // code path runs, not about what an edit means, which is why it may
+    // live here.
+    bool hasSecondaryCarets() const { return !secondaryCarets_.isEmpty(); }
+
 signals:
     // N7: Ctrl+Click landed on an identifier-shaped word. `position` is a
     // document (UTF-16) position inside that word; converting it to the
@@ -191,8 +221,39 @@ signals:
     // and this widget knows nothing about either.
     void contextMenuAboutToShow(QMenu *menu);
 
+    // F1-15: a keystroke that has to be applied at every caret. The widget
+    // does not touch the document for these — it reports the gesture, and
+    // the transaction `editor_ops` computes comes back as one splice, which
+    // is what makes a 200-caret keystroke one Ctrl+Z (ADR-0023).
+    void multiCaretTyped(const QString &text);
+    void multiCaretBackspace();
+    void multiCaretDelete();
+    void multiCaretNewline();
+
+    // Alt+Click: one more caret at this document position.
+    void caretAddRequested(int position);
+
+    // Alt+Shift+drag: the two document positions the drag spans. What that
+    // means in visual columns, and how ragged lines are treated, is
+    // `editor_core::selection::column_block`'s answer, not this widget's.
+    void columnSelectRequested(int anchor, int head);
+
+    // Esc, a plain click, or any key this version does not treat as a
+    // multi-caret operation: back to one caret.
+    void secondaryCaretsDropped();
+
 protected:
     void resizeEvent(QResizeEvent *event) override;
+    // F1-15: the secondary carets are drawn over whatever the base class
+    // painted. They do not blink: one timer driving two phases is how a
+    // secondary caret ends up dark while the primary is lit, and a caret
+    // you cannot see is worse than one that does not blink.
+    void paintEvent(QPaintEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    // Dead keys and CJK composition are not multi-caret operations — there
+    // is no sensible meaning for a composition committed at 200 places — so
+    // composing collapses to the primary caret first.
+    void inputMethodEvent(QInputMethodEvent *event) override;
     // Right-click: Qt's own entries plus whatever the window appends, and
     // the caret moved under the pointer first so a gesture chosen from the
     // menu acts on what was clicked.
@@ -275,6 +336,13 @@ private:
     QCompleter *completer_;
     QStandardItemModel *completionModel_;
     QVector<CompletionEntry> completionEntries_;
+    // F1-15: every caret except this widget's own. Empty is the ordinary
+    // single-caret editor, and every multi-caret code path below is guarded
+    // on it, so nothing changes for a user who never presses Ctrl+D.
+    QVector<SecondaryCaret> secondaryCarets_;
+    // Where an Alt+Shift drag started, and whether one is in progress.
+    int columnAnchor_ = -1;
+    bool columnDragging_ = false;
 };
 
 // No Q_OBJECT: forwards paint events to CodeEditor, uses no signals/slots.

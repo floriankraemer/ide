@@ -125,6 +125,7 @@ EditorTabs::EditorTabs(DocumentManager *docManager, LanguageService *languageSer
                        QSplitter *root, QWidget *window)
   : docManager_(docManager)
   , languageService_(languageService)
+  , editorOps_(new EditorOps(this))
   , root_(root)
   , window_(window)
 {
@@ -765,6 +766,9 @@ void EditorTabs::addHexTab(QTabWidget *group, quint64 tabId, const QString &titl
 
 void EditorTabs::onTabClosed(quint64 tabId)
 {
+    // F1-13: drop the carets and the expand/shrink stack this tab
+    // accumulated, or the map grows for the life of the process.
+    editorOps_->forgetTab(tabId);
     const TabLoc loc = locate(tabId);
     if (!loc.group) {
         return;

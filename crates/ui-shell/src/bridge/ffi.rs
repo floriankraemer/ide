@@ -429,6 +429,10 @@ mod ffi {
     struct FfiCaret {
         anchor: u32,
         head: u32,
+        /// Exactly one caret in a set is the primary. The view keeps it as
+        /// its own `QTextCursor` — so scrolling, Find and the status bar
+        /// keep working unchanged — and paints the rest itself.
+        primary: bool,
     }
 
     /// One edit a refactoring makes, in the protocol's own units (0-based

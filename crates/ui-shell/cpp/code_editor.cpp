@@ -11,6 +11,7 @@
 #include <QFocusEvent>
 #include <QFontMetrics>
 #include <QHelpEvent>
+#include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPalette>
@@ -193,6 +194,49 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
         return;
     }
 
+    // F1-15: with more than one caret, text-producing keys are transactions
+    // computed in Rust rather than edits Qt makes. This sits after the
+    // popup interception on purpose (the popup owns Enter and Tab while it
+    // is up) and returns before the completion request at the bottom of
+    // this function — otherwise 200 carets would fire 200 completion
+    // requests per keystroke.
+    if (hasSecondaryCarets()) {
+        const QString typed = event->text();
+        switch (event->key()) {
+        case Qt::Key_Escape:
+            event->accept();
+            emit secondaryCaretsDropped();
+            return;
+        case Qt::Key_Backspace:
+            event->accept();
+            emit multiCaretBackspace();
+            return;
+        case Qt::Key_Delete:
+            event->accept();
+            emit multiCaretDelete();
+            return;
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+            event->accept();
+            emit multiCaretNewline();
+            return;
+        default:
+            break;
+        }
+        if (!typed.isEmpty() && typed.at(0).isPrint()
+            && !event->modifiers().testFlag(Qt::ControlModifier)) {
+            event->accept();
+            emit multiCaretTyped(typed);
+            return;
+        }
+        // Everything else — arrows, Home, End, a shortcut — is not a
+        // multi-caret operation in this version. The extra carets are
+        // dropped and the key does exactly what it always did, which is a
+        // stated ceiling (ADR-0023): moving N carets is its own rule and
+        // belongs in `editor_core::selection`, not here.
+        emit secondaryCaretsDropped();
+    }
+
     QPlainTextEdit::keyPressEvent(event);
 
     const bool typed = !event->text().isEmpty() && event->text().at(0).isPrint();
@@ -275,9 +319,61 @@ void CodeEditor::clearHoverSpan()
 
 void CodeEditor::mouseMoveEvent(QMouseEvent *event)
 {
+    if (columnDragging_ && event->buttons().testFlag(Qt::LeftButton)) {
+        event->accept();
+        emit columnSelectRequested(columnAnchor_, cursorForPosition(event->pos()).position());
+        return;
+    }
     updateHoverSpan(event->pos(), event->modifiers().testFlag(Qt::ControlModifier));
     cancelHover();
     QPlainTextEdit::mouseMoveEvent(event);
+}
+
+void CodeEditor::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (columnDragging_) {
+        columnDragging_ = false;
+        event->accept();
+        return;
+    }
+    QPlainTextEdit::mouseReleaseEvent(event);
+}
+
+void CodeEditor::inputMethodEvent(QInputMethodEvent *event)
+{
+    if (hasSecondaryCarets()) {
+        emit secondaryCaretsDropped();
+    }
+    QPlainTextEdit::inputMethodEvent(event);
+}
+
+void CodeEditor::setSecondaryCarets(const QVector<SecondaryCaret> &carets)
+{
+    if (carets == secondaryCarets_) {
+        return;
+    }
+    secondaryCarets_ = carets;
+    // The selections ride on the same extra-selection list everything else
+    // does; the bars are painted in paintEvent, which this repaints for.
+    highlightCurrentLine();
+    viewport()->update();
+}
+
+void CodeEditor::paintEvent(QPaintEvent *event)
+{
+    QPlainTextEdit::paintEvent(event);
+    if (secondaryCarets_.isEmpty()) {
+        return;
+    }
+    QPainter painter(viewport());
+    const QColor caretColor = palette().color(QPalette::Text);
+    const int width = qMax(1, cursorWidth());
+    for (const SecondaryCaret &caret : secondaryCarets_) {
+        QTextCursor cursor(document());
+        cursor.setPosition(qBound(0, caret.head, document()->characterCount() - 1));
+        const QRect rect = cursorRect(cursor);
+        painter.fillRect(QRect(rect.left(), rect.top(), width, rect.height()), caretColor);
+    }
 }
 
 bool CodeEditor::viewportEvent(QEvent *event)
@@ -308,6 +404,26 @@ void CodeEditor::cancelHover()
 
 void CodeEditor::mousePressEvent(QMouseEvent *event)
 {
+    // F1-15. Checked before Ctrl+Click so the two gestures cannot both fire
+    // on an Alt+Ctrl+Click; adding a caret is the more specific one.
+    if (event->button() == Qt::LeftButton && event->modifiers().testFlag(Qt::AltModifier)) {
+        const int position = cursorForPosition(event->pos()).position();
+        event->accept();
+        if (event->modifiers().testFlag(Qt::ShiftModifier)) {
+            columnAnchor_ = position;
+            columnDragging_ = true;
+            emit columnSelectRequested(position, position);
+        } else {
+            emit caretAddRequested(position);
+        }
+        return;
+    }
+    // A plain click puts the caret somewhere, which is an answer to "where
+    // is the caret" — so any extra ones stop meaning anything.
+    if (event->button() == Qt::LeftButton && hasSecondaryCarets()) {
+        emit secondaryCaretsDropped();
+    }
+
     if (event->button() == Qt::LeftButton && event->modifiers().testFlag(Qt::ControlModifier)) {
         const QPair<int, int> span = identifierAt(event->pos());
         if (span.first >= 0) {
@@ -388,6 +504,19 @@ void CodeEditor::highlightCurrentLine()
         hover.cursor.setPosition(hoverSpan_.first);
         hover.cursor.setPosition(hoverSpan_.second, QTextCursor::KeepAnchor);
         selections.append(hover);
+    }
+
+    for (const SecondaryCaret &caret : secondaryCarets_) {
+        if (caret.anchor == caret.head) {
+            continue;
+        }
+        QTextEdit::ExtraSelection secondary;
+        secondary.format.setBackground(palette().color(QPalette::Highlight));
+        secondary.format.setForeground(palette().color(QPalette::HighlightedText));
+        secondary.cursor = textCursor();
+        secondary.cursor.setPosition(caret.anchor);
+        secondary.cursor.setPosition(caret.head, QTextCursor::KeepAnchor);
+        selections.append(secondary);
     }
 
     for (const DiagnosticSpan &span : diagnosticSpans_) {

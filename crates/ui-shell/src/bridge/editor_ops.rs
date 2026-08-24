@@ -297,12 +297,13 @@ impl ffi::EditorOps {
             .flat_map(|c| [c.anchor as usize, c.head as usize])
             .collect();
         let bytes = to_bytes(&text, &flat);
+        let primary = carets.iter().position(|caret| caret.primary).unwrap_or(0);
         let set = SelectionSet::from_carets(
             bytes
                 .chunks(2)
                 .map(|pair| Caret::new(pair[0], pair[1]))
                 .collect(),
-            0,
+            primary,
         );
         if let Ok(set) = set {
             self.store_selection(tab_id, set);
@@ -319,11 +320,14 @@ impl ffi::EditorOps {
             .flat_map(|c| [c.anchor, c.head])
             .collect();
         let utf16 = to_utf16(&text, &flat);
+        let primary = selection.primary_index();
         utf16
             .chunks(2)
-            .map(|pair| ffi::FfiCaret {
+            .enumerate()
+            .map(|(index, pair)| ffi::FfiCaret {
                 anchor: pair[0] as u32,
                 head: pair[1] as u32,
+                primary: index == primary,
             })
             .collect()
     }
