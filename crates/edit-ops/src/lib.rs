@@ -25,10 +25,13 @@
 //! # What each module owns
 //!
 //! - [`comment`] — toggling line and block comments.
+//! - [`selection_expand`] — expand/shrink over the node tree, with the
+//!   stack that makes shrink retrace exactly.
 //!
 //! Qt-free, like every crate below the adapter.
 
 pub mod comment;
+pub mod selection_expand;
 mod syntax;
 
 pub use syntax::{Syntax, Tokens};
