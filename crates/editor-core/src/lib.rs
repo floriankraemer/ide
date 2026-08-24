@@ -135,7 +135,7 @@ impl Document {
     }
 
     /// Re-read the backing file from disk into the buffer, discarding any
-    /// in-editor edits (US-3's external-change "Reload" choice, Task 8).
+    /// in-editor edits (the external-change "Reload" choice).
     /// Clears the dirty flag on success; leaves existing state untouched on
     /// failure.
     pub fn reload(&mut self) -> io::Result<()> {

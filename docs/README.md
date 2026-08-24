@@ -9,6 +9,7 @@
 ### Decisions
 
 ADR numbers 0006 and 0013–0015 were never used; the gaps are historical and intentional.
+ADR-0023 (multi-caret) is reserved and lands with the editor-ergonomics work.
 
 - [ADR-0001: core tech stack](architecture/decisions/0001-core-tech-stack.md) — Rust core + Qt6 UI via cxx-qt; hybrid plugin system direction.
 - [ADR-0002: application layer and humble view](architecture/decisions/0002-application-layer-and-humble-view.md) — `app-core` application layer; the Qt view is humble and holds zero rules.
@@ -27,10 +28,14 @@ ADR numbers 0006 and 0013–0015 were never used; the gaps are historical and in
 - [ADR-0019: LSP refactoring](architecture/decisions/0019-lsp-refactoring.md) — refactoring over LSP: code actions, rename, applying workspace edits.
 - [ADR-0020: tab kinds and the binary viewer](architecture/decisions/0020-tab-kinds-and-the-binary-viewer.md) — a tab has an explicit kind; binary files open a read-only hex view instead of erroring.
 - [ADR-0021: AI chat](architecture/decisions/0021-ai-chat.md) — a docked assistant with four providers, environment-only keys, and a policy-gated agent whose edits go through the refactoring path.
+- [ADR-0022: per-project settings](architecture/decisions/0022-per-project-settings.md) — a sparse `.ide/settings.toml` layered over the global file; precedence resolved by `settings-model`.
+- [ADR-0024: verification foundation](architecture/decisions/0024-verification-foundation.md) — a headless E2E harness driving the real binary, and a pinned real-server LSP conformance gate that runs nightly.
+- [ADR-0025: seam split and file-size ceiling](architecture/decisions/0025-seam-split-and-file-size-ceiling.md) — `bridge.rs` and `main_window.cpp` split per feature; a ratcheted size gate; the split proven by byte-identical FFI headers.
 
 ## Plans
 
-All plan documents are complete except the index performance plan and the large-files plan; the rest remain as historical records of how each feature phase was delivered.
+All plan documents are complete except the next-five-features plan, which is the one currently being delivered; the rest remain as historical records of how each feature phase was delivered.
+(An earlier version of this line called the index-performance and large-files plans incomplete. Both of their Progress tables are fully `done`; the claim was stale.)
 
 - [MVP implementation plan](architecture/mvp-implementation-plan.md) — MVP editor shell; marked historical.
 - [Settings, docking, theming, MCP plan](architecture/settings-docking-theming-mcp-plan.md) — settings, docking, theming, MCP foundation, line numbers, tab reorder, syntax foundation.
@@ -42,6 +47,7 @@ All plan documents are complete except the index performance plan and the large-
 - [Refactoring plan](architecture/refactoring-plan.md) — rename, extract via code actions, signature on hover.
 - [Index performance plan](architecture/index-performance-plan.md) — faster project index build and a status-bar indexing indicator.
 - [Large files and the binary viewer plan](architecture/large-files-and-binary-viewer-plan.md) — no-wrap default, highlighting size ceilings, O(1) fold lookup, read-only hex view for binary files.
+- [Next five features plan](architecture/next-five-features-plan.md) — the current roadmap: verification foundation, editor ergonomics, Alt+Enter intentions, Git v1, run configurations. Carries the living Progress table.
 
 ## Design
 

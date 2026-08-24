@@ -3,7 +3,7 @@
 //!
 //! Qt-free by design (see `docs/architecture/layering.md`) — this crate only
 //! moves bytes in and out of a PTY. Grid/VT100 state lives in `terminal-core`
-//! (task F2); wiring it into the UI lives in `ui-shell` (task F3).
+//! wiring it into the UI lives in `ui-shell`.
 //!
 //! Blocking reads are intentional: the eventual `ui-shell` integration drives
 //! this from a dedicated `std::thread` doing blocking reads, the same shape

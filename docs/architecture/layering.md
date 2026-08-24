@@ -89,8 +89,9 @@ cargo tree -p ai-chat-core -e normal | grep -i qt   # must be empty
 
 ## Known debt at time of writing
 
-- Stale `lib.rs` doc comments describe shipped work as future: `project-model` ("no filesystem watcher (that's Task 8)"), `editor-core` ("wraps TabList in a DocumentManager QObject later"), `terminal-core` and `pty-core` ("task F3, not yet built"), `index-core` ("is `ui-shell`'s job (task H)").
-- `settings-model/src/lib.rs` cites ADR-0016 where [ADR-0017](decisions/0017-settings-model-crate.md) is the crate's founding decision.
+- (Both items previously listed here — stale `lib.rs` doc comments describing
+  shipped work as future, and `settings-model` citing ADR-0016 instead of
+  [ADR-0017](decisions/0017-settings-model-crate.md) — are fixed.)
 
 No new code may reintroduce `QString` sentinel errors, int-index tab
 identity, or business rules in `bridge.rs`/`cpp/` — see the FFI seam
