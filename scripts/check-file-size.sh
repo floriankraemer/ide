@@ -68,7 +68,16 @@ baseline() {
 	# the file-local symbolKindLabel helper (used only by ClassViewPanel)
 	# with them. One class per header, one source each — all three fit
 	# comfortably under the 1200-line ceiling.
-	crates/ui-shell/cpp/main_window.cpp) echo 2038 ;;  # split continues (F0-5)
+	# Lowered from 2038 by F0-5: RefactorController and DeclarationNavigator
+	# moved to cpp/refactor_controller.{h,cpp} and
+	# cpp/declaration_navigator.{h,cpp}, taking the free previewText helper
+	# with the former (it is declared in that header because the AI panel's
+	# Apply path in here calls it too). One class per header, one source
+	# each. The third F0-5 item, the action registry, was already moved by
+	# P6 — registerAction/applyKeymap live in cpp/keymap_page.{h,cpp} — so
+	# only the menu-building call sites are left, and those go with the
+	# settings dialog in F0-6, which removes this entry entirely.
+	crates/ui-shell/cpp/main_window.cpp) echo 1494 ;;  # split continues (F0-6)
 	crates/index-core/src/lib.rs) echo 4099 ;;         # no split planned; ratcheted so it cannot grow
 	crates/syntax-core/src/lib.rs) echo 2572 ;;        # no split planned; ratcheted so it cannot grow
 	crates/mcp-server/src/lib.rs) echo 1836 ;;         # no split planned; ratcheted so it cannot grow

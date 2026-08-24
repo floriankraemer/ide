@@ -290,6 +290,12 @@ fn main() {
         .cpp_file("cpp/class_view_panel.cpp")
         .cpp_file("cpp/find_usages_panel.cpp")
         .cpp_file("cpp/ide_main_window.cpp")
+        // The refactoring and Go-to-Declaration controllers, likewise
+        // Q_OBJECT-free: they subclass QObject for parent ownership and
+        // for connect()'s pointer-to-member overload, neither of which
+        // needs moc, so only the sources are listed.
+        .cpp_file("cpp/refactor_controller.cpp")
+        .cpp_file("cpp/declaration_navigator.cpp")
         .cpp_file("cpp/keymap_page.cpp")
         .cpp_file("cpp/syntax_colors_page.cpp")
         .cpp_file("cpp/languages_page.cpp")
