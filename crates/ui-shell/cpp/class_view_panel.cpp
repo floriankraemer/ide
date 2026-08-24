@@ -1,6 +1,7 @@
 #include "class_view_panel.h"
 
 #include "editor_tabs.h"
+#include "symbol_kind_label.h"
 
 #include <QAction>
 #include <QComboBox>
@@ -18,33 +19,6 @@
 #include <QVector>
 
 namespace ui_shell {
-
-namespace {
-
-// Shared by ClassViewPanel, QuickOpenDialog and FindUsagesPanel (Tasks D/I/J)
-// so the "class"/"method"/... label text is spelled once.
-QString symbolKindLabel(FfiSymbolKind kind)
-{
-    switch (kind) {
-    case FfiSymbolKind::Class:
-        return QStringLiteral("class");
-    case FfiSymbolKind::Struct:
-        return QStringLiteral("struct");
-    case FfiSymbolKind::Enum:
-        return QStringLiteral("enum");
-    case FfiSymbolKind::Interface:
-        return QStringLiteral("interface");
-    case FfiSymbolKind::Method:
-        return QStringLiteral("method");
-    case FfiSymbolKind::Function:
-        return QStringLiteral("function");
-    case FfiSymbolKind::Field:
-    default:
-        return QStringLiteral("field");
-    }
-}
-
-} // namespace
 
 ClassViewPanel::ClassViewPanel(DocumentManager *docManager, SearchModel *searchModel,
                                 EditorTabs *editorTabs,

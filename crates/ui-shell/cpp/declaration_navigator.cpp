@@ -1,6 +1,7 @@
 #include "declaration_navigator.h"
 
 #include "editor_tabs.h"
+#include "symbol_kind_label.h"
 
 #include <QAction>
 #include <QCursor>
@@ -128,26 +129,4 @@ void DeclarationNavigator::report(const QString &message)
 {
     window_->statusBar()->showMessage(message, 4000);
 }
-
-QString DeclarationNavigator::symbolKindLabel(FfiSymbolKind kind)
-{
-    switch (kind) {
-    case FfiSymbolKind::Class:
-        return tr("class");
-    case FfiSymbolKind::Struct:
-        return tr("struct");
-    case FfiSymbolKind::Enum:
-        return tr("enum");
-    case FfiSymbolKind::Interface:
-        return tr("interface");
-    case FfiSymbolKind::Method:
-        return tr("method");
-    case FfiSymbolKind::Function:
-        return tr("function");
-    case FfiSymbolKind::Field:
-        return tr("field");
-    }
-    return QString();
-}
-
 } // namespace ui_shell

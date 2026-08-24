@@ -296,6 +296,7 @@ fn main() {
         // needs moc, so only the sources are listed.
         .cpp_file("cpp/refactor_controller.cpp")
         .cpp_file("cpp/declaration_navigator.cpp")
+        .cpp_file("cpp/symbol_kind_label.cpp")
         .cpp_file("cpp/keymap_page.cpp")
         .cpp_file("cpp/syntax_colors_page.cpp")
         .cpp_file("cpp/languages_page.cpp")

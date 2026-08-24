@@ -61,7 +61,6 @@ private:
 
     void report(const QString &message);
 
-    static QString symbolKindLabel(FfiSymbolKind kind);
 
     LanguageService *languageService_;
     SearchModel *searchModel_;
