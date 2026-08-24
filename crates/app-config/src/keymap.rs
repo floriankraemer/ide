@@ -117,6 +117,87 @@ pub const ACTIONS: &[ActionDef] = &[
         category: "Edit",
         default_shortcut: "Ctrl+Shift+F",
     },
+    // F1: the editing operations. Grouped after Find because that is where
+    // they sit in the Edit menu, and given JetBrains' defaults where there
+    // is one — the shortcuts people already have in their fingers.
+    ActionDef {
+        id: "edit.selectNextOccurrence",
+        label: "Select Next Occurrence",
+        category: "Edit",
+        default_shortcut: "Ctrl+D",
+    },
+    ActionDef {
+        id: "edit.addCaretAbove",
+        label: "Add Caret Above",
+        category: "Edit",
+        default_shortcut: "Ctrl+Alt+Up",
+    },
+    ActionDef {
+        id: "edit.addCaretBelow",
+        label: "Add Caret Below",
+        category: "Edit",
+        default_shortcut: "Ctrl+Alt+Down",
+    },
+    ActionDef {
+        id: "edit.toggleLineComment",
+        label: "Comment with Line Comment",
+        category: "Edit",
+        default_shortcut: "Ctrl+/",
+    },
+    ActionDef {
+        id: "edit.toggleBlockComment",
+        label: "Comment with Block Comment",
+        category: "Edit",
+        default_shortcut: "Ctrl+Shift+/",
+    },
+    ActionDef {
+        id: "edit.duplicateLine",
+        label: "Duplicate Line or Selection",
+        category: "Edit",
+        default_shortcut: "Ctrl+Alt+D",
+    },
+    ActionDef {
+        id: "edit.moveLineUp",
+        label: "Move Line Up",
+        category: "Edit",
+        default_shortcut: "Alt+Shift+Up",
+    },
+    ActionDef {
+        id: "edit.moveLineDown",
+        label: "Move Line Down",
+        category: "Edit",
+        default_shortcut: "Alt+Shift+Down",
+    },
+    ActionDef {
+        id: "edit.deleteLine",
+        label: "Delete Line",
+        category: "Edit",
+        default_shortcut: "Ctrl+Y",
+    },
+    ActionDef {
+        id: "edit.joinLines",
+        label: "Join Lines",
+        category: "Edit",
+        default_shortcut: "Ctrl+Shift+J",
+    },
+    ActionDef {
+        id: "edit.expandSelection",
+        label: "Extend Selection",
+        category: "Edit",
+        default_shortcut: "Ctrl+W",
+    },
+    ActionDef {
+        id: "edit.shrinkSelection",
+        label: "Shrink Selection",
+        category: "Edit",
+        default_shortcut: "Ctrl+Shift+W",
+    },
+    ActionDef {
+        id: "edit.matchingBracket",
+        label: "Go to Matching Bracket",
+        category: "Edit",
+        default_shortcut: "Ctrl+]",
+    },
     ActionDef {
         id: "view.classView",
         label: "Class View",

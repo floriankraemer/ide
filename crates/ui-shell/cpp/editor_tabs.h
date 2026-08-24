@@ -192,6 +192,17 @@ public:
     // primary becomes the widget's own cursor, the rest are painted.
     void refreshCarets(CodeEditor *editor);
 
+    // The caret-only operations (Ctrl+D, add caret above/below,
+    // expand/shrink): run `op` against the current editor's tab and live
+    // text, then repaint whatever carets it left behind. Does nothing when
+    // no editor is current.
+    void withCurrentEditor(const std::function<void(quint64, const QString &)> &op);
+
+    // Ctrl+]: move the caret to the partner of the bracket it is on, or
+    // leave it where it is when it is not on one. Which bracket answers
+    // which is `edit_ops::brackets`' answer.
+    void jumpToMatchingBracket();
+
     // A protocol position as a document position. The inverse of
     // `lspPosition`, and a re-expression for the same reason: both count
     // UTF-16 code units within a block.

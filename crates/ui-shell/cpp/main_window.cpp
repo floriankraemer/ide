@@ -6,6 +6,7 @@
 #include "code_editor.h"
 #include "declaration_navigator.h"
 #include "e2e_mark.h"
+#include "editing_actions.h"
 #include "editor_tabs.h"
 #include "find_bar.h"
 #include "find_usages_panel.h"
@@ -778,6 +779,11 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QAction *findInFilesAction = registerAction(editMenu, QStringLiteral("edit.findInFiles"),
                                                  QObject::tr("Find in Files..."), appSettings,
                                                  *actions);
+
+    // F1-16: multi-caret, comment toggling, the line operations,
+    // expand/shrink selection and the bracket jump. Its own translation
+    // unit; every entry routes through EditorTabs to EditorOps.
+    buildEditingActions(editMenu, window, appSettings, *actions, editorTabs);
 
     // RF12: the hover signature fallback. `lsp_core::hover_outcome` decides
     // whether the server answered; this only starts the index leg when it

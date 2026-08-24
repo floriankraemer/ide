@@ -148,6 +148,33 @@ void EditorTabs::refreshCarets(CodeEditor *editor)
     syncingCarets_ = false;
 }
 
+void EditorTabs::withCurrentEditor(const std::function<void(quint64, const QString &)> &op)
+{
+    auto *editor = qobject_cast<CodeEditor *>(currentEditor());
+    if (!editor) {
+        return;
+    }
+    op(editor->property("tabId").toULongLong(), editor->toPlainText());
+    refreshCarets(editor);
+}
+
+void EditorTabs::jumpToMatchingBracket()
+{
+    auto *editor = qobject_cast<CodeEditor *>(currentEditor());
+    if (!editor) {
+        return;
+    }
+    const quint64 tabId = editor->property("tabId").toULongLong();
+    const qint64 target = editorOps_->matchingBracket(
+      tabId, editor->toPlainText(), static_cast<quint32>(editor->textCursor().position()));
+    if (target < 0) {
+        return;
+    }
+    QTextCursor cursor = editor->textCursor();
+    cursor.setPosition(static_cast<int>(target));
+    editor->setTextCursor(cursor);
+}
+
 void EditorTabs::runEditorOp(
   const std::function<::rust::Vec<FfiTextEdit>(quint64, const QString &)> &op)
 {
