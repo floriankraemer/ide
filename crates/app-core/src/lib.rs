@@ -19,6 +19,8 @@ use project_model::{FileOpError, OpenFolderError, Project, ProjectSession};
 
 /// File operations a workspace edit asks for (ADR-0026).
 pub mod file_ops;
+/// Where plugins and icon packs are joined (ADR-0026, ADR-0027).
+pub mod icons;
 
 pub use file_ops::{FileOp, ResourceOpError};
 

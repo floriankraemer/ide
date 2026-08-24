@@ -32,12 +32,19 @@ exempt() {
 # by the time they were enforced.
 baseline() {
 	case "$1" in
-	# Raised from 4393 for the E2E marker calls: the view reporting what it
-	# did, at ~40 call sites. Raising a baseline is meant to be visible in a
-	# diff and argued for, which is what this comment is; the alternative —
-	# a ratchet that can never move — means a file awaiting a split can never
-	# be touched at all. The split (F0-4/F0-5) removes this entry entirely.
-	crates/ui-shell/cpp/main_window.cpp) echo 4479 ;;  # split planned (F0-4/F0-5)
+	# Lowered from 4479 by the first slice of the split: the project-tree
+	# dock (its construction, its click and context-menu wiring, and
+	# showAiChatDock next to them) moved to cpp/project_tree_dock.cpp, which
+	# is also where P5's icon-decoration proxy is wired in. Wiring it here
+	# instead would have grown a baselined file; extracting is what the
+	# ratchet exists to push toward.
+	#
+	# Previously raised from 4393 for the E2E marker calls: the view
+	# reporting what it did, at ~40 call sites. Raising a baseline is meant
+	# to be visible in a diff and argued for; the alternative — a ratchet
+	# that can never move — means a file awaiting a split can never be
+	# touched at all. The split (F0-4/F0-5) removes this entry entirely.
+	crates/ui-shell/cpp/main_window.cpp) echo 4317 ;;  # split planned (F0-4/F0-5)
 	crates/index-core/src/lib.rs) echo 4099 ;;         # no split planned; ratcheted so it cannot grow
 	crates/syntax-core/src/lib.rs) echo 2572 ;;        # no split planned; ratcheted so it cannot grow
 	crates/mcp-server/src/lib.rs) echo 1836 ;;         # no split planned; ratcheted so it cannot grow

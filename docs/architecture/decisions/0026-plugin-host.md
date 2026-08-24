@@ -66,6 +66,16 @@ A plugin id must match `[a-z0-9][a-z0-9._-]*` and be at most 64 characters, beca
 - The manifest is a public contract from its first release. Widening it is cheap; narrowing it costs an `api_version` bump.
 - `syntax_core::runtime` keeps its own manifest format. Folding language packs into plugins is possible later and is not attempted here: it would make an unrelated, already-shipped feature part of this change's blast radius.
 
+### Amendment (P5): `app-core` gains three dependencies
+
+This decision says a contribution is data, that the host never interprets one, and that the host and its consumers are joined in `app-core` rather than wired to each other.
+P5 made that join real, and it cost `app-core` three new dependencies: `plugin-host` (the registry and `LoadedPlugin::read_asset`), `icon-theme` (the pack and the renderer), and `syntax-core` (the language id `IconPack::file_icon` is handed, per [ADR-0018](0018-single-source-language-detection.md)).
+`app-core`'s row in [the layering table](../layering.md) previously listed only `editor-core` and `project-model`, so this is a real widening of the application layer and is recorded rather than assumed.
+
+It is the price of the decision above, not a departure from it: the alternative is `icon-theme` depending on `plugin-host` and on `syntax-core`, which is exactly what this ADR and ADR-0027 refuse.
+All three are Qt-free, so `app-core`'s no-Qt rule is untouched, and CI's layering gate (`cargo tree -p app-core -e normal | grep -i qt`) is what enforces that rather than the claim.
+The join lives in one module, `app_core::icons`, and nothing outside it knows an `icon-themes` contribution names a pack file.
+
 ### Rejected alternatives
 
 **A hardcoded icon table.**

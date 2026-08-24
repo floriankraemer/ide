@@ -16,6 +16,7 @@
 use crate::bridge::ai::chat::AiChatRust;
 use crate::bridge::convert::{new_syntax_highlighter, syntax_scope_names, SyntaxHighlighterHandle};
 use crate::bridge::editor::DocumentManagerRust;
+use crate::bridge::icons::IconProviderRust;
 use crate::bridge::language::LanguageServiceRust;
 use crate::bridge::search::SearchModelRust;
 use crate::bridge::settings::{
@@ -580,6 +581,8 @@ mod ffi {
         type QHash_i32_QByteArray = cxx_qt_lib::QHash<cxx_qt_lib::QHashPair_i32_QByteArray>;
         include!("cxx-qt-lib/qstringlist.h");
         type QStringList = cxx_qt_lib::QStringList;
+        include!("cxx-qt-lib/qbytearray.h");
+        type QByteArray = cxx_qt_lib::QByteArray;
     }
 
     /// Extra data roles `data()` answers, alongside `Qt::DisplayRole` (0 —
@@ -600,6 +603,16 @@ mod ffi {
         Path,
         /// Whether the node is a directory (`bool`).
         IsDir,
+        /// The row's icon key (`"<pack-id>/<icon-id>"`, as a `QString`), or
+        /// an empty string when no icon theme is active.
+        ///
+        /// A custom role rather than `Qt::DecorationRole`: answering a
+        /// Qt-defined role from here would put pixels in the Rust model and
+        /// break the rule the comment above states. `IconDecorationProxy`
+        /// (`cpp/icon_decoration_proxy.h`) turns this key into a decoration
+        /// for the tree view, and P6's tab strip and result lists read the
+        /// same keys straight off `IconProvider`.
+        IconKey,
     }
 
     extern "RustQt" {
@@ -1102,6 +1115,39 @@ mod ffi {
     // thread's one cross-thread hop (M3), same `CxxQtThread::queue()`
     // pattern `ProjectTreeModel`'s watcher relay above already established.
     impl cxx_qt::Threading for DocumentManager {}
+
+    extern "RustQt" {
+        /// Icons for a path (ADR-0027), for any view that has one — the
+        /// project tree through `IconDecorationProxy`, the tab strip and
+        /// the result lists directly.
+        ///
+        /// Split in two on purpose: `iconKeyForPath` is cheap enough to run
+        /// per visible row on every repaint, `iconPixels` rasterises. The
+        /// key is what the view memoises its `QIcon`s by, so the expensive
+        /// half runs once per distinct icon and size.
+        #[qobject]
+        type IconProvider = super::IconProviderRust;
+
+        /// The icon key for a row, or an empty string when no icon theme is
+        /// active — which is what tells the view to draw no decoration at
+        /// all rather than a blank one.
+        #[qinvokable]
+        #[cxx_name = "iconKeyForPath"]
+        fn icon_key_for_path(
+            self: &IconProvider,
+            path: &QString,
+            is_dir: bool,
+            expanded: bool,
+        ) -> QString;
+
+        /// `px` by `px` premultiplied RGBA8 for a key, `px * px * 4` bytes,
+        /// or empty when there is nothing to draw. Wrap it in a
+        /// `QImage::Format_RGBA8888_Premultiplied` — see `icon_cache.cpp`
+        /// for why no other format will do.
+        #[qinvokable]
+        #[cxx_name = "iconPixels"]
+        fn icon_pixels(self: &IconProvider, key: &QString, px: u32) -> QByteArray;
+    }
 
     extern "RustQt" {
         /// Settings-I/O adapter (L1 window geometry/state, C2 recent

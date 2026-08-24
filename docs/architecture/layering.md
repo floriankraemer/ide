@@ -26,7 +26,7 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `icon-theme` | (std, serde, toml, resvg) — **not** `syntax-core` and **not** `plugin-host`, see [ADR-0027](decisions/0027-icon-themes.md) | **No** |
 | `settings-model` | `app-config`, `syntax-core`, `lsp-core`, `edit-ops`, `editor-core` (+ std, serde, toml, tree-sitter) | **No** |
 | `edit-ops` | `editor-core`, `syntax-core` (+ std, tree-sitter) | **No** |
-| `app-core` | `editor-core`, `project-model` | **No** |
+| `app-core` | `editor-core`, `project-model`, `plugin-host`, `icon-theme`, `syntax-core` — the last three only for the icon-theme join, see below | **No** |
 | `ai-chat-core` | `lsp-core` (+ std, serde, serde_json, base64, tiktoken-rs, reqwest/rustls) | **No** |
 | `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `settings-model`, `syntax-core`, `mcp-server`, `index-core`, `lsp-core`, `ai-chat-core`, `pty-core`, `terminal-core` (+ tokio, cxx, cxx-qt, cxx-qt-lib) | Yes (adapter + view live here) |
 | `app` | `ui-shell` | Yes |
@@ -56,6 +56,11 @@ That test target is the one place `app-config` may be read from a test rather th
 - **Which icon a row gets** lives in `icon-theme` (ADR-0027), and it is handed the language id rather than deriving one: `IconPack::file_icon` takes `language_id: Option<&str>` and the crate does not depend on `syntax-core`, so ADR-0018's single detection table stays single.
   Its own extension table answers "which art", never "which language", and nothing may ask it the second question.
   Reading a pack's files is the caller's job through the `IconAssets` trait, because a built-in plugin's SVGs are embedded in the binary and an installed plugin's are on disk; `icon-theme` therefore depends on `plugin-host` no more than `plugin-api` does, and `app-core` joins the two.
+- **Where those three meet** is `app_core::icons` (ADR-0026's amendment), and nowhere else.
+  It owns the active theme — the registry snapshot, the resolved `IconPack`, the `IconAssets` implementation backed by `LoadedPlugin::read_asset`, and the `IconRenderer` — and answers exactly two questions: the `"<pack-id>/<icon-id>"` key for a row, and the premultiplied RGBA8 behind a key.
+  It is also the one place that asks `syntax_core::language_for_path` on an icon's behalf, which is the ADR-0018 join `icon-theme` refuses to make itself.
+  Mapping a colour theme name to a light or dark icon set is a rule and lives here too, not in `theme.cpp`.
+  This is why `app-core`'s dependency row grew past the two domain crates: all three additions are Qt-free, so the hard rule below is untouched, and the `cargo tree` gate is what proves it rather than the claim.
 - **Which kind of page a tab needs** is `app-core`'s answer, carried across the seam as `TabKind` (ADR-0020). The view builds a `CodeEditor` or a `HexViewer` from it and never infers the kind from the path or the bytes. What a hex row *says* — offset format, byte grouping, printable-byte rule, short-row padding — belongs to `editor_core::hex`, next to the `binary_detect` rule that decides what counts as binary in the first place.
 - **Rules the AI assistant needs** (how attachments are assembled into a prompt and in what order they are truncated, how many tokens that costs, which files are too secret to attach or read, whether a model-supplied path escapes the project, which tool an approval policy allows, how a code block or an approved tool call becomes an edit, and when an agent run must stop) live in `ai-chat-core` (ADR-0021).
   It depends on `lsp-core` because a proposed edit is expressed as `Vec<lsp_core::DocumentEdits>` and applied through the same `plan_edit` path a refactoring uses — there is no second apply semantics and no second undo story.

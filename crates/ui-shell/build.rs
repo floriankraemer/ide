@@ -282,6 +282,12 @@ fn main() {
         .cpp_file("cpp/languages_page.cpp")
         .cpp_file("cpp/language_servers_page.cpp")
         .cpp_file("cpp/problems_panel.cpp")
+        .cpp_file("cpp/icon_cache.cpp")
+        // Declares Q_OBJECT (it overrides QIdentityProxyModel::data), so its
+        // header is listed too — that is what runs moc on it.
+        .cpp_file("cpp/icon_decoration_proxy.h")
+        .cpp_file("cpp/icon_decoration_proxy.cpp")
+        .cpp_file("cpp/project_tree_dock.cpp")
         .cpp_file("cpp/search_results_panel.cpp")
         .cpp_file("cpp/refactor_preview_dialog.cpp")
         .cpp_file("cpp/search_everywhere_dialog.cpp")
