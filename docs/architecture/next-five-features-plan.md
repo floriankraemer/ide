@@ -64,7 +64,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F1-5 — `edit-ops` crate + comment toggle | done | 6c787c8 (#89) |
 | F1-6 — expand/shrink selection | done | 6c787c8 (#89) |
 | F1-7 — auto-indent and indent/unindent | done | 6c787c8 (#89) |
-| F1-8 — smart typing (auto-close, type-over, surround) | core done | 6c787c8 (#89); view wiring rides F1-15 |
+| F1-8 — smart typing (auto-close, type-over, surround) | done | 6c787c8 (#89); view wiring recorded at the end of this branch |
 | F1-9 — bracket match | done | 6c787c8 (#89) |
 | F1-10 — editing settings: persistence + rules | done | 3d4002d (#90) |
 | F1-11 — save rules (trim, final newline, line endings) | core done, unwired | 3d4002d (#90); `on_save` has no runtime caller — wired with F1-13…F1-17 |

@@ -2114,6 +2114,17 @@ mod ffi {
         #[cxx_name = "backspace"]
         fn backspace(self: Pin<&mut EditorOps>, tab_id: u64, text: &QString) -> Vec<FfiTextEdit>;
 
+        /// Insert pasted text verbatim, at every caret. Paste is not
+        /// typing: `foo(bar` must not become `foo(bar)`.
+        #[qinvokable]
+        #[cxx_name = "pasteText"]
+        fn paste_text(
+            self: Pin<&mut EditorOps>,
+            tab_id: u64,
+            text: &QString,
+            pasted: &QString,
+        ) -> Vec<FfiTextEdit>;
+
         /// Delete at every caret.
         #[qinvokable]
         #[cxx_name = "deleteForward"]

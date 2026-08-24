@@ -422,6 +422,12 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
         editorOps_->clearSecondaryCarets(tabId);
         editor->setSecondaryCarets({});
     });
+    connect(editor, &CodeEditor::pasteRequested, this, [this, editor, tabId](const QString &text) {
+        const ::rust::Vec<FfiTextEdit> edits =
+          editorOps_->pasteText(tabId, editor->toPlainText(), text);
+        applyEditsTo(editor, edits);
+        refreshCarets(editor);
+    });
 
     // L3: only the visible tab's cursor should move the status bar —
     // guards against a background tab's programmatic cursor change

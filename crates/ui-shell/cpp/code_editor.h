@@ -14,6 +14,7 @@ class QContextMenuEvent;
 class QEvent;
 class QFocusEvent;
 class QKeyEvent;
+class QMimeData;
 class QMouseEvent;
 class QStandardItemModel;
 class QMenu;
@@ -230,6 +231,12 @@ signals:
     void multiCaretDelete();
     void multiCaretNewline();
 
+    // F1-8: Ctrl+V (or a middle-click paste). `insertFromMimeData` is the
+    // one correct override point regardless of how many carets there are —
+    // it is called for every route text can enter the document from the
+    // clipboard, not just the shortcut.
+    void pasteRequested(const QString &text);
+
     // Alt+Click: one more caret at this document position.
     void caretAddRequested(int position);
 
@@ -254,6 +261,10 @@ protected:
     // is no sensible meaning for a composition committed at 200 places — so
     // composing collapses to the primary caret first.
     void inputMethodEvent(QInputMethodEvent *event) override;
+    // F1-8: routes plain-text paste through `EditorOps::pasteText` instead
+    // of Qt's own insertion — the case every editor gets wrong is treating
+    // paste as a run of keystrokes, which auto-close would then wrap.
+    void insertFromMimeData(const QMimeData *source) override;
     // Right-click: Qt's own entries plus whatever the window appends, and
     // the caret moved under the pointer first so a gesture chosen from the
     // menu acts on what was clicked.

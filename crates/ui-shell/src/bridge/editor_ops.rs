@@ -46,6 +46,7 @@ use editor_core::selection::{Caret, SelectionError, SelectionSet};
 use editor_core::transaction::{map_carets, Transaction};
 
 use edit_ops::indent::IndentStyle;
+use edit_ops::pairs::{PairTracker, TypeEdit};
 use edit_ops::selection_expand::SelectionHistory;
 use syntax_core::Language;
 
@@ -68,6 +69,12 @@ struct TabOps {
     /// The expand/shrink stack, so Ctrl+Shift+W retraces exactly the path
     /// Ctrl+W took rather than guessing a smaller node.
     history: SelectionHistory,
+    /// Which closers auto-close inserted, so type-over applies to those and
+    /// only those (F1-8). Cleared by any edit that did not come from this
+    /// tracker — a line operation, a comment toggle, an intention — since a
+    /// stale tracked offset would type over a character somebody else put
+    /// there.
+    pairs: PairTracker,
 }
 
 impl Default for TabOps {
@@ -78,6 +85,7 @@ impl Default for TabOps {
         Self {
             selection: SelectionSet::single(Caret::at(0)),
             history: SelectionHistory::new(),
+            pairs: PairTracker::new(),
         }
     }
 }
@@ -265,10 +273,31 @@ impl EditorOpsRust {
             let ops = tabs.entry(tab_id).or_default();
             ops.selection = moved;
             // Any edit invalidates the expand/shrink path — the nodes it
-            // recorded are no longer the nodes in the text.
+            // recorded are no longer the nodes in the text — and the pair
+            // tracker, whose whole premise is that it saw every edit since
+            // the closers it is tracking were inserted.
             ops.history.clear();
+            ops.pairs.invalidate();
         }
         self.to_ffi_edits(text, &transaction)
+    }
+
+    /// The commit path for a [`TypeEdit`]: `edit-ops::pairs` already worked
+    /// out where the carets land — after inserting `()` the caret belongs
+    /// *between* the two characters, which `map_carets` cannot know — so
+    /// its answer is taken as given rather than recomputed. The tracker's
+    /// own state is left alone; it already updated itself.
+    fn commit_typed(&self, tab_id: u64, text: &str, edit: TypeEdit) -> Vec<ffi::FfiTextEdit> {
+        {
+            let mut tabs = self.tabs.borrow_mut();
+            let ops = tabs.entry(tab_id).or_default();
+            ops.selection = edit.selection;
+            ops.history.clear();
+        }
+        if edit.transaction.is_empty() {
+            return Vec::new();
+        }
+        self.to_ffi_edits(text, &edit.transaction)
     }
 }
 
@@ -471,6 +500,13 @@ impl ffi::EditorOps {
     }
 
     /// Typing at every caret, as one transaction.
+    ///
+    /// A single character goes through `edit-ops::pairs`, which is what
+    /// makes auto-close, type-over and surround happen — including with a
+    /// plain letter, which the tracker treats identically to today. A
+    /// longer string (an IME committing more than one character at once)
+    /// is inserted plainly: pairing a composed run character-by-character
+    /// would double-close a bracket the composition typed whole.
     pub fn type_text(
         mut self: Pin<&mut Self>,
         tab_id: u64,
@@ -478,23 +514,69 @@ impl ffi::EditorOps {
         typed: &QString,
     ) -> Vec<ffi::FfiTextEdit> {
         let text = text.to_string();
-        let selection = self.selection_of(tab_id);
-        let transaction = Transaction::type_text(&selection, &typed.to_string());
-        let edits = self.commit(tab_id, &text, transaction);
+        let typed = typed.to_string();
+        let mut chars = typed.chars();
+        let edits = match (chars.next(), chars.next()) {
+            (Some(ch), None) => {
+                let language = language_of(&self.session.borrow(), tab_id);
+                let type_edit = {
+                    let mut tabs = self.tabs.borrow_mut();
+                    let ops = tabs.entry(tab_id).or_default();
+                    let selection = ops.selection.clone();
+                    ops.pairs.type_char(language, &text, &selection, ch)
+                };
+                self.commit_typed(tab_id, &text, type_edit)
+            }
+            _ => {
+                let selection = self.selection_of(tab_id);
+                let transaction = Transaction::type_text(&selection, &typed);
+                self.commit(tab_id, &text, transaction)
+            }
+        };
         self.as_mut().carets_changed(tab_id);
         edits
     }
 
-    /// Backspace at every caret.
+    /// Backspace at every caret: a caret sitting between an opener and its
+    /// own matching closer with nothing between them deletes both.
     pub fn backspace(
         mut self: Pin<&mut Self>,
         tab_id: u64,
         text: &QString,
     ) -> Vec<ffi::FfiTextEdit> {
         let text = text.to_string();
-        let selection = self.selection_of(tab_id);
-        let transaction = Transaction::backspace(&text, &selection);
-        let edits = self.commit(tab_id, &text, transaction);
+        let language = language_of(&self.session.borrow(), tab_id);
+        let type_edit = {
+            let mut tabs = self.tabs.borrow_mut();
+            let ops = tabs.entry(tab_id).or_default();
+            let selection = ops.selection.clone();
+            ops.pairs.backspace(language, &text, &selection)
+        };
+        let edits = self.commit_typed(tab_id, &text, type_edit);
+        self.as_mut().carets_changed(tab_id);
+        edits
+    }
+
+    /// Insert `pasted` verbatim at every caret. Its own slot rather than a
+    /// long `typeText` string, because pasting `foo(bar` must not become
+    /// `foo(bar)` — paste is not typing, and routing it through the same
+    /// path as a keystroke is the mistake `edit_ops::pairs::paste` exists
+    /// to rule out.
+    pub fn paste_text(
+        mut self: Pin<&mut Self>,
+        tab_id: u64,
+        text: &QString,
+        pasted: &QString,
+    ) -> Vec<ffi::FfiTextEdit> {
+        let text = text.to_string();
+        let pasted = pasted.to_string();
+        let type_edit = {
+            let mut tabs = self.tabs.borrow_mut();
+            let ops = tabs.entry(tab_id).or_default();
+            let selection = ops.selection.clone();
+            ops.pairs.paste(&selection, &pasted)
+        };
+        let edits = self.commit_typed(tab_id, &text, type_edit);
         self.as_mut().carets_changed(tab_id);
         edits
     }

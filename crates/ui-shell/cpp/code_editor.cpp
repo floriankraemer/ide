@@ -12,6 +12,7 @@
 #include <QFontMetrics>
 #include <QHelpEvent>
 #include <QInputMethodEvent>
+#include <QMimeData>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPalette>
@@ -194,68 +195,75 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
         return;
     }
 
-    // F1-15: with more than one caret, text-producing keys are transactions
-    // computed in Rust rather than edits Qt makes. This sits after the
-    // popup interception on purpose (the popup owns Enter and Tab while it
-    // is up) and returns before the completion request at the bottom of
-    // this function — otherwise 200 carets would fire 200 completion
-    // requests per keystroke.
-    if (hasSecondaryCarets()) {
-        const QString typed = event->text();
-        switch (event->key()) {
-        case Qt::Key_Escape:
-            event->accept();
-            emit secondaryCaretsDropped();
-            return;
-        case Qt::Key_Backspace:
-            event->accept();
-            emit multiCaretBackspace();
-            return;
-        case Qt::Key_Delete:
-            event->accept();
-            emit multiCaretDelete();
-            return;
-        case Qt::Key_Return:
-        case Qt::Key_Enter:
-            event->accept();
+    // F1-8/F1-15: every text-producing key is a transaction computed in
+    // Rust now, one caret or two hundred — smart typing (auto-close,
+    // type-over, smart backspace) is stateful and lives in `edit_ops`, and
+    // there is no separate "plain" path left for it to fall through. This
+    // sits after the popup interception on purpose (the popup owns Enter
+    // and Tab while it is up).
+    if (event->key() == Qt::Key_Escape && hasSecondaryCarets()) {
+        event->accept();
+        emit secondaryCaretsDropped();
+        return;
+    }
+
+    const QString typedText = event->text();
+    const bool typed = !typedText.isEmpty() && typedText.at(0).isPrint()
+      && !event->modifiers().testFlag(Qt::ControlModifier);
+    const bool deleted = event->key() == Qt::Key_Backspace || event->key() == Qt::Key_Delete;
+    const bool newline = event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter;
+
+    if (typed || deleted || newline) {
+        event->accept();
+        if (newline) {
             emit multiCaretNewline();
-            return;
-        default:
-            break;
-        }
-        if (!typed.isEmpty() && typed.at(0).isPrint()
-            && !event->modifiers().testFlag(Qt::ControlModifier)) {
-            event->accept();
-            emit multiCaretTyped(typed);
+            // A newline leaves the word the popup describes, same as an
+            // ordinary caret move.
+            hideCompletionPopup();
             return;
         }
-        // Everything else — arrows, Home, End, a shortcut — is not a
-        // multi-caret operation in this version. The extra carets are
-        // dropped and the key does exactly what it always did, which is a
-        // stated ceiling (ADR-0023): moving N carets is its own rule and
-        // belongs in `editor_core::selection`, not here.
+        if (typed) {
+            emit multiCaretTyped(typedText);
+        } else if (event->key() == Qt::Key_Backspace) {
+            emit multiCaretBackspace();
+        } else {
+            emit multiCaretDelete();
+        }
+        if (completer_->popup()->isVisible()) {
+            refreshCompletions();
+        }
+        if (typed) {
+            // Fired on every character: whether it is worth a request — a
+            // trigger character, enough of a word, a list already in
+            // hand — is `lsp_core::completion`'s decision, not this
+            // widget's.
+            emit completionRequested(textCursor().position(), textBeforeCursor(), false);
+        }
+        return;
+    }
+
+    // Everything else — arrows, Home, End, a shortcut — is not a
+    // multi-caret operation in this version: the extra carets are dropped
+    // and the key does exactly what it always did, which is a stated
+    // ceiling (ADR-0023). Moving N carets is its own rule and belongs in
+    // `editor_core::selection`, not here.
+    if (hasSecondaryCarets()) {
         emit secondaryCaretsDropped();
     }
 
     QPlainTextEdit::keyPressEvent(event);
+    // A caret move leaves the word the popup describes, so the list stops
+    // being about anything.
+    hideCompletionPopup();
+}
 
-    const bool typed = !event->text().isEmpty() && event->text().at(0).isPrint();
-    const bool deleted = event->key() == Qt::Key_Backspace || event->key() == Qt::Key_Delete;
-    if (!typed && !deleted) {
-        // A caret move (arrows, Home, Enter) leaves the word the popup
-        // describes, so the list stops being about anything.
-        hideCompletionPopup();
+void CodeEditor::insertFromMimeData(const QMimeData *source)
+{
+    if (source->hasText()) {
+        emit pasteRequested(source->text());
         return;
     }
-    if (completer_->popup()->isVisible()) {
-        refreshCompletions();
-    }
-    if (typed) {
-        // Fired on every character: whether it is worth a request — a
-        // trigger character, enough of a word, a list already in hand — is
-        // `lsp_core::completion`'s decision, not this widget's.
-        emit completionRequested(textCursor().position(), textBeforeCursor(), false);
-    }
+    QPlainTextEdit::insertFromMimeData(source);
 }
 
 void CodeEditor::focusOutEvent(QFocusEvent *event)
