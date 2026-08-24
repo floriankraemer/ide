@@ -319,6 +319,49 @@ fn main() {
                 };
                 send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
             }
+            // F1: formatting, keyed by the tab size so a test can pick a
+            // behaviour without a second document. 2 -> edits, 4 -> an empty
+            // list (already formatted), 8 -> null, anything else -> a
+            // MethodNotFound error, which is what a server that does not
+            // implement formatting actually sends. A real server will not
+            // produce these four on demand, which is the whole reason the
+            // stub exists.
+            ("textDocument/formatting", Some(id)) => {
+                let tab_size = params
+                    .get("options")
+                    .and_then(|o| o.get("tabSize"))
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let range = json!({"start": {"line": 0, "character": 0},
+                                   "end": {"line": 0, "character": 4}});
+                match tab_size {
+                    2 => send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id,
+                               "result": [{"range": range, "newText": "  "}]}),
+                    ),
+                    4 => send(&out, json!({"jsonrpc": "2.0", "id": id, "result": []})),
+                    8 => send(&out, json!({"jsonrpc": "2.0", "id": id, "result": null})),
+                    _ => send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "error": {
+                            "code": -32601,
+                            "message": "textDocument/formatting is not implemented",
+                        }}),
+                    ),
+                }
+            }
+            // F1: range formatting is never implemented by the stub, so the
+            // client's fall back to whole-document formatting is exercised.
+            ("textDocument/rangeFormatting", Some(id)) => {
+                send(
+                    &out,
+                    json!({"jsonrpc": "2.0", "id": id, "error": {
+                        "code": -32601,
+                        "message": "textDocument/rangeFormatting is not implemented",
+                    }}),
+                );
+            }
             // RF3: rename, again by line — 0 -> a versioned documentChanges
             // edit, 1 -> a legacy `changes` edit, 2 -> null (nothing to do),
             // anything else -> an error response.
