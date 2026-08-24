@@ -17,6 +17,11 @@ use std::time::{Duration, Instant};
 use editor_core::{BinaryFile, Document, HexRow};
 use project_model::{FileOpError, OpenFolderError, Project, ProjectSession};
 
+/// File operations a workspace edit asks for (ADR-0026).
+pub mod file_ops;
+
+pub use file_ops::{FileOp, ResourceOpError};
+
 /// Stable per-session tab identity (ADR-0003): issued monotonically from 1,
 /// never reused, so an id can never silently start meaning a different tab
 /// the way a `QTabWidget` index does after a close. `0` is reserved as the
@@ -70,6 +75,9 @@ pub enum AppError {
     /// The mutation itself succeeded but re-snapshotting the tree from disk
     /// failed afterwards (e.g. the root vanished mid-operation).
     TreeRebuild(io::Error),
+    /// A workspace edit's file operations were refused, or failed partway
+    /// (ADR-0026).
+    ResourceOp(ResourceOpError),
     /// The tab exists but holds a binary file, and the command asked for
     /// something only a text document can do (edit, save, reload). Distinct
     /// from [`AppError::NoSuchTab`] so the view can tell "that tab is gone"
@@ -89,6 +97,9 @@ impl AppError {
     pub const CODE_RELOAD: i32 = 7;
     pub const CODE_TREE_REBUILD: i32 = 8;
     pub const CODE_NOT_A_TEXT_TAB: i32 = 9;
+    /// Append-only: these codes cross the FFI seam (ADR-0003), so a new
+    /// error takes the next number and never reuses a retired one.
+    pub const CODE_RESOURCE_OP: i32 = 10;
 
     /// The variant's stable numeric code (ADR-0003). These are part of the
     /// FFI contract — `main_window.cpp` branches on them — so existing
@@ -104,6 +115,7 @@ impl AppError {
             AppError::Reload(_) => Self::CODE_RELOAD,
             AppError::TreeRebuild(_) => Self::CODE_TREE_REBUILD,
             AppError::NotATextTab(_) => Self::CODE_NOT_A_TEXT_TAB,
+            AppError::ResourceOp(_) => Self::CODE_RESOURCE_OP,
         }
     }
 }
@@ -111,6 +123,7 @@ impl AppError {
 impl fmt::Display for AppError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            AppError::ResourceOp(err) => write!(f, "{err}"),
             AppError::NoSuchTab => write!(f, "no such tab"),
             AppError::OpenFolder(e) => write!(f, "{e}"),
             AppError::BinaryFile(p) => write!(
@@ -873,6 +886,7 @@ impl AppSession {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use std::fs;
 
