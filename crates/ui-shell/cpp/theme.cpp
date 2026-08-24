@@ -9,8 +9,12 @@ namespace ui_shell {
 
 // Field order follows the declaration in theme.h: bar, tab, tabText,
 // selected, selectedText, hover, hoverText, accent, closeHover, pane,
-// paneBorder. The values are the ones each theme's sheet already used, plus
-// the hover and accent shades the two older themes never had.
+// paneBorder, divider. The values are the ones each theme's sheet already
+// used — `divider` repeats that theme's own `QSplitter::handle` shade, so a
+// docked pane's splitter and an ordinary one cannot drift apart; light's went
+// from #eeeeee to the #d0d0d0 it borders everything else with, because a
+// handle a shade off white separates nothing — plus the
+// hover and accent shades the two older themes never had.
 TabColors tabColorsForTheme(const QString &themeName)
 {
     if (themeName == QStringLiteral("light")) {
@@ -19,7 +23,7 @@ TabColors tabColorsForTheme(const QString &themeName)
                          QColor(QStringLiteral("#000000")), QColor(QStringLiteral("#e4e4e4")),
                          QColor(QStringLiteral("#1a1a1a")), QColor(QStringLiteral("#4b6eaf")),
                          QColor(QStringLiteral("#cfcfcf")), QColor(QStringLiteral("#ffffff")),
-                         QColor(QStringLiteral("#d0d0d0"))};
+                         QColor(QStringLiteral("#d0d0d0")), QColor(QStringLiteral("#d0d0d0"))};
     }
     if (themeName == QStringLiteral("vscode-dark")) {
         return TabColors{QColor(QStringLiteral("#252526")), QColor(QStringLiteral("#2d2d2d")),
@@ -27,14 +31,14 @@ TabColors tabColorsForTheme(const QString &themeName)
                          QColor(QStringLiteral("#ffffff")), QColor(QStringLiteral("#1f1f1f")),
                          QColor(QStringLiteral("#cccccc")), QColor(QStringLiteral("#007acc")),
                          QColor(QStringLiteral("#4f4f4f")), QColor(QStringLiteral("#1e1e1e")),
-                         QColor()};
+                         QColor(), QColor(QStringLiteral("#2b2b2b"))};
     }
     return TabColors{QColor(QStringLiteral("#3c3f41")), QColor(QStringLiteral("#3c3f41")),
                      QColor(QStringLiteral("#a9b7c6")), QColor(QStringLiteral("#4e5254")),
                      QColor(QStringLiteral("#ffffff")), QColor(QStringLiteral("#45484a")),
                      QColor(QStringLiteral("#cbd6e2")), QColor(QStringLiteral("#4b6eaf")),
                      QColor(QStringLiteral("#5e6060")), QColor(QStringLiteral("#2b2b2b")),
-                     QColor(QStringLiteral("#2b2b2b"))};
+                     QColor(QStringLiteral("#2b2b2b")), QColor(QStringLiteral("#3c3f41"))};
 }
 
 QString tabStyleSheet(const TabColors &colors)
@@ -96,10 +100,14 @@ QTabBar::close-button {
              colors.accent.name(), colors.hover.name(), colors.hoverText.name());
 }
 
-QString dockTabStyleSheet(const TabColors &colors)
+QString dockStyleSheet(const TabColors &colors)
 {
     // Appended to the dock manager's own sheet by restyleDockManagers(), so
-    // these repeat ADS's selectors verbatim and win on being later. Reaching
+    // these repeat ADS's selectors verbatim and win on being later. That is
+    // also the only way to reach the splitter handles between docked panes:
+    // ADS paints them in `palette(dark)`, which this application deliberately
+    // keeps *lighter* than the window (see darculaPalette()) so ADS's own tab
+    // labels stay readable — which left a pale grey bar across the chrome. Reaching
     // them from qApp's sheet is not possible however specific the selector is
     // made: Qt gives a widget's own stylesheet priority over the
     // application's, and ADS installs one on the dock manager.
@@ -107,6 +115,15 @@ QString dockTabStyleSheet(const TabColors &colors)
     // Vertical padding is 4px rather than the 6px a QTabBar tab gets because
     // an ADS tab lays its label out with margins of its own on top.
     return QStringLiteral(R"(
+ads--CDockContainerWidget ads--CDockSplitter::handle {
+    background: %11;
+}
+
+ads--CAutoHideSideBar[sideBarLocation="0"] { border-bottom: 1px solid %11; }
+ads--CAutoHideSideBar[sideBarLocation="1"] { border-right: 1px solid %11; }
+ads--CAutoHideSideBar[sideBarLocation="2"] { border-left: 1px solid %11; }
+ads--CAutoHideSideBar[sideBarLocation="3"] { border-top: 1px solid %11; }
+
 ads--CDockAreaWidget, ads--CDockAreaTitleBar {
     background-color: %1;
     border: none;
@@ -166,7 +183,8 @@ ads--CDockWidgetTab #tabCloseButton:pressed {
         .arg(colors.bar.name(), colors.tab.name(), colors.tabText.name(), colors.hover.name(),
              colors.hoverText.name(), colors.selected.name(), colors.accent.name(),
              colors.selectedText.name())
-        .arg(colors.closeHover.name(), tinted(colors.closeHover, 130, 115).name());
+        .arg(colors.closeHover.name(), tinted(colors.closeHover, 130, 115).name(),
+             colors.divider.name());
 }
 
 // Embedded as a compile-time string constant rather than a .qrc/rcc
@@ -291,7 +309,7 @@ QTreeView::item:selected, QAbstractItemView::item:selected {
 }
 
 QSplitter::handle {
-    background-color: #eeeeee;
+    background-color: #d0d0d0;
 }
 
 QStatusBar {
@@ -620,7 +638,7 @@ void restyleDockManager(QWidget *dockManager)
         dockManager->setProperty(kAdsBaseStyleSheet, dockManager->styleSheet());
     }
     dockManager->setStyleSheet(dockManager->property(kAdsBaseStyleSheet).toString()
-                               + dockTabStyleSheet(tabColorsForTheme(activeTheme)));
+                               + dockStyleSheet(tabColorsForTheme(activeTheme)));
 }
 
 bool isDockManager(const QObject *object)
@@ -630,9 +648,9 @@ bool isDockManager(const QObject *object)
 
 // run_app() themes the application before any window exists, so the dock
 // manager is always born after the theme it has to wear. Rather than have
-// main_window.cpp announce it — that file may only shrink until F0-4b/F0-5
-// split it (scripts/check-file-size.sh) — theme.cpp styles every dock manager
-// the moment Qt polishes it.
+// main_window.cpp announce it — F0-4b/F0-5 left that file two lines under the
+// 1200-line ceiling (scripts/check-file-size.sh) — theme.cpp styles every
+// dock manager the moment Qt polishes it.
 class DockManagerWatcher : public QObject
 {
 public:
