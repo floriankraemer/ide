@@ -2001,6 +2001,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "plugin-host"
+version = "0.1.0"
+dependencies = [
+ "plugin-api",
+ "tempfile",
+]
+
+[[package]]
 name = "png"
 version = "0.17.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
