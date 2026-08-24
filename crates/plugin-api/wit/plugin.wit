@@ -1,0 +1,66 @@
+// The WebAssembly component world a plugin implements.
+//
+// Not compiled by this crate: `plugin-host` runs `wasmtime::component::bindgen!`
+// over this file, so a world that does not parse is a build failure there
+// rather than a runtime surprise. It lives here because it is half of the
+// same contract `plugin.toml` describes — the manifest says what a plugin
+// offers, the world says how it is called.
+//
+// Every import is capability-gated. A component whose manifest declares no
+// `[capabilities]` still links the whole world, but the host's
+// implementation of anything it was not granted returns `denied`, rather
+// than the function being absent — a plugin should get a refusal it can
+// report, not a link error it cannot.
+
+package ide:plugin@0.1.0;
+
+interface host {
+    enum log-level {
+        debug,
+        info,
+        warn,
+        error,
+    }
+
+    /// Why a host call could not be served. `denied` carries the
+    /// capability that was missing, so a plugin can say what to add to its
+    /// manifest.
+    variant host-error {
+        denied(string),
+        not-found(string),
+        io(string),
+    }
+
+    /// Write to the editor's log. Always available: a plugin that cannot
+    /// say why it failed is undiagnosable.
+    log: func(level: log-level, message: string);
+
+    /// Raise a user-visible notification. Requires `notify`.
+    notify: func(message: string) -> result<_, host-error>;
+
+    /// The open project's root, or none when no project is open.
+    /// Requires `workspace-root`.
+    workspace-root: func() -> result<option<string>, host-error>;
+
+    /// Read one file. The path must resolve inside a prefix granted by
+    /// `read-files`; anything else is `denied`, including a symlink that
+    /// leaves the granted prefix.
+    read-file: func(path: string) -> result<list<u8>, host-error>;
+}
+
+world plugin {
+    import host;
+
+    /// Called once, after instantiation. A plugin that returns an error
+    /// here is disabled with that message shown on the Plugins page.
+    export activate: func() -> result<_, string>;
+
+    /// Called before the plugin is dropped — on shutdown, on disable, and
+    /// before a reload. Best-effort: a trap here is logged and ignored,
+    /// because there is nothing left to disable.
+    export deactivate: func();
+
+    /// Invoke a command the manifest contributes. `id` is the contributed
+    /// id, never a name the host invented.
+    export on-command: func(id: string, args: list<string>) -> result<_, string>;
+}

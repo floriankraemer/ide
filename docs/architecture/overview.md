@@ -49,6 +49,7 @@ graph TB
 | `index-core` | support | Project index: text search (tantivy + ripgrep crates) and symbols/references, plus declaration resolution ([ADR-0011](decisions/0011-code-navigation.md)) | No |
 | `lsp-core` | support | LSP client: framing, supervised server processes, diagnostics, hover, navigation, completion, server catalog ([ADR-0016](decisions/0016-lsp-client.md)); code actions, rename and workspace edits ([ADR-0019](decisions/0019-lsp-refactoring.md)) | No |
 | `settings-model` | support | The settings pages' rules: syntax-colour draft and override origin, language load errors as sentences, language-server draft ([ADR-0017](decisions/0017-settings-model-crate.md)) | No |
+| `plugin-api` | support | The plugin contract: `plugin.toml`, contribution points, typed load errors, the WebAssembly component world ([ADR-0026](decisions/0026-plugin-host.md)) | No |
 | `pty-core` | support | Cross-platform PTY transport for the embedded terminal | No |
 | `terminal-core` | support | VT100/grid state over `alacritty_terminal` | No |
 | `mcp-server` | support | MCP server (protocol + transport) so an agent can read and drive the editor and query the project index ([ADR-0004](decisions/0004-mcp-transport.md), [ADR-0012](decisions/0012-mcp-protocol-index-and-lifecycle.md)) | No |
@@ -79,7 +80,7 @@ Artifacts land in `dist/`.
 The following are documented direction per ADR-0001 but have no code and no crates today; add them when the work starts, not before:
 
 - **Debugger adapter (DAP)** — a Qt-free core crate, same placement rationale as the shipped LSP client (`lsp-core`, [ADR-0016](decisions/0016-lsp-client.md)).
-- **Plugin host** — hybrid model: native dylib loader (stable C ABI) for trusted, perf-critical integrations; sandboxed WASM runtime (wasmtime) with a narrower, capability-based API for third-party plugins.
+- **Plugin host** — *in delivery, no longer purely future scope.* The contract crate `plugin-api` exists ([ADR-0026](decisions/0026-plugin-host.md)); discovery, the registry and the sandboxed wasmtime tier are being built by [the plugin host and icon themes plan](plugin-host-and-icon-themes-plan.md). ADR-0001's other half — a native dylib loader over a stable C ABI — remains unbuilt and unscheduled.
 - **QML view** — the planned replacement for the Widgets view; the humble-view split exists so this swap stays cheap.
 
 Each of these gets its own ADR under `decisions/` when it becomes real.
