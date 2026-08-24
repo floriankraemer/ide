@@ -33,7 +33,7 @@ A fresh session should read this table (and `git log`) before picking up work, p
 | P0 — spike: cross-build `wasmtime` for `x86_64-pc-windows-gnu` | done | throwaway; result recorded below |
 | P1 — `plugin-api`: manifest, contribution points, WIT world, ADR-0026, this plan | in review | #91 |
 | P2 — `plugin-host`: discovery, registry, built-ins, reload | blocked on P1 |  |
-| P3 — `icon-theme`: pack model, resolver, `resvg` rasteriser, cache, ADR-0027 | in review |  |
+| P3 — `icon-theme`: pack model, resolver, `resvg` rasteriser, cache, ADR-0027 | in review | #92 |
 | P4 — Material import script + vendored pack under `third_party/` | blocked on P3 |  |
 | P5 — FFI seam + project tree icons | blocked on P2, P4 |  |
 | P6 — icons in editor tabs and the search/result lists | blocked on P5 |  |
