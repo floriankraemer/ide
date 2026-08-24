@@ -32,6 +32,9 @@ pub use selection::{column_block, Caret, SelectionError, SelectionSet, MAX_CARET
 pub mod transaction;
 pub use transaction::{map_carets, TextEdit, Transaction, TransactionError};
 
+/// Whole-line operations: duplicate, move, delete, join.
+pub mod line_ops;
+
 pub use search::{find_matches, replacements, Replacement, SearchError, SearchOptions, TextMatch};
 
 /// A single open file: a rope-backed buffer, its backing path, and a
