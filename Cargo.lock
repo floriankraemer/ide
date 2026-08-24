@@ -110,7 +110,10 @@ name = "app-core"
 version = "0.1.0"
 dependencies = [
  "editor-core",
+ "icon-theme",
+ "plugin-host",
  "project-model",
+ "syntax-core",
  "tempfile",
 ]
 

@@ -8,21 +8,40 @@ use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QStri
 
 use crate::bridge::convert::{push_recent_project, to_ffi_result};
 use crate::bridge::ffi::{self, FfiResult, Roles};
-use crate::bridge::registry::shared_session;
+use crate::bridge::registry::{shared_icons, shared_session, SharedIcons};
 
-/// Rust side of the `ProjectTreeModel` QObject: a handle to the shared
-/// session, nothing else — the tree data itself lives in `app-core`.
+/// Rust side of the `ProjectTreeModel` QObject: handles on the shared
+/// session and icon theme, nothing else — the tree data itself lives in
+/// `app-core`.
 pub struct ProjectTreeModelRust {
     session: Rc<RefCell<AppSession>>,
+    icons: Rc<SharedIcons>,
 }
 
 impl Default for ProjectTreeModelRust {
     fn default() -> Self {
         Self {
             session: shared_session(),
+            icons: shared_icons(),
         }
     }
 }
+
+/// Separates the collapsed key from the expanded one in the `IconKey` role.
+///
+/// The role carries *both* states of a row's icon, because that is what Qt
+/// already knows how to use: a `QIcon` holds a `QIcon::Off` and a
+/// `QIcon::On` pixmap, `QTreeView` paints an expanded row with
+/// `QStyle::State_Open`, and `QStyledItemDelegate` turns that into
+/// `QIcon::On`. Handing the view one icon that knows both states means an
+/// expand or collapse repaints the open/closed folder art on its own — no
+/// `dataChanged` plumbing on the expansion signals, and no C++ asking the
+/// view what state a row is in.
+///
+/// A newline because an icon key is `<pack-id>/<icon-id>` and neither part
+/// can contain one: `plugin-api` restricts the id charset and an icon id is
+/// a file stem.
+const ICON_KEY_STATE_SEPARATOR: char = '\n';
 
 /// `Qt::UserRole` — the first role number Qt promises never to use itself.
 const QT_USER_ROLE: i32 = 0x0100;
@@ -127,6 +146,28 @@ impl ffi::ProjectTreeModel {
                 QVariant::from(&QString::from(node.path.to_string_lossy().as_ref()))
             }
             r if r == user_role(Roles::IsDir) => QVariant::from(&node.is_dir),
+            r if r == user_role(Roles::IconKey) => {
+                // The arena's root node is the model's invisible root, so no
+                // row a view ever asks about is the project root itself.
+                let key = |expanded| {
+                    self.icons.service.borrow().icon_key(
+                        &node.path,
+                        node.is_dir,
+                        expanded,
+                        false,
+                        self.icons.appearance,
+                    )
+                };
+                match (key(false), key(true)) {
+                    (Some(closed), Some(open)) => QVariant::from(&QString::from(
+                        format!("{closed}{ICON_KEY_STATE_SEPARATOR}{open}").as_str(),
+                    )),
+                    // No icon theme active: an empty key, which the
+                    // decoration proxy turns into an invalid QVariant so the
+                    // row reserves no icon width.
+                    _ => QVariant::from(&QString::default()),
+                }
+            }
             // Every role Qt itself defines (decoration, edit, tooltip, size
             // hint, ...) lands here and gets an invalid QVariant, which is
             // what tells the view "this item has no icon, no tooltip, no
@@ -141,6 +182,7 @@ impl ffi::ProjectTreeModel {
         roles.insert(0, QByteArray::from("display"));
         roles.insert(user_role(Roles::Path), QByteArray::from("path"));
         roles.insert(user_role(Roles::IsDir), QByteArray::from("isDir"));
+        roles.insert(user_role(Roles::IconKey), QByteArray::from("iconKey"));
         roles
     }
 
@@ -324,12 +366,24 @@ mod tests {
     /// every label sat well right of its own branch indicator.
     #[test]
     fn tree_roles_stay_out_of_the_range_qt_reserves() {
-        for (name, role) in [("Path", Roles::Path), ("IsDir", Roles::IsDir)] {
+        // `IconKey` is in here rather than answering Qt::DecorationRole
+        // directly: the decoration is `IconDecorationProxy`'s job, and the
+        // Rust model stays free of every role Qt defines.
+        let roles = [
+            ("Path", Roles::Path),
+            ("IsDir", Roles::IsDir),
+            ("IconKey", Roles::IconKey),
+        ];
+        for (name, role) in roles {
             assert!(
                 user_role(role) >= QT_USER_ROLE,
                 "role {name} collides with a Qt-defined role"
             );
         }
-        assert_ne!(user_role(Roles::Path), user_role(Roles::IsDir));
+        let numbers: Vec<i32> = roles.iter().map(|&(_, role)| user_role(role)).collect();
+        let mut distinct = numbers.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        assert_eq!(distinct.len(), numbers.len(), "two roles share a number");
     }
 }

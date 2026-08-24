@@ -12,6 +12,7 @@
 #include "syntax_colors_page.h"
 #include "search_everywhere_dialog.h"
 #include "problems_panel.h"
+#include "project_tree_dock.h"
 #include "refactor_preview_dialog.h"
 #include "search_results_panel.h"
 #include "splash_screen.h"
@@ -3252,41 +3253,11 @@ struct CentralWidgets
     ads::CDockWidget *aiChatDock;
 };
 
-// ProjectTreeModel::Roles are offsets from Qt::UserRole, not role numbers —
-// cxx-qt cannot give a qenum explicit discriminants, so the variants would
-// otherwise collide with Qt::DecorationRole and friends. The Rust side adds
-// the same base before it matches on the role.
-int treeRole(ProjectTreeModel::Roles role)
-{
-    return Qt::UserRole + static_cast<int>(role);
-}
-
-// Shows the AI chat dock, putting it back in its tab strip first if a
-// restored layout left it homeless.
-//
-// ADS flags a dock absent from a saved layout as unassigned
-// (DockManager::restoreDockWidgetsOpenState): closed, un-parented, no dock
-// area. Reopening one in that state takes CDockWidget's floating path, so a
-// user whose window_state predates this dock would get a detached window
-// rather than the tab beside Class View that buildCentralWidget arranged.
-// Both the tree's context menu and the menu bar go through here so "show
-// the panel" means the same thing wherever it is asked for.
-void showAiChatDock(ads::CDockManager *dockManager,
-                    ads::CDockWidget *aiChatDock,
-                    ads::CDockWidget *classViewDock)
-{
-    if (!aiChatDock->dockAreaWidget()) {
-        dockManager->addDockWidget(ads::CenterDockWidgetArea, aiChatDock,
-                                    classViewDock->dockAreaWidget());
-    }
-    aiChatDock->toggleView(true);
-    aiChatDock->raise();
-}
-
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
                                    DocumentManager *docManager, AppSettings *appSettings,
                                    SearchModel *searchModel, TerminalSession *terminalSession,
-                                   LanguageService *languageService, AiChat *aiChat)
+                                   LanguageService *languageService, AiChat *aiChat,
+                                   IconProvider *iconProvider)
 {
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
@@ -3305,12 +3276,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // into equal shares and squeezing the editor down to nothing.
     auto *editorArea = dockManager->setCentralWidget(editorDock);
 
-    auto *treeView = new QTreeView();
-    treeView->setModel(treeModel);
-    treeView->setHeaderHidden(true);
-    auto *treeDock = new ads::CDockWidget(dockManager, QObject::tr("Project"));
-    treeDock->setWidget(treeView);
-    dockManager->addDockWidget(ads::LeftDockWidgetArea, treeDock, editorArea);
+    QTreeView *treeView = createProjectTreeDock(dockManager, editorArea, treeModel, iconProvider);
 
     auto *editorTabs = new EditorTabs(docManager, languageService, editorRoot, window);
 
@@ -3536,149 +3502,17 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                           editorTabs->onTabTitleChanged(tabId, title);
                       });
 
-    QObject::connect(
-      treeView,
-      &QTreeView::clicked,
-      treeModel,
-      [treeModel, editorTabs](const QModelIndex &index) {
-          const bool isDir =
-            treeModel->data(index, treeRole(ProjectTreeModel::Roles::IsDir)).toBool();
-          if (isDir) {
-              return;
-          }
-
-          const QString path =
-            treeModel->data(index, treeRole(ProjectTreeModel::Roles::Path)).toString();
-          editorTabs->openFile(path);
-      });
-
-    // Right-click context menu: create/rename/delete from the tree (US-2b).
-    // Pure intent-forwarding: dialogs gather names/confirmation, the session
-    // performs the operation (including retargeting any open tab).
-    treeView->setContextMenuPolicy(Qt::CustomContextMenu);
-    QObject::connect(
-      treeView,
-      &QTreeView::customContextMenuRequested,
-      treeView,
-      [treeView, treeModel, window, aiChat, aiChatPanel, aiChatDock, dockManager,
-       classViewDock](const QPoint &pos) {
-          const QString rootPath = treeModel->rootPath();
-          if (rootPath.isEmpty()) {
-              return; // No project open.
-          }
-
-          const QModelIndex index = treeView->indexAt(pos);
-          const bool hasItem = index.isValid();
-          QString itemPath;
-          bool itemIsDir = false;
-          QString targetDir = rootPath;
-          if (hasItem) {
-              itemPath =
-                treeModel->data(index, treeRole(ProjectTreeModel::Roles::Path)).toString();
-              itemIsDir =
-                treeModel->data(index, treeRole(ProjectTreeModel::Roles::IsDir)).toBool();
-              targetDir = itemIsDir ? itemPath : QFileInfo(itemPath).absolutePath();
-          }
-
-          QMenu menu(treeView);
-          QAction *newFileAction = menu.addAction(QObject::tr("New File"));
-          QAction *newFolderAction = menu.addAction(QObject::tr("New Folder"));
-          QAction *renameAction = nullptr;
-          QAction *deleteAction = nullptr;
-          QAction *addToChatAction = nullptr;
-          QAction *addToNewChatAction = nullptr;
-          if (hasItem) {
-              menu.addSeparator();
-              renameAction = menu.addAction(QObject::tr("Rename"));
-              deleteAction = menu.addAction(QObject::tr("Delete"));
-              // A folder attaches its contents, which is why the two entries
-              // read the same for a file and a folder: what differs is the
-              // rule `ai_chat_core::expand_folder` applies, not the gesture.
-              menu.addSeparator();
-              addToChatAction = menu.addAction(QObject::tr("Add to AI Chat"));
-              addToNewChatAction = menu.addAction(QObject::tr("Add to New AI Chat"));
-          }
-
-          QAction *chosen = menu.exec(treeView->viewport()->mapToGlobal(pos));
-          if (!chosen) {
-              return;
-          }
-
-          if (chosen == newFileAction) {
-              const QString name = QInputDialog::getText(window, QObject::tr("New File"),
-                                                           QObject::tr("File name:"));
-              if (name.isEmpty()) {
-                  return;
-              }
-              const auto result = treeModel->createFile(targetDir, name);
-              if (result.code != 0) {
-                  QMessageBox::critical(window, QObject::tr("Cannot create file"), result.message);
-              }
-          } else if (chosen == newFolderAction) {
-              const QString name = QInputDialog::getText(window, QObject::tr("New Folder"),
-                                                           QObject::tr("Folder name:"));
-              if (name.isEmpty()) {
-                  return;
-              }
-              const auto result = treeModel->createFolder(targetDir, name);
-              if (result.code != 0) {
-                  QMessageBox::critical(window, QObject::tr("Cannot create folder"),
-                                         result.message);
-              }
-          } else if (chosen == renameAction) {
-              const QString currentName = QFileInfo(itemPath).fileName();
-              const QString newName = QInputDialog::getText(window, QObject::tr("Rename"),
-                                                              QObject::tr("New name:"),
-                                                              QLineEdit::Normal, currentName);
-              if (newName.isEmpty() || newName == currentName) {
-                  return;
-              }
-              const auto result = treeModel->renamePath(itemPath, newName);
-              if (result.code != 0) {
-                  QMessageBox::critical(window, QObject::tr("Cannot rename"), result.message);
-              }
-          } else if (chosen == deleteAction) {
-              const QString itemName = QFileInfo(itemPath).fileName();
-              const QString warning = itemIsDir
-                ? QObject::tr("Delete folder \"%1\" and everything inside it? "
-                               "This deletes its contents recursively and cannot be undone.")
-                    .arg(itemName)
-                : QObject::tr("Delete \"%1\"? This cannot be undone.").arg(itemName);
-              const auto choice = QMessageBox::warning(window,
-                                                         QObject::tr("Confirm delete"),
-                                                         warning,
-                                                         QMessageBox::Yes | QMessageBox::No,
-                                                         QMessageBox::No);
-              if (choice != QMessageBox::Yes) {
-                  return;
-              }
-              const auto result = treeModel->deletePath(itemPath);
-              if (result.code != 0) {
-                  QMessageBox::critical(window, QObject::tr("Cannot delete"), result.message);
-              }
-          } else if (chosen == addToChatAction || chosen == addToNewChatAction) {
-              if (chosen == addToNewChatAction) {
-                  aiChat->newConversation();
-              }
-              // A folder attaches its contents and a file attaches itself;
-              // which files a folder yields, and what to say about the ones
-              // it did not, are both `ai-chat-core`'s answers.
-              const FfiResult result = itemIsDir ? aiChat->attachFolder(itemPath)
-                                                  : aiChat->attachFile(itemPath);
-              if (result.code != 0) {
-                  QMessageBox::information(window, QObject::tr("AI Chat"), result.message);
-                  return;
-              }
-              showAiChatDock(dockManager, aiChatDock, classViewDock);
-              // A folder's summary names what was skipped and what did not
-              // fit; a single file has nothing to report, so only the
-              // folder case is worth a line in the status bar.
-              if (itemIsDir && !QString(result.message).isEmpty()) {
-                  window->statusBar()->showMessage(result.message, 8000);
-              }
-              aiChatPanel->attachAndFocus();
-          }
-      });
+    wireProjectTree(treeView,
+                    treeModel,
+                    ProjectTreeActions{window,
+                                       aiChat,
+                                       aiChatPanel,
+                                       aiChatDock,
+                                       classViewDock,
+                                       dockManager,
+                                       [editorTabs](const QString &path) {
+                                           editorTabs->openFile(path);
+                                       }});
 
     return CentralWidgets{editorTabs,        dockManager,     treeView,
                            searchResultsPanel, searchResultsDock, classViewPanel,
@@ -3728,6 +3562,10 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     progress(2, QObject::tr("Starting services..."));
 
     auto *treeModel = new ProjectTreeModel(window);
+    // One per window, alongside the other adapters. Constructing it loads
+    // the plugin registry and the active icon pack, so it is built before
+    // the widgets that ask it for icons.
+    auto *iconProvider = new IconProvider(window);
     auto *docManager = new DocumentManager(window);
     auto *searchModel = new SearchModel(window);
     // Task F3: one terminal session for the one "Terminal" dock widget —
@@ -3767,7 +3605,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     progress(3, QObject::tr("Building workspace..."));
     const CentralWidgets central =
       buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession,
-                          languageService, aiChat);
+                          languageService, aiChat, iconProvider);
     EditorTabs *editorTabs = central.editorTabs;
 
     // Every path that shows the AI chat goes through here, because a dock

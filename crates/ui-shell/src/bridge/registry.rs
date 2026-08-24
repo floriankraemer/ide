@@ -28,6 +28,38 @@ pub(crate) fn shared_session() -> Rc<RefCell<AppSession>> {
     APP_SESSION.with(Rc::clone)
 }
 
+/// The one icon theme in this process, plus the appearance the current
+/// colour theme asks for.
+///
+/// Shared for the same reason `AppSession` is — cxx-qt has no injection
+/// point — and shared rather than duplicated for a second reason: the
+/// renderer memoises rasterised icons, and a second copy would rasterise
+/// the whole tree again for the tab strip.
+pub(crate) struct SharedIcons {
+    /// `&mut` only for the renderer's cache, so the interior mutability
+    /// stops at this cell rather than reaching into `app-core`.
+    pub(crate) service: RefCell<app_core::icons::IconService>,
+    /// Read once at startup from the persisted theme name. P7 makes the
+    /// icon theme a setting and repaints on change; until then a colour
+    /// theme switched at runtime keeps the icons it started with.
+    pub(crate) appearance: app_core::icons::Appearance,
+}
+
+thread_local! {
+    static ICONS: Rc<SharedIcons> = Rc::new({
+        let config_dir = app_core::resolve_config_dir();
+        let theme = app_config::load(&config_dir).unwrap_or_default();
+        SharedIcons {
+            service: RefCell::new(app_core::icons::IconService::load(&config_dir)),
+            appearance: app_core::icons::appearance_for_theme(theme.theme_name()),
+        }
+    });
+}
+
+pub(crate) fn shared_icons() -> Rc<SharedIcons> {
+    ICONS.with(Rc::clone)
+}
+
 /// The one project index in this process, shared by `SearchModel` (which
 /// builds and updates it) and the MCP server (which only queries it).
 pub(crate) fn index_slot() -> mcp_server::IndexHandle {

@@ -6,6 +6,13 @@ edition = "2021"
 [dependencies]
 editor-core = { path = "../editor-core" }
 project-model = { path = "../project-model" }
+# The icon-theme join (ADR-0026): the host stores contributions, `icon-theme`
+# reads packs, `syntax-core` answers which language a file is, and none of
+# the three may depend on the others. All Qt-free, so `app-core`'s no-Qt rule
+# is untouched.
+icon-theme = { path = "../icon-theme" }
+plugin-host = { path = "../plugin-host" }
+syntax-core = { path = "../syntax-core" }
 
 [dev-dependencies]
 tempfile = "3"

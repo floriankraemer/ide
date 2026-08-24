@@ -28,6 +28,7 @@ pub mod ai;
 pub mod convert;
 pub mod editor;
 pub mod ffi;
+pub mod icons;
 pub mod language;
 pub mod registry;
 pub mod search;
