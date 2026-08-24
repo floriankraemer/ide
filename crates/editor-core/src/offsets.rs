@@ -88,8 +88,54 @@ pub fn byte_offset(text: &str, utf16: usize) -> usize {
     text.len()
 }
 
+/// Byte offset of the start of every line, plus a final sentinel equal to
+/// `text.len()` so the last line's end is addressable.
+///
+/// Lines are `\n`-terminated; a `\r` stays part of the line it ends, which
+/// is what every caller here wants — CRLF normalisation is the save path's
+/// job, not the caret's.
+pub fn line_starts(text: &str) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(16);
+    starts.push(0);
+    starts.extend(
+        text.bytes()
+            .enumerate()
+            .filter(|(_, b)| *b == b'\n')
+            .map(|(i, _)| i + 1),
+    );
+    starts
+}
+
+/// The 0-based line containing `byte`, given `starts` from [`line_starts`].
+///
+/// An offset past the end of the text reports the last line rather than
+/// failing: callers hold offsets that a concurrent edit may have outrun.
+pub fn line_of(starts: &[usize], byte: usize) -> usize {
+    match starts.binary_search(&byte) {
+        Ok(line) => line,
+        Err(next) => next - 1,
+    }
+}
+
+/// The byte range of line `line`, **excluding** its terminating newline.
+///
+/// `starts` comes from [`line_starts`]; `text` is the same text it was built
+/// from. A line past the end of the document yields an empty range at the
+/// end of the text.
+pub fn line_range(text: &str, starts: &[usize], line: usize) -> std::ops::Range<usize> {
+    let Some(&start) = starts.get(line) else {
+        return text.len()..text.len();
+    };
+    let end = match starts.get(line + 1) {
+        // The next line begins after this one's `\n`, which is not part of it.
+        Some(&next) => next - 1,
+        None => text.len(),
+    };
+    start..end
+}
+
 /// Snaps `byte` down to the nearest char boundary, clamping to `text.len()`.
-fn clamp_to_boundary(text: &str, byte: usize) -> usize {
+pub fn clamp_to_boundary(text: &str, byte: usize) -> usize {
     if byte >= text.len() {
         return text.len();
     }
@@ -182,6 +228,38 @@ mod tests {
             let u = utf16_offset(MIXED, b);
             assert_eq!(byte_offset(MIXED, u), b, "round trip failed at byte {b}");
         }
+    }
+
+    #[test]
+    fn line_starts_marks_every_line_and_the_end() {
+        assert_eq!(line_starts("a\nbb\nc"), vec![0, 2, 5]);
+        // A trailing newline opens one more (empty) line.
+        assert_eq!(line_starts("a\n"), vec![0, 2]);
+        assert_eq!(line_starts(""), vec![0]);
+    }
+
+    #[test]
+    fn line_of_finds_the_line_containing_an_offset() {
+        let text = "a\nbb\nc";
+        let starts = line_starts(text);
+        assert_eq!(line_of(&starts, 0), 0);
+        assert_eq!(line_of(&starts, 1), 0);
+        assert_eq!(line_of(&starts, 2), 1);
+        assert_eq!(line_of(&starts, 4), 1);
+        assert_eq!(line_of(&starts, 5), 2);
+        // Past the end reports the last line rather than failing.
+        assert_eq!(line_of(&starts, 99), 2);
+    }
+
+    #[test]
+    fn line_range_excludes_the_newline() {
+        let text = "a\nbb\nc";
+        let starts = line_starts(text);
+        assert_eq!(line_range(text, &starts, 0), 0..1);
+        assert_eq!(line_range(text, &starts, 1), 2..4);
+        assert_eq!(line_range(text, &starts, 2), 5..6);
+        // A line past the end is an empty range at the end of the text.
+        assert_eq!(line_range(text, &starts, 9), 6..6);
     }
 
     #[test]
