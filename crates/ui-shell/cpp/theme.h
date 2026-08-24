@@ -44,6 +44,37 @@ SemanticColors semanticColorsForTheme(const QString &themeName);
 // The same, for whatever theme is active — what a widget building rows wants.
 SemanticColors semanticColors();
 
+// The one definition of what a tab looks like. Every tab bar in the product
+// renders from the rules `tabStyleSheet()` and `dockTabStyleSheet()` emit —
+// the editor tab bar, the dock panel tabs and the Search Everywhere filter
+// strip — so a metric changed there changes all of them at once. Only the
+// colours differ per theme.
+struct TabColors
+{
+    QColor bar;          // the strip behind the tabs
+    QColor tab;          // an unselected tab's body
+    QColor tabText;
+    QColor selected;     // the selected tab's body
+    QColor selectedText;
+    QColor hover;        // an unselected tab under the mouse
+    QColor hoverText;
+    QColor accent;       // the marker on the selected tab's top edge
+    QColor closeHover;   // the close button's hover square
+    QColor pane;         // the page area below the strip
+    QColor paneBorder;   // an invalid QColor means borderless
+};
+
+TabColors tabColorsForTheme(const QString &themeName);
+
+// The QTabBar/QTabWidget half, concatenated into each theme's sheet below.
+QString tabStyleSheet(const TabColors &colors);
+
+// The same look in the docking system's own selectors. Qt gives a widget's
+// own stylesheet priority over the application's however specific the latter
+// is, and ADS installs one on its dock manager — so applyTheme() appends
+// these to that sheet rather than to qApp's.
+QString dockTabStyleSheet(const TabColors &colors);
+
 // Chrome-wide stylesheets (menus, tabs, tree, scrollbars, splitter). Editor
 // text colors are QPalette-driven, not QSS (A3) — kept separate here.
 QString darculaStyleSheet();
@@ -66,8 +97,10 @@ QString activeThemeName();
 // Docking System ships its own stylesheet, applied to the CDockManager
 // widget itself, and every color in it resolves through `palette(...)` roles
 // — as does `find_bar.cpp`. A widget-level sheet beats the application one
-// on equal specificity, so dock chrome can only be themed by giving the
-// application a palette that matches the stylesheet (issue #11).
+// on equal specificity, so dock chrome is themed by giving the application a
+// palette that matches the stylesheet (issue #11) — everything except the
+// dock tabs, which applyTheme() reaches by appending dockTabStyleSheet() to
+// that sheet.
 QPalette paletteForTheme(const QString &themeName);
 
 // Applies both halves of a theme to the running QApplication. Callers should
