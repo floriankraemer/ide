@@ -32,8 +32,8 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 |---|---|---|
 | F0-1 — file-size gate + ratcheted baselines | done | 99a37f5 (#73), corrected in #79 |
 | F0-1b — promote `Utf16Cursor` to `editor_core::offsets` | done | febd6c0 (#74) |
-| F0-2 — bridge.rs split, part 1 | in review | #78 |
-| F0-3 — bridge.rs split, part 2 | in review | #78 |
+| F0-2 — bridge.rs split, part 1 | done | 02b1fa2 (#78) |
+| F0-3 — bridge.rs split, part 2 | done | 02b1fa2 (#78) |
 | F0-4a — main_window.cpp split, part 1: `EditorTabs` | in review | #100 |
 | F0-4b — main_window.cpp split, part 1: `ClassViewPanel`, `FindUsagesPanel`, `IdeMainWindow` | todo |  |
 | F0-5 — main_window.cpp split, part 2 | blocked on F0-4b |  |
@@ -42,13 +42,13 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F0-8 — byte-column fix in `moveCursorToLine` | done | febd6c0 (#74) |
 | F0-9 — per-project settings persistence | done | 720d1d9 (#75) |
 | F0-10 — per-project settings rules + dialog | blocked on F0-6 |  |
-| F0-11 — E2E harness | in review | #76 |
-| F0-12 — E2E seed flows | in review | #76 |
+| F0-11 — E2E harness | done | 1eb5009 (#76) |
+| F0-12 — E2E seed flows | done | 1eb5009 (#76) |
 | F0-13 — E2E in CI | todo |  |
-| F0-14 — `lsp-conformance` image stage | in review | #77 |
-| F0-15 — LSP conformance harness + expectations | in review | #77 |
+| F0-14 — `lsp-conformance` image stage | done | 2f1d4ec (#77) |
+| F0-15 — LSP conformance harness + expectations | done | 2f1d4ec (#77) |
 | F0-16 — conformance fixes | todo | one row per defect once F0-15 lands |
-| F0-17 — docs: this plan, ADRs, layering, overview | in review | #80 |
+| F0-17 — docs: this plan, ADRs, layering, overview | done | 5675b3f (#80) |
 | F0-18 — route every buffer edit through `applyBufferEdits` | todo |  |
 | F0-19 — error-code ranges (ADR-0003 amendment) | todo |  |
 
@@ -669,7 +669,7 @@ What gets deleted is `showAiChatDock`'s comment at **3141–3151** and its near-
 **Proving the split preserved behaviour** — asserted in every large refactor and true in about half. Two mechanisms, both decisive:
 
 1. **FFI header snapshot.** `#[cxx_qt::bridge]` generates C++ headers into `target/**/cxx-qt-gen/`. Snapshot before, snapshot after, diff. Empty diff proves every QObject, slot signature, signal and type mapping is unchanged — a stronger guarantee than any test, because it is about the interface rather than a sample of behaviour. Keep it permanently with a `make bless-ffi-snapshot`, run **unconditionally** (it costs 30s), so any future PR changing the FFI surface says so out loud in its diff.
-2. **E2E marker-stream golden comparison.** `main_window.cpp` has no compile-time invariant to lean on. Run the four seed flows on the pre-split revision, save `events.jsonl` per flow, re-run after, diff **including event order** (excluding timestamps, pids, temp paths, window ids, ports). A reordered `tab_added`/`project_opened` pair is exactly the `connect()`-ordering change a mechanical-looking C++ split introduces, and it is invisible to every other check. **This is the concrete reason F0-11/F0-12 land before F0-4.**
+2. **E2E marker-stream golden comparison.** `main_window.cpp` has no compile-time invariant to lean on. Run the five seed flows on the pre-split revision, save `events.jsonl` per flow, re-run after, diff **including event order** (excluding timestamps, pids, temp paths, window ids, ports). A reordered `tab_added`/`project_opened` pair is exactly the `connect()`-ordering change a mechanical-looking C++ split introduces, and it is invisible to every other check. **This is the concrete reason F0-11/F0-12 land before F0-4.**
 
 Two mechanisms an earlier draft added and this one drops: a normalised-source `verify-mechanical-split.sh` (the split *already* requires four doc comments to move between translation units, so the diff will be dirty on the first commit — a gate expected to be dirty is a gate that gets waved through), and a `split:`-commit-message CI condition (a convention masquerading as enforcement; the snapshot runs unconditionally instead).
 
@@ -738,7 +738,7 @@ Lives at `crates/e2e/tests/` with `harness.rs` (the `Ide` fixture), `keys.rs` (x
 
 *(a) A view-side marker stream* — `IDE_E2E_EVENTS=/path/to/events.jsonl`; unset means every mark is a no-op. One free function in `cpp/e2e_mark.cpp`: `void e2eMark(const char *json)` appends a line and flushes. Called where the view *finished doing something*: `{"ev":"tab_added","index":0,"title":"a.rs"}`, `dialog_shown`, `dialog_closed`, `split_created`, `status`. This does not violate the humble-view rule — it contains no `if` encoding a business decision; it is the view reporting what it did, the same category as painting. It is the **only** channel that can catch the wiring, lifetime, identity-mapping and focus bug classes, because it reports the *widget's* view of the world.
 
-*(b) A quiescence probe, deferred until a flow needs it.* The design, when it is needed: one `AtomicUsize` in-flight counter in `bridge/registry.rs`, incremented where a worker thread is spawned and decremented at the end of the queued callback, exposed in the MCP `ping` reply, with `wait_until_idle()` polling until `inflight == 0` **and** the marker file has not grown for two consecutive polls (either condition alone lies — `inflight == 0` before the worker was even spawned, a quiet marker file during a long computation). But all four seed flows are writable with the marker stream and `wait_for(predicate)` alone, and this is product code added for the harness. Add it when a specific flow cannot be written without it, not before.
+*(b) A quiescence probe, deferred until a flow needs it.* The design, when it is needed: one `AtomicUsize` in-flight counter in `bridge/registry.rs`, incremented where a worker thread is spawned and decremented at the end of the queued callback, exposed in the MCP `ping` reply, with `wait_until_idle()` polling until `inflight == 0` **and** the marker file has not grown for two consecutive polls (either condition alone lies — `inflight == 0` before the worker was even spawned, a quiet marker file during a long computation). But all five seed flows are writable with the marker stream and `wait_for(predicate)` alone, and this is product code added for the harness. Add it when a specific flow cannot be written without it, not before.
 
 **Is MCP the control channel?** No for input, yes-with-limits for observation.
 As input it is disqualified: `open_file` over MCP routes through `AppSession` and never touches the tree widget, never raises a dialog, never exercises a shortcut — it would skip the exact layer E2E exists to cover and produce a green suite proving nothing about `cpp/`. **Input is xdotool, always.**
@@ -870,7 +870,7 @@ Exhaustive per-language test *functions* — a registry-driven test is one langu
 
 **Layering, after each new crate** — `cargo tree -p <crate> -e normal | grep -i qt` must be empty for `edit-ops`, `vcs-core`, `run-core` and `e2e`, and the check added to CI's loop alongside the existing three.
 
-**The seam split specifically** — `make verify-split` clean, the FFI header snapshot diff empty, and the four seed flows' marker streams identical to their pre-split goldens.
+**The seam split specifically** — `make verify-split` clean, the FFI header snapshot diff empty, and the five seed flows' marker streams identical to their pre-split goldens.
 
 **The LSP work** — `make lsp-conformance` against the three pinned servers, with `conformance-expectations.toml` committed and any drift reviewed as a diff.
 
