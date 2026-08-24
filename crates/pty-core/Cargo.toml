@@ -5,3 +5,9 @@ edition = "2021"
 
 [dependencies]
 portable-pty = "0.8"
+
+# Unix only: killpg, for stopping a run and everything it started. A plain
+# child.kill() reaches one process, which leaves rustc or node holding the
+# CPU when a build is cancelled.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

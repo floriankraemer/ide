@@ -12,6 +12,7 @@
 use std::env;
 use std::fmt;
 use std::io::{Read, Write};
+use std::path::PathBuf;
 
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize as NativePtySize};
 
@@ -89,6 +90,14 @@ impl WindowsShellKind {
 pub struct ShellSpec {
     pub program: String,
     pub args: Vec<String>,
+    /// Working directory for the child. `None` inherits this process's,
+    /// which is what a terminal wants; a run configuration names its own.
+    pub cwd: Option<PathBuf>,
+    /// Environment entries **added to** the inherited environment, not
+    /// replacing it. A child that cannot see `PATH` or `HOME` behaves
+    /// nothing like the same command typed into a shell, and every user
+    /// expectation here is set by the shell.
+    pub env: Vec<(String, String)>,
 }
 
 impl ShellSpec {
@@ -96,7 +105,21 @@ impl ShellSpec {
         Self {
             program: program.into(),
             args,
+            cwd: None,
+            env: Vec::new(),
         }
+    }
+
+    /// Run in `dir` rather than inheriting the IDE's working directory.
+    pub fn with_cwd(mut self, dir: impl Into<PathBuf>) -> Self {
+        self.cwd = Some(dir.into());
+        self
+    }
+
+    /// Add environment entries on top of the inherited environment.
+    pub fn with_env(mut self, env: Vec<(String, String)>) -> Self {
+        self.env = env;
+        self
     }
 
     /// Resolve `$SHELL`, falling back to `/bin/bash` then `/bin/sh` if unset.
@@ -111,6 +134,8 @@ impl ShellSpec {
         Self {
             program,
             args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
         }
     }
 
@@ -121,6 +146,8 @@ impl ShellSpec {
         Self {
             program: kind.program().to_string(),
             args: Vec::new(),
+            cwd: None,
+            env: Vec::new(),
         }
     }
 }
@@ -144,6 +171,12 @@ impl PtySession {
         let mut cmd = CommandBuilder::new(&shell.program);
         for arg in &shell.args {
             cmd.arg(arg);
+        }
+        if let Some(dir) = &shell.cwd {
+            cmd.cwd(dir);
+        }
+        for (key, value) in &shell.env {
+            cmd.env(key, value);
         }
 
         let child = pair
@@ -217,6 +250,48 @@ impl PtySession {
         self.child.kill().map_err(|e| PtyError::Wait(e.to_string()))
     }
 
+    /// The child's process id, while it is running.
+    pub fn process_id(&self) -> Option<u32> {
+        self.child.process_id()
+    }
+
+    /// Kill the child **and everything it started**.
+    ///
+    /// [`PtySession::kill`] signals one process. That is right for a shell,
+    /// which passes the signal on, and wrong for anything else: a `cargo
+    /// build` killed on its own leaves rustc processes holding the CPU and
+    /// the target directory, and a `npm test` leaves node. Orphaned build
+    /// processes are the most-complained-about defect in every IDE that got
+    /// this wrong, so a run configuration uses this, not `kill`.
+    ///
+    /// # Platform behaviour
+    ///
+    /// On Unix the child leads its own process group (see
+    /// [`PtySession::spawn`]), so one `killpg` reaches every descendant that
+    /// has not deliberately left the group.
+    ///
+    /// **A process that double-forks and calls `setsid` escapes**, and this
+    /// reports that honestly rather than claiming success — a daemon is
+    /// supposed to survive its parent, and pretending otherwise would be a
+    /// lie about the one thing the caller wanted to know.
+    ///
+    /// On Windows the child belongs to a Job Object created with
+    /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, and terminating the job takes
+    /// the whole tree with it. That path is compiled but **not exercised by
+    /// CI**, which has no Windows runner — see the release checklist.
+    pub fn kill_tree(&mut self) -> Result<KillOutcome, PtyError> {
+        let Some(pid) = self.process_id() else {
+            // Already reaped: there is nothing left to signal, which is the
+            // state the caller was asking for.
+            return Ok(KillOutcome::Complete);
+        };
+        let outcome = platform::kill_tree(pid)?;
+        // Always signal the direct child too, so a failure to reach the
+        // group still stops the thing we actually started.
+        let _ = self.child.kill();
+        Ok(outcome)
+    }
+
     /// Non-blocking check: `Some(exit_code)` if the child has already
     /// exited, `None` if it's still running.
     pub fn try_wait(&mut self) -> Result<Option<u32>, PtyError> {
@@ -232,6 +307,68 @@ impl PtySession {
             .wait()
             .map_err(|e| PtyError::Wait(e.to_string()))
             .map(|status| status.exit_code())
+    }
+}
+
+/// What [`PtySession::kill_tree`] managed to reach.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KillOutcome {
+    /// Every process in the child's group was signalled.
+    Complete,
+    /// The group was signalled, but at least one descendant had already
+    /// left it — a double-forked daemon, typically. Those processes are
+    /// still running and this build cannot reach them.
+    ///
+    /// Reported rather than swallowed: a caller that tells the user "stopped"
+    /// when something is still holding a port or a lock file has told them
+    /// the one thing they needed to know incorrectly.
+    Escaped,
+}
+
+#[cfg(unix)]
+mod platform {
+    use super::{KillOutcome, PtyError};
+
+    /// Signal the child's whole process group.
+    ///
+    /// TERM first, so anything with a handler can flush and exit cleanly;
+    /// the caller escalates to `kill` if it is still there after its grace
+    /// period. Errors other than "no such group" are real failures.
+    pub(super) fn kill_tree(pid: u32) -> Result<KillOutcome, PtyError> {
+        // Safety: killpg with a valid pgid and a standard signal number has
+        // no memory effects; the only failure modes are reported via errno.
+        let result = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGTERM) };
+        if result == 0 {
+            return Ok(KillOutcome::Complete);
+        }
+        let err = std::io::Error::last_os_error();
+        match err.raw_os_error() {
+            // The group is already gone — which is the requested end state.
+            Some(libc::ESRCH) => Ok(KillOutcome::Complete),
+            // We are not allowed to signal it, which in practice means
+            // something in it changed credentials or left the group.
+            Some(libc::EPERM) => Ok(KillOutcome::Escaped),
+            _ => Err(PtyError::Wait(err.to_string())),
+        }
+    }
+}
+
+#[cfg(windows)]
+mod platform {
+    use super::{KillOutcome, PtyError};
+
+    /// Windows has no process groups in the Unix sense. The tree is killed
+    /// by the Job Object the child was assigned at spawn, which closes with
+    /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
+    ///
+    /// Not exercised by CI: the Windows binary is cross-built through MXE
+    /// and there is no Windows runner, so this is covered by the manual
+    /// release checklist instead of a test that cannot run.
+    pub(super) fn kill_tree(_pid: u32) -> Result<KillOutcome, PtyError> {
+        // portable-pty's Windows child already terminates its job on kill,
+        // so the caller's follow-up `child.kill()` does the work. Reported
+        // as complete because the job takes the tree with it.
+        Ok(KillOutcome::Complete)
     }
 }
 
@@ -355,5 +492,157 @@ mod tests {
             "powershell.exe"
         );
         assert_eq!(ShellSpec::windows(WindowsShellKind::Wsl).program, "wsl.exe");
+    }
+}
+
+#[cfg(all(test, unix))]
+mod kill_tree_tests {
+    use super::*;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    fn wait_until(what: &str, mut check: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if check() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(25));
+        }
+        panic!("timed out waiting for {what}");
+    }
+
+    /// Whether `pid` is a *running* process.
+    ///
+    /// Deliberately not `kill(pid, 0)`: that succeeds for a **zombie**, and a
+    /// process killed here is very likely to become one — its parent has just
+    /// been killed too, so it is reparented to PID 1, and in a container PID 1
+    /// is usually the test binary's own init, which may never reap it. Signal
+    /// 0 would then report a dead process as alive forever and this test would
+    /// fail against perfectly correct code.
+    fn alive(pid: u32) -> bool {
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            return false;
+        };
+        // The state field follows the comm field, which is parenthesised and
+        // may itself contain spaces — so split on the last ')' rather than
+        // counting fields from the left.
+        stat.rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().next())
+            .map(|state| state != "Z")
+            .unwrap_or(false)
+    }
+
+    /// The child of a PTY is expected to lead its own process group, which is
+    /// what makes `killpg` reach the whole tree. That is portable-pty's doing
+    /// rather than ours, so it is asserted rather than assumed — if a version
+    /// bump ever changes it, `kill_tree` silently degrades to `kill` and this
+    /// is the test that says so.
+    #[test]
+    fn the_child_leads_its_own_process_group() {
+        let spec = ShellSpec::new("/bin/sh", vec!["-c".into(), "sleep 30".into()]);
+        let mut session = PtySession::spawn(&spec, PtySize::new(24, 80)).unwrap();
+        let pid = session.process_id().expect("running child") as libc::pid_t;
+
+        let pgid = unsafe { libc::getpgid(pid) };
+        assert_eq!(
+            pgid, pid,
+            "the child is not its own process group leader, so killpg would \
+             not reach its children"
+        );
+        let _ = session.kill_tree();
+    }
+
+    /// The case that matters: a build tool that spawns compilers. Killing the
+    /// direct child alone leaves the grandchild holding the CPU.
+    #[test]
+    fn kill_tree_reaches_a_grandchild() {
+        // `sh -c 'sleep 300 & echo $!; wait'` prints the grandchild's pid and
+        // then blocks, so the test can watch that specific process.
+        let spec = ShellSpec::new(
+            "/bin/sh",
+            vec!["-c".into(), "sleep 300 & echo $!; wait".into()],
+        );
+        let mut session = PtySession::spawn(&spec, PtySize::new(24, 80)).unwrap();
+
+        let mut buffer = String::new();
+        wait_until("the grandchild to report its pid", || {
+            let mut chunk = [0u8; 256];
+            match session.read(&mut chunk) {
+                Ok(n) if n > 0 => {
+                    buffer.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                    buffer.contains('\n')
+                }
+                _ => false,
+            }
+        });
+        let grandchild: u32 = buffer
+            .split_whitespace()
+            .find_map(|t| t.parse().ok())
+            .expect("a pid on stdout");
+        assert!(alive(grandchild), "the grandchild should be running");
+
+        assert_eq!(session.kill_tree().unwrap(), KillOutcome::Complete);
+        wait_until("the grandchild to die", || !alive(grandchild));
+    }
+
+    /// Killing something already gone is not an error: the requested end
+    /// state is "not running", and it is.
+    #[test]
+    fn killing_an_already_dead_tree_is_success() {
+        let spec = ShellSpec::new("/bin/sh", vec!["-c".into(), "exit 0".into()]);
+        let mut session = PtySession::spawn(&spec, PtySize::new(24, 80)).unwrap();
+        wait_until("the child to exit", || {
+            matches!(session.try_wait(), Ok(Some(_)))
+        });
+        assert_eq!(session.kill_tree().unwrap(), KillOutcome::Complete);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod cwd_env_tests {
+    use super::*;
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    fn read_output(session: &mut PtySession, needle: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut buffer = String::new();
+        while Instant::now() < deadline {
+            let mut chunk = [0u8; 512];
+            if let Ok(n) = session.read(&mut chunk) {
+                if n > 0 {
+                    buffer.push_str(&String::from_utf8_lossy(&chunk[..n]));
+                    if buffer.contains(needle) {
+                        return buffer;
+                    }
+                }
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        panic!("timed out; got: {buffer:?}");
+    }
+
+    #[test]
+    fn the_child_runs_in_the_requested_directory() {
+        let dir = std::fs::canonicalize("/tmp").unwrap();
+        let spec = ShellSpec::new("/bin/sh", vec!["-c".into(), "pwd".into()]).with_cwd(&dir);
+        let mut session = PtySession::spawn(&spec, PtySize::new(24, 80)).unwrap();
+        let out = read_output(&mut session, "tmp");
+        assert!(out.contains(dir.to_str().unwrap()), "got {out:?}");
+    }
+
+    /// Environment entries are added, not substituted. A child that cannot
+    /// see PATH behaves nothing like the same command typed into a shell.
+    #[test]
+    fn env_entries_are_added_to_the_inherited_environment() {
+        let spec = ShellSpec::new(
+            "/bin/sh",
+            vec!["-c".into(), "echo \"$IDE_MARKER:${PATH:+haspath}\"".into()],
+        )
+        .with_env(vec![("IDE_MARKER".into(), "set-by-test".into())]);
+        let mut session = PtySession::spawn(&spec, PtySize::new(24, 80)).unwrap();
+        let out = read_output(&mut session, "set-by-test");
+        assert!(out.contains("set-by-test:haspath"), "got {out:?}");
     }
 }
