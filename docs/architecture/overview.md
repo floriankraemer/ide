@@ -43,13 +43,15 @@ graph TB
 |-------|-------|----------------|----|
 | `editor-core` | domain | Rope-backed `Document`, tab list, load/save/dirty state, find/replace matching | No |
 | `project-model` | domain | `ProjectSession`, directory tree, `notify` watcher, last-project persistence | No |
-| `app-core` | application | `AppSession`: orchestration, command methods, typed `AppError`, jump history | No |
+| `app-core` | application | `AppSession`: orchestration, command methods, typed `AppError`, jump history; the icon-theme join that hands a row's language id to the pack ([ADR-0027](decisions/0027-icon-themes.md)) | No |
 | `app-config` | support | `settings.toml` load/save, theme, editor font/colors, keymap | No |
 | `syntax-core` | support | tree-sitter parsing: highlighting, folding, outline, occurrences, supertype edges | No |
 | `index-core` | support | Project index: text search (tantivy + ripgrep crates) and symbols/references, plus declaration resolution ([ADR-0011](decisions/0011-code-navigation.md)) | No |
 | `lsp-core` | support | LSP client: framing, supervised server processes, diagnostics, hover, navigation, completion, server catalog ([ADR-0016](decisions/0016-lsp-client.md)); code actions, rename and workspace edits ([ADR-0019](decisions/0019-lsp-refactoring.md)) | No |
-| `settings-model` | support | The settings pages' rules: syntax-colour draft and override origin, language load errors as sentences, language-server draft ([ADR-0017](decisions/0017-settings-model-crate.md)) | No |
+| `settings-model` | support | The settings pages' rules: syntax-colour draft and override origin, language load errors as sentences, language-server draft ([ADR-0017](decisions/0017-settings-model-crate.md)), and the Plugins page's rows including what a load error or a sandbox trap means in English | No |
 | `plugin-api` | support | The plugin contract: `plugin.toml`, contribution points, typed load errors, the WebAssembly component world ([ADR-0026](decisions/0026-plugin-host.md)) | No |
+| `plugin-host` | support | Which plugins exist and which may run: the `<config_dir>/plugins` scan, the built-ins embedded in the binary, the disabled list, quarantine and duplicate-id resolution ([ADR-0026](decisions/0026-plugin-host.md)); the sandboxed wasmtime tier with fuel, epoch and memory limits ([ADR-0028](decisions/0028-wasm-plugin-tier.md)) | No |
+| `icon-theme` | support | Icon packs: the resolution order from a file name to an icon id, light/dark art, and `resvg` rasterisation to premultiplied RGBA8 ([ADR-0027](decisions/0027-icon-themes.md)) | No |
 | `pty-core` | support | Cross-platform PTY transport for the embedded terminal | No |
 | `terminal-core` | support | VT100/grid state over `alacritty_terminal` | No |
 | `mcp-server` | support | MCP server (protocol + transport) so an agent can read and drive the editor and query the project index ([ADR-0004](decisions/0004-mcp-transport.md), [ADR-0012](decisions/0012-mcp-protocol-index-and-lifecycle.md)) | No |
@@ -80,7 +82,9 @@ Artifacts land in `dist/`.
 The following are documented direction per ADR-0001 but have no code and no crates today; add them when the work starts, not before:
 
 - **Debugger adapter (DAP)** — a Qt-free core crate, same placement rationale as the shipped LSP client (`lsp-core`, [ADR-0016](decisions/0016-lsp-client.md)).
-- **Plugin host** — *in delivery, no longer purely future scope.* The contract crate `plugin-api` exists ([ADR-0026](decisions/0026-plugin-host.md)); discovery, the registry and the sandboxed wasmtime tier are being built by [the plugin host and icon themes plan](plugin-host-and-icon-themes-plan.md). ADR-0001's other half — a native dylib loader over a stable C ABI — remains unbuilt and unscheduled.
+- **Plugin host** — *built.* [The plugin host and icon themes plan](plugin-host-and-icon-themes-plan.md) delivered the contract crate `plugin-api`, discovery and the registry in `plugin-host` ([ADR-0026](decisions/0026-plugin-host.md)), and the sandboxed wasmtime tier with fuel, epoch and memory limits ([ADR-0028](decisions/0028-wasm-plugin-tier.md)).
+  A plugin declares contributions in `plugin.toml`; the Material icon pack ships as the first built-in and the Plugins settings page turns any of them off.
+  ADR-0001's other half — a native dylib loader over a stable C ABI — remains unbuilt and unscheduled, and the sandbox is the reason it is not missed.
 - **QML view** — the planned replacement for the Widgets view; the humble-view split exists so this swap stays cheap.
 
 Each of these gets its own ADR under `decisions/` when it becomes real.

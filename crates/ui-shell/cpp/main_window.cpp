@@ -17,6 +17,7 @@
 #include "problems_panel.h"
 #include "icon_decoration_proxy.h"
 #include "project_tree_dock.h"
+#include "recent_projects_menu.h"
 #include "refactor_preview_dialog.h"
 #include "search_results_panel.h"
 #include "splash_screen.h"
@@ -912,6 +913,20 @@ public:
     // highlighter, and a QSyntaxHighlighter only re-runs when its document
     // changes — so a live theme switch has to drop that cache and ask every
     // open editor to re-highlight itself.
+    // The icon theme changed under tabs that already hold their art: a tab
+    // keeps the QIcon it opened with, unlike the tree and the result lists,
+    // which rebuild their rows and pick the new art up on their own.
+    void refreshTabIcons()
+    {
+        for (QTabWidget *group : std::as_const(groups_)) {
+            for (int index = 0; index < group->count(); ++index) {
+                const quint64 tabId = tabIdAt(group, index);
+                renderTabText(group, index, docManager_->tabTitle(tabId),
+                              docManager_->tabIsModified(tabId));
+            }
+        }
+    }
+
     void refreshHighlighting()
     {
         forEachEditor([](QPlainTextEdit *editor) {
@@ -2818,47 +2833,6 @@ private:
     int position_ = 0;
 };
 
-// File > Recent Projects (C2): rebuilds `menu` from `appSettings`'s
-// persisted list. Forward-declared so it and openProjectAndRefreshRecents
-// (below) can call each other without any lambda self-capture.
-void populateRecentProjectsMenu(QMenu *menu, AppSettings *appSettings, ProjectTreeModel *treeModel,
-                                 QMainWindow *window);
-
-// Shared tail for "Open Folder..." and clicking a Recent Projects entry:
-// open, report failure, and on success refresh the menu so the
-// just-opened path moves to the front (C2).
-void openProjectAndRefreshRecents(ProjectTreeModel *treeModel, QMainWindow *window,
-                                   QMenu *recentProjectsMenu, AppSettings *appSettings,
-                                   const QString &path)
-{
-    const auto result = treeModel->openFolder(path);
-    if (result.code != 0) {
-        QMessageBox::critical(window, QObject::tr("Cannot open folder"), result.message);
-        return;
-    }
-    populateRecentProjectsMenu(recentProjectsMenu, appSettings, treeModel, window);
-}
-
-void populateRecentProjectsMenu(QMenu *menu, AppSettings *appSettings, ProjectTreeModel *treeModel,
-                                 QMainWindow *window)
-{
-    menu->clear();
-    const QStringList projects = appSettings->recentProjects();
-    if (projects.isEmpty()) {
-        QAction *empty = menu->addAction(QObject::tr("(No Recent Projects)"));
-        empty->setEnabled(false);
-        return;
-    }
-    for (qsizetype i = 0; i < projects.size(); ++i) {
-        const QString path = projects.at(i);
-        QAction *action = menu->addAction(path);
-        QObject::connect(action, &QAction::triggered, treeModel,
-                          [treeModel, window, menu, appSettings, path]() {
-                              openProjectAndRefreshRecents(treeModel, window, menu, appSettings,
-                                                            path);
-                          });
-    }
-}
 
 // Settings dialog (S1: category list + stacked detail pane; S2: font +
 // editor colors on the Editor page). Every control applies live as it's
@@ -2867,20 +2841,6 @@ void populateRecentProjectsMenu(QMenu *menu, AppSettings *appSettings, ProjectTr
 // through `appSettings`, Cancel restores exactly what was active when the
 // dialog opened. Modal and blocking, so every lambda below capturing
 // `&dialog` only ever runs while `dialog` is still alive on this stack frame.
-// Forgets every cached QIcon behind the project tree and repaints it: the
-// icon theme changed, or the colour theme did and the pack has light art for
-// it. Not a decision — the page that calls this has already made it.
-void refreshTreeIcons(QWidget *projectTree)
-{
-    auto *tree = qobject_cast<QTreeView *>(projectTree);
-    if (tree == nullptr) {
-        return;
-    }
-    if (auto *proxy = qobject_cast<IconDecorationProxy *>(tree->model())) {
-        proxy->clearIcons();
-    }
-    tree->viewport()->update();
-}
 
 void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *editorTabs,
                         KeymapEditor *keymapEditor, const QHash<QString, QAction *> &actions,
@@ -2926,7 +2886,10 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     // Every cached icon behind the tree, dropped: called by the Appearance
     // page when either theme changes, and by the Plugins page when a plugin
     // that contributes icons is switched off.
-    auto refreshIcons = [uiFontTargets]() { refreshTreeIcons(uiFontTargets.projectTree); };
+    auto refreshIcons = [uiFontTargets, editorTabs]() {
+        refreshTreeIcons(uiFontTargets.projectTree);
+        editorTabs->refreshTabIcons();
+    };
 
     const AppearancePage appearance = buildAppearancePage(
       &dialog, appSettings, uiFontTargets,

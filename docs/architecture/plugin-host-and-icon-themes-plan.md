@@ -39,7 +39,7 @@ A fresh session should read this table (and `git log`) before picking up work, p
 | P6 — icons in editor tabs and the search/result lists | done | #97 |
 | P7 — settings: icon theme choice, disabled plugins, Plugins page | in review | #98 |
 | P8 — wasm tier: runtime, capabilities, limits, `commands`, ADR-0028 | done | #95 |
-| P9 — docs truth-up and the end-to-end pass | blocked on P6, P7, P8 |  |
+| P9 — docs truth-up and the end-to-end pass | in review | #99 |
 
 Lanes: `{P1→P2→P8}` and `{P1→P3→P4}` run in parallel and converge at P5.
 P7 needs only the settings seam from P5, not P6.
@@ -130,6 +130,10 @@ A trap disables the plugin with a typed error on the Plugins page; it never take
 ### P9 — docs and the end-to-end pass
 
 `overview.md` and `layering.md` brought back to truth, and the end-to-end run below.
+
+The pass found one seam neither P6 nor P7 owned: a tab keeps the `QIcon` it was given when it opened, so an icon-theme or colour-theme switch left every open tab on the old art.
+The tree repaints because clearing the shared cache invalidates the proxy, and the result lists repaint because they rebuild their rows; tabs do neither.
+`EditorTabs::refreshTabIcons` closes it through the same `renderTabText` a rename already uses, so there is one place that renders a tab rather than two.
 
 ## Verification
 

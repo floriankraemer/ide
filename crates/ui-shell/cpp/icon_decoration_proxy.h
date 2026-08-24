@@ -4,6 +4,8 @@
 
 #include <QIdentityProxyModel>
 
+class QWidget;
+
 namespace ui_shell {
 
 // Answers Qt::DecorationRole from the source model's icon-key role.
@@ -35,5 +37,10 @@ private:
     int m_iconKeyRole;
     int m_logicalPx;
 };
+
+// Drops the cached art behind `projectTree` and repaints it: the icon theme
+// changed, or the colour theme did and the pack has light art for it. Not a
+// decision — the page that calls this has already made it.
+void refreshTreeIcons(QWidget *projectTree);
 
 } // namespace ui_shell

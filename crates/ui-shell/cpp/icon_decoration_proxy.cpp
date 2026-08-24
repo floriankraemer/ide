@@ -1,6 +1,8 @@
 #include "icon_decoration_proxy.h"
 
+#include <QTreeView>
 #include <QVariant>
+#include <QWidget>
 
 namespace ui_shell {
 
@@ -27,6 +29,18 @@ QVariant IconDecorationProxy::data(const QModelIndex &index, int role) const
 void IconDecorationProxy::clearIcons()
 {
     sharedIconCache().clear();
+}
+
+void refreshTreeIcons(QWidget *projectTree)
+{
+    auto *tree = qobject_cast<QTreeView *>(projectTree);
+    if (tree == nullptr) {
+        return;
+    }
+    if (auto *proxy = qobject_cast<IconDecorationProxy *>(tree->model())) {
+        proxy->clearIcons();
+    }
+    tree->viewport()->update();
 }
 
 } // namespace ui_shell

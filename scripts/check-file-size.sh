@@ -54,8 +54,10 @@ baseline() {
 	# icon-theme combos, the three font scales, and both halves of what OK and
 	# Cancel mean for them) to cpp/appearance_page.cpp, taking UiFontTargets and
 	# applyUiFontScales with it, and added the Plugins page as its own
-	# cpp/plugins_page.cpp rather than inline for the same reason.
-	crates/ui-shell/cpp/main_window.cpp) echo 4261 ;;  # split planned (F0-4/F0-5)
+	# cpp/plugins_page.cpp rather than inline for the same reason. P9 moved
+	# refreshTreeIcons next to the proxy it clears, and File > Recent Projects
+	# to cpp/recent_projects_menu.cpp.
+	crates/ui-shell/cpp/main_window.cpp) echo 4224 ;;  # split planned (F0-4/F0-5)
 	crates/index-core/src/lib.rs) echo 4099 ;;         # no split planned; ratcheted so it cannot grow
 	crates/syntax-core/src/lib.rs) echo 2572 ;;        # no split planned; ratcheted so it cannot grow
 	crates/mcp-server/src/lib.rs) echo 1836 ;;         # no split planned; ratcheted so it cannot grow
