@@ -36,7 +36,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F0-3 — bridge.rs split, part 2 | done | 02b1fa2 (#78) |
 | F0-4a — main_window.cpp split, part 1: `EditorTabs` | in review | #100 |
 | F0-4b — main_window.cpp split, part 1: `ClassViewPanel`, `FindUsagesPanel`, `IdeMainWindow` | in review | #101 |
-| F0-5 — main_window.cpp split, part 2 | blocked on F0-4b |  |
+| F0-5 — main_window.cpp split, part 2: `RefactorController`, `DeclarationNavigator` | in review | #102 |
 | F0-6 — settings dialog extraction + `SettingsContext` | blocked on F0-5 |  |
 | F0-7 — dock registry and general reconciliation | blocked on F0-6 |  |
 | F0-8 — byte-column fix in `moveCursorToLine` | done | febd6c0 (#74) |
@@ -443,7 +443,7 @@ Every task is a single commit that keeps `cargo test --workspace` green and is r
 | F0-2 | `bridge.rs` split part 1: `bridge/mod.rs` + `bridge/ffi.rs`; `tree.rs`, `editor.rs`, `settings.rs`, `terminal.rs`, `convert.rs` moved | — |
 | F0-3 | `bridge.rs` split part 2: `search.rs`, `language.rs`, `ai/chat.rs` + `ai/agent.rs`, `registry.rs` moved; the mixed `mod tests` divided; `bridge.rs` deleted | F0-2 |
 | F0-4 | `main_window.cpp` split part 1: `editor_tabs`, `class_view_panel`, `find_usages_panel`, `ide_main_window` extracted with their shared-helper headers, registered in `build.rs`. Split in two on delivery: **F0-4a** moved `EditorTabs` (and the cursor/highlighter helpers only it used) to `cpp/editor_tabs.{h,cpp}` plus `cpp/editor_tabs_panes.cpp` and `cpp/editor_tabs_lsp.cpp` — one class, three translation units, because the class does not fit under the 1200-line ceiling and adding a baseline would defeat F0-1. **F0-4b** is the rest: `ClassViewPanel`, `FindUsagesPanel`, `IdeMainWindow` | F0-12 |
-| F0-5 | `main_window.cpp` split part 2: `refactor_controller`, `declaration_navigator`, `action_registry` extracted | F0-4b |
+| F0-5 | `main_window.cpp` split part 2: `refactor_controller`, `declaration_navigator`, `action_registry` extracted. Delivered as two units, not three: `RefactorController` moved to `cpp/refactor_controller.{h,cpp}` (taking the free `previewText` helper, declared in that header because the AI panel's Apply path in `main_window.cpp` calls it too) and `DeclarationNavigator` to `cpp/declaration_navigator.{h,cpp}`. There was no `action_registry` left to extract — P6 had already moved `registerAction`/`applyKeymap` and the `QHash<QString, QAction *>` bookkeeping to `cpp/keymap_page.{h,cpp}`, leaving only the menu-building call sites, which go with the settings dialog in F0-6 | F0-4b |
 | F0-6 | Settings dialog extraction + `SettingsContext`; the 14-parameter signature replaced; one `buildXPage` per page | F0-5 |
 | F0-7 | Dock registry and general reconciliation in `dock_layout.{h,cpp}`; `showAiChatDock`'s workaround deleted | F0-6 |
 | F0-8 | Byte-column fix **inside `moveCursorToLine`** (`main_window.cpp:128-140`): convert byte column → UTF-16 column against `block.text()` via `editor_core::offsets`, and clamp to the block (`QTextCursor::Right` does not stop at a block boundary). One place fixes all five call sites (`:1935`, `:2065`, `:2622`, `:3200`) **and** `jumpToByteOffset` (`:685-704`). Routing through `AppSession` cannot work — the conversion needs the *live* line text, and the rope is stale (§1) | F0-1b |
