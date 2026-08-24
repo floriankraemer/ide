@@ -27,10 +27,13 @@
 //! - [`comment`] — toggling line and block comments.
 //! - [`selection_expand`] — expand/shrink over the node tree, with the
 //!   stack that makes shrink retrace exactly.
+//! - [`indent`] — the indent of a new line, and indent/unindent of a
+//!   selection.
 //!
 //! Qt-free, like every crate below the adapter.
 
 pub mod comment;
+pub mod indent;
 pub mod selection_expand;
 mod syntax;
 
