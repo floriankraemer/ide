@@ -25,12 +25,6 @@ class CodeEditor;
 class FindBar;
 class HexViewer;
 
-// app_core::AppError's stable code for "that tab holds a binary file, so it
-// cannot be edited" (ADR-0003, pinned by app-core's error_codes_are_stable
-// test) — the one error kind the view presents as information rather than as
-// an error, since it is a fact about the file rather than a failure.
-constexpr int kErrNotATextTab = 9;
-
 // app_core::TabKind's stable code for a binary tab (ADR-0020).
 constexpr int kTabKindBinary = 1;
 
