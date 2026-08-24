@@ -22,13 +22,19 @@ use crate::apply_edit::{
     await_verdict, ApplyEditGate, RefactorSession, RefactorSessions, UNSOLICITED_REASON,
 };
 use crate::catalog::ServerConfig;
-use crate::code_action::{parse_code_actions, CodeActionItem, CommandRef};
+use crate::code_action::{
+    filter_by_kind, needs_unfiltered_retry, parse_code_actions, CodeActionItem, CommandRef,
+};
 use crate::completion::{parse_completion, parse_trigger_characters, CompletionList};
+use crate::document_highlight::{parse_document_highlights, DocumentHighlight};
 use crate::formatting::{parse_formatting, FormattingOptions, FormattingOutcome};
 use crate::framing::{read_message, write_message};
 use crate::hover::{parse_hover, HoverText};
+use crate::inlay_hint::{line_range, parse_inlay_hints, InlayHint};
+use crate::intentions::{assemble, Intention, ORGANIZE_IMPORTS};
 use crate::navigation::{parse_definition, DefinitionTarget};
 use crate::rename::{parse_prepare_rename, PrepareRename};
+use crate::signature_help::{parse_signature_help, SignatureHelp};
 use crate::workspace_edit::{parse_workspace_edit, DocumentEdits};
 
 /// How long a request waits for its response before it is cancelled.
@@ -60,6 +66,25 @@ pub const FORMATTING_TIMEOUT: Duration = Duration::from_secs(15);
 /// does not implement, which is how an unsupported capability is discovered
 /// without having read every field of its `initialize` result.
 const METHOD_NOT_FOUND: i64 = -32601;
+/// Signature help is retriggered on `(` and every `,` while an argument
+/// list is being typed, so it is as speculative as hover and gets the same
+/// deadline: a tip for an argument the user has finished typing is noise.
+pub const SIGNATURE_HELP_TIMEOUT: Duration = Duration::from_secs(2);
+/// Document highlights fire on every caret move and are purely decorative.
+/// One second is deliberately the shortest deadline in this file: an answer
+/// slower than that describes a caret position the user has already left,
+/// and painting it would highlight the wrong word.
+pub const DOCUMENT_HIGHLIGHT_TIMEOUT: Duration = Duration::from_secs(1);
+/// Inlay hints cost the server a real inference pass over the viewport, and
+/// unlike the caret-driven requests their answer does not go stale — a hint
+/// is anchored to a line, so it is still correct when it lands late. Hence
+/// longer than hover, and still far short of a refactoring.
+pub const INLAY_HINT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Alt+Enter, which opens a popup that is not drawn until the list arrives.
+/// The user is waiting with nothing on screen, so this cannot be
+/// [`REFACTOR_TIMEOUT`]; *applying* the action they then choose still is,
+/// because by then they have committed to waiting.
+pub const INTENTION_TIMEOUT: Duration = Duration::from_secs(5);
 /// Delay before the first respawn attempt; doubles per consecutive failure.
 const RESTART_BACKOFF_INITIAL: Duration = Duration::from_millis(200);
 /// Ceiling for the exponential backoff.
@@ -496,8 +521,27 @@ impl LspManager {
         end: (u32, u32),
         only: &[&str],
     ) -> Result<Vec<CodeActionItem>, LspError> {
+        self.code_action_scoped(uri, start, end, only, &[], REFACTOR_TIMEOUT)
+    }
+
+    /// One `textDocument/codeAction` request, with both of the things that
+    /// scope it: a kind filter and the diagnostics the answer should address.
+    ///
+    /// Handing the diagnostics back in `context.diagnostics` is not optional
+    /// decoration — several servers return their quick fixes *only* for
+    /// diagnostics they were given, because a fix is computed from the
+    /// diagnostic's own `data`.
+    fn code_action_scoped(
+        &self,
+        uri: &str,
+        start: (u32, u32),
+        end: (u32, u32),
+        only: &[&str],
+        diagnostics: &[Value],
+        timeout: Duration,
+    ) -> Result<Vec<CodeActionItem>, LspError> {
         let language_id = self.language_of(uri)?;
-        let mut context = json!({"diagnostics": []});
+        let mut context = json!({"diagnostics": diagnostics});
         if !only.is_empty() {
             context["only"] = json!(only);
         }
@@ -512,9 +556,72 @@ impl LspManager {
                 },
                 "context": context,
             }),
-            REFACTOR_TIMEOUT,
+            timeout,
         )?;
         Ok(parse_code_actions(&result))
+    }
+
+    /// Everything that can be done at the caret: the list Alt+Enter shows.
+    ///
+    /// Two requests, merged by [`crate::intentions::assemble`] — one scoped
+    /// to `diagnostics` (the diagnostics under the caret, handed back
+    /// verbatim as the protocol requires) and one to the range alone. A
+    /// quick fix for the error under the cursor and a refactoring available
+    /// at that position are both "things I can do here", and the user should
+    /// not have to choose which kind they meant before asking.
+    ///
+    /// Neither request carries an `only` filter, so there is nothing for
+    /// [`crate::code_action::needs_unfiltered_retry`] to retry: an empty
+    /// answer to an unfiltered request really does mean the server has
+    /// nothing. The retry exists for [`Self::organize_imports`], which does
+    /// filter.
+    ///
+    /// A failure of the diagnostic-scoped request is not a failure of the
+    /// whole list — a server that rejects a diagnostic payload it does not
+    /// recognise should still get to offer its refactorings — so only the
+    /// range-scoped request can fail this method.
+    pub fn intentions(
+        &self,
+        uri: &str,
+        start: (u32, u32),
+        end: (u32, u32),
+        diagnostics: &[Value],
+    ) -> Result<Vec<Intention>, LspError> {
+        let diagnostic_scoped = if diagnostics.is_empty() {
+            Vec::new()
+        } else {
+            self.code_action_scoped(uri, start, end, &[], diagnostics, INTENTION_TIMEOUT)
+                .unwrap_or_default()
+        };
+        let range_scoped = self.code_action_scoped(uri, start, end, &[], &[], INTENTION_TIMEOUT)?;
+        Ok(assemble(&diagnostic_scoped, &range_scoped))
+    }
+
+    /// The `source.organizeImports` action for a whole document, if the
+    /// server has one.
+    ///
+    /// Asked with an `only` filter first, because a whole-document code
+    /// action request is expensive and there is exactly one action wanted.
+    /// An empty answer to that filtered request proves nothing — servers
+    /// disagree about whether `only` is a filter or a hint, and some answer
+    /// nothing at all for a kind they do not recognise — so
+    /// [`crate::code_action::needs_unfiltered_retry`] sends it again
+    /// unfiltered and the taxonomy is applied here, where it is understood.
+    pub fn organize_imports(
+        &self,
+        uri: &str,
+        last_line: u32,
+    ) -> Result<Option<CodeActionItem>, LspError> {
+        let (start, end) = ((0, 0), (last_line, u32::MAX));
+        let filtered =
+            self.code_action_scoped(uri, start, end, &[ORGANIZE_IMPORTS], &[], REFACTOR_TIMEOUT)?;
+        let items = if needs_unfiltered_retry(&filtered) {
+            let all = self.code_action_scoped(uri, start, end, &[], &[], REFACTOR_TIMEOUT)?;
+            filter_by_kind(&all, ORGANIZE_IMPORTS)
+        } else {
+            filter_by_kind(&filtered, ORGANIZE_IMPORTS)
+        };
+        Ok(items.into_iter().next())
     }
 
     /// `codeAction/resolve` for an item the server sent without an edit.
@@ -692,6 +799,70 @@ impl LspManager {
             }
             Err(err) => Err(err),
         }
+    }
+
+    /// `textDocument/signatureHelp` for a position in an open document.
+    /// `Ok(None)` means the caret is not in a call the server recognises.
+    ///
+    /// The server's `activeParameter` describes the position it was asked
+    /// about; by the time the answer lands the caret may have moved, which
+    /// is what [`crate::signature_help::call_site_at`] exists to correct.
+    pub fn signature_help(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Option<SignatureHelp>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/signatureHelp",
+            position_params(uri, line, character),
+            SIGNATURE_HELP_TIMEOUT,
+        )?;
+        Ok(parse_signature_help(&result))
+    }
+
+    /// `textDocument/documentHighlight`: the occurrences of the symbol under
+    /// the caret in this file, each with what it does to the symbol. An
+    /// empty vector means the caret is not on a symbol, which is not an
+    /// error.
+    pub fn document_highlights(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<DocumentHighlight>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/documentHighlight",
+            position_params(uri, line, character),
+            DOCUMENT_HIGHLIGHT_TIMEOUT,
+        )?;
+        Ok(parse_document_highlights(&result))
+    }
+
+    /// `textDocument/inlayHint` for the visible lines, inclusive.
+    ///
+    /// The line range is the request's whole point (see
+    /// [`crate::inlay_hint`]): there is no whole-document form of this
+    /// method, because a 10,000-line file must not be asked for 10,000
+    /// hints to paint fifty.
+    pub fn inlay_hints(
+        &self,
+        uri: &str,
+        first_line: u32,
+        last_line: u32,
+    ) -> Result<Vec<InlayHint>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/inlayHint",
+            json!({"textDocument": {"uri": uri}, "range": line_range(first_line, last_line)}),
+            INLAY_HINT_TIMEOUT,
+        )?;
+        Ok(parse_inlay_hints(&result))
     }
 
     /// The version last sent for a document, if it is open.
@@ -1106,6 +1277,10 @@ fn client_capabilities() -> Value {
                 "codeActionLiteralSupport": {"codeActionKind": {"valueSet": [
                     "", "quickfix", "refactor", "refactor.extract",
                     "refactor.inline", "refactor.rewrite", "source",
+                    // F2: Organize Imports is offered in its own right and
+                    // as a quick fix for an unresolved symbol, so the kind
+                    // is named rather than left to the `source` family.
+                    "source.organizeImports",
                 ]}},
                 "resolveSupport": {"properties": ["edit"]},
                 "dataSupport": true,
@@ -1118,6 +1293,28 @@ fn client_capabilities() -> Value {
             // capabilities later has nowhere to send them.
             "formatting": {"dynamicRegistration": false},
             "rangeFormatting": {"dynamicRegistration": false},
+            // F2: parameter hints. `labelOffsetSupport` says we prefer the
+            // unambiguous `[start, end]` parameter label — a substring has
+            // to be searched for in the signature and can match the wrong
+            // occurrence — but both shapes are handled either way
+            // (`signature_help::parse_signature_help`).
+            // `activeParameterSupport` opts into the per-signature index,
+            // which is the only way an overload set can say that *this*
+            // overload takes fewer arguments.
+            "signatureHelp": {
+                "signatureInformation": {
+                    "documentationFormat": ["plaintext", "markdown"],
+                    "parameterInformation": {"labelOffsetSupport": true},
+                    "activeParameterSupport": true,
+                },
+                "contextSupport": false,
+            },
+            "documentHighlight": {"dynamicRegistration": false},
+            // No `resolveSupport`: hints are requested for a viewport and
+            // painted whole, so there is no second round trip to opt into.
+            // The `InlayHintLabelPart[]` label form needs no capability and
+            // is parsed regardless.
+            "inlayHint": {"dynamicRegistration": false},
         },
         "workspace": {
             // RF5: we answer `workspace/applyEdit`, which is how the

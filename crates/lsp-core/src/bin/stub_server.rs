@@ -21,6 +21,17 @@
 //! `workspace/applyEdit` request *back* to the client and block on the
 //! answer, which is how the command-driven refactorings that jdtls and
 //! intelephense use are exercised offline.
+//!
+//! F2 added the Alt+Enter surfaces — `textDocument/signatureHelp`,
+//! `documentHighlight` and `inlayHint` — and, more to the point, the failure
+//! paths a real language server will not produce on demand (ADR-0024's
+//! division of labour): `stub/silence` never answers at all, `stub/garbage`
+//! sends a well-framed message that is not a JSON-RPC response, and
+//! `stub/lateDuplicate` answers the same id twice so a reply arriving after
+//! its request was superseded can be shown to go nowhere. Malformed replies
+//! are reachable per method too — signature help on line 3, a document
+//! highlight with no range on line 3, an inlay hint whose label is a number
+//! on line 900.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Stdout, Write};
@@ -95,6 +106,15 @@ fn main() {
                             // L5: the same pair rust-analyzer advertises, so
                             // `.` and (twice over) `::` are covered.
                             "completionProvider": {"triggerCharacters": [".", ":"]},
+                            // F2: the pair every language agrees on, plus
+                            // the closing paren as a retrigger so the nested
+                            // -call case is reachable offline.
+                            "signatureHelpProvider": {
+                                "triggerCharacters": ["(", ","],
+                                "retriggerCharacters": [")"],
+                            },
+                            "documentHighlightProvider": true,
+                            "inlayHintProvider": true,
                         },
                         "serverInfo": {"name": "stub_server", "version": "0.1.0"},
                     }}),
@@ -231,6 +251,129 @@ fn main() {
                 };
                 send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
             }
+            // F2-5: one signature-help shape per requested line —
+            // line 0 -> offset parameter labels, line 1 -> substring labels,
+            // line 2 -> an overload set whose second signature carries its
+            // own `activeParameter` (the case where the two indices
+            // disagree), line 3 -> a *malformed* reply: `signatures` is an
+            // object, which no server should send and the client must
+            // survive, line 4 -> an active index past the end of the
+            // signature's own parameters, anything else -> null.
+            ("textDocument/signatureHelp", Some(id)) => {
+                let result = match position_line(&params) {
+                    0 => json!({
+                        "signatures": [{
+                            "label": "fn push(&mut self, value: T)",
+                            "documentation": "Appends an element.",
+                            "parameters": [{"label": [8, 17]}, {"label": [19, 27]}],
+                        }],
+                        "activeSignature": 0,
+                        "activeParameter": 1,
+                    }),
+                    1 => json!({
+                        "signatures": [{
+                            "label": "fn insert(index: usize, value: T)",
+                            "parameters": [{"label": "index: usize"}, {"label": "value: T"}],
+                        }],
+                        "activeParameter": 0,
+                    }),
+                    2 => json!({
+                        "signatures": [
+                            {"label": "f(a, b)",
+                             "parameters": [{"label": "a"}, {"label": "b"}]},
+                            {"label": "f(a)", "parameters": [{"label": "a"}],
+                             "activeParameter": 0},
+                        ],
+                        "activeSignature": 1,
+                        "activeParameter": 1,
+                    }),
+                    3 => json!({"signatures": {"label": "not an array"}}),
+                    4 => json!({
+                        "signatures": [{"label": "f(a)", "parameters": [{"label": "a"}]}],
+                        "activeParameter": 9,
+                    }),
+                    _ => Value::Null,
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // F2-6: highlights, one kind per requested line, plus a
+            // kind-less entry (line 2) and an entry with no range at all
+            // (line 3) — the malformed shape a real server will not produce
+            // on demand.
+            ("textDocument/documentHighlight", Some(id)) => {
+                let result = match position_line(&params) {
+                    0 => json!([
+                        highlight(1, Some(1)),
+                        highlight(4, Some(2)),
+                        highlight(7, Some(3))
+                    ]),
+                    1 => json!([highlight(2, Some(9))]),
+                    2 => json!([highlight(3, None)]),
+                    3 => json!([{"kind": 2}]),
+                    _ => Value::Null,
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // F2-6: inlay hints for the requested line range only — the
+            // reply echoes the range's own lines, so a test can prove the
+            // client asked for a viewport and not for the whole file. A
+            // request whose range starts on line 900 gets a malformed hint
+            // (a label of the wrong type) instead.
+            ("textDocument/inlayHint", Some(id)) => {
+                let first = params
+                    .pointer("/range/start/line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let last = params
+                    .pointer("/range/end/line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(first);
+                let result = if first == 900 {
+                    json!([{"position": {"line": 900, "character": 0}, "label": 42}])
+                } else {
+                    json!([
+                        {"position": {"line": first, "character": 9}, "label": ": i32",
+                         "kind": 1, "paddingLeft": true},
+                        {"position": {"line": last, "character": 4},
+                         "label": [{"value": "value"}, {"value": ":"}],
+                         "kind": 2, "paddingRight": true},
+                    ])
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // F2: a request that is simply never answered, so the client's
+            // timeout and its `$/cancelRequest` are reachable offline. No
+            // real server can be asked to do this on demand.
+            ("stub/silence", Some(_id)) => {}
+            // F2: a reply that arrives *after* the request that asked for it
+            // was superseded — the same id answered twice, late. A client
+            // that correlates by id must ignore the second one rather than
+            // hand it to whoever asks next.
+            ("stub/lateDuplicate", Some(id)) => {
+                let out = Arc::clone(&out);
+                let delay = params.get("delay_ms").and_then(Value::as_u64).unwrap_or(50);
+                thread::spawn(move || {
+                    send(&out, json!({"jsonrpc": "2.0", "id": id, "result": "first"}));
+                    thread::sleep(Duration::from_millis(delay));
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "result": "superseded"}),
+                    );
+                });
+            }
+            // F2: a well-framed message that is not JSON-RPC at all, sent
+            // unsolicited. The client must skip it and keep serving the
+            // request that follows.
+            ("stub/garbage", Some(id)) => {
+                send(
+                    &out,
+                    json!({"jsonrpc": "2.0", "result": "no id, no method"}),
+                );
+                send(
+                    &out,
+                    json!({"jsonrpc": "2.0", "id": id, "result": "still alive"}),
+                );
+            }
             // Ask the client something it does not implement, to check we
             // answer server-to-client requests instead of hanging.
             ("stub/askClient", Some(id)) => {
@@ -257,6 +400,68 @@ fn main() {
                     .pointer("/range/start/line")
                     .and_then(Value::as_u64)
                     .unwrap_or(0);
+                let end_line = params
+                    .pointer("/range/end/line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(line);
+                // A filter for a kind this server does not recognise, which
+                // it answers by saying nothing at all — the behaviour
+                // `needs_unfiltered_retry` exists for. A filter it does
+                // recognise (`refactor.extract`) is honoured as before.
+                let unrecognised_filter = params
+                    .pointer("/context/only")
+                    .and_then(Value::as_array)
+                    .is_some_and(|only| only.contains(&json!("source.organizeImports")));
+                let with_diagnostics = params
+                    .pointer("/context/diagnostics")
+                    .and_then(Value::as_array)
+                    .is_some_and(|d| !d.is_empty());
+                if unrecognised_filter {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}),
+                    );
+                    io::stdout().flush().ok();
+                    continue;
+                }
+                if end_line > line {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "result": [
+                            {"title": "Organize imports", "kind": "source.organizeImports",
+                             "edit": {"documentChanges": []}},
+                            {"title": "Extract into function",
+                             "kind": "refactor.extract.function"},
+                        ]}),
+                    );
+                    io::stdout().flush().ok();
+                    continue;
+                }
+                // F2-4: line 4 answers the two intention requests
+                // differently — the diagnostic-scoped one offers a preferred
+                // quick fix, both offer the same refactoring, and the merged
+                // list must contain that refactoring exactly once.
+                if line == 4 {
+                    let result = if with_diagnostics {
+                        json!([
+                            {"title": "Import `HashMap`", "kind": "quickfix",
+                             "isPreferred": true, "edit": {"documentChanges": []}},
+                            {"title": "Extract into function",
+                             "kind": "refactor.extract.function",
+                             "data": {"scope": "diagnostic"}},
+                        ])
+                    } else {
+                        json!([
+                            {"title": "Extract into function",
+                             "kind": "refactor.extract.function",
+                             "data": {"scope": "range"}},
+                            {"title": "Organize imports", "kind": "source.organizeImports"},
+                        ])
+                    };
+                    send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+                    io::stdout().flush().ok();
+                    continue;
+                }
                 let result = match line {
                     0 => json!([{
                         "title": "Extract into function",
@@ -480,6 +685,18 @@ fn position_line(params: &Value) -> u64 {
         .pointer("/position/line")
         .and_then(Value::as_u64)
         .unwrap_or(0)
+}
+
+/// A `DocumentHighlight` on a 0-based line, optionally with a kind.
+fn highlight(line: u64, kind: Option<u64>) -> Value {
+    let mut value = json!({"range": {
+        "start": {"line": line, "character": 4},
+        "end": {"line": line, "character": 8},
+    }});
+    if let Some(kind) = kind {
+        value["kind"] = json!(kind);
+    }
+    value
 }
 
 /// A `Location` in `uri` at a 0-based line/character.
