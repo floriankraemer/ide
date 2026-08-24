@@ -302,6 +302,13 @@ fn main() {
         .cpp_file("cpp/plugins_page.cpp")
         .cpp_file("cpp/appearance_page.cpp")
         .cpp_file("cpp/language_servers_page.cpp")
+        // The settings dialog and the last two pages that were still built
+        // inline inside it. Q_OBJECT-free like the pages above — the dialog
+        // is a stack-allocated QDialog and the pages are plain QWidgets
+        // wired with lambdas — so only the sources are listed.
+        .cpp_file("cpp/settings_dialog.cpp")
+        .cpp_file("cpp/editor_page.cpp")
+        .cpp_file("cpp/mcp_page.cpp")
         .cpp_file("cpp/problems_panel.cpp")
         .cpp_file("cpp/icon_cache.cpp")
         // Declares Q_OBJECT (it overrides QIdentityProxyModel::data), so its

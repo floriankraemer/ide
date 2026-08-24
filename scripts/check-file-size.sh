@@ -32,52 +32,6 @@ exempt() {
 # by the time they were enforced.
 baseline() {
 	case "$1" in
-	# Lowered from 4317 by P6: registerAction/applyKeymap moved next to the
-	# Settings > Keymap page they serve, which is what paid for the tab-icon
-	# lines. A baselined file cannot grow, so a change that has to touch this
-	# one has to take something out of it first — that is the ratchet working.
-	#
-	# Previously lowered from 4479 by the first slice of the split: the project-tree
-	# dock (its construction, its click and context-menu wiring, and
-	# showAiChatDock next to them) moved to cpp/project_tree_dock.cpp, which
-	# is also where P5's icon-decoration proxy is wired in. Wiring it here
-	# instead would have grown a baselined file; extracting is what the
-	# ratchet exists to push toward.
-	#
-	# Previously raised from 4393 for the E2E marker calls: the view
-	# reporting what it did, at ~40 call sites. Raising a baseline is meant
-	# to be visible in a diff and argued for; the alternative — a ratchet
-	# that can never move — means a file awaiting a split can never be
-	# touched at all. The split (F0-4/F0-5) removes this entry entirely.
-	# Lowered from 4317 by two slices. P6 moved registerAction/applyKeymap to
-	# cpp/keymap_page.cpp. P7 moved Settings > Appearance (the theme and
-	# icon-theme combos, the three font scales, and both halves of what OK and
-	# Cancel mean for them) to cpp/appearance_page.cpp, taking UiFontTargets and
-	# applyUiFontScales with it, and added the Plugins page as its own
-	# cpp/plugins_page.cpp rather than inline for the same reason. P9 moved
-	# refreshTreeIcons next to the proxy it clears, and File > Recent Projects
-	# to cpp/recent_projects_menu.cpp.
-	# Lowered from 4224 by F0-4a: EditorTabs and the four cursor/highlighter
-	# helpers only it used moved to cpp/editor_tabs.{h,cpp}, plus
-	# cpp/editor_tabs_panes.cpp and cpp/editor_tabs_lsp.cpp — one class, three
-	# translation units, because the whole of it does not fit under the
-	# 1200-line ceiling and adding a fourth baseline would defeat the point.
-	# Lowered from 2476 by F0-4b: ClassViewPanel, FindUsagesPanel and
-	# IdeMainWindow moved to cpp/class_view_panel.{h,cpp},
-	# cpp/find_usages_panel.{h,cpp} and cpp/ide_main_window.{h,cpp}, taking
-	# the file-local symbolKindLabel helper (used only by ClassViewPanel)
-	# with them. One class per header, one source each — all three fit
-	# comfortably under the 1200-line ceiling.
-	# Lowered from 2038 by F0-5: RefactorController and DeclarationNavigator
-	# moved to cpp/refactor_controller.{h,cpp} and
-	# cpp/declaration_navigator.{h,cpp}, taking the free previewText helper
-	# with the former (it is declared in that header because the AI panel's
-	# Apply path in here calls it too). One class per header, one source
-	# each. The third F0-5 item, the action registry, was already moved by
-	# P6 — registerAction/applyKeymap live in cpp/keymap_page.{h,cpp} — so
-	# only the menu-building call sites are left, and those go with the
-	# settings dialog in F0-6, which removes this entry entirely.
-	crates/ui-shell/cpp/main_window.cpp) echo 1494 ;;  # split continues (F0-6)
 	crates/index-core/src/lib.rs) echo 4099 ;;         # no split planned; ratcheted so it cannot grow
 	crates/syntax-core/src/lib.rs) echo 2572 ;;        # no split planned; ratcheted so it cannot grow
 	crates/mcp-server/src/lib.rs) echo 1836 ;;         # no split planned; ratcheted so it cannot grow
