@@ -3,12 +3,19 @@ name = "plugin-host"
 version = "0.1.0"
 edition = "2021"
 
-# `plugin-api` and nothing else. The wasm runtime belongs to P8 of the
-# plugin host plan; adding `wasmtime` here before there is code to use it
-# would put a ~40 MB dependency tree and a cross-build risk into every
-# build for no behaviour.
 [dependencies]
 plugin-api = { path = "../plugin-api" }
+# The feature set is not a guess: it is what task P0 of the plugin host plan
+# verified cross-builds *and links* for `x86_64-pc-windows-gnu` through this
+# repo's MXE toolchain (ADR-0028). `default-features = false` drops what an
+# editor never needs — WASI, the async executor, the debug-info pipeline —
+# which is what keeps the link small enough for a Tier 2 target.
+wasmtime = { version = "38", default-features = false, features = [
+    "runtime",
+    "cranelift",
+    "component-model",
+    "std",
+] }
 
 [dev-dependencies]
 # Dev-only, and deliberately so: `tests/material_icon_theme.rs` checks the
@@ -17,3 +24,7 @@ plugin-api = { path = "../plugin-api" }
 # nothing of each other and are joined in `app-core` (ADR-0026, ADR-0027).
 icon-theme = { path = "../icon-theme" }
 tempfile = "3"
+# Tests write their components inline in the component-model text format, so
+# the tier is exercised without adding a `wasm32-*` toolchain to the builder
+# image. Dev-only: a shipped build has no reason to parse `.wat`.
+wasmtime = { version = "38", default-features = false, features = ["wat"] }

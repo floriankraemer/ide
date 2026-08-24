@@ -1,0 +1,16 @@
+[package]
+name = "hello-plugin"
+version = "0.1.0"
+edition = "2021"
+
+# Not a member of the IDE workspace: this crate is built for
+# `wasm32-unknown-unknown` with a toolchain the builder image does not
+# carry. An empty `[workspace]` table is what detaches it, so `cargo build`
+# at the repository root never tries.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"

@@ -22,7 +22,7 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `lsp-core` | (std, lsp-types, serde, serde_json; `syntax-core` as a **dev**-dependency only, ADR-0018) | **No** |
 | `index-core` | `syntax-core`, `editor-core` (+ std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore, rayon, nucleo-matcher, fs4, dirs) | **No** |
 | `plugin-api` | (std, serde, toml) — a leaf on purpose, see [ADR-0026](decisions/0026-plugin-host.md) | **No** |
-| `plugin-host` | `plugin-api` (+ std); `icon-theme` as a **dev**-dependency only, to check the vendored Material pack through the real load path | **No** |
+| `plugin-host` | `plugin-api` (+ std, wasmtime) — discovery, the registry and the built-ins ([ADR-0026](decisions/0026-plugin-host.md)), plus the sandboxed wasm tier ([ADR-0028](decisions/0028-wasm-plugin-tier.md)); `icon-theme` as a **dev**-dependency only, to check the vendored Material pack through the real load path | **No** |
 | `icon-theme` | (std, serde, toml, resvg) — **not** `syntax-core` and **not** `plugin-host`, see [ADR-0027](decisions/0027-icon-themes.md) | **No** |
 | `settings-model` | `app-config`, `syntax-core`, `lsp-core`, `edit-ops`, `editor-core` (+ std, serde, toml, tree-sitter) | **No** |
 | `edit-ops` | `editor-core`, `syntax-core` (+ std, tree-sitter) | **No** |
@@ -51,6 +51,8 @@ That test target is the one place `app-config` may be read from a test rather th
 - **Which plugins exist, and which of them may run** — the scan of `<config_dir>/plugins`, the built-ins embedded in the binary, the user's disabled list, quarantine markers and duplicate-id resolution — lives in `plugin-host` (ADR-0026).
   It stores contribution payloads and never interprets one: the registry has no idea what an icon theme is, which is why `icon-theme` reads `IconThemeContribution` without depending on the host and the two are joined in `app-core`.
   Reading a plugin's files goes through `LoadedPlugin::read_asset`, the single place that turns a manifest-supplied string into a filesystem read, so a built-in's embedded bytes and an installed plugin's directory look the same to every consumer.
+- **What a plugin's own code may do** — the wasmtime component runtime, the fuel/epoch/memory limits, the capability-gated host functions, and running a contributed command — lives in `plugin_host::wasm` (ADR-0028), layered on top of discovery: a `WasmTier` is built from a finished `PluginRegistry` and can only start a plugin the registry already accepted.
+  A trap disables that one plugin with a typed error and never the process, which is the property that made a sandbox worth choosing over ADR-0001's native dylib tier.
 - **Which icon a row gets** lives in `icon-theme` (ADR-0027), and it is handed the language id rather than deriving one: `IconPack::file_icon` takes `language_id: Option<&str>` and the crate does not depend on `syntax-core`, so ADR-0018's single detection table stays single.
   Its own extension table answers "which art", never "which language", and nothing may ask it the second question.
   Reading a pack's files is the caller's job through the `IconAssets` trait, because a built-in plugin's SVGs are embedded in the binary and an installed plugin's are on disk; `icon-theme` therefore depends on `plugin-host` no more than `plugin-api` does, and `app-core` joins the two.
