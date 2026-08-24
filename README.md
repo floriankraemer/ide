@@ -4,6 +4,8 @@ A fast, open-source, multi-language IDE — built as a Rust core with a Qt6 Widg
 
 The goal is a JetBrains-like experience with the performance of a native Rust core: low typing latency, large files that stay smooth, and business logic that is fully testable without a display.
 
+![Screenshot](docs/screenshots/ide.png)
+
 ## What it can do
 
 - Open a project folder, browse the tree, edit and save tabs.
