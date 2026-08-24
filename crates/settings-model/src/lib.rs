@@ -14,6 +14,7 @@
 //! Qt-free, like every crate below `ui-shell`.
 
 pub mod ai;
+pub mod editing;
 pub mod languages;
 pub mod servers;
 pub mod syntax_colors;
@@ -23,6 +24,7 @@ pub use ai::{
     set_tool_policy, tool_policy, validate as validate_provider, AiProviderDraft, AiProviderRow,
     DefaultProvider, KeyStatus, ProviderField, ProviderKind, ToolPolicy, ValidationProblem,
 };
+pub use editing::{resolve_for_language, EditingDraft, EditingField, EditingProblem, EditingRules};
 pub use languages::{
     explain, scan_manifests, toggle, LanguageAction, LanguageRow, LanguageSource, LanguageStatus,
     LanguageToggle, ManifestInfo, Problem,
