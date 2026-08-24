@@ -47,7 +47,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F0-14 — `lsp-conformance` image stage | in review | #77 |
 | F0-15 — LSP conformance harness + expectations | in review | #77 |
 | F0-16 — conformance fixes | todo | one row per defect once F0-15 lands |
-| F0-17 — docs: this plan, ADRs, layering, overview | in review | this change |
+| F0-17 — docs: this plan, ADRs, layering, overview | in review | #80 |
 | F0-18 — route every buffer edit through `applyBufferEdits` | todo |  |
 | F0-19 — error-code ranges (ADR-0003 amendment) | todo |  |
 
@@ -55,10 +55,10 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 
 | Task | Status | Commit |
 |---|---|---|
-| F1-1 — `editor-core::selection` | in review | #80 |
-| F1-2 — `editor-core::transaction` | in review | #80 |
-| F1-3 — next occurrence + column selection | in review | #80 |
-| F1-4 — `editor-core::line_ops` | in review | #80 |
+| F1-1 — `editor-core::selection` | in progress | |
+| F1-2 — `editor-core::transaction` | in progress | |
+| F1-3 — next occurrence + column selection | in progress | |
+| F1-4 — `editor-core::line_ops` | in progress | |
 | F1-4b — `syntax-core` registry: comment tokens + bracket pairs | todo |  |
 | F1-5 — `edit-ops` crate + comment toggle | todo |  |
 | F1-6 — expand/shrink selection | todo |  |
