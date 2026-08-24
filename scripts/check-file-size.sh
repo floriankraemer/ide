@@ -57,7 +57,12 @@ baseline() {
 	# cpp/plugins_page.cpp rather than inline for the same reason. P9 moved
 	# refreshTreeIcons next to the proxy it clears, and File > Recent Projects
 	# to cpp/recent_projects_menu.cpp.
-	crates/ui-shell/cpp/main_window.cpp) echo 4224 ;;  # split planned (F0-4/F0-5)
+	# Lowered from 4224 by F0-4a: EditorTabs and the four cursor/highlighter
+	# helpers only it used moved to cpp/editor_tabs.{h,cpp}, plus
+	# cpp/editor_tabs_panes.cpp and cpp/editor_tabs_lsp.cpp — one class, three
+	# translation units, because the whole of it does not fit under the
+	# 1200-line ceiling and adding a fourth baseline would defeat the point.
+	crates/ui-shell/cpp/main_window.cpp) echo 2476 ;;  # split continues (F0-4b/F0-5)
 	crates/index-core/src/lib.rs) echo 4099 ;;         # no split planned; ratcheted so it cannot grow
 	crates/syntax-core/src/lib.rs) echo 2572 ;;        # no split planned; ratcheted so it cannot grow
 	crates/mcp-server/src/lib.rs) echo 1836 ;;         # no split planned; ratcheted so it cannot grow

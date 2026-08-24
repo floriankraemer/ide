@@ -32,22 +32,23 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 |---|---|---|
 | F0-1 — file-size gate + ratcheted baselines | done | 99a37f5 (#73), corrected in #79 |
 | F0-1b — promote `Utf16Cursor` to `editor_core::offsets` | done | febd6c0 (#74) |
-| F0-2 — bridge.rs split, part 1 | in review | #78 |
-| F0-3 — bridge.rs split, part 2 | in review | #78 |
-| F0-4 — main_window.cpp split, part 1 | blocked on #76 + #78 |  |
-| F0-5 — main_window.cpp split, part 2 | blocked on F0-4 |  |
+| F0-2 — bridge.rs split, part 1 | done | 02b1fa2 (#78) |
+| F0-3 — bridge.rs split, part 2 | done | 02b1fa2 (#78) |
+| F0-4a — main_window.cpp split, part 1: `EditorTabs` | in review | #100 |
+| F0-4b — main_window.cpp split, part 1: `ClassViewPanel`, `FindUsagesPanel`, `IdeMainWindow` | todo |  |
+| F0-5 — main_window.cpp split, part 2 | blocked on F0-4b |  |
 | F0-6 — settings dialog extraction + `SettingsContext` | blocked on F0-5 |  |
 | F0-7 — dock registry and general reconciliation | blocked on F0-6 |  |
 | F0-8 — byte-column fix in `moveCursorToLine` | done | febd6c0 (#74) |
 | F0-9 — per-project settings persistence | done | 720d1d9 (#75) |
 | F0-10 — per-project settings rules + dialog | blocked on F0-6 |  |
-| F0-11 — E2E harness | in review | #76 |
-| F0-12 — E2E seed flows | in review | #76 |
+| F0-11 — E2E harness | done | 1eb5009 (#76) |
+| F0-12 — E2E seed flows | done | 1eb5009 (#76) |
 | F0-13 — E2E in CI | todo |  |
-| F0-14 — `lsp-conformance` image stage | in review | #77 |
-| F0-15 — LSP conformance harness + expectations | in review | #77 |
+| F0-14 — `lsp-conformance` image stage | done | 2f1d4ec (#77) |
+| F0-15 — LSP conformance harness + expectations | done | 2f1d4ec (#77) |
 | F0-16 — conformance fixes | todo | one row per defect once F0-15 lands |
-| F0-17 — docs: this plan, ADRs, layering, overview | in review | #80 |
+| F0-17 — docs: this plan, ADRs, layering, overview | done | 5675b3f (#80) |
 | F0-18 — route every buffer edit through `applyBufferEdits` | todo |  |
 | F0-19 — error-code ranges (ADR-0003 amendment) | todo |  |
 
@@ -441,8 +442,8 @@ Every task is a single commit that keeps `cargo test --workspace` green and is r
 | F0-1b | Promote `Utf16Cursor`/`utf16_at` (`editor-core/src/search.rs:178-201`) to a public `editor_core::offsets`, so the byte↔UTF-16 conversion has one home before five features reimplement it | — |
 | F0-2 | `bridge.rs` split part 1: `bridge/mod.rs` + `bridge/ffi.rs`; `tree.rs`, `editor.rs`, `settings.rs`, `terminal.rs`, `convert.rs` moved | — |
 | F0-3 | `bridge.rs` split part 2: `search.rs`, `language.rs`, `ai/chat.rs` + `ai/agent.rs`, `registry.rs` moved; the mixed `mod tests` divided; `bridge.rs` deleted | F0-2 |
-| F0-4 | `main_window.cpp` split part 1: `editor_tabs`, `class_view_panel`, `find_usages_panel`, `ide_main_window` extracted with their shared-helper headers, registered in `build.rs` | F0-12 |
-| F0-5 | `main_window.cpp` split part 2: `refactor_controller`, `declaration_navigator`, `action_registry` extracted | F0-4 |
+| F0-4 | `main_window.cpp` split part 1: `editor_tabs`, `class_view_panel`, `find_usages_panel`, `ide_main_window` extracted with their shared-helper headers, registered in `build.rs`. Split in two on delivery: **F0-4a** moved `EditorTabs` (and the cursor/highlighter helpers only it used) to `cpp/editor_tabs.{h,cpp}` plus `cpp/editor_tabs_panes.cpp` and `cpp/editor_tabs_lsp.cpp` — one class, three translation units, because the class does not fit under the 1200-line ceiling and adding a baseline would defeat F0-1. **F0-4b** is the rest: `ClassViewPanel`, `FindUsagesPanel`, `IdeMainWindow` | F0-12 |
+| F0-5 | `main_window.cpp` split part 2: `refactor_controller`, `declaration_navigator`, `action_registry` extracted | F0-4b |
 | F0-6 | Settings dialog extraction + `SettingsContext`; the 14-parameter signature replaced; one `buildXPage` per page | F0-5 |
 | F0-7 | Dock registry and general reconciliation in `dock_layout.{h,cpp}`; `showAiChatDock`'s workaround deleted | F0-6 |
 | F0-8 | Byte-column fix **inside `moveCursorToLine`** (`main_window.cpp:128-140`): convert byte column → UTF-16 column against `block.text()` via `editor_core::offsets`, and clamp to the block (`QTextCursor::Right` does not stop at a block boundary). One place fixes all five call sites (`:1935`, `:2065`, `:2622`, `:3200`) **and** `jumpToByteOffset` (`:685-704`). Routing through `AppSession` cannot work — the conversion needs the *live* line text, and the rope is stale (§1) | F0-1b |
@@ -456,7 +457,7 @@ Every task is a single commit that keeps `cargo test --workspace` green and is r
 | F0-16 | Conformance fixes — one commit per defect. **Unbounded by nature**: F0-15 produces the list, and each entry becomes its own Progress row rather than hiding behind this one | F0-15 |
 | F0-17 | Docs: ADR-0022/0024/0025, this plan, `layering.md`, `overview.md`, `docs/README.md`; stale `lib.rs` doc comments and `settings-model`'s wrong ADR citation fixed in the same pass | all F0 |
 
-Lanes: `{F0-11→F0-12→F0-4→F0-5→F0-6→F0-7}` is the critical path — the seed flows are the regression net for the C++ split, so they gate F0-4 rather than depending on F0-7 (an earlier draft had that edge and it made a cycle). Running alongside: `{F0-2→F0-3}`, `{F0-14→F0-15}`, `F0-1`, `F0-1b→F0-8`, `F0-9`. They converge at F0-10 and F0-13.
+Lanes: `{F0-11→F0-12→F0-4a→F0-4b→F0-5→F0-6→F0-7}` is the critical path — the seed flows are the regression net for the C++ split, so they gate F0-4 rather than depending on F0-7 (an earlier draft had that edge and it made a cycle). Running alongside: `{F0-2→F0-3}`, `{F0-14→F0-15}`, `F0-1`, `F0-1b→F0-8`, `F0-9`. They converge at F0-10 and F0-13.
 
 Two more F0 rows worth their own commits: **F0-18**, route `FindBar::replaceCurrent` (`find_bar.cpp:241`) and `CodeEditor::insertCompletion` (`code_editor.cpp:155`) through `applyBufferEdits` so §5's "every buffer change crosses as `Vec<FfiTextEdit>`" is true rather than aspirational, and fix the latent bug at `main_window.cpp:399`/`:408` where `beginEditBlock`/`endEditBlock` run on two different `textCursor()` **copies** (it works only because Qt's counter is per-`QTextDocument`, and it is the first thing a reviewer of the multi-caret change will stare at). **F0-19**, an ADR-0003 amendment introducing the error-code ranges below, replacing the five hardcoded `code: 1` literals (`bridge.rs:5627, :5638, :7005, :7111, :7129`).
 
@@ -668,7 +669,7 @@ What gets deleted is `showAiChatDock`'s comment at **3141–3151** and its near-
 **Proving the split preserved behaviour** — asserted in every large refactor and true in about half. Two mechanisms, both decisive:
 
 1. **FFI header snapshot.** `#[cxx_qt::bridge]` generates C++ headers into `target/**/cxx-qt-gen/`. Snapshot before, snapshot after, diff. Empty diff proves every QObject, slot signature, signal and type mapping is unchanged — a stronger guarantee than any test, because it is about the interface rather than a sample of behaviour. Keep it permanently with a `make bless-ffi-snapshot`, run **unconditionally** (it costs 30s), so any future PR changing the FFI surface says so out loud in its diff.
-2. **E2E marker-stream golden comparison.** `main_window.cpp` has no compile-time invariant to lean on. Run the four seed flows on the pre-split revision, save `events.jsonl` per flow, re-run after, diff **including event order** (excluding timestamps, pids, temp paths, window ids, ports). A reordered `tab_added`/`project_opened` pair is exactly the `connect()`-ordering change a mechanical-looking C++ split introduces, and it is invisible to every other check. **This is the concrete reason F0-11/F0-12 land before F0-4.**
+2. **E2E marker-stream golden comparison.** `main_window.cpp` has no compile-time invariant to lean on. Run the five seed flows on the pre-split revision, save `events.jsonl` per flow, re-run after, diff **including event order** (excluding timestamps, pids, temp paths, window ids, ports). A reordered `tab_added`/`project_opened` pair is exactly the `connect()`-ordering change a mechanical-looking C++ split introduces, and it is invisible to every other check. **This is the concrete reason F0-11/F0-12 land before F0-4.**
 
 Two mechanisms an earlier draft added and this one drops: a normalised-source `verify-mechanical-split.sh` (the split *already* requires four doc comments to move between translation units, so the diff will be dirty on the first commit — a gate expected to be dirty is a gate that gets waved through), and a `split:`-commit-message CI condition (a convention masquerading as enforcement; the snapshot runs unconditionally instead).
 
@@ -737,7 +738,7 @@ Lives at `crates/e2e/tests/` with `harness.rs` (the `Ide` fixture), `keys.rs` (x
 
 *(a) A view-side marker stream* — `IDE_E2E_EVENTS=/path/to/events.jsonl`; unset means every mark is a no-op. One free function in `cpp/e2e_mark.cpp`: `void e2eMark(const char *json)` appends a line and flushes. Called where the view *finished doing something*: `{"ev":"tab_added","index":0,"title":"a.rs"}`, `dialog_shown`, `dialog_closed`, `split_created`, `status`. This does not violate the humble-view rule — it contains no `if` encoding a business decision; it is the view reporting what it did, the same category as painting. It is the **only** channel that can catch the wiring, lifetime, identity-mapping and focus bug classes, because it reports the *widget's* view of the world.
 
-*(b) A quiescence probe, deferred until a flow needs it.* The design, when it is needed: one `AtomicUsize` in-flight counter in `bridge/registry.rs`, incremented where a worker thread is spawned and decremented at the end of the queued callback, exposed in the MCP `ping` reply, with `wait_until_idle()` polling until `inflight == 0` **and** the marker file has not grown for two consecutive polls (either condition alone lies — `inflight == 0` before the worker was even spawned, a quiet marker file during a long computation). But all four seed flows are writable with the marker stream and `wait_for(predicate)` alone, and this is product code added for the harness. Add it when a specific flow cannot be written without it, not before.
+*(b) A quiescence probe, deferred until a flow needs it.* The design, when it is needed: one `AtomicUsize` in-flight counter in `bridge/registry.rs`, incremented where a worker thread is spawned and decremented at the end of the queued callback, exposed in the MCP `ping` reply, with `wait_until_idle()` polling until `inflight == 0` **and** the marker file has not grown for two consecutive polls (either condition alone lies — `inflight == 0` before the worker was even spawned, a quiet marker file during a long computation). But all five seed flows are writable with the marker stream and `wait_for(predicate)` alone, and this is product code added for the harness. Add it when a specific flow cannot be written without it, not before.
 
 **Is MCP the control channel?** No for input, yes-with-limits for observation.
 As input it is disqualified: `open_file` over MCP routes through `AppSession` and never touches the tree widget, never raises a dialog, never exercises a shortcut — it would skip the exact layer E2E exists to cover and produce a green suite proving nothing about `cpp/`. **Input is xdotool, always.**
@@ -869,7 +870,7 @@ Exhaustive per-language test *functions* — a registry-driven test is one langu
 
 **Layering, after each new crate** — `cargo tree -p <crate> -e normal | grep -i qt` must be empty for `edit-ops`, `vcs-core`, `run-core` and `e2e`, and the check added to CI's loop alongside the existing three.
 
-**The seam split specifically** — `make verify-split` clean, the FFI header snapshot diff empty, and the four seed flows' marker streams identical to their pre-split goldens.
+**The seam split specifically** — `make verify-split` clean, the FFI header snapshot diff empty, and the five seed flows' marker streams identical to their pre-split goldens.
 
 **The LSP work** — `make lsp-conformance` against the three pinned servers, with `conformance-expectations.toml` committed and any drift reviewed as a diff.
 

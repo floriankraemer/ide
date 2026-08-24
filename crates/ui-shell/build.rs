@@ -277,6 +277,13 @@ fn main() {
         .cpp_file("cpp/code_editor.cpp")
         .cpp_file("cpp/find_bar.h")
         .cpp_file("cpp/find_bar.cpp")
+        // EditorTabs is one class defined across three translation units:
+        // the tab surface, the pane tree, and the language-server leg.
+        // It declares no Q_OBJECT (main_window.cpp holds none by design),
+        // so only the sources are listed — its header runs no moc.
+        .cpp_file("cpp/editor_tabs.cpp")
+        .cpp_file("cpp/editor_tabs_panes.cpp")
+        .cpp_file("cpp/editor_tabs_lsp.cpp")
         .cpp_file("cpp/keymap_page.cpp")
         .cpp_file("cpp/syntax_colors_page.cpp")
         .cpp_file("cpp/languages_page.cpp")

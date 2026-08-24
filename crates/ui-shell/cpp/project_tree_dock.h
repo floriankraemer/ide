@@ -32,9 +32,9 @@ struct ProjectTreeActions
     ads::CDockWidget *aiChatDock;
     ads::CDockWidget *classViewDock;
     ads::CDockManager *dockManager;
-    // Opening a file is EditorTabs' job, and EditorTabs is private to
-    // main_window.cpp — a callback keeps it that way, the same shape the
-    // search results panel already takes.
+    // Opening a file is EditorTabs' job, and the tree does not depend on
+    // editor_tabs.h to say so — a callback keeps it that way, the same
+    // shape the search results panel already takes.
     std::function<void(const QString &)> openFile;
 };
 
