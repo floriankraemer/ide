@@ -30,9 +30,11 @@
 //! - [`indent`] — the indent of a new line, and indent/unindent of a
 //!   selection.
 //! - [`pairs`] — auto-close, type-over, smart backspace, surround.
+//! - [`brackets`] — a bracket's partner, and where the caret jumps to.
 //!
 //! Qt-free, like every crate below the adapter.
 
+pub mod brackets;
 pub mod comment;
 pub mod indent;
 pub mod pairs;
