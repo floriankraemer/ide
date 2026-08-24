@@ -1,6 +1,7 @@
 #include "search_results_panel.h"
 
 #include "highlight_delegate.h"
+#include "icon_cache.h"
 
 #include <QCheckBox>
 #include <QFileInfo>
@@ -154,6 +155,7 @@ QTreeWidgetItem *SearchResultsPanel::fileGroup(const QString &path)
     auto *group = new QTreeWidgetItem(results_);
     group->setData(0, kPathRole, path);
     group->setText(0, QFileInfo(path).fileName());
+    group->setIcon(0, ui_shell::fileIcon(path, ui_shell::smallIconPx(results_)));
     group->setToolTip(0, path);
     group->setExpanded(true);
     return group;

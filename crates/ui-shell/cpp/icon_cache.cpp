@@ -7,6 +7,8 @@
 #include <QImage>
 #include <QPixmap>
 #include <QStringList>
+#include <QStyle>
+#include <QWidget>
 #include <cstdint>
 
 namespace ui_shell {
@@ -38,6 +40,16 @@ QPixmap pixmapFor(IconProvider *provider, const QString &key, int logicalPx, qre
     QPixmap pixmap = QPixmap::fromImage(view.copy());
     pixmap.setDevicePixelRatio(dpr);
     return pixmap;
+}
+
+// The provider every icon in this process is rendered through. Leaked
+// deliberately, as sharedIconCache() is: a QIcon holds a QPixmap, and
+// destroying one after the QGuiApplication is gone is a crash rather than a
+// cleanup — which is exactly when a function-local static would run.
+IconProvider *sharedProvider()
+{
+    static IconProvider *provider = new IconProvider();
+    return provider;
 }
 
 } // namespace
@@ -76,6 +88,26 @@ QIcon IconCache::iconFor(const QString &key, int logicalPx)
 void IconCache::clear()
 {
     m_icons.clear();
+}
+
+IconCache &sharedIconCache()
+{
+    static IconCache *cache = new IconCache(sharedProvider());
+    return *cache;
+}
+
+QIcon fileIcon(const QString &path, int logicalPx)
+{
+    // Whether a path resolves to an icon at all is the Rust side's answer: an
+    // empty key means "no decoration", and iconFor() turns that into a null
+    // QIcon.
+    return sharedIconCache().iconFor(sharedProvider()->iconKeyForPath(path, false, false),
+                                     logicalPx);
+}
+
+int smallIconPx(const QWidget *widget)
+{
+    return widget->style()->pixelMetric(QStyle::PM_SmallIconSize, nullptr, widget);
 }
 
 } // namespace ui_shell

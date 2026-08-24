@@ -5,6 +5,7 @@
 #include <QString>
 
 class IconProvider;
+class QWidget;
 
 namespace ui_shell {
 
@@ -38,5 +39,27 @@ private:
     IconProvider *m_provider;
     QHash<QString, QIcon> m_icons;
 };
+
+// The one cache in this process, over an IconProvider of its own.
+//
+// Every icon in the window is rasterised by the same Rust-side pack and
+// renderer (`bridge::registry::shared_icons`), so a second cache would only
+// decode the same pixels a second time. An IconProvider carries no state
+// beyond handles on that shared side, which is what makes a private one here
+// equivalent to the window's.
+IconCache &sharedIconCache();
+
+// The icon for the file at `path`, at `logicalPx` device-independent pixels,
+// or a null QIcon when no icon theme is active and for a row that names no
+// file at all.
+//
+// For rows built in C++ rather than served from a model: editor tabs, Search
+// Everywhere, the Search Results dock and the Problems dock. The project tree
+// has a model, so it goes through IconDecorationProxy instead.
+QIcon fileIcon(const QString &path, int logicalPx);
+
+// The small-icon size `widget`'s style asks for, which is the width a list or
+// tree row reserves for a decoration unless the view overrides it.
+int smallIconPx(const QWidget *widget);
 
 } // namespace ui_shell
