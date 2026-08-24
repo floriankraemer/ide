@@ -1,0 +1,19 @@
+[package]
+name = "icon-theme"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+# default-features = false drops `text`, `system-fonts`, `memmap-fonts` and
+# `raster-images`. An icon SVG is paths: none of them renders a glyph or
+# embeds a PNG, and every one of those features drags in something more that
+# would have to cross-build for `x86_64-pc-windows-gnu` through MXE (fontdb,
+# memmap2, image).
+#
+# `resvg` re-exports both `usvg` and `tiny-skia`, so neither is named here on
+# purpose: a second version requirement could resolve to a `tiny_skia::Pixmap`
+# that is not the type `resvg::render` writes into, and the mismatch would
+# only show up as a compile error at some later version bump.
+resvg = { version = "0.45", default-features = false }

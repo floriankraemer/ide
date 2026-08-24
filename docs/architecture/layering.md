@@ -5,7 +5,7 @@ Hexagonal-lite with a humble Qt view: logic in Qt-free Rust, the view only displ
 
 ## Layers
 
-The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `edit-ops`, `pty-core`, `terminal-core`, `mcp-server`, `plugin-api`), adapter + view (`ui-shell`), and the `app` binary.
+The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `edit-ops`, `pty-core`, `terminal-core`, `mcp-server`, `plugin-api`, `icon-theme`), adapter + view (`ui-shell`), and the `app` binary.
 The building-block diagram lives in [overview.md §3](overview.md#3-building-block-view) — one diagram, one place.
 
 ## Allowed imports
@@ -22,6 +22,7 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `lsp-core` | (std, lsp-types, serde, serde_json; `syntax-core` as a **dev**-dependency only, ADR-0018) | **No** |
 | `index-core` | `syntax-core`, `editor-core` (+ std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore, rayon, nucleo-matcher, fs4, dirs) | **No** |
 | `plugin-api` | (std, serde, toml) — a leaf on purpose, see [ADR-0026](decisions/0026-plugin-host.md) | **No** |
+| `icon-theme` | (std, serde, toml, resvg) — **not** `syntax-core` and **not** `plugin-host`, see [ADR-0027](decisions/0027-icon-themes.md) | **No** |
 | `settings-model` | `app-config`, `syntax-core`, `lsp-core`, `edit-ops`, `editor-core` (+ std, serde, toml, tree-sitter) | **No** |
 | `edit-ops` | `editor-core`, `syntax-core` (+ std, tree-sitter) | **No** |
 | `app-core` | `editor-core`, `project-model` | **No** |
@@ -46,6 +47,9 @@ That test target is the one place `app-config` may be read from a test rather th
 - **What a plugin manifest means** — which ids and paths are well-formed, which contract revisions are compatible, how far a capability reaches — lives in `plugin-api`, next to the manifest it describes (ADR-0026).
   A `PluginManifest` that exists has been validated, so no consumer re-checks; `plugin-host` is left with the parts that genuinely need a disk.
   `plugin-api` names no consumer of a contribution — not the host, not `icon-theme` — because a contract that depends on one of its parties is not a contract.
+- **Which icon a row gets** lives in `icon-theme` (ADR-0027), and it is handed the language id rather than deriving one: `IconPack::file_icon` takes `language_id: Option<&str>` and the crate does not depend on `syntax-core`, so ADR-0018's single detection table stays single.
+  Its own extension table answers "which art", never "which language", and nothing may ask it the second question.
+  Reading a pack's files is the caller's job through the `IconAssets` trait, because a built-in plugin's SVGs are embedded in the binary and an installed plugin's are on disk; `icon-theme` therefore depends on `plugin-host` no more than `plugin-api` does, and `app-core` joins the two.
 - **Which kind of page a tab needs** is `app-core`'s answer, carried across the seam as `TabKind` (ADR-0020). The view builds a `CodeEditor` or a `HexViewer` from it and never infers the kind from the path or the bytes. What a hex row *says* — offset format, byte grouping, printable-byte rule, short-row padding — belongs to `editor_core::hex`, next to the `binary_detect` rule that decides what counts as binary in the first place.
 - **Rules the AI assistant needs** (how attachments are assembled into a prompt and in what order they are truncated, how many tokens that costs, which files are too secret to attach or read, whether a model-supplied path escapes the project, which tool an approval policy allows, how a code block or an approved tool call becomes an edit, and when an agent run must stop) live in `ai-chat-core` (ADR-0021).
   It depends on `lsp-core` because a proposed edit is expressed as `Vec<lsp_core::DocumentEdits>` and applied through the same `plan_edit` path a refactoring uses — there is no second apply semantics and no second undo story.
@@ -103,6 +107,7 @@ cargo tree -p lsp-core -e normal | grep -i tokio    # must be empty
 cargo tree -p ai-chat-core -e normal | grep -i qt   # must be empty
 cargo tree -p e2e -e normal | grep -i qt            # must be empty
 cargo tree -p plugin-api -e normal | grep -i qt     # must be empty
+cargo tree -p icon-theme -e normal | grep -i qt     # must be empty
 ```
 
 ## Known debt at time of writing

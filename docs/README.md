@@ -32,6 +32,7 @@ ADR-0023 (multi-caret) is reserved and lands with the editor-ergonomics work.
 - [ADR-0024: verification foundation](architecture/decisions/0024-verification-foundation.md) — a headless E2E harness driving the real binary, and a pinned real-server LSP conformance gate that runs nightly.
 - [ADR-0025: seam split and file-size ceiling](architecture/decisions/0025-seam-split-and-file-size-ceiling.md) — `bridge.rs` and `main_window.cpp` split per feature; a ratcheted size gate; the split proven by byte-identical FFI headers.
 - [ADR-0026: plugin host](architecture/decisions/0026-plugin-host.md) — `plugin-api` as the contract and `plugin-host` as the machinery; declarative contributions, built-ins loaded as plugins, `api_version` the one compatibility lever.
+- [ADR-0027: icon themes](architecture/decisions/0027-icon-themes.md) — a Qt-free `icon-theme` crate: our own `pack.toml`, `resvg` rasterisation to premultiplied RGBA8, and a resolver handed a language id rather than detecting one.
 
 ## Plans
 
