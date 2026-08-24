@@ -4,6 +4,7 @@ members = [
     "crates/editor-core",
     "crates/project-model",
     "crates/syntax-core",
+    "crates/edit-ops",
     "crates/app-config",
     "crates/mcp-server",
     "crates/pty-core",

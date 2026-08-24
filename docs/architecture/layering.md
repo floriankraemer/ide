@@ -5,7 +5,7 @@ Hexagonal-lite with a humble Qt view: logic in Qt-free Rust, the view only displ
 
 ## Layers
 
-The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `pty-core`, `terminal-core`, `mcp-server`), adapter + view (`ui-shell`), and the `app` binary.
+The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `edit-ops`, `pty-core`, `terminal-core`, `mcp-server`), adapter + view (`ui-shell`), and the `app` binary.
 The building-block diagram lives in [overview.md §3](overview.md#3-building-block-view) — one diagram, one place.
 
 ## Allowed imports
@@ -22,6 +22,7 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `lsp-core` | (std, lsp-types, serde, serde_json; `syntax-core` as a **dev**-dependency only, ADR-0018) | **No** |
 | `index-core` | `syntax-core`, `editor-core` (+ std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore, rayon, nucleo-matcher, fs4, dirs) | **No** |
 | `settings-model` | `app-config`, `syntax-core`, `lsp-core` (+ std, serde, toml, tree-sitter) | **No** |
+| `edit-ops` | `editor-core`, `syntax-core` (+ std, tree-sitter) | **No** |
 | `app-core` | `editor-core`, `project-model` | **No** |
 | `ai-chat-core` | `lsp-core` (+ std, serde, serde_json, base64, tiktoken-rs, reqwest/rustls) | **No** |
 | `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `settings-model`, `syntax-core`, `mcp-server`, `index-core`, `lsp-core`, `ai-chat-core`, `pty-core`, `terminal-core` (+ tokio, cxx, cxx-qt, cxx-qt-lib) | Yes (adapter + view live here) |
@@ -47,6 +48,11 @@ That test target is the one place `app-config` may be read from a test rather th
   An assistant inside the IDE therefore cannot see a different project than an agent attached over MCP, and `bridge.rs` never decides whether a tool may run.
   `ai-chat-core` is the one Qt-free crate deliberately **not** covered by the `grep -i tokio` gate the other background-work crates take: `reqwest::blocking` builds a private current-thread runtime internally, so tokio appears in its tree even though no async code is written here and no runtime is managed by us.
   The gate that matters for it is the Qt one, and the rule the tokio gate was protecting — that long work runs on a `std::thread` and returns through `CxxQtThread::queue()`, not on an ambient runtime — is unchanged (ADR-0007, ADR-0021).
+
+- **Language-aware editing operations** — commenting, expand/shrink selection, indentation, bracket pairing and bracket matching — live in `edit-ops`, because each needs the text (`editor-core`) *and* the grammar (`syntax-core`) at once.
+  `editor-core` may not depend on `syntax-core` and must not start; passing "the comment token for this language" in from `bridge.rs` would put the join in the adapter, which is what these rules forbid. Same situation as `settings-model`, same answer.
+  What a comment token, a bracket pair or a quote *is* stays in `syntax-core`'s one registry (ADR-0018) — `edit-ops` reads it and never keeps a second table.
+  Every entry point takes `text: &str`, never a `Document`: the rope is only refreshed on save, so it is one save behind the live Qt buffer.
 
 - **Which language a file is** is answered in exactly one place, `syntax-core`'s registry (ADR-0018).
   `lsp-core` owns only what the protocol owns — the server command per language id, and the few ids LSP names differently from the grammar (`tsx` -> `typescriptreact`) — and `ui-shell` joins the two, which is translation and so allowed in the adapter.
@@ -83,6 +89,7 @@ cargo tree -p pty-core -e normal | grep -i tokio    # must be empty
 cargo tree -p terminal-core -e normal | grep -i qt    # must be empty
 cargo tree -p terminal-core -e normal | grep -i tokio # must be empty
 cargo tree -p app-config -e normal | grep -i qt     # must be empty
+cargo tree -p edit-ops -e normal | grep -i qt       # must be empty
 cargo tree -p index-core -e normal | grep -i qt     # must be empty
 cargo tree -p index-core -e normal | grep -i tokio  # must be empty
 cargo tree -p mcp-server -e normal | grep -i qt     # must be empty
