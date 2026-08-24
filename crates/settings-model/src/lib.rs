@@ -9,7 +9,7 @@
 //! knows what the settings mean — the syntax scope vocabulary and the
 //! runtime language loader in `syntax-core`, the shipped server catalog in
 //! `lsp-core` — and `app-config` deliberately depends on neither
-//! (ADR-0016, and the module docs of `app_config::syntax_colors`).
+//! (ADR-0017, and the module docs of `app_config::syntax_colors`).
 //!
 //! Qt-free, like every crate below `ui-shell`.
 

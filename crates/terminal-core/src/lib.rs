@@ -4,7 +4,7 @@
 //! Qt-free by design (see `docs/architecture/layering.md`): this crate turns
 //! a raw PTY byte stream into a renderable cell grid, cursor position, and
 //! basic per-cell attributes. It does not own a PTY — `pty-core` (task F1)
-//! owns the byte stream, and `ui-shell` (task F3, not yet built) wires the
+//! owns the byte stream, and `ui-shell` wires the
 //! two together, feeding bytes read from a `pty_core::PtySession` into
 //! [`TerminalEmulator::feed`].
 
@@ -47,7 +47,7 @@ impl Dimensions for GridSize {
 
 /// An RGB color as it should be rendered — resolved from `alacritty_terminal`'s
 /// [`AnsiColor`], which can otherwise name a color indirectly (a palette
-/// index or a named ANSI slot). The view (`ui-shell`, task F3) shouldn't need
+/// index or a named ANSI slot). The view (`ui-shell`) shouldn't need
 /// its own copy of the default 16-color ANSI palette just to paint cells, so
 /// resolution happens here.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

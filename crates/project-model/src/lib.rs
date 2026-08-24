@@ -1,7 +1,7 @@
 //! Single-root project state: directory tree snapshot, "Open Folder" logic,
 //! and last-opened-project persistence.
 //!
-//! No Qt dependency, no filesystem watcher (that's Task 8) — pure Rust,
+//! No Qt dependency — pure Rust,
 //! unit-testable. `ui-shell` wraps [`DirectoryTree`] in a
 //! `QAbstractItemModel` later; this crate only owns the tree data.
 
@@ -340,7 +340,7 @@ impl ProjectSession {
     /// Re-snapshot the current project's tree from disk — a full rebuild,
     /// not incremental diffing, which is a legitimate MVP-scope choice since
     /// there's no filesystem watcher yet driving fine-grained updates
-    /// (Task 8). Callers use this after a create/rename/delete mutation
+    /// Callers use this after a create/rename/delete mutation
     /// (US-2b). No-op if no project is open.
     pub fn rebuild_tree(&mut self) -> io::Result<()> {
         let Some(project) = self.current.as_mut() else {
