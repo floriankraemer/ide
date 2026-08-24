@@ -199,6 +199,12 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "Ctrl+]",
     },
     ActionDef {
+        id: "code.reformat",
+        label: "Reformat Code",
+        category: "Code",
+        default_shortcut: "Ctrl+Alt+L",
+    },
+    ActionDef {
         id: "view.classView",
         label: "Class View",
         category: "View",

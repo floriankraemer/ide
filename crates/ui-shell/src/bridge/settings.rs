@@ -8,7 +8,8 @@ use syntax_core::theme;
 
 use crate::bridge::convert::{load_settings, user_styles};
 use crate::bridge::ffi::{
-    self, FfiEditorColors, FfiEditorFont, FfiResult, FfiUiFontScales, FfiWindowGeometry,
+    self, FfiEditingProblem, FfiEditingRow, FfiEditorColors, FfiEditorFont, FfiResult,
+    FfiUiFontScales, FfiWindowGeometry,
 };
 
 /// Rust side of the `AppSettings` QObject: stateless, every call re-reads
@@ -917,5 +918,167 @@ impl ffi::AiProviderEditor {
                 )
             })
             .collect();
+    }
+}
+
+/// Every language a per-language editing override could be about: the
+/// editor's own registry, under the ids `settings-model` speaks (its own,
+/// not the LSP ones `LanguageServerEditor` uses — this page is not talking
+/// to a server).
+fn editing_page_languages() -> Vec<(String, String)> {
+    syntax_core::registry()
+        .languages()
+        .into_iter()
+        .filter(|language| *language != syntax_core::Language::PLAIN_TEXT)
+        .map(|language| (language.id(), language.name()))
+        .collect()
+}
+
+fn to_ffi_editing_row(
+    language_id: &str,
+    language_name: &str,
+    settings: &app_config::editing::EditingSettings,
+) -> FfiEditingRow {
+    FfiEditingRow {
+        language_id: QString::from(language_id),
+        language_name: QString::from(language_name),
+        tab_width: settings.tab_width,
+        has_use_spaces: settings.use_spaces.is_some(),
+        use_spaces: settings.use_spaces.unwrap_or(false),
+        has_trim_trailing_whitespace: settings.trim_trailing_whitespace.is_some(),
+        trim_trailing_whitespace: settings.trim_trailing_whitespace.unwrap_or(false),
+        has_insert_final_newline: settings.insert_final_newline.is_some(),
+        insert_final_newline: settings.insert_final_newline.unwrap_or(false),
+        has_wrap_column: settings.wrap_column.is_some(),
+        wrap_column: settings.wrap_column.unwrap_or(0),
+        default_encoding: QString::from(settings.default_encoding.as_str()),
+        line_endings: QString::from(settings.line_endings.as_str()),
+    }
+}
+
+fn from_ffi_editing_row(row: &FfiEditingRow) -> app_config::editing::EditingSettings {
+    app_config::editing::EditingSettings {
+        tab_width: row.tab_width,
+        use_spaces: row.has_use_spaces.then_some(row.use_spaces),
+        trim_trailing_whitespace: row
+            .has_trim_trailing_whitespace
+            .then_some(row.trim_trailing_whitespace),
+        insert_final_newline: row
+            .has_insert_final_newline
+            .then_some(row.insert_final_newline),
+        wrap_column: row.has_wrap_column.then_some(row.wrap_column),
+        default_encoding: row.default_encoding.to_string(),
+        line_endings: row.line_endings.to_string(),
+        languages: HashMap::new(),
+    }
+}
+
+fn to_ffi_editing_problem(problem: &settings_model::editing::EditingProblem) -> FfiEditingProblem {
+    FfiEditingProblem {
+        language_id: QString::from(problem.language_id.as_deref().unwrap_or_default()),
+        sentence: QString::from(problem.sentence.as_str()),
+    }
+}
+
+/// Rust side of the `EditingEditor` QObject (F1-14, F1-17): the Settings >
+/// Editing page's draft. Isomorphic to `LanguageServerEditor` — begin, edit,
+/// validate, commit — because they answer the same shape of question:
+/// "what does each language do differently, and did the user change it."
+#[derive(Default)]
+pub struct EditingEditorRust {
+    draft: RefCell<Option<settings_model::editing::EditingDraft>>,
+}
+
+impl ffi::EditingEditor {
+    pub fn begin_edit(&self) {
+        let settings = load_settings();
+        *self.draft.borrow_mut() = Some(settings_model::editing::EditingDraft::from_settings(
+            &settings,
+        ));
+    }
+
+    pub fn global_row(&self) -> FfiEditingRow {
+        let draft = self.draft.borrow();
+        let Some(draft) = draft.as_ref() else {
+            return to_ffi_editing_row("", "", &app_config::editing::EditingSettings::default());
+        };
+        to_ffi_editing_row("", "", draft.global())
+    }
+
+    pub fn set_global_row(&self, row: &FfiEditingRow) {
+        if let Some(draft) = self.draft.borrow_mut().as_mut() {
+            *draft.global_mut() = from_ffi_editing_row(row);
+        }
+    }
+
+    /// Every language with an override, plus the ones without one, so the
+    /// page can offer every language and show which already differ. The
+    /// registry order (not `languages()`'s sort) is what the picker shows.
+    pub fn language_rows(&self) -> Vec<FfiEditingRow> {
+        let draft = self.draft.borrow();
+        let Some(draft) = draft.as_ref() else {
+            return Vec::new();
+        };
+        editing_page_languages()
+            .into_iter()
+            .map(|(id, name)| {
+                let settings = draft.language(&id).cloned().unwrap_or_default();
+                to_ffi_editing_row(&id, &name, &settings)
+            })
+            .collect()
+    }
+
+    pub fn set_language_row(&self, row: &FfiEditingRow) {
+        if let Some(draft) = self.draft.borrow_mut().as_mut() {
+            let id = row.language_id.to_string();
+            draft.set_language(&id, from_ffi_editing_row(row));
+        }
+    }
+
+    /// What the resolved rules would be for `language_id` if the draft were
+    /// saved right now — the preview row's tab width and spaces-vs-tabs.
+    pub fn resolved_tab_width(&self, language_id: &QString) -> u32 {
+        let draft = self.draft.borrow();
+        draft
+            .as_ref()
+            .map(|draft| draft.resolved(&language_id.to_string()).tab_width as u32)
+            .unwrap_or(4)
+    }
+
+    /// Everything the page has to say out loud before it may commit, in the
+    /// order the user should be walked through it.
+    pub fn problems(&self) -> Vec<FfiEditingProblem> {
+        let draft = self.draft.borrow();
+        let Some(draft) = draft.as_ref() else {
+            return Vec::new();
+        };
+        draft
+            .validate()
+            .iter()
+            .map(to_ffi_editing_problem)
+            .collect()
+    }
+
+    /// Refuses when [`problems`](Self::problems) is non-empty — a setting
+    /// that parses and then does nothing is worse than one the dialog
+    /// refused to save, per the page's own rule.
+    pub fn commit(&self) -> FfiResult {
+        let Some(draft) = self.draft.borrow().clone() else {
+            return FfiResult::default();
+        };
+        if !draft.validate().is_empty() {
+            return FfiResult {
+                code: 1,
+                message: QString::from("Fix the highlighted editing settings first."),
+            };
+        }
+        let config_dir = app_core::resolve_config_dir();
+        match app_config::update(&config_dir, |settings| draft.apply_to(settings)) {
+            Ok(()) => FfiResult::default(),
+            Err(error) => FfiResult {
+                code: 1,
+                message: QString::from(error.to_string().as_str()),
+            },
+        }
     }
 }

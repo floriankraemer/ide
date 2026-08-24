@@ -70,7 +70,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F1-11 — save rules (trim, final newline, line endings) | core done, unwired | 3d4002d (#90); `on_save` has no runtime caller — wired with F1-13…F1-17 |
 | F1-12 — `lsp-core` formatting | done | 7891f57 (#82) |
 | F1-13 — bridge: `EditorOps` | done | recorded at the end of this branch |
-| F1-14 — bridge: `EditingEditor` + formatting | todo |  |
+| F1-14 — bridge: `EditingEditor` + formatting | done | recorded at the end of this branch |
 | F1-15 — view: multi-caret rendering and input | done | recorded at the end of this branch |
 | F1-16 — view: actions and menus | done | recorded at the end of this branch |
 | F1-17 — view: editing settings page | todo |  |

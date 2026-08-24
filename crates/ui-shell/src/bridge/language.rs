@@ -628,6 +628,65 @@ impl ffi::LanguageService {
         }
     }
 
+    /// Reformat one open document (F1-14), through the same pending-edit
+    /// protocol a rename uses: `code.reformat` is confined to the file the
+    /// user is looking at, so `touches_other_files` is always false and
+    /// `RefactorController::onRefactorReady` applies it straight away —
+    /// one Ctrl+Z undoes a reformat exactly as it undoes a rename, with no
+    /// new C++ needed for it.
+    ///
+    /// Whole-document only. `textDocument/rangeFormatting` over a selection
+    /// is a real `lsp_core::LspManager::format_range` capability, left for
+    /// whichever future task wires "Reformat Selection" to it — nothing
+    /// here calls it yet.
+    pub fn request_formatting(mut self: Pin<&mut Self>, path: &QString, buffer_revision: i64) {
+        let path = path.to_string();
+        let Some(language_id) = self.open_docs.borrow().get(&path).cloned() else {
+            return;
+        };
+        let settings = crate::bridge::convert::load_settings();
+        let rules = settings_model::editing::resolve_for_language(&settings, &language_id);
+        let style = rules.indent_style();
+        let options = lsp_core::formatting::FormattingOptions {
+            tab_size: style.tab_width as u32,
+            insert_spaces: style.use_spaces,
+            trim_trailing_whitespace: Some(rules.trim_trailing_whitespace),
+            insert_final_newline: Some(rules.insert_final_newline),
+            trim_final_newlines: None,
+        };
+        let uri = lsp_core::uri_from_path(&path);
+        self.edits.borrow_mut().begin(buffer_revision);
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            let outcome = manager.format(&uri, &options);
+            let version = manager.document_version(&uri);
+            let _ = qt_thread.queue(move |service: Pin<&mut Self>| match outcome {
+                Ok(lsp_core::formatting::FormattingOutcome::Edits(edits)) => {
+                    let plan = lsp_core::EditPlan {
+                        buffers: vec![lsp_core::DocumentEdits {
+                            uri,
+                            path,
+                            version,
+                            edits,
+                        }],
+                        files: Vec::new(),
+                        touches_other_files: false,
+                    };
+                    service.publish_refactor("Reformat Code".to_string(), plan, None);
+                }
+                Ok(lsp_core::formatting::FormattingOutcome::AlreadyFormatted) => {
+                    service.finish_refactor(Ok(()));
+                }
+                Ok(lsp_core::formatting::FormattingOutcome::Unsupported) => {
+                    service.finish_refactor(Err(format!(
+                        "No formatter is available for {language_id}."
+                    )));
+                }
+                Err(error) => service.finish_refactor(Err(error.to_string())),
+            });
+        });
+    }
+
     pub fn pending_edits(&self) -> Vec<ffi::FfiTextEdit> {
         match self.pending.borrow().as_ref() {
             Some(pending) => to_ffi_edits(&pending.plan, &[]),

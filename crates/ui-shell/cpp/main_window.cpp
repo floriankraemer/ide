@@ -842,6 +842,17 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
                             QObject::tr("The language server offers no refactorings here."));
     });
 
+    refactorMenu->addSeparator();
+    QAction *reformatAction = registerAction(refactorMenu, QStringLiteral("code.reformat"),
+                                             QObject::tr("Reformat Code"), appSettings, *actions);
+    QObject::connect(reformatAction, &QAction::triggered, window, [editorTabs, languageService]() {
+        const QString path = editorTabs->currentPath();
+        if (path.isEmpty()) {
+            return;
+        }
+        languageService->requestFormatting(path, editorTabs->documentRevision());
+    });
+
     // The same gestures on the editor's right-click menu. The actions are
     // looked up by id rather than captured, so this does not depend on which
     // menus have been built yet — and because they are the *same* QActions,

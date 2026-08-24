@@ -22,8 +22,8 @@ use crate::bridge::language::LanguageServiceRust;
 use crate::bridge::plugins::PluginCatalogRust;
 use crate::bridge::search::SearchModelRust;
 use crate::bridge::settings::{
-    AiProviderEditorRust, AppSettingsRust, KeymapEditorRust, LanguageCatalogRust,
-    LanguageServerEditorRust, SyntaxColorEditorRust,
+    AiProviderEditorRust, AppSettingsRust, EditingEditorRust, KeymapEditorRust,
+    LanguageCatalogRust, LanguageServerEditorRust, SyntaxColorEditorRust,
 };
 use crate::bridge::terminal::TerminalSessionRust;
 use crate::bridge::tree::ProjectTreeModelRust;
@@ -2442,6 +2442,18 @@ mod ffi {
         #[cxx_name = "codeActions"]
         fn code_actions(self: &LanguageService) -> Vec<FfiCodeAction>;
 
+        /// Reformat one open document, whole-file (F1-14). Answers through
+        /// the same `refactorReady`/`refactorFailed`/`pendingEdits`
+        /// protocol a rename uses — `touches_other_files` is always false,
+        /// so the view applies it straight away, and one Ctrl+Z undoes it.
+        #[qinvokable]
+        #[cxx_name = "requestFormatting"]
+        fn request_formatting(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            buffer_revision: i64,
+        );
+
         /// A `codeActionsAt` answered. Empty is a legitimate answer and is
         /// still signalled, so the view can say "nothing here" rather than
         /// leaving the gesture hanging.
@@ -2970,6 +2982,97 @@ mod ffi {
         /// separately, by `LanguageService::applyServerSettings`.
         #[qinvokable]
         fn commit(self: &LanguageServerEditor);
+    }
+
+    /// One editing-settings row — the global section, or one language's
+    /// overrides — as the page edits it. `EditingSettings`'s `Option<T>`
+    /// fields cross as a `has_*` flag plus the value, since cxx shared
+    /// structs have no optional; the value is meaningless when its flag is
+    /// false and the adapter never reads it that way.
+    ///
+    /// `default_encoding` and `line_endings` are carried for the global row
+    /// only — a language may not override either (`settings-model`'s rule,
+    /// not this struct's) — and are empty strings on every language row.
+    #[derive(Default)]
+    struct FfiEditingRow {
+        /// Empty for the global row.
+        language_id: QString,
+        language_name: QString,
+        /// `0` means unset.
+        tab_width: u32,
+        has_use_spaces: bool,
+        use_spaces: bool,
+        has_trim_trailing_whitespace: bool,
+        trim_trailing_whitespace: bool,
+        has_insert_final_newline: bool,
+        insert_final_newline: bool,
+        has_wrap_column: bool,
+        wrap_column: u32,
+        default_encoding: QString,
+        line_endings: QString,
+    }
+
+    /// Something the Editing page must say out loud before it may commit.
+    /// `language_id` is empty for the global section, which is what lets
+    /// the page put the user back on the row that is wrong.
+    #[derive(Default)]
+    struct FfiEditingProblem {
+        language_id: QString,
+        sentence: QString,
+    }
+
+    extern "RustQt" {
+        /// Settings > Editing (F1-14, F1-17): the draft of the `[editing]`
+        /// section and its per-language overrides, committed on OK.
+        ///
+        /// Isomorphic to `LanguageServerEditor` — begin, edit, validate,
+        /// commit — because a settings page with rules to refuse against is
+        /// always this shape, not a special case of it.
+        #[qobject]
+        type EditingEditor = super::EditingEditorRust;
+
+        /// Re-read the settings and start a fresh draft from them.
+        #[qinvokable]
+        #[cxx_name = "beginEdit"]
+        fn begin_edit(self: &EditingEditor);
+
+        /// The global section, as the page's top row.
+        #[qinvokable]
+        #[cxx_name = "globalRow"]
+        fn global_row(self: &EditingEditor) -> FfiEditingRow;
+
+        #[qinvokable]
+        #[cxx_name = "setGlobalRow"]
+        fn set_global_row(self: &EditingEditor, row: &FfiEditingRow);
+
+        /// One row per language the editor knows about, in registry order —
+        /// not just the ones with an override, so the page can offer every
+        /// language and show which already differ.
+        #[qinvokable]
+        #[cxx_name = "languageRows"]
+        fn language_rows(self: &EditingEditor) -> Vec<FfiEditingRow>;
+
+        #[qinvokable]
+        #[cxx_name = "setLanguageRow"]
+        fn set_language_row(self: &EditingEditor, row: &FfiEditingRow);
+
+        /// The tab width a buffer of `language_id` would resolve to if the
+        /// draft were saved right now — what the preview column shows.
+        #[qinvokable]
+        #[cxx_name = "resolvedTabWidth"]
+        fn resolved_tab_width(self: &EditingEditor, language_id: &QString) -> u32;
+
+        /// Everything wrong with the draft, in the order the page should
+        /// walk the user through it. Non-empty means `commit` will refuse.
+        #[qinvokable]
+        fn problems(self: &EditingEditor) -> Vec<FfiEditingProblem>;
+
+        /// Write the draft to settings. Refuses with a typed code
+        /// (ADR-0003) when `problems` is non-empty — a setting that parses
+        /// and then does nothing is worse than one the dialog would not
+        /// save.
+        #[qinvokable]
+        fn commit(self: &EditingEditor) -> FfiResult;
     }
 
     /// One turn as the transcript renders it. `text` is every text block of
