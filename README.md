@@ -41,3 +41,9 @@ cargo test --workspace
 ## License
 
 GPLv3, see [LICENSE](LICENSE).
+
+### Third-party assets
+
+File and folder icons come from the [Material Icon Theme](https://github.com/material-extensions/vscode-material-icon-theme), MIT licensed, copyright (c) 2025 Material Extensions.
+The 1251 SVGs and the mapping table converted from them are vendored under [third_party/material-icon-theme/](third_party/material-icon-theme/), with the upstream licence and the pinned version and checksum beside them.
+They are not edited by hand: `scripts/import-material-icons.py` downloads the pinned package, verifies its SHA-256 and regenerates the whole directory, so updating to a newer upstream release is a two-line edit and a re-run.

@@ -60,7 +60,10 @@ That is tiny-skia's native byte order, and it is exactly `QImage::Format_RGBA888
 
 Two smaller choices are worth recording because they look arbitrary.
 The icons directory is the fixed name `icons`, not a pack field: a pack-supplied directory would be an untrusted path joined to a plugin directory, and `plugin-api`'s path-safety rules cover the manifest, not a path a file the manifest points to then names.
-File names match case-sensitively and extensions case-insensitively, which is upstream Material's own rule — diverging would silently mis-icon files against the very table we generate from.
+Every name table — file names, folder names and extensions — matches case-insensitively, which is upstream Material's own rule.
+This corrects what this ADR said when it was written, and the correction came from the import at P4: 5.38.1 ships `dockerfile` and `makefile` in lower case, alongside 21 mixed-case `fileNames` keys and 35 mixed-case `folderNames` keys, because VS Code lowercases a row's name before the lookup.
+Matching by exact case left `Dockerfile`, `Makefile`, `LICENSE` and every `META-INF` with no icon at all.
+The import script lowercases those keys, refusing to proceed if two of them ever fold together, so the mixed-case keys that are dead in VS Code itself work here.
 
 ## Consequences
 
