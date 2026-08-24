@@ -236,6 +236,18 @@ struct Manifest {
     filenames: Option<Vec<String>>,
     grammar: Option<String>,
     grammar_library: Option<String>,
+    /// The editing tokens (F1-4b). `#[serde(default)]` is load-bearing:
+    /// this struct is `deny_unknown_fields`, so a manifest written before
+    /// these keys existed must keep loading, and one written after must
+    /// not have to name all four.
+    #[serde(default)]
+    line_comment: Option<String>,
+    #[serde(default)]
+    block_comment: Option<[String; 2]>,
+    #[serde(default)]
+    brackets: Option<Vec<[String; 2]>>,
+    #[serde(default)]
+    quotes: Option<Vec<String>>,
 }
 
 /// Scan `<config_dir>/languages` and layer what it finds over `builtins`.
@@ -405,6 +417,39 @@ fn load_one(
             .unwrap_or_else(|| base.map_or_else(Vec::new, |d| strings(d.filenames))),
         grammar: grammar_fn,
         queries,
+        // Each falls back to the builtin this entry shadows, so an
+        // override that only replaces a query file keeps `Ctrl+/` working.
+        line_comment: manifest
+            .line_comment
+            .or_else(|| base.and_then(|d| d.line_comment.map(str::to_string))),
+        block_comment: manifest
+            .block_comment
+            .map(|[open, close]| (open, close))
+            .or_else(|| {
+                base.and_then(|d| {
+                    d.block_comment
+                        .map(|(open, close)| (open.to_string(), close.to_string()))
+                })
+            }),
+        brackets: manifest
+            .brackets
+            .map(|pairs| {
+                pairs
+                    .into_iter()
+                    .map(|[open, close]| (open, close))
+                    .collect()
+            })
+            .unwrap_or_else(|| {
+                base.map_or_else(Vec::new, |d| {
+                    d.brackets
+                        .iter()
+                        .map(|(open, close)| ((*open).to_string(), (*close).to_string()))
+                        .collect()
+                })
+            }),
+        quotes: manifest
+            .quotes
+            .unwrap_or_else(|| base.map_or_else(Vec::new, |d| strings(d.quotes))),
     }))
 }
 
@@ -667,6 +712,10 @@ mod tests {
                     highlights: Some("(identifier) @variable"),
                     ..QuerySet::default()
                 },
+                line_comment: Some("//"),
+                block_comment: Some(("/*", "*/")),
+                brackets: &[("(", ")")],
+                quotes: &["\""],
             };
             let json = LanguageDef {
                 id: "json",
@@ -736,6 +785,43 @@ mod tests {
             rust.queries.highlights.as_deref(),
             Some("(identifier) @keyword\n")
         );
+    }
+
+    #[test]
+    fn a_manifest_written_before_the_editing_keys_existed_still_loads() {
+        // The `deny_unknown_fields` trap in reverse: the keys are new, so
+        // every manifest already on a user's disk names none of them and
+        // must inherit the builtin's.
+        let fixture = Fixture::new();
+        fixture.write("rust/language.toml", "name = \"Rust (mine)\"\n");
+        let loaded = fixture.load();
+
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        let rust = &loaded.entries[0];
+        assert_eq!(rust.line_comment.as_deref(), Some("//"));
+        assert_eq!(
+            rust.block_comment,
+            Some(("/*".to_string(), "*/".to_string()))
+        );
+        assert_eq!(rust.brackets, [("(".to_string(), ")".to_string())]);
+    }
+
+    #[test]
+    fn a_manifest_can_declare_its_own_editing_tokens() {
+        let fixture = Fixture::new();
+        fixture.write(
+            "rust/language.toml",
+            "line_comment = \";\"\nblock_comment = [\"#|\", \"|#\"]\n\
+             brackets = [[\"(\", \")\"], [\"[\", \"]\"]]\nquotes = [\"|\"]\n",
+        );
+        let loaded = fixture.load();
+
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        let rust = &loaded.entries[0];
+        assert_eq!(rust.line_comment.as_deref(), Some(";"));
+        assert_eq!(rust.block_comment, Some(("#|".into(), "|#".into())));
+        assert_eq!(rust.brackets.len(), 2);
+        assert_eq!(rust.quotes, ["|"]);
     }
 
     #[test]
