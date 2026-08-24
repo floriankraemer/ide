@@ -1,0 +1,12 @@
+[package]
+name = "edit-ops"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+editor-core = { path = "../editor-core" }
+syntax-core = { path = "../syntax-core" }
+# The same runtime `syntax-core` is built against; a node tree cannot cross
+# two of them. `settings-model` depends on it the same way and for the same
+# reason.
+tree-sitter = "0.26"
