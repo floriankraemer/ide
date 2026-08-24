@@ -17,6 +17,7 @@ class QMenu;
 class QPlainTextEdit;
 class QSplitter;
 class QTabWidget;
+class QTextDocument;
 class QWidget;
 
 namespace ui_shell {
@@ -175,7 +176,7 @@ public:
     // A protocol position as a document position. The inverse of
     // `lspPosition`, and a re-expression for the same reason: both count
     // UTF-16 code units within a block.
-    static int positionAt(QPlainTextEdit *editor, quint32 line, quint32 character);
+    static int positionAt(const QTextDocument *document, quint32 line, quint32 character);
 
     // The word under the caret, used by the caret-driven Find Usages and
     // the type-hierarchy jumps. Empty when no tab is open or the caret is

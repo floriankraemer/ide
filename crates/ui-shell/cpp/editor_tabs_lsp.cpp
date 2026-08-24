@@ -59,29 +59,37 @@ QPair<QPair<quint32, quint32>, QPair<quint32, quint32>> EditorTabs::selectionRan
 
 void EditorTabs::applyBufferEdits(const ::rust::Vec<FfiTextEdit> &edits)
 {
-    QHash<QString, CodeEditor *> editors;
+    // One cursor per file, held open for the whole splice: begin and end
+    // must be the *same* QTextCursor. Two temporaries happen to work
+    // because Qt counts edit blocks on the QTextDocument, but the pairing
+    // is what makes every edit here one Ctrl+Z (ADR-0019, ADR-0023), and
+    // it should not rest on that.
+    //
+    // The edits arrive descending, so each position resolves against text
+    // the previous edits have not moved.
+    QHash<QString, QTextCursor> cursors;
     for (const FfiTextEdit &edit : edits) {
         if (!edit.in_buffer) {
             continue;
         }
         const QString path = edit.path;
-        CodeEditor *editor = editors.value(path);
-        if (!editor) {
-            editor = editorForPath(path);
+        if (!cursors.contains(path)) {
+            CodeEditor *editor = editorForPath(path);
             if (!editor) {
                 continue;
             }
-            editors.insert(path, editor);
-            editor->textCursor().beginEditBlock();
+            QTextCursor cursor(editor->document());
+            cursor.beginEditBlock();
+            cursors.insert(path, cursor);
         }
-        QTextCursor cursor(editor->document());
-        cursor.setPosition(positionAt(editor, edit.start_line, edit.start_character));
-        cursor.setPosition(positionAt(editor, edit.end_line, edit.end_character),
+        QTextCursor &cursor = cursors[path];
+        cursor.setPosition(positionAt(cursor.document(), edit.start_line, edit.start_character));
+        cursor.setPosition(positionAt(cursor.document(), edit.end_line, edit.end_character),
                             QTextCursor::KeepAnchor);
         cursor.insertText(edit.new_text);
     }
-    for (CodeEditor *editor : editors) {
-        editor->textCursor().endEditBlock();
+    for (QTextCursor &cursor : cursors) {
+        cursor.endEditBlock();
     }
 }
 
@@ -109,11 +117,11 @@ void EditorTabs::hoverCanceled()
     }
 }
 
-int EditorTabs::positionAt(QPlainTextEdit *editor, quint32 line, quint32 character)
+int EditorTabs::positionAt(const QTextDocument *document, quint32 line, quint32 character)
 {
-    const QTextBlock block = editor->document()->findBlockByNumber(static_cast<int>(line));
+    const QTextBlock block = document->findBlockByNumber(static_cast<int>(line));
     if (!block.isValid()) {
-        return editor->document()->characterCount() - 1;
+        return document->characterCount() - 1;
     }
     const int within = qMin(static_cast<int>(character), block.length() - 1);
     return block.position() + within;
