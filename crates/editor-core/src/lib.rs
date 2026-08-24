@@ -23,6 +23,18 @@ pub mod offsets;
 pub use hex::{BinaryFile, HexRow, BYTES_PER_ROW};
 
 pub mod search;
+
+/// Carets and selections — the state a multi-caret edit is computed from.
+pub mod selection;
+pub use selection::{column_block, Caret, SelectionError, SelectionSet, MAX_CARETS};
+
+/// One user-visible change to a buffer, however many carets made it.
+pub mod transaction;
+pub use transaction::{map_carets, TextEdit, Transaction, TransactionError};
+
+/// Whole-line operations: duplicate, move, delete, join.
+pub mod line_ops;
+
 pub use search::{find_matches, replacements, Replacement, SearchError, SearchOptions, TextMatch};
 
 /// A single open file: a rope-backed buffer, its backing path, and a
