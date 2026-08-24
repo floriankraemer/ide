@@ -2889,7 +2889,7 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
                         LanguageServerEditor *languageServerEditor,
                         LanguageService *languageService,
                         AiProviderEditor *aiProviderEditor, AiChat *aiChat,
-                        IconProvider *iconProvider, PluginCatalog *pluginCatalog,
+                        PluginCatalog *pluginCatalog,
                         const UiFontTargets &uiFontTargets)
 {
     const FfiEditorFont originalFont = appSettings->editorFont();
@@ -2929,7 +2929,7 @@ void showSettingsDialog(QWidget *parent, AppSettings *appSettings, EditorTabs *e
     auto refreshIcons = [uiFontTargets]() { refreshTreeIcons(uiFontTargets.projectTree); };
 
     const AppearancePage appearance = buildAppearancePage(
-      &dialog, appSettings, iconProvider, uiFontTargets,
+      &dialog, appSettings, uiFontTargets,
       AppearanceHooks{
         [editorTabs]() { editorTabs->refreshHighlighting(); },
         refreshIcons,
@@ -3821,13 +3821,13 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QObject::connect(preferencesAction, &QAction::triggered, window,
                       [window, appSettings, editorTabs, keymapEditor, actions, docManager,
                        mcpStatus, syntaxColorEditor, languageCatalog, languageServerEditor,
-                       languageService, aiProviderEditor, aiChat, iconProvider, pluginCatalog,
+                       languageService, aiProviderEditor, aiChat, pluginCatalog,
                        uiFontTargets]() {
                           showSettingsDialog(window, appSettings, editorTabs, keymapEditor,
                                               *actions, docManager, mcpStatus,
                                               syntaxColorEditor, languageCatalog,
                                               languageServerEditor, languageService,
-                                              aiProviderEditor, aiChat, iconProvider,
+                                              aiProviderEditor, aiChat,
                                               pluginCatalog, uiFontTargets);
                       });
 

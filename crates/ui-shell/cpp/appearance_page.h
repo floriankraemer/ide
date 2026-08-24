@@ -56,7 +56,6 @@ struct AppearancePage
 
 AppearancePage buildAppearancePage(QWidget *parent,
                                    AppSettings *appSettings,
-                                   IconProvider *iconProvider,
                                    const UiFontTargets &targets,
                                    AppearanceHooks hooks);
 

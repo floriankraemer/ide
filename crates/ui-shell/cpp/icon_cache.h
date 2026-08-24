@@ -49,6 +49,11 @@ private:
 // equivalent to the window's.
 IconCache &sharedIconCache();
 
+// The IconProvider sharedIconCache() renders through, for the few callers that
+// need the provider itself rather than a QIcon: the Appearance page, which
+// lists the installed packs and switches between them.
+IconProvider *sharedIconProvider();
+
 // The icon for the file at `path`, at `logicalPx` device-independent pixels,
 // or a null QIcon when no icon theme is active and for a row that names no
 // file at all.

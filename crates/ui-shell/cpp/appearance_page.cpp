@@ -1,5 +1,7 @@
 #include "appearance_page.h"
 
+#include "icon_cache.h"
+
 #include "theme.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
@@ -26,10 +28,10 @@ void applyUiFontScales(const FfiUiFontScales &scales, const UiFontTargets &targe
 
 AppearancePage buildAppearancePage(QWidget *parent,
                                    AppSettings *appSettings,
-                                   IconProvider *iconProvider,
                                    const UiFontTargets &targets,
                                    AppearanceHooks hooks)
 {
+    IconProvider *iconProvider = sharedIconProvider();
     const QString originalTheme = appSettings->themeName();
     const QString originalIconTheme = appSettings->iconThemeId();
     const FfiUiFontScales originalScales = appSettings->uiFontScales();
