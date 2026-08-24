@@ -5,6 +5,20 @@ Architecture authority: `docs/architecture/layering.md` and the ADRs in `docs/ar
 Docs index: `docs/README.md` lists every architecture, decision, plan, design, and product doc with a one-line summary.
 Orientation for a cold start: `docs/architecture/overview.md` (what the system is) and `docs/architecture/project-structure.md` (where things live).
 
+## Default working mode
+
+Load these skills before the work they cover — do not wait for a prompt to name the language:
+
+- `clean-code-solid` — before any non-trivial implementation, refactor, or review.
+- `rust` — before writing or reviewing Rust in any crate.
+- `qt` and `cpp` — before touching `crates/ui-shell/cpp/` or the cxx-qt bridge.
+- `conventional-commits` — before writing a commit message or PR title.
+- `debugging-root-cause` — before any bug fix, alongside the E2E reproduction rule.
+- `architecture-decision-records` — when a change requires a new or updated ADR.
+
+Apply senior-software-engineer standards inline rather than delegating to the subagent:
+small verified increments, `cargo test --workspace` green before every commit, patterns named only where they drive a decision, no abstraction for a hypothetical second implementation.
+
 ## Development environment
 
 Always use Docker containers for development (builds, tests, running the app) — never the bare host.
