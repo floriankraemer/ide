@@ -777,8 +777,9 @@ fn the_refactoring_capabilities_are_advertised() {
     );
     assert_eq!(
         capabilities["workspace"]["workspaceEdit"]["resourceOperations"],
-        json!([]),
-        "file create/rename/delete is deliberately not supported",
+        json!(["create", "rename", "delete"]),
+        "advertised because app_core::apply_file_ops performs them (ADR-0026); \
+         without these, every extract-to-new-file refactoring is refused whole",
     );
     assert_eq!(
         capabilities["workspace"]["workspaceEdit"]["failureHandling"],

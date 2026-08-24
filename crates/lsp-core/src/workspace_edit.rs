@@ -107,6 +107,180 @@ impl std::error::Error for EditError {}
 ///
 /// Documents are returned in a stable order — `documentChanges` order as the
 /// server sent it, `changes` sorted by URI, since a JSON object has none.
+/// A file the server wants created, renamed or deleted as part of an edit.
+///
+/// These arrive interleaved with text edits inside `documentChanges`, and the
+/// protocol is explicit that the array is applied **in order**. That ordering
+/// is load-bearing: a server that renames a file to match a renamed type
+/// sends the text edit first and the rename second, and performing the rename
+/// early would leave the edit addressing a path that no longer exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ResourceOp {
+    Create {
+        uri: String,
+        path: String,
+        /// Replace an existing file. `overwrite` wins over `ignore_if_exists`
+        /// when a server sets both, which the specification requires.
+        overwrite: bool,
+        ignore_if_exists: bool,
+    },
+    Rename {
+        old_uri: String,
+        old_path: String,
+        new_uri: String,
+        new_path: String,
+        overwrite: bool,
+        ignore_if_exists: bool,
+    },
+    Delete {
+        uri: String,
+        path: String,
+        /// Delete a directory and its contents. Refused unless the server
+        /// asks for it, so a stray delete cannot take a tree with it.
+        recursive: bool,
+        ignore_if_not_exists: bool,
+    },
+}
+
+impl ResourceOp {
+    /// Every path this operation touches, for the confinement check the
+    /// caller performs before anything is applied.
+    pub fn paths(&self) -> Vec<&str> {
+        match self {
+            ResourceOp::Create { path, .. } | ResourceOp::Delete { path, .. } => vec![path],
+            ResourceOp::Rename {
+                old_path, new_path, ..
+            } => vec![old_path, new_path],
+        }
+    }
+}
+
+/// One step of a `WorkspaceEdit`, in the order the server sent it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChangeStep {
+    Op(ResourceOp),
+    Edits(DocumentEdits),
+}
+
+/// A `WorkspaceEdit` that may create, rename or delete files as well as edit
+/// them, with the server's ordering preserved.
+///
+/// [`parse_workspace_edit`] remains the text-only reading and still refuses
+/// resource operations, because its callers apply edits directly to open
+/// buffers and have nowhere to put a file rename. New callers that can
+/// perform file operations use this instead.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct WorkspaceChanges {
+    pub steps: Vec<ChangeStep>,
+}
+
+impl WorkspaceChanges {
+    /// The document edits, in order, ignoring resource operations.
+    pub fn documents(&self) -> impl Iterator<Item = &DocumentEdits> {
+        self.steps.iter().filter_map(|s| match s {
+            ChangeStep::Edits(e) => Some(e),
+            ChangeStep::Op(_) => None,
+        })
+    }
+
+    /// The resource operations, in order.
+    pub fn operations(&self) -> impl Iterator<Item = &ResourceOp> {
+        self.steps.iter().filter_map(|s| match s {
+            ChangeStep::Op(op) => Some(op),
+            ChangeStep::Edits(_) => None,
+        })
+    }
+
+    pub fn has_operations(&self) -> bool {
+        self.operations().next().is_some()
+    }
+}
+
+/// Read a `WorkspaceEdit`, keeping resource operations rather than refusing
+/// them.
+///
+/// Order is preserved exactly as sent. The specification says the array is
+/// applied in order, and real refactorings depend on it — "rename the type
+/// and rename its file to match" is a text edit followed by a rename, and
+/// reordering those breaks it.
+///
+/// The legacy `changes` map has no ordering and cannot express resource
+/// operations at all, so it reads exactly as it does today.
+pub fn parse_workspace_changes(value: &Value) -> Result<WorkspaceChanges, EditError> {
+    if value.is_null() {
+        return Ok(WorkspaceChanges::default());
+    }
+    let object = value.as_object().ok_or(EditError::Malformed)?;
+
+    if let Some(changes) = object.get("documentChanges") {
+        let items = changes.as_array().ok_or(EditError::Malformed)?;
+        let mut steps = Vec::with_capacity(items.len());
+        for item in items {
+            match item.get("kind").and_then(Value::as_str) {
+                Some(kind) => steps.push(ChangeStep::Op(
+                    resource_op(kind, item).ok_or(EditError::Malformed)?,
+                )),
+                None => steps.push(ChangeStep::Edits(
+                    document_edits(item).ok_or(EditError::Malformed)?,
+                )),
+            }
+        }
+        return Ok(WorkspaceChanges { steps });
+    }
+
+    Ok(WorkspaceChanges {
+        steps: parse_workspace_edit(value)?
+            .into_iter()
+            .map(ChangeStep::Edits)
+            .collect(),
+    })
+}
+
+fn resource_op(kind: &str, item: &Value) -> Option<ResourceOp> {
+    let options = item.get("options");
+    let flag = |name: &str| {
+        options
+            .and_then(|o| o.get(name))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
+    let to_path =
+        |uri: &str| crate::diagnostics::path_from_uri(uri).unwrap_or_else(|| uri.to_string());
+    match kind {
+        "create" => {
+            let uri = item.get("uri")?.as_str()?.to_string();
+            Some(ResourceOp::Create {
+                path: to_path(&uri),
+                uri,
+                overwrite: flag("overwrite"),
+                ignore_if_exists: flag("ignoreIfExists"),
+            })
+        }
+        "rename" => {
+            let old_uri = item.get("oldUri")?.as_str()?.to_string();
+            let new_uri = item.get("newUri")?.as_str()?.to_string();
+            Some(ResourceOp::Rename {
+                old_path: to_path(&old_uri),
+                new_path: to_path(&new_uri),
+                old_uri,
+                new_uri,
+                overwrite: flag("overwrite"),
+                ignore_if_exists: flag("ignoreIfExists"),
+            })
+        }
+        "delete" => {
+            let uri = item.get("uri")?.as_str()?.to_string();
+            Some(ResourceOp::Delete {
+                path: to_path(&uri),
+                uri,
+                recursive: flag("recursive"),
+                ignore_if_not_exists: flag("ignoreIfNotExists"),
+            })
+        }
+        _ => None,
+    }
+}
+
 pub fn parse_workspace_edit(value: &Value) -> Result<Vec<DocumentEdits>, EditError> {
     if value.is_null() {
         return Ok(Vec::new());
@@ -831,5 +1005,111 @@ mod tests {
     fn the_gate_refuses_an_answer_nobody_asked_for() {
         let mut gate = EditGate::default();
         assert!(!gate.accept(0));
+    }
+}
+
+#[cfg(test)]
+mod resource_op_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn range(sl: u32, sc: u32, el: u32, ec: u32) -> Value {
+        json!({"start": {"line": sl, "character": sc}, "end": {"line": el, "character": ec}})
+    }
+
+    #[test]
+    fn create_rename_and_delete_are_read_with_their_options() {
+        let value = json!({"documentChanges": [
+            {"kind": "create", "uri": "file:///p/new.rs", "options": {"overwrite": true}},
+            {"kind": "rename", "oldUri": "file:///p/a.rs", "newUri": "file:///p/b.rs"},
+            {"kind": "delete", "uri": "file:///p/old.rs", "options": {"recursive": true}},
+        ]});
+        let changes = parse_workspace_changes(&value).unwrap();
+        let ops: Vec<_> = changes.operations().cloned().collect();
+        assert_eq!(ops.len(), 3);
+        assert!(matches!(
+            &ops[0],
+            ResourceOp::Create {
+                overwrite: true,
+                ignore_if_exists: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            &ops[1],
+            ResourceOp::Rename { old_path, new_path, .. }
+                if old_path.ends_with("a.rs") && new_path.ends_with("b.rs")
+        ));
+        assert!(matches!(
+            &ops[2],
+            ResourceOp::Delete {
+                recursive: true,
+                ..
+            }
+        ));
+    }
+
+    // The specification applies documentChanges in order, and real
+    // refactorings depend on it: "rename the type, then rename its file to
+    // match" is a text edit followed by a rename. Reordering breaks it.
+    #[test]
+    fn order_is_preserved_between_edits_and_operations() {
+        let value = json!({"documentChanges": [
+            {"textDocument": {"uri": "file:///p/a.rs", "version": 1},
+             "edits": [{"range": range(0, 0, 0, 3), "newText": "Bar"}]},
+            {"kind": "rename", "oldUri": "file:///p/a.rs", "newUri": "file:///p/bar.rs"},
+        ]});
+        let changes = parse_workspace_changes(&value).unwrap();
+        assert!(matches!(changes.steps[0], ChangeStep::Edits(_)));
+        assert!(matches!(changes.steps[1], ChangeStep::Op(_)));
+    }
+
+    #[test]
+    fn an_unknown_kind_is_malformed_rather_than_ignored() {
+        let value = json!({"documentChanges": [{"kind": "teleport", "uri": "file:///p/a.rs"}]});
+        assert_eq!(
+            parse_workspace_changes(&value),
+            Err(EditError::Malformed),
+            "an operation we do not understand must not be silently skipped"
+        );
+    }
+
+    #[test]
+    fn a_rename_missing_its_target_is_malformed() {
+        let value = json!({"documentChanges": [{"kind": "rename", "oldUri": "file:///p/a.rs"}]});
+        assert_eq!(parse_workspace_changes(&value), Err(EditError::Malformed));
+    }
+
+    // The legacy `changes` map has no ordering and cannot express a resource
+    // operation, so it reads exactly as it always has.
+    #[test]
+    fn the_legacy_changes_map_still_works_and_has_no_operations() {
+        let value = json!({"changes": {
+            "file:///p/a.rs": [{"range": range(0, 0, 0, 1), "newText": "x"}],
+        }});
+        let changes = parse_workspace_changes(&value).unwrap();
+        assert!(!changes.has_operations());
+        assert_eq!(changes.documents().count(), 1);
+    }
+
+    // The text-only reading keeps refusing, because its callers splice into
+    // open buffers and have nowhere to put a file rename.
+    #[test]
+    fn the_text_only_parser_still_refuses_resource_operations() {
+        let value = json!({"documentChanges": [
+            {"kind": "rename", "oldUri": "file:///p/a.rs", "newUri": "file:///p/b.rs"},
+        ]});
+        assert!(matches!(
+            parse_workspace_edit(&value),
+            Err(EditError::ResourceOperation(_))
+        ));
+    }
+
+    #[test]
+    fn a_null_edit_has_no_steps() {
+        assert_eq!(
+            parse_workspace_changes(&Value::Null).unwrap(),
+            WorkspaceChanges::default()
+        );
     }
 }

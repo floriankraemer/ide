@@ -1127,11 +1127,12 @@ fn client_capabilities() -> Value {
             "workspaceEdit": {
                 // Versions let a stale edit be caught before it is applied.
                 "documentChanges": true,
-                // Empty on purpose: file create/rename/delete is not
-                // supported, so a conforming server will not send one — and
-                // `workspace_edit::parse_workspace_edit` refuses the whole
-                // edit if one arrives anyway.
-                "resourceOperations": [],
+                // F2: create, rename and delete are performed by
+                // `app_core::AppSession::apply_file_ops` (ADR-0026). Without
+                // these advertised, rust-analyzer's "move to submodule" and
+                // every extract-to-new-file refactoring is refused whole —
+                // the user sees "unsupported" for a correct edit.
+                "resourceOperations": ["create", "rename", "delete"],
                 // We apply all of an edit or none of it.
                 "failureHandling": "abort",
                 "normalizesLineEndings": false,
