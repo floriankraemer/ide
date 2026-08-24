@@ -14,6 +14,7 @@ members = [
     "crates/ai-chat-core",
     "crates/plugin-api",
     "crates/icon-theme",
+    "crates/plugin-host",
     "crates/settings-model",
     "crates/app-core",
     "crates/ui-shell",
