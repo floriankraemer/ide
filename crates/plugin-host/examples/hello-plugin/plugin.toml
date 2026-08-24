@@ -1,0 +1,20 @@
+id = "example-hello"
+name = "Hello Example"
+version = "0.1.0"
+api_version = 1
+license = "MIT"
+description = "A worked example of the WebAssembly plugin tier."
+
+[wasm]
+component = "plugin.wasm"
+
+[[contributes.commands]]
+id = "example-hello.say-hello"
+title = "Example: Say Hello"
+
+# Only what the plugin actually uses. `log` is not listed because it needs
+# no grant, and `workspace-root` is not listed on purpose — the component
+# asks for it anyway, so that the refusal is visible in the log.
+[capabilities]
+notify = true
+read-files = ["${plugin_dir}/data"]

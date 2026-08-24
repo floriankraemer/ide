@@ -38,7 +38,7 @@ A fresh session should read this table (and `git log`) before picking up work, p
 | P5 — FFI seam + project tree icons | blocked on P2, P4 |  |
 | P6 — icons in editor tabs and the search/result lists | blocked on P5 |  |
 | P7 — settings: icon theme choice, disabled plugins, Plugins page | blocked on P5 |  |
-| P8 — wasm tier: runtime, capabilities, limits, `commands`, ADR-0028 | blocked on P2 |  |
+| P8 — wasm tier: runtime, capabilities, limits, `commands`, ADR-0028 | in review | #95 |
 | P9 — docs truth-up and the end-to-end pass | blocked on P6, P7, P8 |  |
 
 Lanes: `{P1→P2→P8}` and `{P1→P3→P4}` run in parallel and converge at P5.

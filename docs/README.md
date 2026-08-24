@@ -33,6 +33,7 @@ ADR-0023 (multi-caret) is reserved and lands with the editor-ergonomics work.
 - [ADR-0025: seam split and file-size ceiling](architecture/decisions/0025-seam-split-and-file-size-ceiling.md) — `bridge.rs` and `main_window.cpp` split per feature; a ratcheted size gate; the split proven by byte-identical FFI headers.
 - [ADR-0026: plugin host](architecture/decisions/0026-plugin-host.md) — `plugin-api` as the contract and `plugin-host` as the machinery; declarative contributions, built-ins loaded as plugins, `api_version` the one compatibility lever.
 - [ADR-0027: icon themes](architecture/decisions/0027-icon-themes.md) — a Qt-free `icon-theme` crate: our own `pack.toml`, `resvg` rasterisation to premultiplied RGBA8, and a resolver handed a language id rather than detecting one.
+- [ADR-0028: wasm plugin tier](architecture/decisions/0028-wasm-plugin-tier.md) — wasmtime components under fuel, an epoch deadline and a memory cap; capabilities that deny rather than omit; a trap disables one plugin and never the process.
 
 ## Plans
 

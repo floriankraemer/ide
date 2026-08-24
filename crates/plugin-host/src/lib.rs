@@ -23,9 +23,12 @@
 //! them without depending on this crate, and the two are joined in
 //! `app-core`.
 //!
-//! Declarative only. The WebAssembly tier — instantiating a component,
-//! granting it capabilities, running a command — is P8 and lives nowhere
-//! in this crate yet.
+//! Discovery is declarative and knows nothing about running code. The
+//! executable tier — instantiating a component, granting it capabilities,
+//! running a contributed command under fuel, an epoch deadline and a
+//! memory cap — is the `wasm` module, layered *on top of* this one:
+//! [`WasmTier`] is built from a finished [`PluginRegistry`] and can only
+//! ever start a plugin that discovery already accepted.
 //!
 //! ## Layout on disk
 //!
@@ -37,6 +40,7 @@
 
 mod builtins;
 mod plugin;
+mod wasm;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,6 +52,7 @@ use plugin_api::{
 };
 
 pub use plugin::{BuiltinPlugin, LoadedPlugin, PluginSource};
+pub use wasm::{HostServices, LogLevel, StderrServices, WasmError, WasmLimits, WasmTier};
 
 /// The plugins shipped inside the binary.
 ///
@@ -267,11 +272,17 @@ fn load_builtin(
 /// was loading when the editor last died, so it is disabled until the user
 /// deletes the file.
 ///
-/// Only *reading* markers lives here. Writing one — around the wasm
-/// instantiation that can take the process down — is P8's job, and its
-/// absence in this crate is deliberate rather than an oversight: a
-/// declarative plugin has nothing that can crash the editor, so there is
-/// nothing yet to mark.
+/// Only *reading* markers lives here, and nothing in this crate writes
+/// one. That is a conclusion, not an omission (ADR-0028): the marker
+/// mechanism was designed in `syntax_core::runtime` for `dlopen`, where
+/// foreign native code can take the process down before any error can be
+/// returned. A component cannot. Every failure the wasm tier can have —
+/// a malformed component, a failed instantiation, a trap — arrives as a
+/// `Result` on the host's side of the sandbox, and is answered by
+/// disabling that one plugin. There is no window where the editor dies
+/// with a plugin half-loaded, so there is nothing to mark. A user can
+/// still write a marker by hand, and a future tier that runs native code
+/// would write one around exactly its own window.
 fn check_quarantine(quarantine: &Path, id: &str) -> Result<(), LoadErrorKind> {
     let marker = quarantine.join(id);
     if marker.exists() {
