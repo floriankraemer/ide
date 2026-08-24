@@ -76,6 +76,19 @@ pub struct LanguageDef {
     pub filenames: &'static [&'static str],
     pub grammar: fn() -> tree_sitter::Language,
     pub queries: QuerySet,
+    /// The token that comments out the rest of a line, or `None` for a
+    /// language that genuinely has none (JSON). Never a guess: a wrong
+    /// token corrupts the file `Ctrl+/` is pressed in.
+    pub line_comment: Option<&'static str>,
+    /// The `(open, close)` delimiters of a block comment, or `None`.
+    pub block_comment: Option<(&'static str, &'static str)>,
+    /// Bracket pairs, for matching, auto-close and indentation. Ordered
+    /// pairs of `(open, close)`; both sides are always distinct strings.
+    pub brackets: &'static [(&'static str, &'static str)],
+    /// Quote characters that open *and* close a literal in this language.
+    /// Separate from [`Self::brackets`] because the two sides are equal,
+    /// which changes every rule that inspects them.
+    pub quotes: &'static [&'static str],
 }
 
 /// A language loaded from the config directory at runtime.
@@ -93,6 +106,10 @@ pub struct OwnedLanguageDef {
     pub filenames: Vec<String>,
     pub grammar: fn() -> tree_sitter::Language,
     pub queries: QuerySet<String>,
+    pub line_comment: Option<String>,
+    pub block_comment: Option<(String, String)>,
+    pub brackets: Vec<(String, String)>,
+    pub quotes: Vec<String>,
 }
 
 /// What stands behind one registry row: a const catalog row, or a
@@ -158,6 +175,44 @@ impl Def {
             Self::Runtime(def) => def.queries.as_deref(),
         }
     }
+
+    pub fn line_comment(&self) -> Option<&str> {
+        match self {
+            Self::Builtin(def) => def.line_comment,
+            Self::Runtime(def) => def.line_comment.as_deref(),
+        }
+    }
+
+    pub fn block_comment(&self) -> Option<(&str, &str)> {
+        match self {
+            Self::Builtin(def) => def.block_comment,
+            Self::Runtime(def) => def
+                .block_comment
+                .as_ref()
+                .map(|(open, close)| (open.as_str(), close.as_str())),
+        }
+    }
+
+    /// Owned pairs rather than an iterator: every caller wants the whole
+    /// (two- or three-element) list, and one `Vec` is cheaper than the
+    /// type gymnastics that would unify the two representations.
+    pub fn brackets(&self) -> Vec<(&str, &str)> {
+        match self {
+            Self::Builtin(def) => def.brackets.to_vec(),
+            Self::Runtime(def) => def
+                .brackets
+                .iter()
+                .map(|(open, close)| (open.as_str(), close.as_str()))
+                .collect(),
+        }
+    }
+
+    pub fn quotes(&self) -> Vec<&str> {
+        match self {
+            Self::Builtin(def) => def.quotes.to_vec(),
+            Self::Runtime(def) => def.quotes.iter().map(String::as_str).collect(),
+        }
+    }
 }
 
 macro_rules! queries {
@@ -190,6 +245,17 @@ macro_rules! queries {
     };
 }
 
+/// The bracket pairs almost every language shares.
+const BRACKETS: &[(&str, &str)] = &[("(", ")"), ("[", "]"), ("{", "}")];
+
+/// For the data languages where a parenthesis is not a bracket at all.
+const BRACKETS_NO_PARENS: &[(&str, &str)] = &[("[", "]"), ("{", "}")];
+
+const QUOTES_DOUBLE: &[&str] = &["\""];
+const QUOTES_DOUBLE_SINGLE: &[&str] = &["\"", "'"];
+const QUOTES_DOUBLE_BACKTICK: &[&str] = &["\"", "`"];
+const QUOTES_DOUBLE_SINGLE_BACKTICK: &[&str] = &["\"", "'", "`"];
+
 /// Every language compiled into the binary, in resolution order.
 ///
 /// Order is load-bearing: an extension claimed by two languages (`.h` is
@@ -205,6 +271,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "Rust",
         extensions: &["rs"],
         filenames: &[],
+        line_comment: Some("//"),
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_rust::LANGUAGE.into(),
         queries: queries!("rust"),
     },
@@ -213,6 +283,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "JSON",
         extensions: &["json"],
         filenames: &[],
+        line_comment: None,
+        block_comment: None,
+        brackets: BRACKETS_NO_PARENS,
+        quotes: QUOTES_DOUBLE,
         grammar: || tree_sitter_json::LANGUAGE.into(),
         queries: queries!("json"),
     },
@@ -221,6 +295,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "C#",
         extensions: &["cs"],
         filenames: &[],
+        line_comment: Some("//"),
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_c_sharp::LANGUAGE.into(),
         queries: queries!("csharp"),
     },
@@ -229,6 +307,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "Java",
         extensions: &["java"],
         filenames: &[],
+        line_comment: Some("//"),
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_java::LANGUAGE.into(),
         queries: queries!("java"),
     },
@@ -243,6 +325,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         // markup to; R4d added one, so a real-world `.php` file — a
         // template with PHP embedded in it — now highlights instead of
         // parsing as one long error. See php/injections.scm.
+        line_comment: Some("//"),
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_php::LANGUAGE_PHP.into(),
         queries: queries!("php", injections),
     },
@@ -251,6 +337,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "Python",
         extensions: &["py", "pyi", "pyw"],
         filenames: &[],
+        line_comment: Some("#"),
+        block_comment: None,
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_python::LANGUAGE.into(),
         queries: queries!("python"),
     },
@@ -262,6 +352,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "C",
         extensions: &["c", "h"],
         filenames: &[],
+        line_comment: Some("//"),
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_c::LANGUAGE.into(),
         queries: queries!("c"),
     },
@@ -270,6 +364,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "C++",
         extensions: &["cpp", "cc", "cxx", "hpp", "hh", "hxx", "ipp"],
         filenames: &[],
+        line_comment: Some("//"),
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_cpp::LANGUAGE.into(),
         queries: queries!("cpp"),
     },
@@ -278,6 +376,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "Go",
         extensions: &["go"],
         filenames: &[],
+        line_comment: Some("//"),
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_BACKTICK,
         grammar: || tree_sitter_go::LANGUAGE.into(),
         queries: queries!("go"),
     },
@@ -288,6 +390,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         // TypeScript is the only useful reading.
         extensions: &["ts", "mts", "cts"],
         filenames: &[],
+        line_comment: Some("//"),
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE_BACKTICK,
         grammar: || tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
         queries: queries!("typescript"),
     },
@@ -299,6 +405,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         // element in .tsx), and `grammar` is per row.
         extensions: &["tsx"],
         filenames: &[],
+        line_comment: Some("//"),
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE_BACKTICK,
         grammar: || tree_sitter_typescript::LANGUAGE_TSX.into(),
         queries: queries!("tsx"),
     },
@@ -308,6 +418,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         // The grammar includes JSX, so `.jsx` needs no separate row.
         extensions: &["js", "mjs", "cjs", "jsx"],
         filenames: &[],
+        line_comment: Some("//"),
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE_BACKTICK,
         grammar: || tree_sitter_javascript::LANGUAGE.into(),
         queries: queries!("javascript"),
     },
@@ -329,6 +443,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
             ".zlogin",
             ".zlogout",
         ],
+        line_comment: Some("#"),
+        block_comment: None,
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_bash::LANGUAGE.into(),
         queries: queries!("bash"),
     },
@@ -337,6 +455,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "YAML",
         extensions: &["yaml", "yml"],
         filenames: &[],
+        line_comment: Some("#"),
+        block_comment: None,
+        brackets: BRACKETS_NO_PARENS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_yaml::LANGUAGE.into(),
         queries: queries!("yaml"),
     },
@@ -351,6 +473,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         // pinned to the tree-sitter 0.20 runtime and its `language()`
         // returns that crate's `Language`, which is a different type from
         // the 0.26 one this workspace uses.
+        line_comment: Some("#"),
+        block_comment: None,
+        brackets: BRACKETS_NO_PARENS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_toml_ng::LANGUAGE.into(),
         queries: queries!("toml"),
     },
@@ -361,6 +487,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         filenames: &[],
         // `tree-sitter-sequel` is the crate name of derekstride's SQL
         // grammar — not a typo, and not a different language.
+        line_comment: Some("--"),
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_sequel::LANGUAGE.into(),
         queries: queries!("sql"),
     },
@@ -381,6 +511,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
             "Podfile",
             "Capfile",
         ],
+        line_comment: Some("#"),
+        block_comment: None,
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_ruby::LANGUAGE.into(),
         queries: queries!("ruby"),
     },
@@ -389,6 +523,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "Lua",
         extensions: &["lua", "rockspec"],
         filenames: &[".luacheckrc"],
+        line_comment: Some("--"),
+        block_comment: Some(("--[[", "]]")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_lua::LANGUAGE.into(),
         queries: queries!("lua"),
     },
@@ -407,6 +545,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
             "Makefile.am",
             "Makefile.in",
         ],
+        line_comment: Some("#"),
+        block_comment: None,
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_make::LANGUAGE.into(),
         queries: queries!("make"),
     },
@@ -421,6 +563,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         // `tree-sitter-containerfile`, not `tree-sitter-dockerfile`: the
         // latter is pinned to the tree-sitter 0.20 runtime and would drag a
         // second one into the build, exactly like `tree-sitter-toml` above.
+        line_comment: Some("#"),
+        block_comment: None,
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_containerfile::LANGUAGE.into(),
         queries: queries!("dockerfile"),
     },
@@ -433,6 +579,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         // `tree-sitter-kotlin`: the fork is the maintained one and ships a
         // grammar the 0.26 runtime loads. It ships no queries, so
         // queries/kotlin/highlights.scm is hand-written.
+        line_comment: Some("//"),
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_kotlin_ng::LANGUAGE.into(),
         queries: queries!("kotlin"),
     },
@@ -441,6 +591,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "Swift",
         extensions: &["swift"],
         filenames: &[],
+        line_comment: Some("//"),
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE,
         grammar: || tree_sitter_swift::LANGUAGE.into(),
         queries: queries!("swift"),
     },
@@ -449,6 +603,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "Scala",
         extensions: &["scala", "sc"],
         filenames: &[],
+        line_comment: Some("//"),
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_scala::LANGUAGE.into(),
         queries: queries!("scala"),
     },
@@ -459,6 +617,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         // not carry, and the Zig grammar does not parse it.
         extensions: &["zig"],
         filenames: &[],
+        line_comment: Some("//"),
+        block_comment: None,
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_zig::LANGUAGE.into(),
         queries: queries!("zig"),
     },
@@ -467,6 +629,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "Haskell",
         extensions: &["hs"],
         filenames: &[],
+        line_comment: Some("--"),
+        block_comment: Some(("{-", "-}")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_haskell::LANGUAGE.into(),
         queries: queries!("haskell"),
     },
@@ -483,6 +649,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         // would not be.
         extensions: &["fs", "fsx", "fsscript"],
         filenames: &[],
+        line_comment: Some("//"),
+        block_comment: Some(("(*", "*)")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_fsharp::LANGUAGE_FSHARP.into(),
         queries: queries!("fsharp"),
     },
@@ -498,6 +668,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         // leaves every run of prose as one opaque `(inline)` node and
         // injects the `markdown_inline` row over it (markdown/
         // injections.scm).
+        line_comment: None,
+        block_comment: Some(("<!--", "-->")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE,
         grammar: || tree_sitter_md::LANGUAGE.into(),
         queries: queries!("markdown", injections),
     },
@@ -510,6 +684,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         // allows that precisely because another catalog row injects this id.
         extensions: &[],
         filenames: &[],
+        line_comment: None,
+        block_comment: Some(("<!--", "-->")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE,
         grammar: || tree_sitter_md::INLINE_LANGUAGE.into(),
         queries: queries!("markdown_inline", injections),
     },
@@ -518,6 +696,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "HTML",
         extensions: &["html", "htm", "xhtml"],
         filenames: &[],
+        line_comment: None,
+        block_comment: Some(("<!--", "-->")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_html::LANGUAGE.into(),
         queries: queries!("html", injections),
     },
@@ -526,6 +708,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         name: "CSS",
         extensions: &["css"],
         filenames: &[],
+        line_comment: None,
+        block_comment: Some(("/*", "*/")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_css::LANGUAGE.into(),
         queries: queries!("css"),
     },
@@ -538,6 +724,10 @@ pub const BUILTIN_LANGUAGES: &[LanguageDef] = &[
         // every actual XML document.
         extensions: &["xml", "xsd", "xsl", "xslt", "svg", "rss", "wsdl"],
         filenames: &[],
+        line_comment: None,
+        block_comment: Some(("<!--", "-->")),
+        brackets: BRACKETS,
+        quotes: QUOTES_DOUBLE_SINGLE,
         grammar: || tree_sitter_xml::LANGUAGE_XML.into(),
         queries: queries!("xml"),
     },
@@ -893,6 +1083,67 @@ mod tests {
         }
     }
 
+    /// Languages that genuinely have no comment syntax at all. Membership
+    /// is a claim about the language, not a to-do: JSON's specification
+    /// has no comment production, which is why every "JSON with comments"
+    /// is a different format.
+    const NO_COMMENT_SYNTAX: &[&str] = &["json"];
+
+    /// The gate that stops language #32 shipping without `Ctrl+/`. One
+    /// test over the catalog rather than one test per language: a
+    /// per-language function is the one a new row simply never gets.
+    #[test]
+    fn every_registered_language_has_a_comment_token_or_is_explicitly_exempt() {
+        for def in BUILTIN_LANGUAGES {
+            let has_comment = def.line_comment.is_some() || def.block_comment.is_some();
+            let exempt = NO_COMMENT_SYNTAX.contains(&def.id);
+            assert_ne!(
+                has_comment, exempt,
+                "{}: declare a comment token, or add it to NO_COMMENT_SYNTAX and say why",
+                def.id
+            );
+        }
+    }
+
+    #[test]
+    fn every_registered_language_has_bracket_pairs_and_distinct_delimiters() {
+        for def in BUILTIN_LANGUAGES {
+            assert!(!def.brackets.is_empty(), "{}: no bracket pairs", def.id);
+            for (open, close) in def.brackets {
+                assert_ne!(open, close, "{}: bracket pair with equal sides", def.id);
+            }
+            for quote in def.quotes {
+                assert!(!quote.is_empty(), "{}: empty quote", def.id);
+            }
+            if let Some((open, close)) = def.block_comment {
+                assert!(!open.is_empty() && !close.is_empty(), "{}", def.id);
+            }
+            if let Some(token) = def.line_comment {
+                assert!(!token.is_empty(), "{}: empty line comment", def.id);
+            }
+        }
+    }
+
+    #[test]
+    fn a_runtime_definition_reports_its_own_tokens() {
+        let def = Def::Runtime(Arc::new(OwnedLanguageDef {
+            id: "toy".into(),
+            name: "Toy".into(),
+            extensions: vec!["toy".into()],
+            filenames: Vec::new(),
+            grammar: || tree_sitter_json::LANGUAGE.into(),
+            queries: QuerySet::default(),
+            line_comment: Some(";".into()),
+            block_comment: Some(("#|".into(), "|#".into())),
+            brackets: vec![("(".into(), ")".into())],
+            quotes: vec!["\"".into()],
+        }));
+        assert_eq!(def.line_comment(), Some(";"));
+        assert_eq!(def.block_comment(), Some(("#|", "|#")));
+        assert_eq!(def.brackets(), vec![("(", ")")]);
+        assert_eq!(def.quotes(), vec!["\""]);
+    }
+
     #[test]
     fn plain_text_has_nothing_to_compile() {
         assert!(registry().compiled(Language::PLAIN_TEXT).is_none());
@@ -926,6 +1177,10 @@ mod tests {
             filenames: &[],
             grammar: || tree_sitter_rust::LANGUAGE.into(),
             queries: QuerySet::default(),
+            line_comment: Some("//"),
+            block_comment: None,
+            brackets: BRACKETS,
+            quotes: QUOTES_DOUBLE,
         };
         let cpp = LanguageDef {
             id: "cpp",
@@ -951,6 +1206,10 @@ mod tests {
             filenames: &["Makefile", "GNUmakefile"],
             grammar: || tree_sitter_rust::LANGUAGE.into(),
             queries: QuerySet::default(),
+            line_comment: Some("//"),
+            block_comment: None,
+            brackets: BRACKETS,
+            quotes: QUOTES_DOUBLE,
         };
         let catalog: &'static [LanguageDef] = Box::leak(Box::new([make]));
         let registry = LanguageRegistry::new(catalog);
@@ -974,6 +1233,10 @@ mod tests {
             filenames: &["Makefile"],
             grammar: || tree_sitter_rust::LANGUAGE.into(),
             queries: QuerySet::default(),
+            line_comment: Some("//"),
+            block_comment: None,
+            brackets: BRACKETS,
+            quotes: QUOTES_DOUBLE,
         };
         let catalog: &'static [LanguageDef] = Box::leak(Box::new([make]));
         let registry = LanguageRegistry::with_runtime(catalog, &[], &["make".to_string()]);

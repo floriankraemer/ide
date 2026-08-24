@@ -43,6 +43,7 @@ Support (Qt-free):
 - `crates/index-core` — project index: text search, symbols, declaration resolution.
 - `crates/lsp-core` — blocking LSP client: framing, `LspManager`, server catalog, feature modules.
 - `crates/settings-model` — rules behind the language-platform settings pages.
+- `crates/edit-ops` — language-aware editing: comment toggle, expand selection, indent, bracket pairing and matching.
 - `crates/pty-core` — cross-platform PTY transport.
 - `crates/terminal-core` — VT100 grid state over `alacritty_terminal`.
 - `crates/mcp-server` — local Streamable-HTTP JSON-RPC MCP server over the shared index.
