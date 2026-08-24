@@ -329,6 +329,21 @@ pub struct WasmTier {
     limits: WasmLimits,
 }
 
+impl Default for WasmTier {
+    /// A tier running nothing, over an empty registry.
+    ///
+    /// What the process holds before anything has been started, so that
+    /// asking a tier a question is always possible and the answer before
+    /// startup is "no plugin is running" rather than "there is no tier".
+    fn default() -> Self {
+        Self {
+            registry: Arc::new(PluginRegistry::default()),
+            slots: Vec::new(),
+            limits: WasmLimits::default(),
+        }
+    }
+}
+
 impl WasmTier {
     /// Compile, instantiate and `activate` every plugin in `registry` that
     /// declares a component.

@@ -155,7 +155,7 @@ impl ffi::ProjectTreeModel {
                         node.is_dir,
                         expanded,
                         false,
-                        self.icons.appearance,
+                        self.icons.appearance.get(),
                     )
                 };
                 match (key(false), key(true)) {

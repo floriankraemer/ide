@@ -18,6 +18,7 @@ use crate::bridge::convert::{new_syntax_highlighter, syntax_scope_names, SyntaxH
 use crate::bridge::editor::DocumentManagerRust;
 use crate::bridge::icons::IconProviderRust;
 use crate::bridge::language::LanguageServiceRust;
+use crate::bridge::plugins::PluginCatalogRust;
 use crate::bridge::search::SearchModelRust;
 use crate::bridge::settings::{
     AiProviderEditorRust, AppSettingsRust, KeymapEditorRust, LanguageCatalogRust,
@@ -1121,6 +1122,11 @@ mod ffi {
         /// project tree through `IconDecorationProxy`, the tab strip and
         /// the result lists directly.
         ///
+        /// It also owns the two live-preview switches the Appearance page
+        /// needs — the icon theme and the colour theme's appearance —
+        /// because both change what a key resolves to and this is the
+        /// object every view already asks.
+        ///
         /// Split in two on purpose: `iconKeyForPath` is cheap enough to run
         /// per visible row on every repaint, `iconPixels` rasterises. The
         /// key is what the view memoises its `QIcon`s by, so the expensive
@@ -1147,6 +1153,28 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "iconPixels"]
         fn icon_pixels(self: &IconProvider, key: &QString, px: u32) -> QByteArray;
+
+        /// Every icon theme the loaded plugins offer — the Appearance
+        /// page's combo, in registry order.
+        #[qinvokable]
+        #[cxx_name = "iconThemes"]
+        fn icon_themes(self: &IconProvider) -> Vec<FfiIconTheme>;
+
+        /// Draw with this icon theme from now on, without persisting the
+        /// choice: the Appearance page's live preview, and the Cancel path
+        /// that puts the previous one back. An id nothing offers falls back
+        /// to the first theme there is, so a preview can never leave the
+        /// tree bare.
+        #[qinvokable]
+        #[cxx_name = "applyIconTheme"]
+        fn apply_icon_theme(self: &IconProvider, id: &QString);
+
+        /// Tell the icons which colour theme is in force, so a pack's light
+        /// variants swap in with it. Pass the theme name that was applied;
+        /// what it means for the art is decided in `app-core`.
+        #[qinvokable]
+        #[cxx_name = "applyColorTheme"]
+        fn apply_color_theme(self: &IconProvider, theme_name: &QString);
     }
 
     extern "RustQt" {
@@ -1212,6 +1240,18 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "saveTheme"]
         fn save_theme(self: &AppSettings, theme: &QString);
+
+        /// The persisted icon theme id, or an empty string when the user
+        /// has never chosen one — which is not the same as "no icons": the
+        /// first theme the plugins offer is used until they do.
+        #[qinvokable]
+        #[cxx_name = "iconThemeId"]
+        fn icon_theme_id(self: &AppSettings) -> QString;
+
+        /// Persist the chosen icon theme id (P7's Appearance page, on OK).
+        #[qinvokable]
+        #[cxx_name = "saveIconTheme"]
+        fn save_icon_theme(self: &AppSettings, id: &QString);
 
         /// Editor font, always resolved to a usable value (S2).
         #[qinvokable]
@@ -2433,6 +2473,53 @@ mod ffi {
         disable: bool,
     }
 
+    /// One entry of the Appearance page's icon-theme combo. The id is the
+    /// contribution's, which is what `Settings::icon_theme` persists.
+    struct FfiIconTheme {
+        id: QString,
+        label: QString,
+    }
+
+    /// Where a plugin came from — the Plugins page's grouping.
+    enum FfiPluginSource {
+        Builtin,
+        Installed,
+    }
+
+    /// One row of the Plugins page (P7). Every word in it was chosen in
+    /// `settings-model`; the view renders and never derives.
+    struct FfiPluginRow {
+        id: QString,
+        name: QString,
+        version: QString,
+        description: QString,
+        /// What this plugin adds, in words.
+        contributes: QString,
+        /// The status word, empty for a plugin that is working.
+        status: QString,
+        source: FfiPluginSource,
+        severity: FfiRowSeverity,
+    }
+
+    /// The Plugins details pane: one failure, already turned into a
+    /// sentence. A raw `LoadErrorKind` or wasm trap never crosses here —
+    /// which is the point of the page, see ADR-0028.
+    #[derive(Default)]
+    struct FfiPluginProblem {
+        sentence: QString,
+        /// The specific detail, or empty when the sentence says everything.
+        detail: QString,
+        path: QString,
+    }
+
+    /// The Plugins page's bottom-strip toggle, for the selected row.
+    struct FfiPluginToggle {
+        label: QString,
+        enabled: bool,
+        /// What to pass to `setDisabled` when pressed.
+        disable: bool,
+    }
+
     /// The configuration half of a Language Servers row's status; the live
     /// half arrives on `LanguageService::serverStateChanged`.
     enum FfiServerRowStatus {
@@ -2576,6 +2663,50 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "languagesDir"]
         fn languages_dir(self: &LanguageCatalog) -> QString;
+    }
+
+    extern "RustQt" {
+        /// Settings > Plugins (P7): what the host loaded, what it refused,
+        /// and what the sandbox stopped.
+        ///
+        /// `LanguageCatalog`'s twin, and read-mostly for the same reason:
+        /// the page is open for seconds and a scan is a directory listing.
+        #[qobject]
+        type PluginCatalog = super::PluginCatalogRust;
+
+        /// Re-scan the plugins directory. The scan deliberately filters
+        /// nothing — a plugin the user disabled still needs a row, or it
+        /// could never be switched back on.
+        #[qinvokable]
+        fn refresh(self: &PluginCatalog);
+
+        /// Every plugin, healthy or not, installed ones first.
+        #[qinvokable]
+        fn plugins(self: &PluginCatalog) -> Vec<FfiPluginRow>;
+
+        /// The details pane for one plugin. `sentence` is empty when that
+        /// plugin has nothing to report, and the pane collapses.
+        #[qinvokable]
+        fn problem(self: &PluginCatalog, id: &QString) -> FfiPluginProblem;
+
+        /// What the bottom strip's toggle says for `id`, and what pressing
+        /// it does. An id nothing matches — no selection — comes back as a
+        /// greyed `Disable Plugin`.
+        #[qinvokable]
+        fn toggle(self: &PluginCatalog, id: &QString) -> FfiPluginToggle;
+
+        /// Turn one plugin off or back on: persist the choice, re-scan, and
+        /// restart the icon theme and the wasm tier over the result, so the
+        /// change reaches the open window rather than waiting for a
+        /// restart. The rows are refreshed too.
+        #[qinvokable]
+        #[cxx_name = "setDisabled"]
+        fn set_disabled(self: &PluginCatalog, id: &QString, disabled: bool) -> FfiResult;
+
+        /// The directory installed plugins are read from.
+        #[qinvokable]
+        #[cxx_name = "pluginsDir"]
+        fn plugins_dir(self: &PluginCatalog) -> QString;
     }
 
     extern "RustQt" {

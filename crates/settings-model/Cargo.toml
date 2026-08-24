@@ -13,6 +13,11 @@ edit-ops = { path = "../edit-ops" }
 editor-core = { path = "../editor-core" }
 syntax-core = { path = "../syntax-core" }
 lsp-core = { path = "../lsp-core" }
+# The Plugins page joins persisted settings to what the host loaded and what
+# the sandbox stopped, exactly as the Languages page joins them to
+# `syntax-core`'s runtime — see the module docs of `plugins`.
+plugin-api = { path = "../plugin-api" }
+plugin-host = { path = "../plugin-host" }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 tree-sitter = "0.26"

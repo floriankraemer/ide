@@ -618,7 +618,9 @@ fn query_detail(message: &str) -> String {
 }
 
 /// One detail line, ending in a period like every other status sentence.
-fn sentence(text: &str) -> String {
+/// Shared with `plugins`, so the two pages punctuate a library message the
+/// same way.
+pub(crate) fn sentence(text: &str) -> String {
     let trimmed = text.trim().trim_end_matches('.');
     if trimmed.is_empty() {
         return String::new();

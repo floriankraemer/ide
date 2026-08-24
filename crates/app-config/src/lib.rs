@@ -152,6 +152,16 @@ pub struct AiToolPolicySetting {
 pub struct Settings {
     #[serde(default)]
     pub theme: String,
+    /// Id of the `icon-themes` contribution whose pack draws file and folder
+    /// icons. Empty means "never chosen", which resolves to the first icon
+    /// theme the loaded plugins offer — so a fresh install gets icons without
+    /// the user first finding a setting.
+    ///
+    /// Global rather than per-project, like [`Settings::theme`]: per-project
+    /// settings deliberately exclude theme-like choices, see
+    /// [`project_settings`].
+    #[serde(default)]
+    pub icon_theme: String,
     #[serde(default)]
     pub editor_font_size: u32,
     #[serde(default)]
@@ -283,6 +293,15 @@ pub struct Settings {
     /// files open as plain text. Ids, not names: names are display-only.
     #[serde(default)]
     pub disabled_languages: Vec<String>,
+    /// Ids of plugins the user turned off. Filtered out by
+    /// `plugin_host::load`, which never even opens the manifest of a
+    /// disabled plugin — so a *broken* plugin the user disabled stops
+    /// reporting its error too.
+    ///
+    /// Plugin ids, not contribution ids: disabling is a statement about the
+    /// whole plugin, and one plugin can contribute several things.
+    #[serde(default)]
+    pub disabled_plugins: Vec<String>,
 }
 
 /// Cap on remembered recent projects — enough for a useful menu without
@@ -430,6 +449,20 @@ impl Settings {
 
     pub fn is_language_disabled(&self, id: &str) -> bool {
         self.disabled_languages.iter().any(|other| other == id)
+    }
+
+    /// Turn one plugin off or back on, with the same sorted-and-deduped
+    /// persistence [`Settings::set_language_disabled`] gives languages.
+    pub fn set_plugin_disabled(&mut self, id: &str, disabled: bool) {
+        self.disabled_plugins.retain(|other| other != id);
+        if disabled {
+            self.disabled_plugins.push(id.to_string());
+            self.disabled_plugins.sort();
+        }
+    }
+
+    pub fn is_plugin_disabled(&self, id: &str) -> bool {
+        self.disabled_plugins.iter().any(|other| other == id)
     }
 }
 
@@ -723,6 +756,8 @@ mod tests {
 
         let settings = Settings {
             theme: "dark".to_string(),
+            icon_theme: "material".to_string(),
+            disabled_plugins: vec!["noisy-plugin".to_string()],
             editor_font_size: 14,
             editor_font_family: "Fira Code".to_string(),
             ui_font_scale: 130,
@@ -1169,6 +1204,45 @@ use_spaces = false
         // Unset fields stay unset rather than being written as empty strings,
         // so "only disable it" cannot silently wipe the shipped command.
         assert!(loaded.language_servers[1].command.is_none());
+    }
+
+    #[test]
+    fn a_settings_file_written_before_plugins_existed_still_loads() {
+        // The backward-compatibility rule for every field this crate adds:
+        // a file that predates it parses, and the field reads as "never
+        // chosen" rather than failing the load.
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join(SETTINGS_FILE), "theme = \"light\"\n").unwrap();
+
+        let loaded = load(dir.path()).unwrap();
+        assert_eq!(loaded.theme_name(), "light");
+        assert_eq!(loaded.icon_theme, "");
+        assert!(loaded.disabled_plugins.is_empty());
+    }
+
+    #[test]
+    fn the_icon_theme_and_disabled_plugins_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut settings = Settings {
+            icon_theme: "material".to_string(),
+            ..Default::default()
+        };
+        settings.set_plugin_disabled("zebra-icons", true);
+        settings.set_plugin_disabled("material-icons", true);
+        settings.set_plugin_disabled("zebra-icons", true);
+
+        save(dir.path(), &settings).unwrap();
+        let mut loaded = load(dir.path()).unwrap();
+        assert_eq!(loaded.icon_theme, "material");
+        assert_eq!(
+            loaded.disabled_plugins,
+            vec!["material-icons", "zebra-icons"]
+        );
+        assert!(loaded.is_plugin_disabled("material-icons"));
+
+        loaded.set_plugin_disabled("material-icons", false);
+        assert_eq!(loaded.disabled_plugins, vec!["zebra-icons"]);
+        assert!(!loaded.is_plugin_disabled("material-icons"));
     }
 
     #[test]

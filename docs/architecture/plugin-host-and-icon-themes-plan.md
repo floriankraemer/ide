@@ -32,13 +32,13 @@ A fresh session should read this table (and `git log`) before picking up work, p
 |---|---|---|
 | P0 — spike: cross-build `wasmtime` for `x86_64-pc-windows-gnu` | done | throwaway; result recorded below |
 | P1 — `plugin-api`: manifest, contribution points, WIT world, ADR-0026, this plan | done | #91 |
-| P2 — `plugin-host`: discovery, registry, built-ins, reload | in review | #93 |
+| P2 — `plugin-host`: discovery, registry, built-ins, reload | done | #93 |
 | P3 — `icon-theme`: pack model, resolver, `resvg` rasteriser, cache, ADR-0027 | done | #92 |
-| P4 — Material import script + vendored pack under `third_party/` | in review | #94 |
-| P5 — FFI seam + project tree icons | in review | #96 |
-| P6 — icons in editor tabs and the search/result lists | in review | #97 |
-| P7 — settings: icon theme choice, disabled plugins, Plugins page | blocked on P5 |  |
-| P8 — wasm tier: runtime, capabilities, limits, `commands`, ADR-0028 | in review | #95 |
+| P4 — Material import script + vendored pack under `third_party/` | done | #94 |
+| P5 — FFI seam + project tree icons | done | #96 |
+| P6 — icons in editor tabs and the search/result lists | done | #97 |
+| P7 — settings: icon theme choice, disabled plugins, Plugins page | in review | #98 |
+| P8 — wasm tier: runtime, capabilities, limits, `commands`, ADR-0028 | done | #95 |
 | P9 — docs truth-up and the end-to-end pass | blocked on P6, P7, P8 |  |
 
 Lanes: `{P1→P2→P8}` and `{P1→P3→P4}` run in parallel and converge at P5.
@@ -112,6 +112,12 @@ That is a rule, so it is `IconService::icon_key`'s and has a unit test; the view
 `Settings::icon_theme` and `Settings::disabled_plugins`, both global: per-project settings deliberately exclude theme-like choices (see `crates/app-config/src/project_settings.rs`).
 An icon-theme combo on the Appearance page with live preview and revert-on-Cancel, the same shape as the existing theme combo.
 `settings-model/src/plugins.rs` produces the rows; `PluginCatalog` and `cpp/plugins_page.*` mirror `LanguageCatalog` and `cpp/languages_page.*`.
+
+Two things the task turned out to need that this section did not say.
+The Plugins page scans with **nothing disabled** rather than reading the live registry, because `plugin_host::load` filters a disabled plugin out before it opens its manifest — a page reading the live registry could list every plugin except the ones it exists to switch back on.
+`WasmTier::disabled()` also had no owner: P8 built the tier and nothing in the application ever started one, so the trap rows the page is for would always have been empty.
+The tier now lives beside the registry in `plugin-host` (`start_tier`/`tier`, same `RwLock<Arc<_>>` shape), is started from the same scan the icon theme comes from, and is restarted whenever a plugin is switched off or back on.
+Choosing its `HostServices` stays in `ui-shell`, because the implementation that eventually routes a plugin's `notify` to the editor is a Qt object.
 
 ### P8 — the wasm tier
 
