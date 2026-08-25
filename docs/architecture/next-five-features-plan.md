@@ -74,7 +74,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F1-15 — view: multi-caret rendering and input | done | recorded at the end of this branch |
 | F1-16 — view: actions and menus | done | recorded at the end of this branch |
 | F1-17 — view: editing settings page | done | recorded at the end of this branch |
-| F1-18 — E2E + ADR-0023 + docs | todo |  |
+| F1-18 — E2E + ADR-0023 + docs | done | 14f7b76 |
 
 ### F2 — Intentions and LSP surface
 

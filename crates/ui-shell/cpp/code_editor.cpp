@@ -195,6 +195,25 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
         return;
     }
 
+    // A bare modifier key press (Shift held before the letter it modifies
+    // arrives, Ctrl held before a shortcut's second key) carries no meaning
+    // of its own. `xdotool type`'s Shift+digit combos (e.g. "!") deliver
+    // exactly this: a Key_Shift press event with no text, ahead of the
+    // character it is about to shift. Treating it as "some other operation"
+    // would drop the multi-caret selection before the character it is
+    // actually part of ever arrives.
+    switch (event->key()) {
+    case Qt::Key_Shift:
+    case Qt::Key_Control:
+    case Qt::Key_Alt:
+    case Qt::Key_AltGr:
+    case Qt::Key_Meta:
+        QPlainTextEdit::keyPressEvent(event);
+        return;
+    default:
+        break;
+    }
+
     // F1-8/F1-15: every text-producing key is a transaction computed in
     // Rust now, one caret or two hundred — smart typing (auto-close,
     // type-over, smart backspace) is stateful and lives in `edit_ops`, and
