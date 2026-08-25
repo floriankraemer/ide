@@ -33,6 +33,8 @@ namespace ui_shell {
 namespace {
 // Width reserved for the fold triangle, left of the line-number digits.
 constexpr int kFoldMarkerWidth = 12;
+// F3-16: width of the change-marker strip, left of the fold triangle.
+constexpr int kChangeMarkerWidth = 4;
 
 // Which CompletionEntry a popup row stands for. Read back through the
 // completer's proxy model, so no assumption is made about the proxy keeping
@@ -637,7 +639,8 @@ int CodeEditor::lineNumberAreaWidth() const
         max /= 10;
         ++digits;
     }
-    return kFoldMarkerWidth + 3 + fontMetrics().horizontalAdvance(QLatin1Char('9')) * digits;
+    return kChangeMarkerWidth + kFoldMarkerWidth + 3
+      + fontMetrics().horizontalAdvance(QLatin1Char('9')) * digits;
 }
 
 void CodeEditor::updateLineNumberAreaWidth(int /*newBlockCount*/)
@@ -694,13 +697,14 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
 
             const QString number = QString::number(blockNumber + 1);
             painter.setPen(isCurrent ? currentDigitColor : digitColor);
-            painter.drawText(kFoldMarkerWidth, top, lineNumberArea_->width() - kFoldMarkerWidth - 2,
+            painter.drawText(kChangeMarkerWidth + kFoldMarkerWidth, top,
+                              lineNumberArea_->width() - kChangeMarkerWidth - kFoldMarkerWidth - 2,
                               fontMetrics().height(), Qt::AlignRight, number);
 
             FoldRange range;
             if (foldStartingAt(blockNumber, &range)) {
                 const bool collapsed = collapsedRanges_.contains(range);
-                const int cx = kFoldMarkerWidth / 2;
+                const int cx = kChangeMarkerWidth + kFoldMarkerWidth / 2;
                 const int cy = top + fontMetrics().height() / 2;
                 QPolygon triangle;
                 if (collapsed) {
@@ -716,6 +720,12 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
                 painter.setBrush(digitColor);
                 painter.drawPolygon(triangle);
             }
+
+            ChangeMarker marker;
+            if (changeMarkerAt(blockNumber, &marker)) {
+                painter.fillRect(0, top, kChangeMarkerWidth, fontMetrics().height(),
+                                  changeMarkerColor(marker.kind));
+            }
         }
 
         block = block.next();
@@ -727,7 +737,9 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
 
 void CodeEditor::lineNumberAreaMousePressEvent(QMouseEvent *event)
 {
+    const int clickX = static_cast<int>(event->position().x());
     const int clickY = static_cast<int>(event->position().y());
+    const bool onChangeMarkerStrip = clickX < kChangeMarkerWidth;
 
     QTextBlock block = firstVisibleBlock();
     int blockNumber = block.blockNumber();
@@ -736,6 +748,12 @@ void CodeEditor::lineNumberAreaMousePressEvent(QMouseEvent *event)
 
     while (block.isValid() && top <= clickY) {
         if (block.isVisible() && clickY >= top && clickY < bottom) {
+            ChangeMarker marker;
+            if (onChangeMarkerStrip && changeMarkerAt(blockNumber, &marker)) {
+                emit changeMarkerClicked(marker.hunkIndex,
+                                          lineNumberArea_->mapToGlobal(event->pos()));
+                return;
+            }
             toggleFold(blockNumber);
             return;
         }
@@ -750,6 +768,25 @@ bool CodeEditor::foldStartingAt(int blockNumber, FoldRange *out) const
 {
     const auto it = foldStarts_.constFind(blockNumber);
     if (it == foldStarts_.constEnd()) {
+        return false;
+    }
+    *out = it.value();
+    return true;
+}
+
+void CodeEditor::setChangeMarkers(const QVector<ChangeMarker> &markers)
+{
+    changeMarkers_.clear();
+    for (const ChangeMarker &marker : markers) {
+        changeMarkers_.insert(marker.block, marker);
+    }
+    lineNumberArea_->update();
+}
+
+bool CodeEditor::changeMarkerAt(int blockNumber, ChangeMarker *out) const
+{
+    const auto it = changeMarkers_.constFind(blockNumber);
+    if (it == changeMarkers_.constEnd()) {
         return false;
     }
     *out = it.value();

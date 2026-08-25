@@ -1,5 +1,7 @@
 #pragma once
 
+#include "vcs_gutter.h"
+
 #include <QColor>
 #include <QHash>
 #include <QPlainTextEdit>
@@ -221,6 +223,12 @@ public:
     // live here.
     bool hasSecondaryCarets() const { return !secondaryCarets_.isEmpty(); }
 
+    // F3-16: the gutter's change markers against `HEAD`, pushed in by
+    // EditorTabs whenever `VcsService::hunksChanged` answers for this
+    // file — same "widget never computes it" arrangement as
+    // setFoldRanges/setDiagnosticSpans.
+    void setChangeMarkers(const QVector<ChangeMarker> &markers);
+
 signals:
     // N7: Ctrl+Click landed on an identifier-shaped word. `position` is a
     // document (UTF-16) position inside that word; converting it to the
@@ -292,6 +300,13 @@ signals:
     // Esc, a plain click, or any key this version does not treat as a
     // multi-caret operation: back to one caret.
     void secondaryCaretsDropped();
+
+    // F3-16: a click landed on a change marker in the gutter's strip.
+    // `hunkIndex` is the marker's own — what a hunk-revert/stage/show-diff
+    // request needs — and `globalPos` is where to show the popup. Deciding
+    // what the popup offers, and performing any of the three, is
+    // EditorTabs's job; this widget only reports the gesture.
+    void changeMarkerClicked(int hunkIndex, const QPoint &globalPos);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -365,6 +380,9 @@ private:
     void toggleFold(int blockNumber);
     void setBlocksVisible(int fromBlockExclusive, int toBlockInclusive, bool visible);
 
+    // F3-16: the marker painted at `blockNumber`, if any.
+    bool changeMarkerAt(int blockNumber, ChangeMarker *out) const;
+
     LineNumberArea *lineNumberArea_;
     QVector<QPair<int, int>> matchSelections_;
     int currentMatch_ = -1;
@@ -377,6 +395,9 @@ private:
     // which a multi-megabyte file has hundreds of thousands of.
     QHash<int, FoldRange> foldStarts_;
     QVector<FoldRange> collapsedRanges_;
+    // F3-16: the gutter's change-marker strip, keyed by block like
+    // foldStarts_ is — repainted on every scroll step.
+    QHash<int, ChangeMarker> changeMarkers_;
     QVector<DiagnosticSpan> diagnosticSpans_;
     QVector<OccurrenceSpan> occurrenceSpans_;
     QVector<InlayHintSpan> inlayHints_;

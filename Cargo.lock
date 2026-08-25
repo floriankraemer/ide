@@ -5219,6 +5219,7 @@ dependencies = [
  "syntax-core",
  "terminal-core",
  "tokio",
+ "vcs-core",
 ]
 
 [[package]]

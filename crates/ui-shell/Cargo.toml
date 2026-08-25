@@ -16,6 +16,10 @@ project-model = { path = "../project-model" }
 syntax-core = { path = "../syntax-core" }
 index-core = { path = "../index-core" }
 lsp-core = { path = "../lsp-core" }
+# Git v1 (F3-12): repository discovery, status, hunks, staging, commit,
+# branches, remotes, history and blame — `VcsService` is a thin worker-thread
+# adapter over this crate's own types, never `gix`/`git` directly.
+vcs-core = { path = "../vcs-core" }
 pty-core = { path = "../pty-core" }
 terminal-core = { path = "../terminal-core" }
 mcp-server = { path = "../mcp-server" }

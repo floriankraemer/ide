@@ -37,5 +37,6 @@ pub mod search;
 pub mod settings;
 pub mod terminal;
 pub mod tree;
+pub mod vcs;
 
 pub use ffi::run_app;
