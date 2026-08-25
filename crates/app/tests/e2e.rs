@@ -96,6 +96,96 @@ fn buffer(mcp: &Mcp, tab_id: u64) -> String {
         .to_string()
 }
 
+/// The centre of a `[x, y, w, h]` marker field — the same shape `tab_centre`
+/// reads off `tab_added`, reused here for `changes_row`'s and
+/// `changes_panel_shown`'s rects so a flow never computes a click point from
+/// window geometry or font metrics.
+fn rect_centre(rect: &serde_json::Value) -> (i32, i32) {
+    let rect: Vec<i64> = rect
+        .as_array()
+        .expect("the marker carries a rect")
+        .iter()
+        .map(|v| v.as_i64().expect("an integer"))
+        .collect();
+    (
+        (rect[0] + rect[2] / 2) as i32,
+        (rect[1] + rect[3] / 2) as i32,
+    )
+}
+
+/// A point on a `changes_row` marker's checkbox glyph — measured against a
+/// real screenshot under Xvfb (10px in from the row's own left edge, at its
+/// vertical centre), not the row's text label: `QAbstractItemView` toggles a
+/// checkable item's check state only on a genuine click on the indicator
+/// itself, no keyboard binding does it.
+fn checkbox_point(rect: &serde_json::Value) -> (i32, i32) {
+    let rect: Vec<i64> = rect
+        .as_array()
+        .expect("the marker carries a rect")
+        .iter()
+        .map(|v| v.as_i64().expect("an integer"))
+        .collect();
+    (rect[0] as i32 + 10, (rect[1] + rect[3] / 2) as i32)
+}
+
+/// A fresh temp directory holding `files`, committed to a brand-new Git
+/// repository.
+///
+/// `VcsService::open_project` discovers `.git` on a background thread the
+/// instant `ProjectTreeModel::projectOpened` fires during startup (see
+/// `wireVcsService`, `crates/ui-shell/cpp/editor_tabs_vcs.cpp`) — before a
+/// test gets to run a single line, and with nothing that ever re-checks once
+/// that first answer is in. A `git init` run against `Ide::project_root()`
+/// after `Ide::launch` returns would race that thread and, on the losing
+/// side, leave the app permanently believing the project is not a
+/// repository. Baking `.git` into the directory `Ide::launch` copies from
+/// sidesteps the race entirely: `copy_tree` faithfully copies dotdirs, so by
+/// the time the app process is even spawned, `.git` has already been in the
+/// (temporary, throwaway) project root for as long as every other file has.
+fn git_fixture(files: &[(&str, &str)]) -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("temp git fixture dir");
+    for (relative, content) in files {
+        let path = dir.path().join(relative);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("fixture subdirectory");
+        }
+        std::fs::write(&path, content).expect("fixture file");
+    }
+    let git = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .status()
+            .unwrap_or_else(|e| panic!("running git {args:?}: {e}"));
+        assert!(status.success(), "git {args:?} failed");
+    };
+    git(&["init", "--quiet"]);
+    // A fresh `git` has no identity configured in CI; scoped to this repo
+    // only; `--global` would leak between test runs on a shared machine.
+    git(&["config", "user.email", "e2e@example.invalid"]);
+    git(&["config", "user.name", "E2E"]);
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "initial"]);
+    dir
+}
+
+/// The subject of the repository's current `HEAD` commit, read with a plain
+/// `git` subprocess from the *test* — never through the app — so a pass
+/// proves the whole seam (Changes dock -> bridge -> `vcs-core` -> a real
+/// `git` process) actually produced a commit, not that each layer's own
+/// unit tests agree with each other.
+fn head_commit_subject(repo: &Path) -> String {
+    let output = std::process::Command::new("git")
+        .args(["log", "-1", "--format=%s"])
+        .current_dir(repo)
+        .output()
+        .expect("git log");
+    String::from_utf8(output.stdout)
+        .expect("git log output is UTF-8")
+        .trim()
+        .to_string()
+}
+
 // ---------------------------------------------------------------------------
 
 /// The harness itself: a seeded launch reaches a mapped, focused window with
@@ -862,4 +952,239 @@ fn groups_of(node: &serde_json::Value) -> Vec<&serde_json::Value> {
             .unwrap_or_default(),
         _ => Vec::new(),
     }
+}
+
+/// F3-11/F3-16: reverting a hunk splices the edit back into the buffer —
+/// never the file on disk — so the app's own undo stack, not a second write,
+/// is what gets a user back to what they had before Revert. Proven two ways:
+/// the file on disk keeps whatever was last *saved* right through the
+/// revert, and one Ctrl+Z lands exactly on the pre-revert text (round-tripped
+/// through the same modification-tracking every other edit uses, not a
+/// second, hand-rolled "are these bytes equal" check).
+#[test]
+#[ignore = "E2E: needs an X server; run via `make e2e`"]
+fn e2e_hunk_revert_is_one_undo_never_touches_disk() {
+    const ORIGINAL: &str = "line one\nline two\nline three\n";
+    // Lowercase only: `xdotool type`'s Shift for a capital can land on top
+    // of a modifier a preceding `xdotool key` chord has not yet released,
+    // turning it into an unrelated `Ctrl+Shift+<letter>` shortcut — Search
+    // Everywhere and friends all live on that chord (`keymap.rs`).
+    const EDITED: &str = "line one edited\nline two\nline three\n";
+    let name = "e2e_hunk_revert_is_one_undo_never_touches_disk";
+
+    let repo = git_fixture(&[("notes.txt", ORIGINAL)]);
+    let mut ide = Ide::launch(name, APP, repo.path());
+    drop(repo); // already copied into the app's own temp project root
+
+    let mcp = ide.mcp();
+    ide.wait_for_ev(Mark::start(), "project_opened");
+    wait_for_index(&mcp);
+
+    let tab = open_file(&ide, "notes.txt");
+    let tab_id = tab["tab_id"].as_u64().expect("tab_id");
+
+    // One hunk: append to the first line, entirely in the buffer.
+    ide.key("ctrl+Home");
+    ide.key("End");
+    let mark = ide.mark();
+    ide.type_text(" edited");
+    ide.wait_for_event(mark, "the tab to go dirty", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == true
+    });
+    // The gutter's hunk cache is what `vcs.rollbackHunk` reads at the caret;
+    // reverting before this fires would find nothing there yet and silently
+    // do nothing.
+    ide.wait_for_event(mark, "the gutter to see the edit as a hunk", |e| {
+        e["ev"] == "vcs_hunks_applied" && e["count"].as_u64().unwrap_or(0) > 0
+    });
+
+    // Save, so the disk copy is `EDITED` — the baseline the "never touches
+    // disk" assertion below is measured against.
+    ide.key("ctrl+s");
+    ide.wait_for_event(mark, "the tab to go clean after saving", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false
+    });
+    ide.sync(&mcp);
+    assert_eq!(
+        buffer(&mcp, tab_id),
+        EDITED,
+        "the edit did not land in the buffer"
+    );
+    assert_eq!(
+        ide.read_project_file("notes.txt"),
+        EDITED,
+        "the fixture's shape changed"
+    );
+
+    // Revert through the VCS menu — no default keyboard shortcut is bound to
+    // `vcs.rollbackHunk` (`app-config/src/keymap.rs`), so this drives the
+    // same QAction through the menu bar instead. Keyboard-only throughout:
+    // no coordinate is computed for a 1px gutter marker.
+    let mark = ide.mark();
+    ide.key("alt+c"); // "V&CS" — see vcs_menu.cpp for why not Alt+V.
+    ide.wait_for_event(mark, "the VCS menu to open", |e| {
+        e["ev"] == "dialog_shown" && e["name"] == "vcs_menu"
+    });
+    // Commit, Push, Pull, Fetch, Branches, (separator), Show Diff, Rollback
+    // Hunk: unlike a bare `exec()` popup (the tab context menu's own
+    // Down-count in `e2e_split_editor_persistence` relies on nothing being
+    // highlighted yet), a menu-bar-triggered QMenu pre-highlights its first
+    // item the moment it opens — confirmed against a real run under Xvfb,
+    // not assumed — so reaching the 7th item takes 6 more Downs, not 7.
+    for _ in 0..6 {
+        ide.key("Down");
+    }
+    ide.key("Return");
+    ide.wait_for_event(mark, "the VCS menu to close", |e| {
+        e["ev"] == "dialog_closed" && e["name"] == "vcs_menu"
+    });
+    ide.wait_for_ev(mark, "vcs_hunk_reverted");
+
+    // `read_buffer` cannot referee this step (the module doc comment: it
+    // answers from the rope, which only a *save* refreshes — a revert never
+    // saves), so the buffer's new content is checked the way the gutter
+    // itself would notice: the didChange debounce re-diffs the live buffer
+    // against `HEAD` and should now find nothing, which does not depend on
+    // a save and says more than "some edit happened".
+    ide.wait_for_event(
+        mark,
+        "the gutter to see no more difference from HEAD",
+        |e| e["ev"] == "vcs_hunks_applied" && e["count"].as_u64() == Some(0),
+    );
+    assert_eq!(
+        ide.read_project_file("notes.txt"),
+        EDITED,
+        "the revert wrote to disk instead of only splicing the buffer"
+    );
+    ide.wait_for_event(
+        mark,
+        "the tab to go dirty (buffer no longer matches the saved disk copy)",
+        |e| e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == true,
+    );
+
+    // One Ctrl+Z, not two: the revert went through `beginEditBlock` exactly
+    // like every other edit `applyEditsTo` makes.
+    ide.key("ctrl+z");
+    ide.wait_for_event(
+        mark,
+        "the tab to go clean again (back to what was saved)",
+        |e| e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false,
+    );
+    ide.sync(&mcp);
+    assert_eq!(
+        buffer(&mcp, tab_id),
+        EDITED,
+        "one Ctrl+Z did not undo the hunk revert"
+    );
+
+    assert_eq!(ide.quit(), 0);
+}
+
+/// F3-17: staging a file and committing through the Changes dock's own
+/// checkboxes and button produces a real commit — the one property no unit
+/// test can prove, since it is specifically about the dock's widgets driving
+/// the real seam (dock -> bridge -> `vcs-core` -> a `git` subprocess) rather
+/// than each layer agreeing with itself. Verified with a `git log`/`git show`
+/// run by the *test*, independent of anything the app itself would report.
+#[test]
+#[ignore = "E2E: needs an X server; run via `make e2e`"]
+fn e2e_stage_and_commit_through_the_changes_dock() {
+    const ORIGINAL: &str = "first draft\n";
+    const EDITED: &str = "first draft, revised\n";
+    // Lowercase, for the same reason `e2e_hunk_revert_is_one_undo_never_
+    // touches_disk`'s edit is: no Shift for `xdotool type` to combine with a
+    // modifier a preceding key chord left down.
+    const MESSAGE: &str = "revise the draft";
+    let name = "e2e_stage_and_commit_through_the_changes_dock";
+
+    let repo = git_fixture(&[("draft.txt", ORIGINAL)]);
+    let mut ide = Ide::launch(name, APP, repo.path());
+    drop(repo);
+
+    let mcp = ide.mcp();
+    ide.wait_for_ev(Mark::start(), "project_opened");
+    wait_for_index(&mcp);
+
+    let tab = open_file(&ide, "draft.txt");
+    let tab_id = tab["tab_id"].as_u64().expect("tab_id");
+
+    // Show the Changes dock before editing, so the refresh a save triggers
+    // (`EditorTabs::saveTab`) runs while the panel is already visible and
+    // its rows lay out to real, clickable geometry. `vcs_menu.cpp` also
+    // raises this dock on its own the moment the repository is discovered
+    // (before this line ever runs, since the fixture's `.git` is already on
+    // disk at launch) — so its geometry marker is read from the start of
+    // the stream, not from a mark taken here, in case Alt+9 finds it
+    // already the visible tab and toggles nothing.
+    let mark = ide.mark();
+    ide.key("alt+9"); // vcs.view.changes' default shortcut (keymap.rs).
+    let shown = ide.wait_for_event(
+        Mark::start(),
+        "the Changes dock to report its geometry",
+        |e| e["ev"] == "changes_panel_shown",
+    );
+
+    ide.key("ctrl+Home");
+    ide.key("End");
+    ide.type_text(", revised");
+    ide.key("ctrl+s");
+    ide.wait_for_event(mark, "the tab to go clean after saving", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false
+    });
+    ide.sync(&mcp);
+    assert_eq!(
+        ide.read_project_file("draft.txt"),
+        EDITED,
+        "the fixture's shape changed"
+    );
+
+    // The save above just made `EditorTabs::saveTab` ask `VcsService` to
+    // look again — this is the row that answer produced.
+    let row = ide.wait_for_event(mark, "the file to show up as an unstaged change", |e| {
+        e["ev"] == "changes_row" && e["path"] == "draft.txt" && e["group"] == "unstaged"
+    });
+
+    // Stage it: a real click on the checkbox glyph itself — `Space` on the
+    // row once merely current turned out not to toggle it (no default
+    // `QAbstractItemView` keyboard binding does that; only clicking the
+    // indicator does), confirmed against a real run under Xvfb rather than
+    // assumed. The glyph sits a fixed, style-drawn offset in from the row's
+    // own left edge, which the row's marked rect gives without this flow
+    // computing it from indentation or icon metrics.
+    let (checkbox_x, checkbox_y) = checkbox_point(&row["rect"]);
+    ide.click_at(checkbox_x, checkbox_y, 1);
+    ide.wait_for_event(mark, "the file to move to Staged Changes", |e| {
+        e["ev"] == "changes_row" && e["path"] == "draft.txt" && e["group"] == "staged"
+    });
+
+    // Type the commit message and click Commit — both rects came from the
+    // same `changes_panel_shown` marker taken when the dock was first shown.
+    let (message_x, message_y) = rect_centre(&shown["message_rect"]);
+    ide.click_at(message_x, message_y, 1);
+    ide.type_text(MESSAGE);
+    let (commit_x, commit_y) = rect_centre(&shown["commit_rect"]);
+    ide.click_at(commit_x, commit_y, 1);
+
+    // The dock's own click is fire-and-forget (`ChangesPanel::doCommit`
+    // queues the commit on `VcsService`'s worker thread and returns), so
+    // this polls the filesystem — the one channel this harness trusts as
+    // much as the marker stream (`crates/e2e/src/lib.rs`) — rather than
+    // inventing a fixed delay.
+    let repo_root = ide.project_root().to_path_buf();
+    e2e::wait_for("the commit to land", || {
+        (head_commit_subject(&repo_root) == MESSAGE).then_some(())
+    });
+
+    let output = std::process::Command::new("git")
+        .args(["show", "HEAD:draft.txt"])
+        .current_dir(&repo_root)
+        .output()
+        .expect("git show");
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("git show output is UTF-8"),
+        EDITED,
+        "the commit did not carry the edited content"
+    );
+
+    assert_eq!(ide.quit(), 0);
 }

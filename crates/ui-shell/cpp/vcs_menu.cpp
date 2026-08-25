@@ -1,6 +1,7 @@
 #include "vcs_menu.h"
 
 #include "dock_layout.h"
+#include "e2e_mark.h"
 #include "editor_tabs.h"
 #include "file_history_panel.h"
 #include "keymap_page.h"
@@ -140,7 +141,19 @@ void buildVcsMenu(QMainWindow *window, VcsService *vcsService, AppSettings *appS
         QMessageBox::warning(window, QObject::tr("Git"), error.message);
     });
 
-    QMenu *vcsMenu = window->menuBar()->addMenu(QObject::tr("&VCS"));
+    // "V&CS", not "&VCS": "&View" already claims Alt+V, and a menu bar's
+    // ambiguous-mnemonic fallback (cycling on a repeated press) is not
+    // something either a user or an E2E flow should have to rely on to
+    // reach this menu.
+    QMenu *vcsMenu = window->menuBar()->addMenu(QObject::tr("V&CS"));
+    // A top-level menu bar entry never goes through `exec()` (unlike the
+    // tab and hunk-popup context menus), so `aboutToShow`/`aboutToHide` are
+    // the only signal an E2E flow has that it is safe to send keystrokes
+    // into what is, in X11 terms, a brand new toplevel.
+    QObject::connect(vcsMenu, &QMenu::aboutToShow, vcsMenu,
+                      []() { e2eMark("{\"ev\":\"dialog_shown\",\"name\":\"vcs_menu\"}"); });
+    QObject::connect(vcsMenu, &QMenu::aboutToHide, vcsMenu,
+                      []() { e2eMark("{\"ev\":\"dialog_closed\",\"name\":\"vcs_menu\"}"); });
 
     QAction *commitAction = registerAction(vcsMenu, QStringLiteral("vcs.commit"),
                                             QObject::tr("Commit..."), appSettings, actions);

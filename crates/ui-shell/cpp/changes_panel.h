@@ -7,6 +7,7 @@
 
 class QPlainTextEdit;
 class QPushButton;
+class QShowEvent;
 class QTreeWidget;
 class QTreeWidgetItem;
 
@@ -32,6 +33,9 @@ class ChangesPanel : public QWidget
 {
 public:
     explicit ChangesPanel(VcsService *vcsService, QWidget *parent);
+
+protected:
+    void showEvent(QShowEvent *event) override;
 
 private:
     void refresh();

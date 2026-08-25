@@ -204,7 +204,21 @@ impl ffi::VcsService {
         let job_path = path.clone();
         let job_text = working_text.clone();
         self.as_ref().push_job(move |worker: &VcsWorker| {
-            let relative = Path::new(&job_path);
+            // `job_path` is the tab's own path (`DocumentManager::tabPath`),
+            // which is absolute — `Repository::head_blob` and
+            // `HunkCache::hunks` both look a path up in the `HEAD` tree,
+            // which only ever holds repository-relative paths. Handing them
+            // the absolute one is a silent "this file does not exist in
+            // HEAD", which reads as the whole file having just been added
+            // (every line its own hunk) rather than "no changes" — the
+            // Changes dock's own `changedFiles()` never has this bug because
+            // `vcs_core::Repository::status` already returns repo-relative
+            // paths.
+            let absolute = Path::new(&job_path);
+            let relative = match worker.repo.work_dir() {
+                Some(root) => absolute.strip_prefix(&root).unwrap_or(absolute),
+                None => absolute,
+            };
             let head = worker.repo.head_blob(relative);
             let hunks = worker
                 .hunk_cache
