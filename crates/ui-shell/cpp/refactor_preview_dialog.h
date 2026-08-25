@@ -1,16 +1,24 @@
 #pragma once
 
+#include "ui-shell/src/bridge/ffi.cxxqt.h"
+
 #include <QDialog>
 #include <QHash>
 #include <QString>
 #include <QStringList>
 
+#include <functional>
+
 class QCheckBox;
 class QLabel;
+class QSplitter;
 class QTreeWidget;
 class QTreeWidgetItem;
+class QVBoxLayout;
 
 namespace ui_shell {
+
+class DiffView;
 
 // The preview shown before a refactoring that reaches beyond the file the
 // user is looking at.
@@ -41,10 +49,23 @@ public:
         bool checked;
     };
 
+    // Answers `path`'s before/after text and hunks for the diff panel
+    // (F3-15), filling the out-parameters and returning whether it had one.
+    // A row whose file the provider has nothing for (or a dialog built with
+    // no provider at all) shows no diff panel — every call site decides for
+    // itself whether it has a real per-file diff to offer; this class never
+    // computes one.
+    using DiffProvider = std::function<bool(const QString &path,
+                                             QString &oldText,
+                                             QString &newText,
+                                             ::rust::Vec<FfiHunk> &hunks,
+                                             ::rust::Vec<FfiInlineSpan> &spans)>;
+
     RefactorPreviewDialog(const QString &title,
                           const QString &explanation,
                           const QList<Row> &rows,
-                          QWidget *parent);
+                          QWidget *parent,
+                          DiffProvider diffProvider = {});
 
     // Files the user unticked. Excluded rather than included, because that
     // is what the bridge takes: the plan is the source of truth and the
@@ -58,8 +79,14 @@ protected:
     void done(int result) override;
 
 private:
+    void showDiffFor(const QString &path);
+
     QTreeWidget *tree_ = nullptr;
     QLabel *statusLabel_ = nullptr;
+    QSplitter *splitter_ = nullptr;
+    QVBoxLayout *diffLayout_ = nullptr;
+    DiffView *diffView_ = nullptr;
+    DiffProvider diffProvider_;
 };
 
 } // namespace ui_shell
