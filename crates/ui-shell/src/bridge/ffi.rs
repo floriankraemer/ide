@@ -20,6 +20,7 @@ use crate::bridge::editor_ops::EditorOpsRust;
 use crate::bridge::icons::IconProviderRust;
 use crate::bridge::language::LanguageServiceRust;
 use crate::bridge::plugins::PluginCatalogRust;
+use crate::bridge::run::{RunConfigEditorRust, RunServiceRust};
 use crate::bridge::search::SearchModelRust;
 use crate::bridge::settings::{
     AiProviderEditorRust, AppSettingsRust, EditingEditorRust, KeymapEditorRust,
@@ -579,6 +580,37 @@ mod ffi {
     /// bare `Vec<QString>` anywhere.
     struct FfiBranch {
         name: QString,
+    }
+
+    /// One run configuration, 1:1 with `run_core::RunConfig`
+    /// (`app_config::RunConfigSetting`). `args` crosses space-joined — the
+    /// same convention `FfiLanguageServerRow::args` already uses (shell-style
+    /// quoting is the upgrade if a literal space in an argument ever
+    /// matters, not a list editor) — and `env` as `KEY=VALUE` lines
+    /// separated by `\n`, since a `Vec` field on a shared struct is not a
+    /// shape cxx supports (see `FfiFileDiff`'s doc comment).
+    #[derive(Default)]
+    struct FfiRunConfig {
+        id: QString,
+        name: QString,
+        program: QString,
+        args: QString,
+        cwd: QString,
+        env: QString,
+    }
+
+    /// `RunService::resolveLink`'s result. `found == false` means "no link
+    /// at that byte offset", the same typed-flag convention `FfiTerminalLink`
+    /// and `FfiLocation` already use instead of an empty-`QString` sentinel
+    /// (ADR-0003). `has_column` is false for a location with no column (e.g.
+    /// Python's `File "...", line N`).
+    #[derive(Default)]
+    struct FfiResolvedLink {
+        found: bool,
+        path: QString,
+        line: u32,
+        has_column: bool,
+        column: u32,
     }
 
     /// One blamed line, 1:1 with `vcs_core::BlameLine` (F3-12d).
@@ -4227,6 +4259,175 @@ mod ffi {
     // Enables `self.qt_thread()` on `VcsService` for its worker thread,
     // mirroring `LanguageService`'s listener (ADR-0004).
     impl cxx_qt::Threading for VcsService {}
+
+    extern "RustQt" {
+        /// Run configurations and console (F4-9): owns one
+        /// `run_core::Supervisor` on a worker thread — spawning a process,
+        /// killing its tree, and a blocking PTY read must not run on the UI
+        /// thread — plus one dedicated reader thread per active console
+        /// feeding output back through the same job queue. `lsp-core`'s
+        /// supervised-child shape, extended with the per-console reader
+        /// thread `docs/architecture/next-five-features-plan.md`'s
+        /// threading table calls for (see `crate::bridge::run`'s module doc
+        /// for the concurrency argument). Translation only, per
+        /// `docs/architecture/layering.md`: what a run configuration is, how
+        /// one launches, and what a line of output links to all live in
+        /// `run-core`.
+        #[qobject]
+        type RunService = super::RunServiceRust;
+
+        /// The current project's run configurations — whatever
+        /// `.ide/settings.toml` has, already merged with the last
+        /// `detectConfigurations()` scan (F4-4/F4-5's merge rule: a
+        /// user-edited configuration is never silently overwritten). Empty
+        /// with no project open.
+        #[qinvokable]
+        fn configurations(self: &RunService) -> Vec<FfiRunConfig>;
+
+        /// Scan the project (`Cargo.toml`, `package.json`, `Makefile`) for
+        /// launchable targets on the worker thread, merge the result into
+        /// the persisted list and save it; answers via
+        /// `configurationsChanged`.
+        #[qinvokable]
+        #[cxx_name = "detectConfigurations"]
+        fn detect_configurations(self: Pin<&mut RunService>);
+
+        /// Launch `config_id`'s program in a fresh console on the worker
+        /// thread. A resolvable configuration always answers via
+        /// `consoleStarted`; an unresolvable one (no project open, unknown
+        /// id) is reported here rather than as a silent no-op. A spawn
+        /// failure inside `run-core` (bad `program`, missing `cwd`) has no
+        /// console to attach to, so it answers via `runFailed` instead.
+        #[qinvokable]
+        fn run(self: Pin<&mut RunService>, config_id: &QString) -> FfiResult;
+
+        /// Stop `console_id`: `kill_tree()`s its process on the worker
+        /// thread, flushes whatever output was still pending, and answers
+        /// via `consoleFinished` with `escaped = true` if
+        /// `KillOutcome::Escaped` was reported (a double-forked descendant
+        /// this build could not reach) — never conflated with a clean kill.
+        #[qinvokable]
+        fn stop(self: Pin<&mut RunService>, console_id: u64);
+
+        /// Stop `console_id` if still running, then launch its configuration
+        /// again. `console_id` must be one `consoleStarted` reported.
+        #[qinvokable]
+        fn rerun(self: Pin<&mut RunService>, console_id: u64) -> FfiResult;
+
+        /// The `file:line[:col]` (or Python `File "...", line N`) location
+        /// covering `byte_offset` in `console_id`'s accumulated output, for
+        /// hover feedback and Ctrl+Click — the same
+        /// `run_core::links::resolve_link` catalogue `TerminalSession` uses
+        /// for terminal output.
+        #[qinvokable]
+        #[cxx_name = "resolveLink"]
+        fn resolve_link(self: &RunService, console_id: u64, byte_offset: u32) -> FfiResolvedLink;
+
+        /// `configurations()` has a fresh answer.
+        #[qsignal]
+        #[cxx_name = "configurationsChanged"]
+        fn configurations_changed(self: Pin<&mut RunService>);
+
+        /// A console was launched and is ready to receive `consoleOutput`.
+        #[qsignal]
+        #[cxx_name = "consoleStarted"]
+        fn console_started(self: Pin<&mut RunService>, console_id: u64, config_id: QString);
+
+        /// A batch of output — never one event per PTY `read()`, that is
+        /// the whole point of F4-7's batcher.
+        #[qsignal]
+        #[cxx_name = "consoleOutput"]
+        fn console_output(self: Pin<&mut RunService>, console_id: u64, text: QString);
+
+        /// The ring buffer backing `console_id` dropped its oldest content.
+        /// Emitted at most once per batch, right after the `consoleOutput`
+        /// that pushed it over the limit.
+        #[qsignal]
+        #[cxx_name = "consoleTruncated"]
+        fn console_truncated(self: Pin<&mut RunService>, console_id: u64);
+
+        /// `console_id` exited (on its own, or via `stop`/`rerun`).
+        /// `exit_code` is `-1` when it could not be determined (an explicit
+        /// stop does not wait for one). `escaped` is `stop`'s
+        /// `KillOutcome::Escaped` case, reported honestly rather than as a
+        /// clean kill.
+        #[qsignal]
+        #[cxx_name = "consoleFinished"]
+        fn console_finished(
+            self: Pin<&mut RunService>,
+            console_id: u64,
+            exit_code: i32,
+            escaped: bool,
+        );
+
+        /// `run(config_id)` could not start anything at all — no console
+        /// was opened for it, so this is the only signal a caller gets.
+        #[qsignal]
+        #[cxx_name = "runFailed"]
+        fn run_failed(self: Pin<&mut RunService>, config_id: QString, error: FfiResult);
+    }
+
+    // Enables `self.qt_thread()` on `RunService` for its worker thread and
+    // the per-console reader threads it spawns.
+    impl cxx_qt::Threading for RunService {}
+
+    extern "RustQt" {
+        /// Settings-page draft for the project's run configurations (F4-10),
+        /// isomorphic to `LanguageServerEditor`: load, edit a working copy,
+        /// validate, commit back to `.ide/settings.toml` on save.
+        #[qobject]
+        type RunConfigEditor = super::RunConfigEditorRust;
+
+        /// Re-read the project's run configurations into the draft.
+        #[qinvokable]
+        #[cxx_name = "beginEdit"]
+        fn begin_edit(self: &RunConfigEditor);
+
+        /// The draft's configurations, in list order.
+        #[qinvokable]
+        fn configurations(self: &RunConfigEditor) -> Vec<FfiRunConfig>;
+
+        /// Append a new, empty configuration to the draft.
+        #[qinvokable]
+        #[cxx_name = "addConfiguration"]
+        fn add_configuration(self: &RunConfigEditor);
+
+        /// Remove `configurations()[index]` from the draft. Out-of-range is
+        /// a no-op.
+        #[qinvokable]
+        #[cxx_name = "removeConfiguration"]
+        fn remove_configuration(self: &RunConfigEditor, index: u32);
+
+        /// Replace `configurations()[index]`'s fields. Out-of-range is a
+        /// no-op.
+        #[qinvokable]
+        #[cxx_name = "updateConfiguration"]
+        fn update_configuration(
+            self: &RunConfigEditor,
+            index: u32,
+            name: &QString,
+            program: &QString,
+            args: &QString,
+            cwd: &QString,
+            env: &QString,
+        );
+
+        /// The first problem that would stop the dialog closing — an empty
+        /// `program` (`run_core::RunError::InvalidConfig`'s own rule,
+        /// mirrored here since validation this shallow does not warrant a
+        /// second entry point into `run-core`). Code `0` means the draft is
+        /// savable.
+        #[qinvokable]
+        fn validate(self: &RunConfigEditor) -> FfiResult;
+
+        /// Write the draft to `.ide/settings.toml`.
+        #[qinvokable]
+        fn commit(self: &RunConfigEditor) -> FfiResult;
+
+        /// Discard the draft, restoring what was last loaded or committed.
+        #[qinvokable]
+        fn revert(self: &RunConfigEditor);
+    }
 
     unsafe extern "C++" {
         include!("main_window.h");

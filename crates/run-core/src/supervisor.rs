@@ -107,10 +107,29 @@ impl Supervisor {
         Ok(outcome)
     }
 
+    /// Move `id`'s PTY read half out for a dedicated reader thread to own —
+    /// exactly [`pty_core::PtySession::take_reader`]'s own contract, exposed
+    /// here because [`RunningConsole`]'s fields are private to this module
+    /// and a `ui-shell::RunService` reader thread (one per console,
+    /// mirroring `TerminalSessionRust`'s) needs the raw byte source to do
+    /// the blocking `read()` loop `read_output`'s doc comment describes.
+    /// Returns [`RunError::Io`] if already taken.
+    pub fn take_reader(
+        &mut self,
+        id: ConsoleId,
+    ) -> Result<Box<dyn std::io::Read + Send>, RunError> {
+        let console = self.consoles.get_mut(&id).ok_or(RunError::UnknownConsole)?;
+        console
+            .pty_session
+            .take_reader()
+            .ok_or_else(|| RunError::Io("PTY read half already taken".to_string()))
+    }
+
     /// Feed a chunk read from `id`'s PTY through its output batcher.
     /// The blocking `read()` loop itself belongs to the caller's reader
     /// thread, exactly as `TerminalSessionRust`'s reader thread calls
-    /// `session.read()` then hands the bytes onward.
+    /// `session.read()` then hands the bytes onward — obtained via
+    /// [`Supervisor::take_reader`].
     pub fn read_output(
         &mut self,
         id: ConsoleId,
@@ -292,6 +311,38 @@ mod tests {
             }
         }
         collected
+    }
+
+    #[test]
+    fn take_reader_hands_over_the_pty_read_half_exactly_once() {
+        let mut supervisor = Supervisor::new();
+        let id = supervisor
+            .launch("cfg", &spec("/bin/sh", vec!["-c", "echo hi"]))
+            .expect("launch");
+
+        let mut reader = supervisor.take_reader(id).expect("take_reader");
+        let mut buf = [0u8; 64];
+        let mut collected = Vec::new();
+        loop {
+            match reader.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => collected.extend_from_slice(&buf[..n]),
+                Err(_) => break,
+            }
+        }
+        assert!(String::from_utf8_lossy(&collected).contains("hi"));
+
+        // Taking it again fails rather than panicking — the read half moved.
+        assert!(matches!(supervisor.take_reader(id), Err(RunError::Io(_))));
+    }
+
+    #[test]
+    fn take_reader_on_an_unknown_console_is_reported_not_panicked() {
+        let mut supervisor = Supervisor::new();
+        assert!(matches!(
+            supervisor.take_reader(ConsoleId(999)),
+            Err(RunError::UnknownConsole)
+        ));
     }
 
     #[test]

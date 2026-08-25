@@ -5229,6 +5229,7 @@ dependencies = [
  "plugin-host",
  "project-model",
  "pty-core",
+ "run-core",
  "serde_json",
  "settings-model",
  "syntax-core",

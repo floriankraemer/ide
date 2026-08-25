@@ -22,6 +22,11 @@ lsp-core = { path = "../lsp-core" }
 vcs-core = { path = "../vcs-core" }
 pty-core = { path = "../pty-core" }
 terminal-core = { path = "../terminal-core" }
+# Run configurations and console (F4): the configuration model, detection,
+# process supervision and output batching, and the file:line link catalogue
+# — `RunService`/`RunConfigEditor` are thin adapters over this crate's own
+# types, never `pty-core` directly.
+run-core = { path = "../run-core" }
 mcp-server = { path = "../mcp-server" }
 ai-chat-core = { path = "../ai-chat-core" }
 # The Plugins page: scanning for the page (which must see the plugins the

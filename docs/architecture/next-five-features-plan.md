@@ -135,8 +135,8 @@ Renumbered to match §4's Task breakdown, which this table had drifted from (an 
 | F4-6 — supervisor | done | recorded at the end of this branch |
 | F4-7 — output batching | done | recorded at the end of this branch |
 | F4-8 — `run-core::links` | done | recorded at the end of this branch |
-| F4-9 — bridge: `RunService` | todo |  |
-| F4-10 — bridge: `RunConfigEditor` | todo |  |
+| F4-9 — bridge: `RunService` | done | recorded at the end of this branch |
+| F4-10 — bridge: `RunConfigEditor` | done | recorded at the end of this branch |
 | F4-11 — view: run console dock | todo |  |
 | F4-12 — view: toolbar and dialog | todo |  |
 | F4-13 — view: clickable links | todo |  |
