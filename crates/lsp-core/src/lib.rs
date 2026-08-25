@@ -14,6 +14,7 @@ pub mod catalog;
 pub mod code_action;
 pub mod completion;
 pub mod diagnostics;
+pub mod diff_preview;
 pub mod document_highlight;
 pub mod formatting;
 pub mod framing;
@@ -45,6 +46,7 @@ pub use completion::{
 pub use diagnostics::{
     path_from_uri, uri_from_path, DiagnosticCounts, DiagnosticRow, DiagnosticStore, Severity,
 };
+pub use diff_preview::{file_diff, FileDiff};
 pub use document_highlight::{parse_document_highlights, DocumentHighlight, HighlightKind};
 pub use hover::{
     hover_outcome, parse_hover, to_tooltip_html, HoverOutcome, HoverText, HoverTracker,

@@ -328,6 +328,10 @@ fn main() {
         .cpp_file("cpp/project_tree_dock.cpp")
         .cpp_file("cpp/search_results_panel.cpp")
         .cpp_file("cpp/refactor_preview_dialog.cpp")
+        // Declares Q_OBJECT, so its header is listed too — that is what
+        // runs moc on it.
+        .cpp_file("cpp/diff_view.h")
+        .cpp_file("cpp/diff_view.cpp")
         .cpp_file("cpp/search_everywhere_dialog.cpp")
         .cpp_file("cpp/splash_screen.cpp")
         .cpp_file("cpp/theme.cpp")

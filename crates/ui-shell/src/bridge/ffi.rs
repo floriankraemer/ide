@@ -453,6 +453,58 @@ mod ffi {
         new_text: QString,
     }
 
+    /// What happened to a run of lines in a diff, 1:1 with
+    /// `editor_core::diff::HunkKind` (F3-13).
+    enum FfiHunkKind {
+        Added,
+        Removed,
+        Modified,
+    }
+
+    /// One hunk of a text diff, 1:1 with `editor_core::diff::Hunk` — a
+    /// half-open line range into each side, expressed as start+len because
+    /// there is no `Range` to cross the seam with. `DiffView`'s change
+    /// ribbon and F7/Shift+F7 hunk navigation are painted from these; no
+    /// other logic reads them.
+    struct FfiHunk {
+        old_start: u32,
+        old_len: u32,
+        new_start: u32,
+        new_len: u32,
+        kind: FfiHunkKind,
+    }
+
+    /// Which pane of a `DiffView` an `FfiInlineSpan` highlights.
+    enum FfiDiffSide {
+        Old,
+        New,
+    }
+
+    /// One intra-line changed span, 1:1 with `editor_core::diff::InlineSpan`
+    /// — `start`/`end` are UTF-16 code units into `line`, the same units
+    /// `FfiTextEdit` already uses, so `DiffView` can position a
+    /// `QTextCursor` with them directly rather than re-deriving an offset.
+    struct FfiInlineSpan {
+        side: FfiDiffSide,
+        line: u32,
+        start: u32,
+        end: u32,
+    }
+
+    /// Whole-file before/after text for one file in a pending change, for
+    /// `DiffView`'s two panes (F3-13/F3-15). Hunks and inline spans are
+    /// fetched separately — `pendingFileHunks`/`pendingFileSpans` and their
+    /// `replacePreview*` counterparts — since a `Vec` field on a shared
+    /// struct is not a shape cxx supports; every other list already crosses
+    /// the seam as a method's own return value, so this follows the same
+    /// convention instead of a new one.
+    #[derive(Default)]
+    struct FfiFileDiff {
+        path: QString,
+        old_text: QString,
+        new_text: QString,
+    }
+
     /// What a refactoring is about to do, for the confirm text and for the
     /// decision the view is not allowed to make: `touches_other_files` is
     /// what says whether a preview is required, computed in `lsp_core`.
@@ -1653,6 +1705,39 @@ mod ffi {
             case_sensitive: bool,
         );
 
+        /// F3-15: build the diff preview `replaceInFiles` would produce for
+        /// the same `edits`, without writing anything. Answers on
+        /// `replacePreviewReady` (with the paths that got a preview) or
+        /// `replacePreviewFailed`; each path's text and hunks are then read
+        /// with `replacePreviewDiff`/`replacePreviewHunks`/
+        /// `replacePreviewSpans`.
+        #[qinvokable]
+        #[cxx_name = "previewReplacements"]
+        fn preview_replacements(
+            self: Pin<&mut SearchModel>,
+            edits: Vec<FfiFileReplacement>,
+            pattern: &QString,
+            replacement: &QString,
+            is_regex: bool,
+            case_sensitive: bool,
+        );
+
+        /// The before/after text of one file from the last
+        /// `previewReplacements` answer. Empty when `path` was not in it.
+        #[qinvokable]
+        #[cxx_name = "replacePreviewDiff"]
+        fn replace_preview_diff(self: &SearchModel, path: &QString) -> FfiFileDiff;
+
+        /// The line hunks for the same file `replacePreviewDiff` describes.
+        #[qinvokable]
+        #[cxx_name = "replacePreviewHunks"]
+        fn replace_preview_hunks(self: &SearchModel, path: &QString) -> Vec<FfiHunk>;
+
+        /// The intra-line spans for the same file.
+        #[qinvokable]
+        #[cxx_name = "replacePreviewSpans"]
+        fn replace_preview_spans(self: &SearchModel, path: &QString) -> Vec<FfiInlineSpan>;
+
         /// RF12 — the declaration of the symbol at `byte_offset`, rendered
         /// as a tooltip.
         ///
@@ -1808,6 +1893,21 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "replaceFailed"]
         fn replace_failed(self: Pin<&mut SearchModel>, message: QString);
+
+        /// A `previewReplacements` call finished: `paths` names every file
+        /// that got a preview, in the order `SearchResultsPanel` should show
+        /// them. A file the spans no longer fit (changed since the search)
+        /// is left out, the same way `replaceFinished`'s `skipped_files`
+        /// leaves it out of the write.
+        #[qsignal]
+        #[cxx_name = "replacePreviewReady"]
+        fn replace_preview_ready(self: Pin<&mut SearchModel>, paths: QStringList);
+
+        /// Emitted instead of `replacePreviewReady` when the preview could
+        /// not run at all (no index built yet, or an invalid pattern).
+        #[qsignal]
+        #[cxx_name = "replacePreviewFailed"]
+        fn replace_preview_failed(self: Pin<&mut SearchModel>, message: QString);
 
         /// A batch of Find-in-Files matches for `generation`, as
         /// `FfiHitKind::Text` hits: `line` is 1-based, `start`/`end` are
@@ -2781,6 +2881,27 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "pendingOps"]
         fn pending_ops(self: &LanguageService) -> Vec<FfiResourceOp>;
+
+        /// The before/after text of one file in the pending refactoring, for
+        /// `RefactorPreviewDialog`'s `DiffView` panel (F3-15). `path` must be
+        /// one `pendingEdits()` named, and the preview only asks for one
+        /// when that file's row is selected — computing every file's diff
+        /// up front would cost more than most refactorings ever need shown.
+        /// Empty texts when there is nothing pending or `path` is not in it.
+        #[qinvokable]
+        #[cxx_name = "pendingFileDiff"]
+        fn pending_file_diff(self: &LanguageService, path: &QString) -> FfiFileDiff;
+
+        /// The line hunks for the same file `pendingFileDiff` describes.
+        #[qinvokable]
+        #[cxx_name = "pendingFileHunks"]
+        fn pending_file_hunks(self: &LanguageService, path: &QString) -> Vec<FfiHunk>;
+
+        /// The intra-line spans for the same file, one entry per changed
+        /// word in every modified hunk.
+        #[qinvokable]
+        #[cxx_name = "pendingFileSpans"]
+        fn pending_file_spans(self: &LanguageService, path: &QString) -> Vec<FfiInlineSpan>;
 
         /// Leave `path` out of the pending refactoring — the user unticked
         /// it in the preview. Call before `takePendingEdits`; excluding a

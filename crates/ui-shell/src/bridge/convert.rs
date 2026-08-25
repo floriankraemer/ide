@@ -401,3 +401,77 @@ pub(crate) fn symbol_kind_word(kind: Option<syntax_core::SymbolKind>) -> &'stati
 pub(crate) fn load_settings() -> app_config::Settings {
     app_config::load(&app_core::resolve_config_dir()).unwrap_or_default()
 }
+
+/// `editor_core::diff::Hunk`s as `DiffView`'s change ribbon reads them
+/// (F3-13). Shared by the refactor-preview and Replace-in-Files diff
+/// panels — both hand `editor_core` hunks to the same widget.
+pub(crate) fn to_ffi_hunks(hunks: &[editor_core::diff::Hunk]) -> Vec<ffi::FfiHunk> {
+    hunks
+        .iter()
+        .map(|hunk| ffi::FfiHunk {
+            old_start: hunk.old.start as u32,
+            old_len: (hunk.old.end - hunk.old.start) as u32,
+            new_start: hunk.new.start as u32,
+            new_len: (hunk.new.end - hunk.new.start) as u32,
+            kind: match hunk.kind {
+                editor_core::diff::HunkKind::Added => ffi::FfiHunkKind::Added,
+                editor_core::diff::HunkKind::Removed => ffi::FfiHunkKind::Removed,
+                editor_core::diff::HunkKind::Modified => ffi::FfiHunkKind::Modified,
+            },
+        })
+        .collect()
+}
+
+/// Intra-line spans for every modified hunk in `hunks`, as `DiffView`'s
+/// `QTextEdit::ExtraSelection`s read them (F3-13): `start`/`end` are UTF-16
+/// code units into the named line, matching `FfiTextEdit`'s convention.
+///
+/// `editor_core::diff::diff_inline` answers in byte offsets, which is the
+/// right unit for slicing `old_text`/`new_text` themselves but the wrong one
+/// for a `QString`; the conversion happens once, here, rather than in every
+/// caller that would otherwise get it wrong the way `apply_to_text`'s own
+/// doc comment warns about.
+pub(crate) fn to_ffi_inline_spans(
+    old_text: &str,
+    new_text: &str,
+    hunks: &[editor_core::diff::Hunk],
+) -> Vec<ffi::FfiInlineSpan> {
+    let old_lines: Vec<&str> = old_text.lines().collect();
+    let new_lines: Vec<&str> = new_text.lines().collect();
+    let mut out = Vec::new();
+    for hunk in hunks {
+        let inline = editor_core::diff::diff_inline(old_text, new_text, hunk);
+        for span in &inline.removed {
+            let Some(line) = old_lines.get(span.line) else {
+                continue;
+            };
+            out.push(ffi::FfiInlineSpan {
+                side: ffi::FfiDiffSide::Old,
+                line: span.line as u32,
+                start: utf16_offset(line, span.range.start),
+                end: utf16_offset(line, span.range.end),
+            });
+        }
+        for span in &inline.added {
+            let Some(line) = new_lines.get(span.line) else {
+                continue;
+            };
+            out.push(ffi::FfiInlineSpan {
+                side: ffi::FfiDiffSide::New,
+                line: span.line as u32,
+                start: utf16_offset(line, span.range.start),
+                end: utf16_offset(line, span.range.end),
+            });
+        }
+    }
+    out
+}
+
+/// The UTF-16 code-unit count of `line[..byte_offset]`. `byte_offset` is
+/// always one `diff_inline` produced, so it is always a char boundary.
+fn utf16_offset(line: &str, byte_offset: usize) -> u32 {
+    line[..byte_offset.min(line.len())]
+        .chars()
+        .map(|c| c.len_utf16() as u32)
+        .sum()
+}
