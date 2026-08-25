@@ -550,6 +550,63 @@ mod ffi {
         disabled_reason: QString,
     }
 
+    /// The overload the tip shows (F2-9), reduced from `lsp_core::
+    /// SignatureHelp`'s full overload set to what `signature_tip.cpp` paints:
+    /// `resolved_signature()`'s label and doc, and `resolved_parameter()`'s
+    /// span within that label to embolden. `signature_index`/`signature_
+    /// count` are only for the "(1/3)" overload indicator; cycling overloads
+    /// is not F2's scope. `has_signature` false means nothing to show — the
+    /// default value, so a tip that never asked reads as empty rather than
+    /// as overload zero of nothing.
+    #[derive(Default)]
+    struct FfiSignatureHelp {
+        has_signature: bool,
+        label: QString,
+        documentation: QString,
+        has_active_parameter: bool,
+        parameter_start: u32,
+        parameter_end: u32,
+        signature_index: u32,
+        signature_count: u32,
+    }
+
+    /// What kind of occurrence a document highlight is, 1:1 with
+    /// `lsp_core::HighlightKind`.
+    enum FfiHighlightKind {
+        Text,
+        Read,
+        Write,
+    }
+
+    /// One occurrence of the symbol under the caret (F2-9), 1:1 with
+    /// `lsp_core::DocumentHighlight`. Same units as `FfiTextEdit`: 0-based
+    /// lines, UTF-16 characters.
+    struct FfiDocumentHighlight {
+        kind: FfiHighlightKind,
+        start_line: u32,
+        start_character: u32,
+        end_line: u32,
+        end_character: u32,
+    }
+
+    /// What an inlay hint stands for, 1:1 with `lsp_core::InlayHintKind` —
+    /// the view paints a type hint and a parameter-name hint differently.
+    enum FfiInlayHintKind {
+        Type,
+        Parameter,
+        Other,
+    }
+
+    /// One inlay hint (F2-9), 1:1 with `lsp_core::InlayHint`.
+    struct FfiInlayHint {
+        line: u32,
+        character: u32,
+        label: QString,
+        kind: FfiInlayHintKind,
+        padding_left: bool,
+        padding_right: bool,
+    }
+
     /// How many diagnostics of each severity exist right now, 1:1 with
     /// `lsp_core::DiagnosticCounts` — for the status-bar counter and the
     /// Problems panel's filter buttons.
@@ -2562,6 +2619,91 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "applyIntention"]
         fn apply_intention(self: Pin<&mut LanguageService>, index: u32, buffer_revision: i64);
+
+        /// F2-8's remaining LSP surface: organize imports for a whole
+        /// document. `last_line` is the document's last line (the view's own
+        /// `QTextDocument::blockCount() - 1`, exactly as `codeActionsAt`'s
+        /// range comes from the view). Applies through the same
+        /// pending-refactor protocol as `applyCodeAction`, or reports
+        /// `refactorFailed` when the server has nothing to organize.
+        #[qinvokable]
+        #[cxx_name = "organizeImports"]
+        fn organize_imports(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            last_line: u32,
+            buffer_revision: i64,
+        );
+
+        /// F2-9 — signature help for a call. `text` and `byte_offset` are
+        /// the live buffer and the caret's byte offset in it, per §1: the
+        /// call-site scan (`lsp_core::signature_help::call_site_at`) needs
+        /// the surrounding text, not just a position. `explicit` is
+        /// Ctrl+P; `showing` is whether a tip is already up, which decides
+        /// whether an ordinary keystroke is worth asking again over.
+        /// Answers on `signatureHelpReady` — including to say "nothing here
+        /// any more", which is how the tip knows to close.
+        #[qinvokable]
+        #[cxx_name = "requestSignatureHelp"]
+        fn request_signature_help(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            text: &QString,
+            byte_offset: u64,
+            explicit_request: bool,
+            showing: bool,
+        );
+
+        #[qsignal]
+        #[cxx_name = "signatureHelpReady"]
+        fn signature_help_ready(self: Pin<&mut LanguageService>);
+
+        /// The overload `requestSignatureHelp` last resolved, or the default
+        /// (`has_signature: false`) when there is nothing to show.
+        #[qinvokable]
+        #[cxx_name = "signatureHelp"]
+        fn signature_help(self: &LanguageService) -> FfiSignatureHelp;
+
+        /// F2-9 — every occurrence of the symbol under the caret in this
+        /// file, for `signature_tip.cpp`'s occurrence painting. Answers on
+        /// `documentHighlightsReady`.
+        #[qinvokable]
+        #[cxx_name = "requestDocumentHighlights"]
+        fn request_document_highlights(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            line: u32,
+            character: u32,
+        );
+
+        #[qsignal]
+        #[cxx_name = "documentHighlightsReady"]
+        fn document_highlights_ready(self: Pin<&mut LanguageService>);
+
+        #[qinvokable]
+        #[cxx_name = "documentHighlights"]
+        fn document_highlights(self: &LanguageService) -> Vec<FfiDocumentHighlight>;
+
+        /// F2-9 — inlay hints for the visible lines, inclusive. There is no
+        /// whole-document form on purpose (`lsp_core::inlay_hint`'s own
+        /// doc): a 10,000-line file must not be asked for 10,000 hints to
+        /// paint fifty. Answers on `inlayHintsReady`.
+        #[qinvokable]
+        #[cxx_name = "requestInlayHints"]
+        fn request_inlay_hints(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            first_line: u32,
+            last_line: u32,
+        );
+
+        #[qsignal]
+        #[cxx_name = "inlayHintsReady"]
+        fn inlay_hints_ready(self: Pin<&mut LanguageService>);
+
+        #[qinvokable]
+        #[cxx_name = "inlayHints"]
+        fn inlay_hints(self: &LanguageService) -> Vec<FfiInlayHint>;
 
         /// RF8 — rename the symbol at a position.
         ///
