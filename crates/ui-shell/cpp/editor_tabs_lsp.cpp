@@ -4,6 +4,7 @@
 #include "find_bar.h"
 #include "intention_bulb.h"
 #include "problems_panel.h"
+#include "signature_tip.h"
 #include "syntax_highlighter.h"
 
 #include <QAction>
@@ -11,6 +12,7 @@
 #include <QHash>
 #include <QMenu>
 #include <QPlainTextEdit>
+#include <QScrollBar>
 #include <QTabWidget>
 #include <QTextBlock>
 #include <QTextCursor>
@@ -199,6 +201,105 @@ void EditorTabs::requestIntentionsFor(CodeEditor *editor, bool explicitRequest)
     intentionsDocPos_ = position;
     intentionsPending_ = explicitRequest;
     languageService_->requestIntentions(path, at.first, at.second);
+    languageService_->requestDocumentHighlights(path, at.first, at.second);
+}
+
+void EditorTabs::onDocumentHighlightsReady()
+{
+    if (!intentionsEditor_) {
+        return;
+    }
+    QVector<OccurrenceSpan> spans;
+    const QTextDocument *document = intentionsEditor_->document();
+    for (const FfiDocumentHighlight &highlight : languageService_->documentHighlights()) {
+        const int start = positionAt(document, highlight.start_line, highlight.start_character);
+        const int end = positionAt(document, highlight.end_line, highlight.end_character);
+        if (end <= start) {
+            continue;
+        }
+        spans.append(OccurrenceSpan{start, end, highlight.kind == FfiHighlightKind::Write});
+    }
+    intentionsEditor_->setOccurrenceSpans(spans);
+}
+
+void EditorTabs::requestSignatureHelpFor(CodeEditor *editor, bool explicitRequest)
+{
+    const QString path = editor->property("lspPath").toString();
+    if (path.isEmpty()) {
+        return;
+    }
+    signatureHelpEditor_ = editor;
+    languageService_->requestSignatureHelp(path, editor->toPlainText(),
+                                           static_cast<quint64>(editor->textCursor().position()),
+                                           explicitRequest, signatureTipVisible_);
+}
+
+void EditorTabs::requestSignatureHelpNow()
+{
+    auto *editor = qobject_cast<CodeEditor *>(currentEditor());
+    if (!editor) {
+        return;
+    }
+    requestSignatureHelpFor(editor, true);
+}
+
+void EditorTabs::organizeImports()
+{
+    auto *editor = qobject_cast<CodeEditor *>(currentEditor());
+    const QString path = currentPath();
+    if (!editor || path.isEmpty()) {
+        return;
+    }
+    languageService_->organizeImports(
+      path, static_cast<quint32>(editor->document()->blockCount() - 1), documentRevision());
+}
+
+void EditorTabs::onSignatureHelpReady()
+{
+    if (!signatureHelpEditor_) {
+        return;
+    }
+    const FfiSignatureHelp help = languageService_->signatureHelp();
+    signatureTipVisible_ = help.has_signature;
+    if (!help.has_signature) {
+        hideSignatureTip();
+        return;
+    }
+    const QRect rect = signatureHelpEditor_->cursorRect();
+    showSignatureTip(signatureHelpEditor_,
+                     signatureHelpEditor_->viewport()->mapToGlobal(QPoint(rect.left(), rect.top())),
+                     help);
+}
+
+void EditorTabs::requestInlayHintsFor(CodeEditor *editor)
+{
+    if (!editor->inlayHintsEnabled()) {
+        return;
+    }
+    const QString path = editor->property("lspPath").toString();
+    if (path.isEmpty()) {
+        return;
+    }
+    inlayHintsEditor_ = editor;
+    const int firstLine = editor->cursorForPosition(QPoint(0, 0)).blockNumber();
+    const int lastLine =
+      editor->cursorForPosition(QPoint(0, editor->viewport()->height())).blockNumber();
+    languageService_->requestInlayHints(path, static_cast<quint32>(firstLine),
+                                        static_cast<quint32>(lastLine));
+}
+
+void EditorTabs::onInlayHintsReady()
+{
+    if (!inlayHintsEditor_) {
+        return;
+    }
+    QVector<InlayHintSpan> hints;
+    const QTextDocument *document = inlayHintsEditor_->document();
+    for (const FfiInlayHint &hint : languageService_->inlayHints()) {
+        hints.append(InlayHintSpan{positionAt(document, hint.line, hint.character),
+                                   QString(hint.label), hint.padding_left, hint.padding_right});
+    }
+    inlayHintsEditor_->setInlayHints(hints);
 }
 
 void EditorTabs::onIntentionsReady()
@@ -382,6 +483,7 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
     editor->setPlainText(docManager_->tabContent(tabId));
     editor->document()->setModified(false);
     editor->setFont(editorFont_);
+    editor->setInlayHintsEnabled(inlayHintsEnabled_);
     applyEditorAppearance(editor);
     // Y2: self-parents to editor->document(), no manual lifetime
     // management needed. Plain text (a file no language claims) yields
@@ -562,6 +664,10 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
                 intentionBulb_->hide();
             }
             intentionsTimer->start();
+            // F2-11: signature help tracks typing live rather than waiting
+            // for the caret to settle — `should_request`/`should_dismiss`
+            // decide whether this keystroke means anything to it.
+            requestSignatureHelpFor(editor);
         }
     });
 
@@ -593,14 +699,23 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
         if (!current.isEmpty()) {
             languageService_->documentChanged(current, editor->toPlainText());
         }
+        // F2-11: a content change shifts every hint position on the lines
+        // after it, so the visible set is asked for again on the same
+        // debounce rather than a fourth timer.
+        requestInlayHintsFor(editor);
     });
     connect(editor->document(), &QTextDocument::contentsChanged, changeTimer,
              qOverload<>(&QTimer::start));
+    // F2-11: scrolling changes which lines are visible without touching the
+    // document or the caret, so it needs its own trigger.
+    connect(editor->verticalScrollBar(), &QScrollBar::valueChanged, this,
+            [this, editor]() { requestInlayHintsFor(editor); });
 
     group->addTab(editor, title);
     renderTabText(group, group->indexOf(editor), title, false);
     markTab("tab_added", tabId, group, group->indexOf(editor), title);
     applyDiagnostics();
+    requestInlayHintsFor(editor);
 }
 
 } // namespace ui_shell

@@ -210,6 +210,22 @@ public:
     // lands, whether or not the bulb ends up shown for it.
     void showIntentionsNow();
 
+    // F2-11: code.toggleInlayHints. Applies to every open editor
+    // immediately (S2's live-apply convention — see setEditorFont) and to
+    // every editor opened afterward.
+    void setInlayHintsEnabled(bool enabled);
+    bool inlayHintsEnabled() const { return inlayHintsEnabled_; }
+
+    // F2-11: Ctrl+P. Asks again with `explicit_request = true`, which is
+    // what lets it work with the caret sitting still on an argument the
+    // trigger character for was typed several keystrokes ago.
+    void requestSignatureHelpNow();
+
+    // F2-9's `organizeImports`, over whatever tab is current.
+    // `documentRevision()`/`currentPath()` are what every other refactor
+    // gesture already reads from here.
+    void organizeImports();
+
     // A protocol position as a document position. The inverse of
     // `lspPosition`, and a re-expression for the same reason: both count
     // UTF-16 code units within a block.
@@ -482,6 +498,9 @@ private:
     // explicit request — turned into the popup without asking the caret
     // again (it may have moved on to something else by the time the answer
     // lands, though a moved caret already cancelled this request first).
+    // F2-11 piggybacks document highlights on the same caret-settle tick —
+    // both are "what does the caret's position mean" questions, asked
+    // about the same editor and position, so one debounce answers both.
     void requestIntentionsFor(CodeEditor *editor, bool explicitRequest);
 
     // `LanguageService::intentionsReady`. Empty hides the bulb; otherwise
@@ -491,6 +510,26 @@ private:
 
     // The grouped popup itself, shared by the bulb's click and Alt+Return.
     void showIntentionsMenu();
+
+    // F2-11: `LanguageService::documentHighlightsReady` — paint whatever
+    // came back onto the editor `requestIntentionsFor` asked about.
+    void onDocumentHighlightsReady();
+
+    // F2-11: signature help, driven straight from `cursorPositionChanged`
+    // rather than the caret-settle debounce — `should_request`/
+    // `should_dismiss` are cheap and the tip has to track typing live, not
+    // after it pauses. `showing` is `signatureTipVisible_`; `explicitRequest`
+    // is Ctrl+P's, which asks again even without a trigger character.
+    void requestSignatureHelpFor(CodeEditor *editor, bool explicitRequest = false);
+
+    void onSignatureHelpReady();
+
+    // F2-11: inlay hints for whatever `editor` currently has visible.
+    // Called on scroll and after a document change settles; a no-op when
+    // the toggle is off.
+    void requestInlayHintsFor(CodeEditor *editor);
+
+    void onInlayHintsReady();
 
     // Public for the same reason onBufferEditedExternally is: an agent's
     // tool can open a tab (AiChat::toolOpenedTab), and that relay lives in
@@ -556,6 +595,15 @@ private:
     CodeEditor *intentionsEditor_ = nullptr;
     int intentionsDocPos_ = 0;
     bool intentionsPending_ = false;
+
+    // F2-11: the editor a signature-help/inlay-hints request was last made
+    // about — same reasoning as `intentionsEditor_`, one relevant answer at
+    // a time. `signatureTipVisible_` is what `requestSignatureHelpFor`
+    // hands `LanguageService` as `showing`.
+    CodeEditor *signatureHelpEditor_ = nullptr;
+    bool signatureTipVisible_ = false;
+    CodeEditor *inlayHintsEditor_ = nullptr;
+    bool inlayHintsEnabled_ = false;
 };
 
 } // namespace ui_shell

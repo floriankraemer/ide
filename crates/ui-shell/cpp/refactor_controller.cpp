@@ -386,6 +386,32 @@ void RefactorController::buildCodeActions(QMenu *refactorMenu, AppSettings *appS
                       tr("Show Intention Actions"), appSettings, actions);
     connect(showIntentionsAction, &QAction::triggered, this,
             [this]() { editorTabs_->showIntentionsNow(); });
+
+    // F2-11: Ctrl+P. The tip's own content is driven by typing; this is
+    // only for asking again explicitly with the caret sitting still — the
+    // same "showing" flag typing uses, so an already-open tip does not
+    // flash closed and reopen for the request it was already answering.
+    QAction *parameterInfoAction = registerAction(
+      refactorMenu, QStringLiteral("code.parameterInfo"), tr("Parameter Info"), appSettings,
+      actions);
+    connect(parameterInfoAction, &QAction::triggered, this,
+            [this]() { editorTabs_->requestSignatureHelpNow(); });
+
+    QAction *optimizeImportsAction = registerAction(
+      refactorMenu, QStringLiteral("code.optimizeImports"), tr("Optimize Imports"), appSettings,
+      actions);
+    connect(optimizeImportsAction, &QAction::triggered, this,
+            [this]() { editorTabs_->organizeImports(); });
+
+    // F2-11: off by default — a hint is text the server invented, not text
+    // in the file (`code_editor.h`'s own reasoning for `inlayHintsEnabled_`).
+    QAction *toggleInlayHintsAction =
+      registerAction(refactorMenu, QStringLiteral("code.toggleInlayHints"),
+                      tr("Show Inlay Hints"), appSettings, actions);
+    toggleInlayHintsAction->setCheckable(true);
+    toggleInlayHintsAction->setChecked(editorTabs_->inlayHintsEnabled());
+    connect(toggleInlayHintsAction, &QAction::toggled, this,
+            [this](bool checked) { editorTabs_->setInlayHintsEnabled(checked); });
 }
 
 } // namespace ui_shell

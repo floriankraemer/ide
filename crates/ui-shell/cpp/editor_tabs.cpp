@@ -172,11 +172,17 @@ EditorTabs::EditorTabs(DocumentManager *docManager, LanguageService *languageSer
         }
     });
 
-    // F2-10: an intentions answer landed. Only a still-current one is ever
-    // signalled (`lsp_core::RequestTracker`), so this only has to decide
-    // where to put it — never whether it is still wanted.
+    // F2-10/F2-11: every answer landed. Only a still-current one is ever
+    // signalled (`lsp_core::RequestTracker`), so each of these only has to
+    // decide where to put it — never whether it is still wanted.
     connect(languageService_, &LanguageService::intentionsReady, this,
             &EditorTabs::onIntentionsReady);
+    connect(languageService_, &LanguageService::documentHighlightsReady, this,
+            &EditorTabs::onDocumentHighlightsReady);
+    connect(languageService_, &LanguageService::signatureHelpReady, this,
+            &EditorTabs::onSignatureHelpReady);
+    connect(languageService_, &LanguageService::inlayHintsReady, this,
+            &EditorTabs::onInlayHintsReady);
 
     activeGroup_ = makeGroup();
     root_->addWidget(activeGroup_);
@@ -528,6 +534,21 @@ void EditorTabs::setEditorFont(const QFont &font)
     forEachHexViewer([&font](HexViewer *viewer) {
         viewer->setFont(font);
         viewer->refreshMetrics();
+    });
+}
+
+void EditorTabs::setInlayHintsEnabled(bool enabled)
+{
+    inlayHintsEnabled_ = enabled;
+    forEachEditor([this, enabled](QPlainTextEdit *editor) {
+        auto *codeEditor = qobject_cast<CodeEditor *>(editor);
+        if (!codeEditor) {
+            return;
+        }
+        codeEditor->setInlayHintsEnabled(enabled);
+        if (enabled) {
+            requestInlayHintsFor(codeEditor);
+        }
     });
 }
 

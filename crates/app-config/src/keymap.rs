@@ -211,6 +211,24 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "Alt+Return",
     },
     ActionDef {
+        id: "code.parameterInfo",
+        label: "Parameter Info",
+        category: "Code",
+        default_shortcut: "Ctrl+P",
+    },
+    ActionDef {
+        id: "code.optimizeImports",
+        label: "Optimize Imports",
+        category: "Code",
+        default_shortcut: "Ctrl+Alt+O",
+    },
+    ActionDef {
+        id: "code.toggleInlayHints",
+        label: "Show Inlay Hints",
+        category: "Code",
+        default_shortcut: "",
+    },
+    ActionDef {
         id: "view.classView",
         label: "Class View",
         category: "View",
