@@ -172,6 +172,12 @@ EditorTabs::EditorTabs(DocumentManager *docManager, LanguageService *languageSer
         }
     });
 
+    // F2-10: an intentions answer landed. Only a still-current one is ever
+    // signalled (`lsp_core::RequestTracker`), so this only has to decide
+    // where to put it — never whether it is still wanted.
+    connect(languageService_, &LanguageService::intentionsReady, this,
+            &EditorTabs::onIntentionsReady);
+
     activeGroup_ = makeGroup();
     root_->addWidget(activeGroup_);
 }

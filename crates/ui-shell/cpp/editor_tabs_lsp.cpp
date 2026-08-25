@@ -2,9 +2,12 @@
 
 #include "code_editor.h"
 #include "find_bar.h"
+#include "intention_bulb.h"
 #include "problems_panel.h"
 #include "syntax_highlighter.h"
 
+#include <QAction>
+#include <QCursor>
 #include <QHash>
 #include <QMenu>
 #include <QPlainTextEdit>
@@ -173,6 +176,95 @@ void EditorTabs::jumpToMatchingBracket()
     QTextCursor cursor = editor->textCursor();
     cursor.setPosition(static_cast<int>(target));
     editor->setTextCursor(cursor);
+}
+
+void EditorTabs::showIntentionsNow()
+{
+    auto *editor = qobject_cast<CodeEditor *>(currentEditor());
+    if (!editor) {
+        return;
+    }
+    requestIntentionsFor(editor, true);
+}
+
+void EditorTabs::requestIntentionsFor(CodeEditor *editor, bool explicitRequest)
+{
+    const QString path = editor->property("lspPath").toString();
+    if (path.isEmpty()) {
+        return;
+    }
+    const int position = editor->textCursor().position();
+    const QPair<quint32, quint32> at = lspPosition(editor, position);
+    intentionsEditor_ = editor;
+    intentionsDocPos_ = position;
+    intentionsPending_ = explicitRequest;
+    languageService_->requestIntentions(path, at.first, at.second);
+}
+
+void EditorTabs::onIntentionsReady()
+{
+    const bool wasPending = intentionsPending_;
+    intentionsPending_ = false;
+    if (!intentionsEditor_) {
+        return;
+    }
+    const ::rust::Vec<FfiIntention> items = languageService_->intentions();
+    if (items.empty()) {
+        if (intentionBulb_) {
+            intentionBulb_->hide();
+        }
+        return;
+    }
+
+    if (!intentionBulb_) {
+        intentionBulb_ = new IntentionBulb(intentionsEditor_->viewport());
+        connect(intentionBulb_, &IntentionBulb::activated, this,
+                [this]() { showIntentionsMenu(); });
+    } else {
+        intentionBulb_->setParent(intentionsEditor_->viewport());
+    }
+    QTextCursor cursor(intentionsEditor_->document());
+    cursor.setPosition(intentionsDocPos_);
+    const QRect caretRect = intentionsEditor_->cursorRect(cursor);
+    intentionBulb_->move(2, caretRect.top());
+    intentionBulb_->show();
+    intentionBulb_->raise();
+
+    if (wasPending) {
+        showIntentionsMenu();
+    }
+}
+
+void EditorTabs::showIntentionsMenu()
+{
+    if (!intentionsEditor_) {
+        return;
+    }
+    const ::rust::Vec<FfiIntention> items = languageService_->intentions();
+    if (items.empty()) {
+        return;
+    }
+    QMenu menu(window_);
+    FfiIntentionGroup lastGroup = items[0].group;
+    for (std::size_t i = 0; i < items.size(); ++i) {
+        if (i > 0 && items[i].group != lastGroup) {
+            menu.addSeparator();
+        }
+        lastGroup = items[i].group;
+        const QString reason = items[i].disabled_reason;
+        QAction *entry = menu.addAction(reason.isEmpty()
+                                          ? QString(items[i].title)
+                                          : tr("%1 — %2").arg(QString(items[i].title), reason));
+        entry->setEnabled(reason.isEmpty());
+        const quint32 index = static_cast<quint32>(i);
+        connect(entry, &QAction::triggered, this, [this, index]() {
+            languageService_->applyIntention(index, documentRevision());
+        });
+    }
+    const QPoint pos = intentionBulb_ && intentionBulb_->isVisible()
+      ? intentionBulb_->mapToGlobal(QPoint(0, intentionBulb_->height()))
+      : QCursor::pos();
+    menu.exec(pos);
 }
 
 void EditorTabs::runEditorOp(
@@ -435,7 +527,20 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
     // M4: unlike the status bar, every cursor move is forwarded to
     // AppSession regardless of visibility, so get_cursor_position stays
     // accurate for a tab MCP asks about while it's in the background.
-    connect(editor, &QPlainTextEdit::cursorPositionChanged, this, [this, editor, tabId]() {
+    // F2-10: intentions are caret-scoped, so every move invalidates
+    // whatever was asked for the caret's previous spot — a stale bulb
+    // sitting on a line the caret already left is a bug, not a cosmetic
+    // nit — and, once the caret settles, is worth asking about again.
+    // 150ms matches §5's debounce policy; not asked at all for a tab that
+    // is not the one visible.
+    auto *intentionsTimer = new QTimer(editor);
+    intentionsTimer->setSingleShot(true);
+    intentionsTimer->setInterval(150);
+    connect(intentionsTimer, &QTimer::timeout, this, [this, editor]() {
+        requestIntentionsFor(editor, false);
+    });
+    connect(editor, &QPlainTextEdit::cursorPositionChanged, this,
+            [this, editor, tabId, intentionsTimer]() {
         const QTextCursor cursor = editor->textCursor();
         // F1-15: keep `editor_ops` told where the one caret is, so Ctrl+D
         // and the line operations act on what the user can see. Skipped
@@ -452,6 +557,11 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
                                         static_cast<quint32>(cursor.columnNumber()));
         if (activeGroup_ && activeGroup_->currentWidget() == editor) {
             updateStatusBar();
+            languageService_->cancelIntentions();
+            if (intentionBulb_ && intentionsEditor_ == editor) {
+                intentionBulb_->hide();
+            }
+            intentionsTimer->start();
         }
     });
 

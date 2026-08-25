@@ -25,6 +25,7 @@ namespace ui_shell {
 class CodeEditor;
 class FindBar;
 class HexViewer;
+class IntentionBulb;
 
 // app_core::TabKind's stable code for a binary tab (ADR-0020).
 constexpr int kTabKindBinary = 1;
@@ -202,6 +203,12 @@ public:
     // leave it where it is when it is not on one. Which bracket answers
     // which is `edit_ops::brackets`' answer.
     void jumpToMatchingBracket();
+
+    // F2-10: Alt+Return / code.showIntentions. Asks again right now,
+    // bypassing the caret-settle debounce that drives the bulb — the user
+    // asked explicitly — and opens the grouped popup as soon as the answer
+    // lands, whether or not the bulb ends up shown for it.
+    void showIntentionsNow();
 
     // A protocol position as a document position. The inverse of
     // `lspPosition`, and a re-expression for the same reason: both count
@@ -469,6 +476,22 @@ private:
 
     void addHexTab(QTabWidget *group, quint64 tabId, const QString &title);
 
+    // F2-10: the caret-settle debounce fired, or Alt+Return asked directly
+    // (`explicitRequest`). Remembers which editor and document position the
+    // request is about, so the answer can be positioned and — for an
+    // explicit request — turned into the popup without asking the caret
+    // again (it may have moved on to something else by the time the answer
+    // lands, though a moved caret already cancelled this request first).
+    void requestIntentionsFor(CodeEditor *editor, bool explicitRequest);
+
+    // `LanguageService::intentionsReady`. Empty hides the bulb; otherwise
+    // positions it at the request's caret line and, for an explicit
+    // request, opens the popup immediately.
+    void onIntentionsReady();
+
+    // The grouped popup itself, shared by the bulb's click and Alt+Return.
+    void showIntentionsMenu();
+
     // Public for the same reason onBufferEditedExternally is: an agent's
     // tool can open a tab (AiChat::toolOpenedTab), and that relay lives in
     // buildMainWindow beside MCP's.
@@ -521,6 +544,18 @@ private:
     // Rust just computed. Same arrangement FindBar uses while it is the one
     // editing the document.
     bool syncingCarets_ = false;
+
+    // F2-10: one bulb, reparented to whichever editor's viewport it is
+    // currently shown over — like the hover tooltip, only one is ever
+    // relevant at a time. `intentionsEditor_`/`intentionsDocPos_` are the
+    // editor and document position the *last request* was made against,
+    // which is what its answer is positioned against; `intentionsPending_`
+    // is set only by an explicit Alt+Return, so a background bulb refresh
+    // never pops the menu the user didn't ask for.
+    IntentionBulb *intentionBulb_ = nullptr;
+    CodeEditor *intentionsEditor_ = nullptr;
+    int intentionsDocPos_ = 0;
+    bool intentionsPending_ = false;
 };
 
 } // namespace ui_shell

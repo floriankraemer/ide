@@ -89,7 +89,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F2-7 — organize imports | done | 264f3b3 (#88) |
 | F2-8 — bridge: intentions | done | 8554431 |
 | F2-9 — bridge: signature help, highlights, hints | done | a3133ba (also organize imports, F2-8's remainder) |
-| F2-10 — view: bulb and popup | todo |  |
+| F2-10 — view: bulb and popup | done | fca1d99 |
 | F2-11 — view: signature tip, highlights, hints | todo |  |
 | F2-12 — E2E + its ADR + docs | todo | ADR number to be reallocated, see below |
 

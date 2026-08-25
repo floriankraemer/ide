@@ -205,6 +205,12 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "Ctrl+Alt+L",
     },
     ActionDef {
+        id: "code.showIntentions",
+        label: "Show Intention Actions",
+        category: "Code",
+        default_shortcut: "Alt+Return",
+    },
+    ActionDef {
         id: "view.classView",
         label: "Class View",
         category: "View",

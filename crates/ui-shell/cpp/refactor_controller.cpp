@@ -2,6 +2,7 @@
 
 #include "e2e_mark.h"
 #include "editor_tabs.h"
+#include "keymap_page.h"
 
 #include <QAction>
 #include <QCursor>
@@ -362,6 +363,29 @@ int RefactorController::countBufferFiles(const ::rust::Vec<FfiTextEdit> &edits)
 void RefactorController::report(const QString &message)
 {
     window_->statusBar()->showMessage(message, 6000);
+}
+
+void RefactorController::buildCodeActions(QMenu *refactorMenu, AppSettings *appSettings,
+                                          QHash<QString, QAction *> &actions)
+{
+    refactorMenu->addSeparator();
+    QAction *reformatAction = registerAction(refactorMenu, QStringLiteral("code.reformat"),
+                                             tr("Reformat Code"), appSettings, actions);
+    connect(reformatAction, &QAction::triggered, this, [this]() {
+        const QString path = editorTabs_->currentPath();
+        if (path.isEmpty()) {
+            return;
+        }
+        languageService_->requestFormatting(path, editorTabs_->documentRevision());
+    });
+
+    // F2-10: Alt+Return. `EditorTabs` owns the bulb this shares its popup
+    // with; this only wires the shortcut to asking for it right now.
+    QAction *showIntentionsAction =
+      registerAction(refactorMenu, QStringLiteral("code.showIntentions"),
+                      tr("Show Intention Actions"), appSettings, actions);
+    connect(showIntentionsAction, &QAction::triggered, this,
+            [this]() { editorTabs_->showIntentionsNow(); });
 }
 
 } // namespace ui_shell
