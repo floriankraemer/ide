@@ -140,8 +140,8 @@ Renumbered to match §4's Task breakdown, which this table had drifted from (an 
 | F4-11 — view: run console dock | done | recorded at the end of this branch |
 | F4-12 — view: toolbar and dialog | done | recorded at the end of this branch |
 | F4-13 — view: clickable links | done | recorded at the end of this branch |
-| F4-14 — terminal multi-session (a) core | todo |  |
-| F4-15 — terminal multi-session (b) view | todo |  |
+| F4-14 — terminal multi-session (a) core | done | recorded at the end of this branch |
+| F4-15 — terminal multi-session (b) view | done | recorded at the end of this branch |
 | F4-16 — E2E + its ADR + docs | todo | ADR number to be reallocated, see below |
 
 **ADR numbering has drifted and must be reallocated.**

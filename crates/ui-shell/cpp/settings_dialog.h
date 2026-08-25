@@ -14,6 +14,7 @@ class QWidget;
 namespace ui_shell {
 
 class EditorTabs;
+class TerminalSessionsPanel;
 
 // Everything the Settings dialog talks to, in one place.
 //
@@ -47,6 +48,11 @@ struct SettingsContext
     AiChat *aiChat;
     PluginCatalog *pluginCatalog;
     UiFontTargets uiFontTargets;
+    // F4-14b: every open terminal tab's Copy/Paste shortcut is re-read from
+    // `appSettings` here on OK, rather than through `actions` — see that
+    // field's doc comment above for why a per-tab QAction can't live in a
+    // shared-by-id map.
+    TerminalSessionsPanel *terminalPanel;
 };
 
 // Settings dialog (S1: category list + stacked detail pane). One page per

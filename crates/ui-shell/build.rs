@@ -348,6 +348,9 @@ fn main() {
         .cpp_file("cpp/syntax_highlighter.cpp")
         .cpp_file("cpp/terminal_widget.h")
         .cpp_file("cpp/terminal_widget.cpp")
+        // F4-14b: the tabbed multi-session terminal dock over TerminalWidget.
+        .cpp_file("cpp/terminal_sessions_panel.h")
+        .cpp_file("cpp/terminal_sessions_panel.cpp")
         .cpp_file("cpp/hex_viewer.h")
         .cpp_file("cpp/hex_viewer.cpp")
         // The chat panel declares Q_OBJECT, so its header is listed too

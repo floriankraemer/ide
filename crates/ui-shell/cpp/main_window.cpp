@@ -31,7 +31,7 @@
 #include "settings_dialog.h"
 #include "splash_screen.h"
 #include "syntax_highlighter.h"
-#include "terminal_widget.h"
+#include "terminal_sessions_panel.h"
 #include "theme.h"
 #include "vcs_menu.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
@@ -98,7 +98,7 @@ struct CentralWidgets
     QTreeView *projectTree;
     SearchResultsPanel *searchResultsPanel;
     ClassViewPanel *classViewPanel;
-    TerminalWidget *terminalWidget;
+    TerminalSessionsPanel *terminalPanel;
     FindUsagesPanel *findUsagesPanel;
     SearchEverywhereDialog *searchEverywhereDialog;
     ProblemsPanel *problemsPanel;
@@ -110,7 +110,7 @@ struct CentralWidgets
 
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
                                    DocumentManager *docManager, AppSettings *appSettings,
-                                   SearchModel *searchModel, TerminalSession *terminalSession,
+                                   SearchModel *searchModel, TerminalSupervisor *terminalSupervisor,
                                    LanguageService *languageService, AiChat *aiChat,
                                    VcsService *vcsService, RunService *runService)
 {
@@ -212,10 +212,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     auto *searchEverywhereDialog =
       new SearchEverywhereDialog(searchModel, openAt, searchResultsPanel, window);
 
-    // Task F3: bottom dock panel, tabbed alongside Find in Files — the
-    // conventional spot for an embedded shell in JetBrains/VS-style IDEs.
-    // The widget itself only starts the PTY once it's actually shown/sized
-    // (TerminalWidget::showEvent/resizeEvent), not eagerly here.
+    // Task F3, multi-session since F4-14: bottom dock panel, tabbed alongside
+    // Find in Files. Each tab's TerminalWidget starts its own PTY once shown.
     // Task L2: the Problems panel, tabbed into the same bottom area as Find
     // in Files and Find Usages — the same "list of locations" shape, fed by
     // the language servers instead of a query.
@@ -237,9 +235,9 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     QObject::connect(languageService, &LanguageService::diagnosticsChanged, editorTabs,
                       [editorTabs]() { editorTabs->applyDiagnostics(); });
 
-    auto *terminalWidget = new TerminalWidget(terminalSession, appSettings, dockManager);
+    auto *terminalPanel = new TerminalSessionsPanel(terminalSupervisor, appSettings, dockManager);
     auto *terminalDock = new ads::CDockWidget(dockManager, QObject::tr("Terminal"));
-    terminalDock->setWidget(terminalWidget);
+    terminalDock->setWidget(terminalPanel);
     docks->registerDock(QStringLiteral("terminal"), terminalDock, ads::CenterDockWidgetArea,
                         bottomArea);
     auto *runConsolePanel = buildRunConsoleDock(dockManager, docks, bottomArea, runService, openAt);
@@ -394,7 +392,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
 
     return CentralWidgets{editorTabs,       dockManager,      docks,
                            treeView,         searchResultsPanel, classViewPanel,
-                           terminalWidget,   findUsagesPanel,  searchEverywhereDialog,
+                           terminalPanel,    findUsagesPanel,  searchEverywhereDialog,
                            problemsPanel,    aiChatPanel,      changesPanel,
                            fileHistoryPanel, runConsolePanel};
 }
@@ -445,11 +443,10 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     auto *treeModel = new ProjectTreeModel(window);
     auto *docManager = new DocumentManager(window);
     auto *searchModel = new SearchModel(window);
-    // Task F3: one terminal session for the one "Terminal" dock widget —
-    // same one-QObject-per-dock-widget shape SearchModel/DocumentManager
-    // establish above. The shell isn't spawned yet (TerminalSession::start
-    // hasn't been called) until TerminalWidget knows its own pixel size.
-    auto *terminalSession = new TerminalSession(window);
+    // Task F3, multi-session since F4-14: one supervisor for every terminal
+    // session the "Terminal" dock's tabs open (`RunService`'s N-consoles
+    // shape, applied here). No shell spawns until a tab calls `newSession()`.
+    auto *terminalSupervisor = new TerminalSupervisor(window);
     // Task L2: one language-server adapter per window, alongside the other
     // per-window QObjects. It launches nothing until a project is opened and
     // a file of a configured language is opened in it.
@@ -475,8 +472,8 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     docManager->applyMcpSettings();
     progress(3, QObject::tr("Building workspace..."));
     const CentralWidgets central =
-      buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession,
-                          languageService, aiChat, vcsService, runService);
+      buildCentralWidget(window, treeModel, docManager, appSettings, searchModel,
+                          terminalSupervisor, languageService, aiChat, vcsService, runService);
     EditorTabs *editorTabs = central.editorTabs;
     wireVcsService(vcsService, treeModel, editorTabs); // F3-12a/F3-16
 
@@ -693,12 +690,13 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     progress(4, QObject::tr("Preparing menus..."));
     auto actions = std::make_shared<QHash<QString, QAction *>>();
 
-    // The terminal's Copy/Paste are QActions on the terminal widget itself
-    // (widget-scoped shortcuts, so Ctrl+C keeps reaching the shell), but they
-    // are registered in the same map as the menu actions so Settings > Keymap
-    // lists them and applyKeymap() re-applies a rebinding without a restart.
-    actions->insert(QStringLiteral("terminal.copy"), central.terminalWidget->copyAction());
-    actions->insert(QStringLiteral("terminal.paste"), central.terminalWidget->pasteAction());
+    // The terminal's Copy/Paste are per-tab QActions (widget-scoped, so
+    // Ctrl+C keeps reaching the shell); Settings > Keymap lists them from
+    // `app_config::ACTIONS` regardless, but a single QAction* here would
+    // dangle once its tab closed, so a rebind reaches every open tab via
+    // `SettingsContext::terminalPanel`'s `reapplyKeymap()` instead. `newSession`
+    // is one QAction for the whole panel's lifetime, so it can sit here.
+    actions->insert(QStringLiteral("terminal.newSession"), central.terminalPanel->newSessionAction());
 
     QMenu *fileMenu = window->menuBar()->addMenu(QObject::tr("&File"));
     QAction *openFolderAction = registerAction(fileMenu, QStringLiteral("file.openFolder"),
@@ -759,6 +757,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
       aiChat,
       pluginCatalog,
       uiFontTargets,
+      central.terminalPanel,
     };
     QObject::connect(preferencesAction, &QAction::triggered, window,
                       [window, settingsContext]() {
@@ -910,7 +909,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
                                              QObject::tr("Terminal"), appSettings, *actions);
     QObject::connect(terminalAction, &QAction::triggered, window, [central]() {
         central.docks->show(QStringLiteral("terminal"));
-        central.terminalWidget->setFocus();
+        central.terminalPanel->focusCurrent();
     });
     // Every entry point opens the same popup, just preselected on a
     // different tab — one search surface, several doors into it.

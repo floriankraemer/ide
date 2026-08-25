@@ -404,6 +404,20 @@ pub const ACTIONS: &[ActionDef] = &[
         category: "Terminal",
         default_shortcut: "Ctrl+Shift+V",
     },
+    // F4-14b: multi-session terminal — a new tab, and (Windows-only; see
+    // `pty_core::WindowsShellKind`) picking which shell it spawns.
+    ActionDef {
+        id: "terminal.newSession",
+        label: "New Terminal Tab",
+        category: "Terminal",
+        default_shortcut: "Ctrl+Shift+T",
+    },
+    ActionDef {
+        id: "terminal.selectShell",
+        label: "Select Shell...",
+        category: "Terminal",
+        default_shortcut: "",
+    },
     // F3-19: Git v1's action set.
     ActionDef {
         id: "vcs.commit",

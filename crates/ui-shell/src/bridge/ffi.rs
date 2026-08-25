@@ -26,7 +26,7 @@ use crate::bridge::settings::{
     AiProviderEditorRust, AppSettingsRust, EditingEditorRust, KeymapEditorRust,
     LanguageCatalogRust, LanguageServerEditorRust, SyntaxColorEditorRust,
 };
-use crate::bridge::terminal::TerminalSessionRust;
+use crate::bridge::terminal::TerminalSupervisorRust;
 use crate::bridge::tree::ProjectTreeModelRust;
 use crate::bridge::vcs::VcsServiceRust;
 
@@ -2150,41 +2150,63 @@ mod ffi {
     impl cxx_qt::Threading for SearchModel {}
 
     extern "RustQt" {
-        /// Embedded terminal adapter (Task F3): owns one `pty_core::PtySession`
-        /// (a spawned shell) and one `terminal_core::TerminalEmulator` (its
-        /// VT100/grid state), same "adapter owns nothing but a handle to
-        /// Qt-free state" shape every other QObject in this file uses. Only
-        /// ever one terminal session exists today (one dock widget), same
-        /// scope as `DocumentManager`'s single shared `AppSession`.
+        /// Embedded terminal adapter (Task F4-14a): owns every open terminal
+        /// session — each a `pty_core::PtySession` (a spawned shell) plus a
+        /// `terminal_core::TerminalEmulator` (its VT100/grid state) — keyed
+        /// by a `u64` session id the view carries per tab. Same
+        /// "adapter owns nothing but a handle to Qt-free state" shape every
+        /// other QObject in this file uses, generalized from Task F3's
+        /// single-session `TerminalSession` the same way `RunService`
+        /// already owns N run consoles behind one QObject
+        /// (`bridge/run/mod.rs`).
         #[qobject]
-        type TerminalSession = super::TerminalSessionRust;
+        type TerminalSupervisor = super::TerminalSupervisorRust;
 
-        /// Spawn the shell and size both the PTY and the grid to
+        /// Allocate a new session id. The shell is not spawned yet — call
+        /// `start()` once the new tab's `TerminalWidget` knows its own pixel
+        /// size, same lazy-start rule Task F3 established.
+        #[qinvokable]
+        #[cxx_name = "newSession"]
+        fn new_session(self: Pin<&mut TerminalSupervisor>) -> u64;
+
+        /// Kill `session_id`'s shell (and everything it started —
+        /// `pty_core::PtySession::kill_tree`) and forget its state. Safe to
+        /// call on an id that was never started or is already gone.
+        #[qinvokable]
+        #[cxx_name = "closeSession"]
+        fn close_session(self: Pin<&mut TerminalSupervisor>, session_id: u64);
+
+        /// Spawn `session_id`'s shell and size both the PTY and the grid to
         /// `rows`/`cols` — call once, when `cpp/terminal_widget.cpp` first
         /// knows its pixel size (its own font-metrics-derived cell count).
         /// A background `std::thread` starts doing blocking
         /// `PtySession::read` in a loop, feeding `TerminalEmulator::feed`
-        /// and emitting `gridUpdated` after each chunk via
+        /// and emitting `gridUpdated(session_id)` after each chunk via
         /// `CxxQtThread::queue()` — the exact pattern `apply_mcp_settings`
-        /// already established. Spawn failure (e.g. no shell resolvable)
-        /// returns a typed non-zero `code` (ADR-0003); no `QString`
-        /// sentinel.
+        /// already established. Spawn failure (e.g. no shell resolvable, or
+        /// an unknown `session_id`) returns a typed non-zero `code`
+        /// (ADR-0003); no `QString` sentinel.
         #[qinvokable]
         #[cxx_name = "start"]
-        fn start(self: Pin<&mut TerminalSession>, rows: u32, cols: u32) -> FfiResult;
+        fn start(
+            self: Pin<&mut TerminalSupervisor>,
+            session_id: u64,
+            rows: u32,
+            cols: u32,
+        ) -> FfiResult;
 
         /// Forward keystrokes (already translated to the byte sequence a
-        /// shell expects by the view) to the PTY's stdin.
+        /// shell expects by the view) to `session_id`'s PTY stdin.
         #[qinvokable]
         #[cxx_name = "write"]
-        fn write(self: Pin<&mut TerminalSession>, input: &QString);
+        fn write(self: Pin<&mut TerminalSupervisor>, session_id: u64, input: &QString);
 
-        /// Resize both the PTY and the grid — call from
+        /// Resize both `session_id`'s PTY and grid — call from
         /// `cpp/terminal_widget.cpp`'s `resizeEvent` whenever the
         /// font-metrics-derived row/column count actually changes.
         #[qinvokable]
         #[cxx_name = "resize"]
-        fn resize(self: Pin<&mut TerminalSession>, rows: u32, cols: u32);
+        fn resize(self: Pin<&mut TerminalSupervisor>, session_id: u64, rows: u32, cols: u32);
 
         /// Pull-based grid read (Qt thread only — never touches the PTY):
         /// `cpp/terminal_widget.cpp`'s paint routine calls this in response
@@ -2195,27 +2217,27 @@ mod ffi {
         /// reshapes using `gridCols()`.
         #[qinvokable]
         #[cxx_name = "gridCells"]
-        fn grid_cells(self: &TerminalSession) -> Vec<FfiTerminalCell>;
+        fn grid_cells(self: &TerminalSupervisor, session_id: u64) -> Vec<FfiTerminalCell>;
 
         /// Row count of the snapshot `gridCells()` would return right now.
         #[qinvokable]
         #[cxx_name = "gridRows"]
-        fn grid_rows(self: &TerminalSession) -> u32;
+        fn grid_rows(self: &TerminalSupervisor, session_id: u64) -> u32;
 
         /// Column count of the snapshot `gridCells()` would return right now.
         #[qinvokable]
         #[cxx_name = "gridCols"]
-        fn grid_cols(self: &TerminalSession) -> u32;
+        fn grid_cols(self: &TerminalSupervisor, session_id: u64) -> u32;
 
         /// Cursor's current row, zero-indexed from the top.
         #[qinvokable]
         #[cxx_name = "cursorRow"]
-        fn cursor_row(self: &TerminalSession) -> u32;
+        fn cursor_row(self: &TerminalSupervisor, session_id: u64) -> u32;
 
         /// Cursor's current column, zero-indexed from the left.
         #[qinvokable]
         #[cxx_name = "cursorCol"]
-        fn cursor_col(self: &TerminalSession) -> u32;
+        fn cursor_col(self: &TerminalSupervisor, session_id: u64) -> u32;
 
         /// Begin a mouse selection at a grid cell (Task F4). `right_half`
         /// is which half of the cell the click landed on, which decides
@@ -2224,7 +2246,8 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "selectionStart"]
         fn selection_start(
-            self: &TerminalSession,
+            self: &TerminalSupervisor,
+            session_id: u64,
             row: u32,
             col: u32,
             right_half: bool,
@@ -2234,50 +2257,63 @@ mod ffi {
         /// Extend the in-progress selection to a cell (drag).
         #[qinvokable]
         #[cxx_name = "selectionUpdate"]
-        fn selection_update(self: &TerminalSession, row: u32, col: u32, right_half: bool);
+        fn selection_update(
+            self: &TerminalSupervisor,
+            session_id: u64,
+            row: u32,
+            col: u32,
+            right_half: bool,
+        );
 
         #[qinvokable]
         #[cxx_name = "selectionClear"]
-        fn selection_clear(self: &TerminalSession);
+        fn selection_clear(self: &TerminalSupervisor, session_id: u64);
 
         /// Whether a selection covers at least one cell. The view gates
         /// its Copy action on this rather than on `selectionText()` being
         /// non-empty.
         #[qinvokable]
         #[cxx_name = "hasSelection"]
-        fn has_selection(self: &TerminalSession) -> bool;
+        fn has_selection(self: &TerminalSupervisor, session_id: u64) -> bool;
 
         /// The selected text, empty when there is no selection (guard with
         /// `hasSelection()`).
         #[qinvokable]
         #[cxx_name = "selectionText"]
-        fn selection_text(self: &TerminalSession) -> QString;
+        fn selection_text(self: &TerminalSupervisor, session_id: u64) -> QString;
 
-        /// Paste clipboard text into the shell. The rules — control-character
-        /// stripping, newline normalization, and bracketed-paste framing —
-        /// live in `terminal-core`; the view only supplies the text.
+        /// Paste clipboard text into `session_id`'s shell. The rules —
+        /// control-character stripping, newline normalization, and
+        /// bracketed-paste framing — live in `terminal-core`; the view only
+        /// supplies the text.
         #[qinvokable]
         #[cxx_name = "paste"]
-        fn paste(self: Pin<&mut TerminalSession>, text: &QString);
+        fn paste(self: Pin<&mut TerminalSupervisor>, session_id: u64, text: &QString);
 
         /// The `http(s)` link covering a grid cell, for hover feedback and
         /// Ctrl+Click activation.
         #[qinvokable]
         #[cxx_name = "linkAt"]
-        fn link_at(self: &TerminalSession, row: u32, col: u32) -> FfiTerminalLink;
+        fn link_at(
+            self: &TerminalSupervisor,
+            session_id: u64,
+            row: u32,
+            col: u32,
+        ) -> FfiTerminalLink;
 
-        /// Emitted on the Qt thread (queued there from the background
-        /// reader thread) after new PTY output has been fed into the
-        /// emulator and is ready to paint.
+        /// Emitted on the Qt thread (queued there from `session_id`'s
+        /// background reader thread) after new PTY output has been fed into
+        /// its emulator and is ready to paint. Every session's widget is
+        /// connected to this one signal and filters on `session_id`.
         #[qsignal]
         #[cxx_name = "gridUpdated"]
-        fn grid_updated(self: Pin<&mut TerminalSession>);
+        fn grid_updated(self: Pin<&mut TerminalSupervisor>, session_id: u64);
     }
 
-    // Enables `self.qt_thread()` on `TerminalSession` for the background PTY
-    // reader thread to marshal `gridUpdated` back, same pattern as
+    // Enables `self.qt_thread()` on `TerminalSupervisor` for the background
+    // PTY reader threads to marshal `gridUpdated` back, same pattern as
     // `SearchModel`/`DocumentManager` above.
-    impl cxx_qt::Threading for TerminalSession {}
+    impl cxx_qt::Threading for TerminalSupervisor {}
 
     extern "RustQt" {
         /// Editor ergonomics adapter (task F1-13): carets, transactions and
