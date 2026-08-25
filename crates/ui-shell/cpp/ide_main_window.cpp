@@ -5,11 +5,17 @@
 #include "DockManager.h"
 
 #include <QCloseEvent>
+#include <QCoreApplication>
 #include <QKeyEvent>
 #include <QRect>
 #include <QString>
 
 namespace ui_shell {
+
+IdeMainWindow::IdeMainWindow()
+{
+    qApp->installEventFilter(this);
+}
 
 void IdeMainWindow::keyPressEvent(QKeyEvent *event)
 {
@@ -27,12 +33,27 @@ void IdeMainWindow::keyPressEvent(QKeyEvent *event)
             return;
         }
         lastShift_.start();
-    } else if (!event->text().isEmpty()) {
-        // Any real keystroke between the two presses means the user was
-        // typing, not gesturing.
-        lastShift_.invalidate();
     }
     QMainWindow::keyPressEvent(event);
+}
+
+bool IdeMainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    if (event->type() == QEvent::KeyPress) {
+        auto *keyEvent = static_cast<QKeyEvent *>(event);
+        const bool bareShift = (keyEvent->modifiers() & ~Qt::ShiftModifier) == Qt::NoModifier;
+        const bool isGestureShift =
+          keyEvent->key() == Qt::Key_Shift && !keyEvent->isAutoRepeat() && bareShift;
+        if (!isGestureShift && !keyEvent->text().isEmpty()) {
+            // Any real keystroke between the two Shift presses means the
+            // user was typing, not gesturing — caught here rather than only
+            // in keyPressEvent() above because a widget that fully consumes
+            // the key (the terminal, the code editor) never forwards it to
+            // this window's own override (#116).
+            lastShift_.invalidate();
+        }
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void IdeMainWindow::closeEvent(QCloseEvent *event)
