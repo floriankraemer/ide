@@ -129,12 +129,12 @@ Renumbered to match §4's Task breakdown, which this table had drifted from (an 
 |---|---|---|
 | F4-1 — `pty-core`: cwd and env | done | e1788b0 (#86) |
 | F4-2 — `pty-core`: kill tree | done | e1788b0 (#86) |
-| F4-3 — `run-core` skeleton + model | todo |  |
-| F4-4 — persistence | todo |  |
-| F4-5 — detection | todo |  |
-| F4-6 — supervisor | todo |  |
-| F4-7 — output batching | todo |  |
-| F4-8 — `run-core::links` | todo |  |
+| F4-3 — `run-core` skeleton + model | done | recorded at the end of this branch |
+| F4-4 — persistence | done | recorded at the end of this branch |
+| F4-5 — detection | done | recorded at the end of this branch |
+| F4-6 — supervisor | done | recorded at the end of this branch |
+| F4-7 — output batching | done | recorded at the end of this branch |
+| F4-8 — `run-core::links` | done | recorded at the end of this branch |
 | F4-9 — bridge: `RunService` | todo |  |
 | F4-10 — bridge: `RunConfigEditor` | todo |  |
 | F4-11 — view: run console dock | todo |  |

@@ -21,8 +21,8 @@
 //! configure the project, not the person reading it. Theme, fonts, keymap and
 //! AI providers stay global on purpose.
 //!
-//! Today that means language servers and editing behaviour. Run
-//! configurations and index excludes are named in the plan but have no
+//! Today that means language servers, editing behaviour and run
+//! configurations. Index excludes are still named in the plan but have no
 //! counterpart in [`Settings`] yet, so they are deliberately absent: a key
 //! that parses and then does nothing reads as a working feature and is worse
 //! than no key. They slot in additively as their features land.
@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     load_toml, save_toml, update_toml, ConfigError, EditingSettings, LanguageServerSetting,
+    RunConfigSetting,
 };
 
 /// Directory holding a project's IDE files, inside the project root.
@@ -89,6 +90,20 @@ pub struct ProjectSettings {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub editing: Option<EditingSettings>,
 
+    /// The project's `[[run_config]]` entries (F4-4, ADR-0022): a run
+    /// configuration is the definition of a project, not a preference, so it
+    /// lives here rather than in the global `settings.toml`.
+    ///
+    /// Sparse like the rest of this struct: `None` means the project has no
+    /// run configurations file section at all (distinct from `Some(vec![])`,
+    /// which is a project that has explicitly cleared every configuration).
+    #[serde(
+        default,
+        rename = "run_config",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub run_configs: Option<Vec<RunConfigSetting>>,
+
     /// Keys this build does not understand, kept verbatim so a round trip
     /// through an older binary does not delete what a newer one wrote.
     ///
@@ -101,7 +116,10 @@ pub struct ProjectSettings {
 impl ProjectSettings {
     /// True if nothing is overridden — the file, if written, would say nothing.
     pub fn is_empty(&self) -> bool {
-        self.language_servers.is_none() && self.editing.is_none() && self.unknown.is_empty()
+        self.language_servers.is_none()
+            && self.editing.is_none()
+            && self.run_configs.is_none()
+            && self.unknown.is_empty()
     }
 }
 
@@ -313,6 +331,43 @@ mod tests {
         assert_eq!(servers.len(), 1);
         assert_eq!(servers[0].language_id, "rust");
         assert_eq!(servers[0].command.as_deref(), Some("/opt/rust-analyzer"));
+    }
+
+    #[test]
+    fn run_configs_round_trip() {
+        let root = project();
+        update(root.path(), |s| {
+            s.run_configs = Some(vec![RunConfigSetting {
+                id: "run-1".into(),
+                name: "cargo run".into(),
+                program: "cargo".into(),
+                args: vec!["run".into()],
+                cwd: Some("$PROJECT_DIR".into()),
+                env: vec![("RUST_LOG".into(), "debug".into())],
+            }]);
+        })
+        .unwrap();
+
+        let loaded = load(root.path()).unwrap();
+        let configs = loaded.run_configs.expect("run configs");
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].id, "run-1");
+        assert_eq!(configs[0].name, "cargo run");
+        assert_eq!(configs[0].program, "cargo");
+        assert_eq!(configs[0].args, vec!["run".to_string()]);
+        assert_eq!(configs[0].cwd.as_deref(), Some("$PROJECT_DIR"));
+        assert_eq!(
+            configs[0].env,
+            vec![("RUST_LOG".to_string(), "debug".to_string())]
+        );
+    }
+
+    #[test]
+    fn absent_run_configs_key_falls_back_to_none() {
+        let root = project();
+        write_settings(root.path(), "version = 1\n");
+        let loaded = load(root.path()).unwrap();
+        assert_eq!(loaded.run_configs, None);
     }
 
     #[test]

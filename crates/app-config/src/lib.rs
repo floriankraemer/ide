@@ -145,6 +145,35 @@ pub struct AiToolPolicySetting {
     pub policy: String,
 }
 
+/// One `[[run_config]]` entry: a project-defined launch target (F4-4, ADR-0022).
+///
+/// Lives in the project layer, not here — see [`project_settings`] — but the
+/// struct itself sits in this crate like `LanguageServerSetting` does, kept
+/// out of `run-core` so persistence stays dumb (ADR-0017): `run-core`
+/// re-exports this exact type as its own `RunConfig` rather than keeping a
+/// second struct in sync with a manual mapping.
+///
+/// `id` is a stable opaque string, issued once and independent of `name`:
+/// renaming or re-editing a configuration must not change what re-runs and
+/// what persistence keys on, the same guarantee `app_core::TabId` gives tabs.
+/// Environment values are stored literally — a config referencing a secret
+/// is the user's problem, and the docs say so.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct RunConfigSetting {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub program: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+}
+
 /// Structured application settings, round-tripped to `settings.toml` in the
 /// config directory. Every field is `#[serde(default)]` so old or partially
 /// written settings files still parse.
