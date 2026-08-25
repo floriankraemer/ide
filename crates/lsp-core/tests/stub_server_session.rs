@@ -385,10 +385,14 @@ fn completions_are_parsed_ordered_and_filtered() {
         .expect("didOpen");
 
     // The trigger characters reach the UI through ServerReady, not a getter.
-    let triggers = wait_for(&rx, "ServerReady", |e| match e {
+    // F2-9's signature-help triggers arrive on the same event, read from the
+    // same `initialize` result.
+    let (triggers, signature_triggers) = wait_for(&rx, "ServerReady", |e| match e {
         LspEvent::ServerReady {
-            trigger_characters, ..
-        } => Some(trigger_characters.clone()),
+            trigger_characters,
+            signature_triggers,
+            ..
+        } => Some((trigger_characters.clone(), signature_triggers.clone())),
         _ => None,
     });
     assert_eq!(triggers, [".", ":"]);
@@ -398,6 +402,9 @@ fn completions_are_parsed_ordered_and_filtered() {
         false,
         &lsp_core::CompletionTracker::default(),
     ));
+    assert!(signature_triggers.supported);
+    assert_eq!(signature_triggers.trigger, ["(", ","]);
+    assert_eq!(signature_triggers.retrigger, [")"]);
 
     // Line 0: a bare CompletionItem[], ordered by sortText, not by label.
     let plain = manager.completion(uri, 0, 0).expect("completion");

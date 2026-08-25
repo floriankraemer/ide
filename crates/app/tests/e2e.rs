@@ -663,6 +663,181 @@ fn e2e_comment_toggle_and_duplicate_line() {
     assert_eq!(ide.quit(), 0);
 }
 
+/// Where `stub_server` lands: Cargo places every workspace binary in the
+/// same `target/<profile>/` directory as `app`'s own, and
+/// `CARGO_BIN_EXE_stub_server` is not an option here — Cargo only sets a
+/// binary's `CARGO_BIN_EXE_*` for integration tests of the crate that
+/// declares it (`lsp-core`'s own, not `app`'s; see
+/// `lsp-core/tests/stub_server_session.rs:15`).
+fn stub_server_path() -> PathBuf {
+    Path::new(APP).with_file_name("stub_server")
+}
+
+/// Route the `rust` language id at `lsp-core`'s X2 stub server rather than a
+/// real `rust-analyzer` — not installed in this image, and the point of F2's
+/// flows is the client's own behaviour, which the stub is built to exercise
+/// deterministically by request line (`stub_server.rs`'s own doc comment).
+///
+/// Requires a restart: `LanguageService` resolves the server table once, on
+/// `openProject`, from whatever `app-config` already has on disk — so the
+/// override has to be written before the project opens, not after.
+fn route_rust_at_stub(ide: &mut Ide) {
+    assert_eq!(ide.quit(), 0);
+    let mut settings = app_config::load(&ide.config_dir()).expect("settings just written");
+    settings
+        .language_servers
+        .push(app_config::LanguageServerSetting {
+            language_id: "rust".to_string(),
+            command: Some(stub_server_path().to_string_lossy().into_owned()),
+            ..Default::default()
+        });
+    app_config::save(&ide.config_dir(), &settings).expect("seeding the stub server override");
+    ide.relaunch();
+    ide.wait_for_ev(Mark::start(), "project_opened");
+}
+
+/// F2-8/F2-10: Alt+Enter merges the diagnostic-scoped and range-scoped
+/// intentions at the caret into one grouped popup, and applying one goes
+/// through the same one-`beginEditBlock` pending-refactor protocol every
+/// other refactoring does.
+///
+/// The caret sits at (0,0), which is inside `stub_server`'s canned
+/// diagnostic (line 0, columns 0-4) — so this also proves
+/// `intentions::assemble` dedups the one action both the diagnostic-scoped
+/// and the range-scoped request return, rather than listing it twice.
+#[test]
+#[ignore = "E2E: needs an X server; run via `make e2e`"]
+fn e2e_alt_enter_applies_an_intention_in_one_undo() {
+    let name = "e2e_alt_enter_applies_an_intention_in_one_undo";
+    let mut ide = Ide::launch(name, APP, fixture("tiny"));
+    ide.wait_for_ev(Mark::start(), "project_opened");
+    route_rust_at_stub(&mut ide);
+
+    let mcp = ide.mcp();
+    wait_for_index(&mcp);
+    let original = fixture_text("tiny", "src/main.rs");
+    let tab = open_file(&ide, "main.rs");
+    let tab_id = tab["tab_id"].as_u64().expect("tab_id");
+    ide.key("ctrl+Home");
+
+    let mark = ide.mark();
+    ide.key("alt+Return");
+    let shown = ide.wait_for_event(mark, "the intentions menu to open", |e| {
+        e["ev"] == "dialog_shown" && e["name"] == "intentions_menu"
+    });
+    assert_eq!(
+        shown["count"].as_u64(),
+        Some(1),
+        "the stub's one action at (0,0) should not be listed twice"
+    );
+    ide.key("Down");
+    ide.key("Return");
+    ide.wait_for_event(mark, "the intentions menu to accept", |e| {
+        e["ev"] == "dialog_closed" && e["name"] == "intentions_menu" && e["accepted"] == true
+    });
+    ide.wait_for_ev(mark, "workspace_edit_applied");
+    ide.focus_main();
+
+    ide.key("ctrl+s");
+    ide.wait_for_event(mark, "the tab to go clean after saving", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false
+    });
+    ide.sync(&mcp);
+    assert!(
+        buffer(&mcp, tab_id).starts_with("extracted()"),
+        "the intention's edit was not applied"
+    );
+
+    let mark = ide.mark();
+    ide.key("ctrl+z");
+    ide.wait_for_event(mark, "the tab to go dirty again", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == true
+    });
+    ide.key("ctrl+s");
+    ide.wait_for_event(mark, "the undone tab to be saved", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false
+    });
+    ide.sync(&mcp);
+    assert_eq!(
+        buffer(&mcp, tab_id),
+        original,
+        "one Ctrl+Z did not undo the intention"
+    );
+
+    assert_eq!(ide.quit(), 0);
+}
+
+/// F2-3: a resource operation ahead of its text edits, previewed and
+/// applied through `RefactorPreviewDialog` exactly like a multi-file
+/// rename — creating a file is never a same-file change, so
+/// `EditPlan::touches_other_files` is true even though only one *other*
+/// file is a resource operation, not a text edit.
+#[test]
+#[ignore = "E2E: needs an X server; run via `make e2e`"]
+fn e2e_intention_creates_a_file_through_the_preview() {
+    let name = "e2e_intention_creates_a_file_through_the_preview";
+    let mut ide = Ide::launch(name, APP, fixture("tiny"));
+    ide.wait_for_ev(Mark::start(), "project_opened");
+    route_rust_at_stub(&mut ide);
+
+    let mcp = ide.mcp();
+    wait_for_index(&mcp);
+    assert!(
+        !fixture("tiny").join("src/extracted.rs").exists(),
+        "the fixture's shape changed"
+    );
+
+    let tab = open_file(&ide, "main.rs");
+    let tab_id = tab["tab_id"].as_u64().expect("tab_id");
+    ide.key("ctrl+Home");
+    for _ in 0..5 {
+        ide.key("Down"); // Line 5 (0-indexed from Ctrl+Home): the closing `}`.
+    }
+
+    let mark = ide.mark();
+    ide.key("alt+Return");
+    ide.wait_for_event(mark, "the intentions menu to open", |e| {
+        e["ev"] == "dialog_shown" && e["name"] == "intentions_menu"
+    });
+    ide.key("Down"); // A freshly-opened QMenu highlights nothing on its own.
+    ide.key("Return"); // The stub offers exactly one action at this line.
+    ide.wait_for_event(mark, "the intentions menu to accept", |e| {
+        e["ev"] == "dialog_closed" && e["name"] == "intentions_menu" && e["accepted"] == true
+    });
+
+    let rows = ide.wait_for_ev(mark, "preview_rows");
+    assert_eq!(
+        rows["files"].as_u64(),
+        Some(2),
+        "the preview should list the created file and the edited one"
+    );
+    ide.key("Return");
+    let applied = ide.wait_for_ev(mark, "workspace_edit_applied");
+    assert_eq!(applied["documents"].as_u64(), Some(2));
+    ide.focus_main();
+
+    ide.wait_for_event(mark, "the open file's buffer to be spliced", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == true
+    });
+    ide.key("ctrl+s");
+    ide.wait_for_event(mark, "the tab to go clean after saving", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false
+    });
+    ide.sync(&mcp);
+    assert!(
+        buffer(&mcp, tab_id).ends_with("moved\n") || buffer(&mcp, tab_id).contains("moved"),
+        "the original file's edit was not applied"
+    );
+
+    e2e::wait_for("the created file to appear on disk", || {
+        ide.read_project_file("src/extracted.rs")
+            .contains("moved here")
+            .then_some(())
+    });
+
+    assert_eq!(ide.quit(), 0);
+}
+
 /// The centre of a tab's label on screen, from its `tab_added` marker.
 fn tab_centre(tab: &serde_json::Value) -> (i32, i32) {
     let rect: Vec<i64> = tab["rect"]

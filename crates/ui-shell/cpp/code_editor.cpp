@@ -389,17 +389,46 @@ void CodeEditor::setSecondaryCarets(const QVector<SecondaryCaret> &carets)
 void CodeEditor::paintEvent(QPaintEvent *event)
 {
     QPlainTextEdit::paintEvent(event);
-    if (secondaryCarets_.isEmpty()) {
-        return;
+    if (!secondaryCarets_.isEmpty()) {
+        QPainter painter(viewport());
+        const QColor caretColor = palette().color(QPalette::Text);
+        const int width = qMax(1, cursorWidth());
+        for (const SecondaryCaret &caret : secondaryCarets_) {
+            QTextCursor cursor(document());
+            cursor.setPosition(qBound(0, caret.head, document()->characterCount() - 1));
+            const QRect rect = cursorRect(cursor);
+            painter.fillRect(QRect(rect.left(), rect.top(), width, rect.height()), caretColor);
+        }
     }
-    QPainter painter(viewport());
-    const QColor caretColor = palette().color(QPalette::Text);
-    const int width = qMax(1, cursorWidth());
-    for (const SecondaryCaret &caret : secondaryCarets_) {
-        QTextCursor cursor(document());
-        cursor.setPosition(qBound(0, caret.head, document()->characterCount() - 1));
-        const QRect rect = cursorRect(cursor);
-        painter.fillRect(QRect(rect.left(), rect.top(), width, rect.height()), caretColor);
+
+    // F2-11: inlay hints, off unless the user turned them on
+    // (code.toggleInlayHints) — a hint is text the server invented, not
+    // text in the file, so it defaults to not being drawn at all.
+    if (inlayHintsEnabled_ && !inlayHints_.isEmpty()) {
+        QPainter painter(viewport());
+        QFont hintFont = font();
+        hintFont.setPointSizeF(hintFont.pointSizeF() * 0.85);
+        painter.setFont(hintFont);
+        const QColor hintColor = tinted(palette().color(QPalette::Text), 100, 100);
+        const QColor hintBackground = tinted(palette().color(QPalette::Base), 100, 108);
+        const int maxPosition = document()->characterCount() - 1;
+        for (const InlayHintSpan &hint : inlayHints_) {
+            if (hint.position < 0 || hint.position > maxPosition) {
+                continue;
+            }
+            QTextCursor cursor(document());
+            cursor.setPosition(hint.position);
+            const QRect rect = cursorRect(cursor);
+            const QString text = (hint.paddingLeft ? QStringLiteral(" ") : QString())
+              + hint.label + (hint.paddingRight ? QStringLiteral(" ") : QString());
+            const QRect textRect(rect.left(), rect.top(),
+                                 painter.fontMetrics().horizontalAdvance(text) + 4,
+                                 rect.height());
+            painter.fillRect(textRect, hintBackground);
+            painter.setPen(hintColor);
+            painter.drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft,
+                             QStringLiteral(" ") + text);
+        }
     }
 }
 
@@ -500,6 +529,24 @@ void CodeEditor::setDiagnosticSpans(const QVector<DiagnosticSpan> &spans)
     highlightCurrentLine();
 }
 
+void CodeEditor::setOccurrenceSpans(const QVector<OccurrenceSpan> &spans)
+{
+    occurrenceSpans_ = spans;
+    highlightCurrentLine();
+}
+
+void CodeEditor::setInlayHints(const QVector<InlayHintSpan> &hints)
+{
+    inlayHints_ = hints;
+    viewport()->update();
+}
+
+void CodeEditor::setInlayHintsEnabled(bool enabled)
+{
+    inlayHintsEnabled_ = enabled;
+    viewport()->update();
+}
+
 void CodeEditor::highlightCurrentLine()
 {
     QList<QTextEdit::ExtraSelection> selections;
@@ -544,6 +591,17 @@ void CodeEditor::highlightCurrentLine()
         secondary.cursor.setPosition(caret.anchor);
         secondary.cursor.setPosition(caret.head, QTextCursor::KeepAnchor);
         selections.append(secondary);
+    }
+
+    const QColor readColor = tinted(palette().color(QPalette::Base), 205, 190);
+    const QColor writeColor = tinted(palette().color(QPalette::Base), 230, 165);
+    for (const OccurrenceSpan &span : occurrenceSpans_) {
+        QTextEdit::ExtraSelection occurrence;
+        occurrence.format.setBackground(span.isWrite ? writeColor : readColor);
+        occurrence.cursor = textCursor();
+        occurrence.cursor.setPosition(span.start);
+        occurrence.cursor.setPosition(span.end, QTextCursor::KeepAnchor);
+        selections.append(occurrence);
     }
 
     for (const DiagnosticSpan &span : diagnosticSpans_) {

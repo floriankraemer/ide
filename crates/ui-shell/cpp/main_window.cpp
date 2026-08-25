@@ -340,7 +340,9 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                           editorTabs->onBufferEditedExternally(tabId, content);
                       });
 
-    // A tree-driven rename/delete retitled an open tab (US-2b).
+    // A tree-driven rename/delete retitled an open tab (US-2b). A
+    // refactoring's own resource operations (F2-3) retitle one too, wired in
+    // RefactorController's constructor since it already owns both ends.
     QObject::connect(treeModel,
                       &ProjectTreeModel::tabTitleChanged,
                       editorTabs,
@@ -844,16 +846,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
                             QObject::tr("The language server offers no refactorings here."));
     });
 
-    refactorMenu->addSeparator();
-    QAction *reformatAction = registerAction(refactorMenu, QStringLiteral("code.reformat"),
-                                             QObject::tr("Reformat Code"), appSettings, *actions);
-    QObject::connect(reformatAction, &QAction::triggered, window, [editorTabs, languageService]() {
-        const QString path = editorTabs->currentPath();
-        if (path.isEmpty()) {
-            return;
-        }
-        languageService->requestFormatting(path, editorTabs->documentRevision());
-    });
+    refactorer->buildCodeActions(refactorMenu, appSettings, *actions);
 
     // The same gestures on the editor's right-click menu. The actions are
     // looked up by id rather than captured, so this does not depend on which

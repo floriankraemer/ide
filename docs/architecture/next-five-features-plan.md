@@ -82,16 +82,16 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 |---|---|---|
 | F2-1 — resource operations: parse and order | done | ac32f77 (#84) |
 | F2-2 — resource operations: perform as `FileOp` | done | ac32f77 (#84) |
-| F2-3 — resource operations: bridge + view | todo |  |
+| F2-3 — resource operations: bridge + view | done | 28ead4b |
 | F2-4 — `lsp-core::intentions` | done | 264f3b3 (#88) |
 | F2-5 — `lsp-core::signature_help` | done | 264f3b3 (#88) |
 | F2-6 — `document_highlight` + `inlay_hint` | done | 264f3b3 (#88) |
 | F2-7 — organize imports | done | 264f3b3 (#88) |
-| F2-8 — bridge: intentions | todo |  |
-| F2-9 — bridge: signature help, highlights, hints | todo |  |
-| F2-10 — view: bulb and popup | todo |  |
-| F2-11 — view: signature tip, highlights, hints | todo |  |
-| F2-12 — E2E + its ADR + docs | todo | ADR number to be reallocated, see below |
+| F2-8 — bridge: intentions | done | 8554431 |
+| F2-9 — bridge: signature help, highlights, hints | done | a3133ba (also organize imports, F2-8's remainder) |
+| F2-10 — view: bulb and popup | done | fca1d99 |
+| F2-11 — view: signature tip, highlights, hints | done | 90af252 |
+| F2-12 — E2E + its ADR + docs | done | recorded at the end of this branch; ADR-0029 |
 
 ### F3 — Git v1
 
@@ -501,7 +501,7 @@ F1-12 is independent of everything else in F1; F1-6…F1-9 are four independent 
 | F2-9 | Bridge: signature help, highlights, hints, each with its own generation | F2-5, F2-6 |
 | F2-10 | View: `intention_bulb.{h,cpp}`, grouped `QMenu`, `code.showIntentions` | F2-8 |
 | F2-11 | View: `signature_tip.{h,cpp}`, occurrence painting, inlay-hint painting behind the toggle | F2-9 |
-| F2-12 | E2E (2 flows, against the stub server) + ADR-0026 + `layering.md` | all F2 |
+| F2-12 | E2E (2 flows, against the stub server) + ADR-0029 + `layering.md` | all F2 |
 
 Two independent lanes: `{F2-1→F2-2→F2-3}` and `{F2-4…F2-7}`.
 

@@ -9,6 +9,7 @@
 use std::collections::BTreeMap;
 
 use lsp_types::{Diagnostic, DiagnosticSeverity};
+use serde_json::Value;
 
 /// Severity as the UI ranks it. Ordered worst-first, which is also the
 /// tie-break order for two diagnostics on the same position.
@@ -133,6 +134,35 @@ impl DiagnosticStore {
         }
         counts
     }
+
+    /// The diagnostics at `uri` whose range covers `(line, character)`, as
+    /// raw JSON — what [`crate::LspManager::intentions`]' `diagnostics`
+    /// parameter needs verbatim, since several servers compute a quick fix
+    /// from the diagnostic's own opaque `data` and will not offer it for a
+    /// diagnostic they were not handed back exactly as they sent it.
+    pub fn diagnostics_at(&self, uri: &str, line: u32, character: u32) -> Vec<Value> {
+        self.by_uri
+            .get(uri)
+            .map(|diags| {
+                diags
+                    .iter()
+                    .filter(|d| covers(&d.range, line, character))
+                    .map(|d| serde_json::to_value(d).unwrap_or(Value::Null))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Whether a protocol range covers a position, inclusive of both ends — a
+/// diagnostic reported for the empty range at the very end of a line must
+/// still be found by a caret sitting there.
+fn covers(range: &lsp_types::Range, line: u32, character: u32) -> bool {
+    let after_start =
+        line > range.start.line || (line == range.start.line && character >= range.start.character);
+    let before_end =
+        line < range.end.line || (line == range.end.line && character <= range.end.character);
+    after_start && before_end
 }
 
 fn row(uri: &str, diagnostic: &Diagnostic) -> DiagnosticRow {
@@ -354,5 +384,46 @@ mod tests {
     #[test]
     fn a_non_file_uri_has_no_local_path() {
         assert!(path_from_uri("untitled:Untitled-1").is_none());
+    }
+
+    #[test]
+    fn diagnostics_at_finds_the_one_covering_the_position() {
+        let mut store = DiagnosticStore::new();
+        store.replace(
+            "file:///p/a.rs",
+            vec![
+                diagnostic(2, 1, DiagnosticSeverity::ERROR, "here"),
+                diagnostic(9, 0, DiagnosticSeverity::WARNING, "elsewhere"),
+            ],
+        );
+        let found = store.diagnostics_at("file:///p/a.rs", 2, 2);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0]["message"], "here");
+    }
+
+    #[test]
+    fn diagnostics_at_is_empty_off_every_range() {
+        let mut store = DiagnosticStore::new();
+        store.replace(
+            "file:///p/a.rs",
+            vec![diagnostic(2, 1, DiagnosticSeverity::ERROR, "here")],
+        );
+        assert!(store.diagnostics_at("file:///p/a.rs", 2, 0).is_empty());
+        assert!(store.diagnostics_at("file:///p/a.rs", 5, 1).is_empty());
+        assert!(store
+            .diagnostics_at("file:///p/missing.rs", 2, 1)
+            .is_empty());
+    }
+
+    #[test]
+    fn diagnostics_at_includes_both_endpoints_of_the_range() {
+        let mut store = DiagnosticStore::new();
+        store.replace(
+            "file:///p/a.rs",
+            vec![diagnostic(2, 1, DiagnosticSeverity::ERROR, "here")],
+        );
+        // `diagnostic()` builds a 3-character range: [2:1, 2:4).
+        assert_eq!(store.diagnostics_at("file:///p/a.rs", 2, 1).len(), 1);
+        assert_eq!(store.diagnostics_at("file:///p/a.rs", 2, 4).len(), 1);
     }
 }

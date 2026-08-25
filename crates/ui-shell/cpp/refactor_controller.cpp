@@ -2,10 +2,12 @@
 
 #include "e2e_mark.h"
 #include "editor_tabs.h"
+#include "keymap_page.h"
 
 #include <QAction>
 #include <QCursor>
 #include <QDialog>
+#include <QFileInfo>
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMainWindow>
@@ -54,6 +56,10 @@ RefactorController::RefactorController(LanguageService *languageService, SearchM
             });
     connect(languageService_, &LanguageService::codeActionsReady, this,
             &RefactorController::onCodeActionsReady);
+    // F2-3: a resource operation the refactoring performed retitled an open
+    // tab, exactly as a tree-driven rename does.
+    connect(languageService_, &LanguageService::tabTitleChanged, editorTabs_,
+            &EditorTabs::onTabTitleChanged);
 
     connect(searchModel_, &SearchModel::indexRenameReady, this,
             &RefactorController::onIndexRenameReady);
@@ -182,17 +188,36 @@ void RefactorController::onRefactorReady(const FfiRefactorSummary &summary)
     }
 
     QList<RefactorPreviewDialog::Row> rows;
+    for (const FfiResourceOp &op : languageService_->pendingOps()) {
+        QString detail;
+        switch (op.kind) {
+        case FfiResourceOpKind::Create:
+            detail = tr("Create file");
+            break;
+        case FfiResourceOpKind::Rename:
+            detail = tr("Rename to %1").arg(QFileInfo(QString(op.new_path)).fileName());
+            break;
+        case FfiResourceOpKind::Delete:
+            detail = tr("Delete file");
+            break;
+        }
+        rows.append({op.path, 0, detail, true, true});
+    }
     for (const FfiTextEdit &edit : languageService_->pendingEdits()) {
         rows.append({edit.path, static_cast<int>(edit.start_line),
                       previewText(edit.new_text), true, true});
     }
-    RefactorPreviewDialog dialog(summary.title,
-                                  tr("%n change(s) across %1 file(s). Changes to files that "
-                                     "are not open are written to disk and cannot be undone.",
-                                     "", static_cast<int>(summary.edit_count))
-                                    .arg(summary.document_count),
-                                  rows,
-                                  window_);
+    const QString explanation = summary.op_count > 0
+      ? tr("%n change(s) across %1 file(s), including %2 file creation/rename/deletion. Changes "
+           "to files that are not open are written to disk and cannot be undone.",
+           "", static_cast<int>(summary.edit_count))
+          .arg(summary.document_count)
+          .arg(summary.op_count)
+      : tr("%n change(s) across %1 file(s). Changes to files that "
+           "are not open are written to disk and cannot be undone.",
+           "", static_cast<int>(summary.edit_count))
+          .arg(summary.document_count);
+    RefactorPreviewDialog dialog(summary.title, explanation, rows, window_);
     if (dialog.exec() != QDialog::Accepted) {
         languageService_->cancelRefactor();
         return;
@@ -205,7 +230,16 @@ void RefactorController::onRefactorReady(const FfiRefactorSummary &summary)
 
 void RefactorController::applyPending()
 {
-    const ::rust::Vec<FfiTextEdit> edits = languageService_->takePendingEdits(revision_);
+    // Read fresh rather than reusing `revision_` (which is only ever set at
+    // the *start* of a gesture, e.g. `onCodeActionsReady`/`askForNewName`):
+    // `lsp_core::EditGate::accept` exists to catch a buffer that changed
+    // while the answer was in flight, and echoing the request-time value
+    // back at it would make that check pass unconditionally. F2-8's
+    // intentions never populate `revision_` at all — they capture their own
+    // revision at `applyIntention`'s call site — so this is also the fix
+    // for those.
+    const ::rust::Vec<FfiTextEdit> edits =
+      languageService_->takePendingEdits(editorTabs_->documentRevision());
     if (edits.empty()) {
         report(tr("The file changed while the refactoring was being prepared; nothing was "
                   "applied."));
@@ -338,6 +372,55 @@ int RefactorController::countBufferFiles(const ::rust::Vec<FfiTextEdit> &edits)
 void RefactorController::report(const QString &message)
 {
     window_->statusBar()->showMessage(message, 6000);
+}
+
+void RefactorController::buildCodeActions(QMenu *refactorMenu, AppSettings *appSettings,
+                                          QHash<QString, QAction *> &actions)
+{
+    refactorMenu->addSeparator();
+    QAction *reformatAction = registerAction(refactorMenu, QStringLiteral("code.reformat"),
+                                             tr("Reformat Code"), appSettings, actions);
+    connect(reformatAction, &QAction::triggered, this, [this]() {
+        const QString path = editorTabs_->currentPath();
+        if (path.isEmpty()) {
+            return;
+        }
+        languageService_->requestFormatting(path, editorTabs_->documentRevision());
+    });
+
+    // F2-10: Alt+Return. `EditorTabs` owns the bulb this shares its popup
+    // with; this only wires the shortcut to asking for it right now.
+    QAction *showIntentionsAction =
+      registerAction(refactorMenu, QStringLiteral("code.showIntentions"),
+                      tr("Show Intention Actions"), appSettings, actions);
+    connect(showIntentionsAction, &QAction::triggered, this,
+            [this]() { editorTabs_->showIntentionsNow(); });
+
+    // F2-11: Ctrl+P. The tip's own content is driven by typing; this is
+    // only for asking again explicitly with the caret sitting still — the
+    // same "showing" flag typing uses, so an already-open tip does not
+    // flash closed and reopen for the request it was already answering.
+    QAction *parameterInfoAction = registerAction(
+      refactorMenu, QStringLiteral("code.parameterInfo"), tr("Parameter Info"), appSettings,
+      actions);
+    connect(parameterInfoAction, &QAction::triggered, this,
+            [this]() { editorTabs_->requestSignatureHelpNow(); });
+
+    QAction *optimizeImportsAction = registerAction(
+      refactorMenu, QStringLiteral("code.optimizeImports"), tr("Optimize Imports"), appSettings,
+      actions);
+    connect(optimizeImportsAction, &QAction::triggered, this,
+            [this]() { editorTabs_->organizeImports(); });
+
+    // F2-11: off by default — a hint is text the server invented, not text
+    // in the file (`code_editor.h`'s own reasoning for `inlayHintsEnabled_`).
+    QAction *toggleInlayHintsAction =
+      registerAction(refactorMenu, QStringLiteral("code.toggleInlayHints"),
+                      tr("Show Inlay Hints"), appSettings, actions);
+    toggleInlayHintsAction->setCheckable(true);
+    toggleInlayHintsAction->setChecked(editorTabs_->inlayHintsEnabled());
+    connect(toggleInlayHintsAction, &QAction::toggled, this,
+            [this](bool checked) { editorTabs_->setInlayHintsEnabled(checked); });
 }
 
 } // namespace ui_shell

@@ -9,6 +9,11 @@ use crate::bridge::convert::to_ffi_edits;
 use crate::bridge::ffi::{self};
 use crate::bridge::registry::SharedDiagnostics;
 
+/// F2-8/F2-9: intentions, organize imports, signature help, document
+/// highlights and inlay hints — split out once this file crossed the
+/// file-size ceiling, the way `ai/agent.rs` splits out of `ai/chat.rs`.
+mod lsp_surface;
+
 // ---------------------------------------------------------------------------
 // Language servers (Task L2)
 // ---------------------------------------------------------------------------
@@ -26,8 +31,13 @@ type LspJob = Box<dyn FnOnce(&lsp_core::LspManager) + Send>;
 /// Rust side of the `LanguageService` QObject: a handle to the worker, the
 /// resolved server table, and the diagnostics currently published. No rules —
 /// see the bridge declaration above.
-#[derive(Default)]
 pub struct LanguageServiceRust {
+    /// Shared with every other adapter (`registry::shared_session`) — needed
+    /// here because F2-3's resource operations perform through
+    /// `AppSession::apply_file_ops`, the same call the project tree's
+    /// rename/delete use, so a renamed file retargets its open tab exactly
+    /// as it does from the tree.
+    session: std::rc::Rc<RefCell<app_core::AppSession>>,
     /// `None` before a project is open; dropping the sender is what stops the
     /// previous project's servers.
     jobs: RefCell<Option<std::sync::mpsc::Sender<LspJob>>>,
@@ -39,11 +49,11 @@ pub struct LanguageServiceRust {
     started: RefCell<std::collections::HashSet<String>>,
     /// Open document path -> language id, so a change/save/close for a file we
     /// never opened against a server is dropped rather than sent.
-    open_docs: RefCell<std::collections::HashMap<String, String>>,
+    pub(crate) open_docs: RefCell<std::collections::HashMap<String, String>>,
     /// Shared with `AiChat`, which reads it for `attachDiagnostics` — two
     /// stores would mean the chat attaching a different set of problems
     /// than the Problems panel shows.
-    store: SharedDiagnostics,
+    pub(crate) store: SharedDiagnostics,
     /// L3: which hover request is still the current one. The rule is
     /// `lsp_core`'s; what is kept here is only its state.
     hover: RefCell<lsp_core::HoverTracker>,
@@ -58,6 +68,24 @@ pub struct LanguageServiceRust {
     /// came from — resolving or executing one has to go back to that server.
     actions: RefCell<Vec<lsp_core::CodeActionItem>>,
     actions_language: RefCell<String>,
+    /// F2-8: the offers of the last `requestIntentions`, plus the language
+    /// they came from and the generation that invalidates a stale answer —
+    /// a caret move sends a fresh request rather than waiting for this one.
+    pub(crate) intentions: RefCell<Vec<lsp_core::Intention>>,
+    pub(crate) intentions_language: RefCell<String>,
+    pub(crate) intentions_tracker: RefCell<lsp_core::RequestTracker>,
+    /// F2-9: whether, and on which characters, each language's server wants
+    /// signature help (re)requested — from that server's `initialize`
+    /// result, published on `ServerReady` the same way completion's trigger
+    /// characters are.
+    pub(crate) signature_triggers:
+        RefCell<std::collections::HashMap<String, lsp_core::SignatureTriggers>>,
+    pub(crate) signature_help: RefCell<Option<lsp_core::SignatureHelp>>,
+    pub(crate) signature_tracker: RefCell<lsp_core::RequestTracker>,
+    pub(crate) highlights: RefCell<Vec<lsp_core::DocumentHighlight>>,
+    pub(crate) highlights_tracker: RefCell<lsp_core::RequestTracker>,
+    pub(crate) inlay_hints: RefCell<Vec<lsp_core::InlayHint>>,
+    pub(crate) inlay_hints_tracker: RefCell<lsp_core::RequestTracker>,
     /// The refactoring waiting to be applied, if any: what it changes, what
     /// to call it, and — when it came from the server asking us — the gate
     /// that server is blocked on.
@@ -65,6 +93,37 @@ pub struct LanguageServiceRust {
     /// RF2's staleness rule. The comparison is `lsp_core`'s; only its state
     /// lives here.
     edits: RefCell<lsp_core::EditGate>,
+}
+
+impl Default for LanguageServiceRust {
+    fn default() -> Self {
+        LanguageServiceRust {
+            session: crate::bridge::registry::shared_session(),
+            jobs: RefCell::default(),
+            configs: RefCell::default(),
+            started: RefCell::default(),
+            open_docs: RefCell::default(),
+            store: SharedDiagnostics::default(),
+            hover: RefCell::default(),
+            completion: RefCell::default(),
+            completions: RefCell::default(),
+            triggers: RefCell::default(),
+            actions: RefCell::default(),
+            actions_language: RefCell::default(),
+            intentions: RefCell::default(),
+            intentions_language: RefCell::default(),
+            intentions_tracker: RefCell::default(),
+            signature_triggers: RefCell::default(),
+            signature_help: RefCell::default(),
+            signature_tracker: RefCell::default(),
+            highlights: RefCell::default(),
+            highlights_tracker: RefCell::default(),
+            inlay_hints: RefCell::default(),
+            inlay_hints_tracker: RefCell::default(),
+            pending: RefCell::default(),
+            edits: RefCell::default(),
+        }
+    }
 }
 
 /// A refactoring that has produced edits and is waiting for the view to
@@ -92,6 +151,69 @@ impl PendingRefactor {
         } else {
             gate.refuse(reason);
         }
+    }
+}
+
+/// Map one `lsp_core::ResourceOp` onto the `app_core::FileOp` that performs
+/// it. Translation only (ADR-0026): what each field means is decided in
+/// `app_core::apply_file_ops`, not here.
+fn to_file_op(op: &lsp_core::ResourceOp) -> app_core::FileOp {
+    match op {
+        lsp_core::ResourceOp::Create {
+            path,
+            overwrite,
+            ignore_if_exists,
+            ..
+        } => app_core::FileOp::Create {
+            path: std::path::PathBuf::from(path),
+            overwrite: *overwrite,
+            ignore_if_exists: *ignore_if_exists,
+        },
+        lsp_core::ResourceOp::Rename {
+            old_path,
+            new_path,
+            overwrite,
+            ignore_if_exists,
+            ..
+        } => app_core::FileOp::Rename {
+            from: std::path::PathBuf::from(old_path),
+            to: std::path::PathBuf::from(new_path),
+            overwrite: *overwrite,
+            ignore_if_exists: *ignore_if_exists,
+        },
+        lsp_core::ResourceOp::Delete {
+            path,
+            recursive,
+            ignore_if_not_exists,
+            ..
+        } => app_core::FileOp::Delete {
+            path: std::path::PathBuf::from(path),
+            recursive: *recursive,
+            ignore_if_not_exists: *ignore_if_not_exists,
+        },
+    }
+}
+
+/// The same operation, as the preview lists it.
+fn to_ffi_resource_op(op: &lsp_core::ResourceOp) -> ffi::FfiResourceOp {
+    match op {
+        lsp_core::ResourceOp::Create { path, .. } => ffi::FfiResourceOp {
+            kind: ffi::FfiResourceOpKind::Create,
+            path: QString::from(path.as_str()),
+            new_path: QString::default(),
+        },
+        lsp_core::ResourceOp::Rename {
+            old_path, new_path, ..
+        } => ffi::FfiResourceOp {
+            kind: ffi::FfiResourceOpKind::Rename,
+            path: QString::from(old_path.as_str()),
+            new_path: QString::from(new_path.as_str()),
+        },
+        lsp_core::ResourceOp::Delete { path, .. } => ffi::FfiResourceOp {
+            kind: ffi::FfiResourceOpKind::Delete,
+            path: QString::from(path.as_str()),
+            new_path: QString::default(),
+        },
     }
 }
 
@@ -474,6 +596,20 @@ impl ffi::LanguageService {
             return;
         };
         let language_id = self.actions_language.borrow().clone();
+        self.as_mut()
+            .run_action(action, language_id, buffer_revision);
+    }
+
+    /// Resolve (if needed) and apply one code action, publishing whatever
+    /// `WorkspaceChanges` its steps produce through the pending-refactor
+    /// protocol. Shared by `applyCodeAction` and `applyIntention` — the two
+    /// surfaces differ only in how the action was found.
+    pub(crate) fn run_action(
+        mut self: Pin<&mut Self>,
+        action: lsp_core::CodeActionItem,
+        language_id: String,
+        buffer_revision: i64,
+    ) {
         let open_paths = self.open_document_paths();
         let current_path = self.current_path_of(&action);
         self.edits.borrow_mut().begin(buffer_revision);
@@ -493,13 +629,13 @@ impl ffi::LanguageService {
                 action
             };
 
-            let mut documents = Vec::new();
+            let mut changes = lsp_core::WorkspaceChanges::default();
             let mut failure = None;
             for step in lsp_core::action_steps(&resolved) {
                 match step {
                     lsp_core::ActionStep::ApplyEdit(edit) => {
-                        match lsp_core::parse_workspace_edit(&edit) {
-                            Ok(docs) => documents.extend(docs),
+                        match lsp_core::parse_workspace_changes(&edit) {
+                            Ok(parsed) => changes.steps.extend(parsed.steps),
                             Err(e) => failure = Some(e.to_string()),
                         }
                     }
@@ -513,18 +649,18 @@ impl ffi::LanguageService {
                 }
             }
             let title = resolved.title.clone();
-            let versions: std::collections::HashMap<String, i32> = documents
-                .iter()
+            let versions: std::collections::HashMap<String, i32> = changes
+                .documents()
                 .filter_map(|doc| {
                     manager
                         .document_version(&doc.uri)
                         .map(|v| (doc.uri.clone(), v))
                 })
                 .collect();
-            let planned = if documents.is_empty() {
+            let planned = if changes.steps.is_empty() {
                 Ok(lsp_core::EditPlan::default())
             } else {
-                lsp_core::plan_edit(documents, &open_paths, &current_path, &|uri| {
+                lsp_core::plan_changes(changes, &open_paths, &current_path, &|uri| {
                     versions.get(uri).copied()
                 })
             };
@@ -670,6 +806,7 @@ impl ffi::LanguageService {
                             edits,
                         }],
                         files: Vec::new(),
+                        ops: Vec::new(),
                         touches_other_files: false,
                     };
                     service.publish_refactor("Reformat Code".to_string(), plan, None);
@@ -694,13 +831,23 @@ impl ffi::LanguageService {
         }
     }
 
+    pub fn pending_ops(&self) -> Vec<ffi::FfiResourceOp> {
+        match self.pending.borrow().as_ref() {
+            Some(pending) => pending.plan.ops.iter().map(to_ffi_resource_op).collect(),
+            None => Vec::new(),
+        }
+    }
+
     pub fn exclude_from_refactor(self: Pin<&mut Self>, path: &QString) {
         if let Some(pending) = self.pending.borrow_mut().as_mut() {
             pending.excluded.push(path.to_string());
         }
     }
 
-    pub fn take_pending_edits(self: Pin<&mut Self>, buffer_revision: i64) -> Vec<ffi::FfiTextEdit> {
+    pub fn take_pending_edits(
+        mut self: Pin<&mut Self>,
+        buffer_revision: i64,
+    ) -> Vec<ffi::FfiTextEdit> {
         let fresh = self.edits.borrow_mut().accept(buffer_revision);
         let Some(pending) = self.pending.borrow_mut().take() else {
             return Vec::new();
@@ -715,8 +862,32 @@ impl ffi::LanguageService {
             );
             return Vec::new();
         }
+        // ADR-0026: every resource operation is performed, all-or-nothing,
+        // before any text edit is written. A failure here means the text
+        // edits below never run at all.
+        if !pending.plan.ops.is_empty() {
+            let file_ops: Vec<app_core::FileOp> = pending.plan.ops.iter().map(to_file_op).collect();
+            let outcome = self.session.borrow_mut().apply_file_ops(&file_ops);
+            match outcome {
+                Ok(retitled) => {
+                    for tab in retitled {
+                        self.as_mut()
+                            .tab_title_changed(tab.id.raw(), QString::from(tab.title.as_str()));
+                    }
+                }
+                Err(err) => {
+                    pending.settle(false, "the refactoring could not be applied");
+                    self.as_mut()
+                        .refactor_failed(QString::from(err.to_string().as_str()));
+                    return Vec::new();
+                }
+            }
+        }
         let edits = to_ffi_edits(&pending.plan, &pending.excluded);
-        pending.settle(!edits.is_empty(), "the refactoring was not applied");
+        pending.settle(
+            !edits.is_empty() || !pending.plan.ops.is_empty(),
+            "the refactoring was not applied",
+        );
         edits
     }
 
@@ -739,6 +910,7 @@ impl ffi::LanguageService {
             title: QString::from(title.as_str()),
             document_count: plan.document_count() as u32,
             edit_count: plan.edit_count() as u32,
+            op_count: plan.ops.len() as u32,
             touches_other_files: plan.touches_other_files,
         };
         if let Some(previous) = self.pending.borrow_mut().replace(PendingRefactor {
@@ -753,7 +925,7 @@ impl ffi::LanguageService {
 
     /// Report a refactoring that produced nothing, answering anything that
     /// was waiting on it.
-    fn finish_refactor(mut self: Pin<&mut Self>, outcome: Result<(), String>) {
+    pub(crate) fn finish_refactor(mut self: Pin<&mut Self>, outcome: Result<(), String>) {
         if let Some(pending) = self.pending.borrow_mut().take() {
             pending.settle(false, "the refactoring could not be applied");
         }
@@ -905,7 +1077,10 @@ impl ffi::LanguageService {
     /// Queue work for the worker thread. Returns false when there is no
     /// worker (no project open yet), which callers that must answer either
     /// way have to handle.
-    fn push_job(&self, job: impl FnOnce(&lsp_core::LspManager) + Send + 'static) -> bool {
+    pub(crate) fn push_job(
+        &self,
+        job: impl FnOnce(&lsp_core::LspManager) + Send + 'static,
+    ) -> bool {
         match self.jobs.borrow().as_ref() {
             Some(jobs) => jobs.send(Box::new(job)).is_ok(),
             None => false,
@@ -964,12 +1139,16 @@ impl ffi::LanguageService {
             lsp_core::LspEvent::ServerReady {
                 language_id,
                 trigger_characters,
+                signature_triggers,
                 ..
             } => {
                 let name = name_of(&language_id);
                 self.triggers
                     .borrow_mut()
                     .insert(language_id.clone(), trigger_characters);
+                self.signature_triggers
+                    .borrow_mut()
+                    .insert(language_id.clone(), signature_triggers);
                 self.as_mut().server_state_changed(
                     QString::from(language_id.as_str()),
                     QString::from(name.as_str()),
@@ -1012,8 +1191,8 @@ impl ffi::LanguageService {
             lsp_core::LspEvent::ApplyEdit {
                 label, edit, gate, ..
             } => {
-                let documents = match lsp_core::parse_workspace_edit(&edit) {
-                    Ok(documents) => documents,
+                let changes = match lsp_core::parse_workspace_changes(&edit) {
+                    Ok(changes) => changes,
                     Err(e) => {
                         gate.refuse(e.to_string());
                         self.as_mut()
@@ -1025,7 +1204,7 @@ impl ffi::LanguageService {
                 // The server chose the files, so there is no "current" one
                 // to compare against: a server-driven edit always shows its
                 // preview.
-                let planned = lsp_core::plan_edit(documents, &open_paths, "", &|_| None);
+                let planned = lsp_core::plan_changes(changes, &open_paths, "", &|_| None);
                 match planned {
                     Ok(plan) => {
                         self.publish_refactor(

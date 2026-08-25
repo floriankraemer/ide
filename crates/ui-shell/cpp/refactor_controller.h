@@ -3,12 +3,15 @@
 #include "refactor_preview_dialog.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
+#include <QHash>
 #include <QList>
 #include <QObject>
 #include <QPair>
 #include <QString>
 
+class QAction;
 class QMainWindow;
+class QMenu;
 
 namespace ui_shell {
 
@@ -44,6 +47,13 @@ public:
     // Ctrl+Alt+M and its siblings: ask for a kind family, then offer
     // whatever the server actually has.
     void extract(const QString &kind, const QString &nothingFound);
+
+    // `code.reformat` and `code.showIntentions` (F2-10), added to
+    // `refactorMenu` here rather than inline in `buildMainWindow` — which
+    // has no headroom left under the file-size ceiling — since this class
+    // already owns everything both actions need.
+    void buildCodeActions(QMenu *refactorMenu, AppSettings *appSettings,
+                          QHash<QString, QAction *> &actions);
 
 private:
     QPair<quint32, quint32> caret() const;

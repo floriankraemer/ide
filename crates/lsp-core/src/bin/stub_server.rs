@@ -31,7 +31,9 @@
 //! its request was superseded can be shown to go nowhere. Malformed replies
 //! are reachable per method too — signature help on line 3, a document
 //! highlight with no range on line 3, an inlay hint whose label is a number
-//! on line 900.
+//! on line 900. A `codeAction` request at line 5 answers with a resource
+//! operation ahead of its text edits (F2-3), for the one thing none of the
+//! above exercises: creating a file as part of an edit.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Stdout, Write};
@@ -493,6 +495,36 @@ fn main() {
                         "kind": "refactor.extract",
                         "disabled": {"reason": "selection is not an expression"},
                     }]),
+                    // F2-3: a resource operation ahead of its text edits, in
+                    // one `documentChanges` array — "move to a new file"
+                    // creates the sibling, writes its content, and trims
+                    // what moved out of the original, the shape a real
+                    // extract-to-module refactoring takes.
+                    5 => {
+                        let new_uri = format!(
+                            "{}/extracted.rs",
+                            &uri[..uri.rfind('/').unwrap_or(uri.len())]
+                        );
+                        json!([{
+                            "title": "Move to new file",
+                            "kind": "refactor.move",
+                            "edit": {"documentChanges": [
+                                {"kind": "create", "uri": new_uri},
+                                {"textDocument": {"uri": new_uri, "version": Value::Null},
+                                 "edits": [{
+                                     "range": {"start": {"line": 0, "character": 0},
+                                               "end": {"line": 0, "character": 0}},
+                                     "newText": "// moved here\n",
+                                 }]},
+                                {"textDocument": {"uri": uri, "version": 1},
+                                 "edits": [{
+                                     "range": {"start": {"line": 5, "character": 0},
+                                               "end": {"line": 5, "character": 1}},
+                                     "newText": "moved",
+                                 }]},
+                            ]},
+                        }])
+                    }
                     _ => Value::Null,
                 };
                 send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));

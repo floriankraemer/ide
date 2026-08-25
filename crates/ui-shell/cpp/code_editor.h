@@ -56,6 +56,37 @@ struct DiagnosticSpan
     QColor color;
 };
 
+// One occurrence of the symbol under the caret (F2-11), view-local for the
+// same reason DiagnosticSpan is: [start, end) document (UTF-16) positions,
+// converted from the FFI type by whoever owns the mapping.
+// `document_highlight::HighlightKind::Write` paints differently from a
+// plain read/text occurrence — the distinction the server drew, not
+// something guessed here.
+struct OccurrenceSpan
+{
+    int start;
+    int end;
+    bool isWrite;
+
+    bool operator==(const OccurrenceSpan &other) const
+    {
+        return start == other.start && end == other.end && isWrite == other.isWrite;
+    }
+};
+
+// One inlay hint (F2-11), view-local for the same reason. `position` is
+// where the label is inserted; `paddingLeft`/`paddingRight` are the
+// server's own spacing request (`lsp_core::InlayHint`'s fields, carried
+// through rather than guessed from `kind` — a parameter hint and a type
+// hint pad differently and the server already said which).
+struct InlayHintSpan
+{
+    int position;
+    QString label;
+    bool paddingLeft;
+    bool paddingRight;
+};
+
 // One caret that is not the widget's own (F1-15), view-local for the same
 // reason FoldRange and DiagnosticSpan are: [anchor, head] document (UTF-16)
 // positions, converted from the FFI type by whoever owns the mapping.
@@ -149,6 +180,19 @@ public:
     // server, and cost no reparse — which is exactly the lifetime a
     // diagnostic has.
     void setDiagnosticSpans(const QVector<DiagnosticSpan> &spans);
+
+    // F2-11: the occurrences of the symbol under the caret, same
+    // extra-selection lifetime as diagnostics — asked again on every caret
+    // settle, painted until the next answer replaces them.
+    void setOccurrenceSpans(const QVector<OccurrenceSpan> &spans);
+
+    // F2-11: inlay hints for the visible range, and the settings toggle
+    // that decides whether `paintEvent` draws them at all — off by default
+    // (`code.toggleInlayHints`), since a hint is text the server invented,
+    // not text in the file.
+    void setInlayHints(const QVector<InlayHintSpan> &hints);
+    void setInlayHintsEnabled(bool enabled);
+    bool inlayHintsEnabled() const { return inlayHintsEnabled_; }
 
     // L5: show these candidates, or hide the popup when the vector is
     // empty. Called with whatever `LanguageService::completionItems` last
@@ -334,6 +378,9 @@ private:
     QHash<int, FoldRange> foldStarts_;
     QVector<FoldRange> collapsedRanges_;
     QVector<DiagnosticSpan> diagnosticSpans_;
+    QVector<OccurrenceSpan> occurrenceSpans_;
+    QVector<InlayHintSpan> inlayHints_;
+    bool inlayHintsEnabled_ = false;
     // The Ctrl-hovered word, as [start, end) document positions, or
     // {-1, -1} for none. Pure view state, like the fold collapse state.
     QPair<int, int> hoverSpan_{-1, -1};

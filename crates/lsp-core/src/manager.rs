@@ -34,7 +34,9 @@ use crate::inlay_hint::{line_range, parse_inlay_hints, InlayHint};
 use crate::intentions::{assemble, Intention, ORGANIZE_IMPORTS};
 use crate::navigation::{parse_definition, DefinitionTarget};
 use crate::rename::{parse_prepare_rename, PrepareRename};
-use crate::signature_help::{parse_signature_help, SignatureHelp};
+use crate::signature_help::{
+    parse_signature_help, parse_signature_triggers, SignatureHelp, SignatureTriggers,
+};
 use crate::workspace_edit::{parse_workspace_edit, DocumentEdits};
 
 /// How long a request waits for its response before it is cancelled.
@@ -110,6 +112,10 @@ pub enum LspEvent {
         /// The characters this server wants completion requested after, from
         /// its `initialize` result — `.` in most languages, `:` in Rust.
         trigger_characters: Vec<String>,
+        /// F2-9: whether this server offers signature help at all, and which
+        /// characters trigger and retrigger it — from the same `initialize`
+        /// result, read once for the same reason `trigger_characters` is.
+        signature_triggers: SignatureTriggers,
     },
     /// The server's stdout hit EOF or errored, i.e. it died. A respawn follows
     /// after `retry_in` unless the restart budget is used up.
@@ -958,7 +964,7 @@ fn spawn_supervisor(
 
         loop {
             match connect(&server, &cfg, &root_uri) {
-                Ok((stdout, trigger_characters)) => {
+                Ok((stdout, trigger_characters, signature_triggers)) => {
                     if let Some(tx) = ready.take() {
                         let _ = tx.send(Ok(()));
                     }
@@ -966,6 +972,7 @@ fn spawn_supervisor(
                         language_id: cfg.language_id.clone(),
                         restarts,
                         trigger_characters,
+                        signature_triggers,
                     });
                     let started = Instant::now();
                     read_loop(&server, &cfg.language_id, stdout, &events);
@@ -1026,7 +1033,14 @@ fn connect(
     server: &Server,
     cfg: &ServerConfig,
     root_uri: &str,
-) -> Result<(BufReader<std::process::ChildStdout>, Vec<String>), LspError> {
+) -> Result<
+    (
+        BufReader<std::process::ChildStdout>,
+        Vec<String>,
+        SignatureTriggers,
+    ),
+    LspError,
+> {
     let mut child = Command::new(&cfg.command)
         .args(&cfg.args)
         .stdin(Stdio::piped())
@@ -1061,7 +1075,7 @@ fn connect(
         &serde_json::to_vec(&init).map_err(io::Error::from)?,
     )?;
 
-    let triggers = loop {
+    let (trigger_characters, signature_triggers) = loop {
         let Some(body) = read_message(&mut stdout)? else {
             return Err(LspError::Disconnected {
                 method: "initialize".into(),
@@ -1074,7 +1088,11 @@ fn connect(
             }
             // What the server can do is read here, once, and published with
             // `ServerReady` — nothing else ever sees the raw result.
-            break parse_trigger_characters(message.get("result").unwrap_or(&Value::Null));
+            let result = message.get("result").unwrap_or(&Value::Null);
+            break (
+                parse_trigger_characters(result),
+                parse_signature_triggers(result),
+            );
         }
         // Anything else before the response (log messages, server requests)
         // is dropped: the client isn't observable yet.
@@ -1088,7 +1106,7 @@ fn connect(
     stdin.flush()?;
 
     *server.conn.lock().unwrap() = Some(Conn { stdin, child });
-    Ok((stdout, triggers))
+    Ok((stdout, trigger_characters, signature_triggers))
 }
 
 /// Read and dispatch until the server's stdout ends (i.e. it died).

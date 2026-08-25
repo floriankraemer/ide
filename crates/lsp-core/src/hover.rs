@@ -202,26 +202,28 @@ pub fn hover_outcome(
 /// answer would put the previous position's text under the current cursor,
 /// which is worse than showing nothing, so every request carries a token and
 /// only the newest token is accepted.
+///
+/// A thin, named wrapper over [`crate::RequestTracker`] rather than a type
+/// alias: `HoverTracker` reads at every call site as what it tracks, and the
+/// method names carry `HoverTracker`'s own doc comments instead of the
+/// generic ones.
 #[derive(Debug, Default)]
-pub struct HoverTracker {
-    latest: u64,
-}
+pub struct HoverTracker(crate::RequestTracker);
 
 impl HoverTracker {
     /// Start a hover request, invalidating any still in flight.
     pub fn begin(&mut self) -> u64 {
-        self.latest += 1;
-        self.latest
+        self.0.begin()
     }
 
     /// The pointer moved or left: nothing in flight is wanted any more.
     pub fn cancel(&mut self) {
-        self.latest += 1;
+        self.0.cancel();
     }
 
     /// Is this response still the current one?
     pub fn accept(&self, token: u64) -> bool {
-        token == self.latest
+        self.0.accept(token)
     }
 }
 
