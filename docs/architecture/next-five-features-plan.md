@@ -121,7 +121,7 @@ Renumbered to match §4's Task breakdown, which this table had drifted from (an 
 | F3-17 — view: `changes_panel` | done | fe4a5fb |
 | F3-18 — view: branch widget, `file_history_panel`, blame gutter | done | fe4a5fb |
 | F3-19 — view: the VCS action set and menu | done | fe4a5fb |
-| F3-20 — E2E + its two ADRs + docs | todo | ADR numbers to be reallocated, see below |
+| F3-20 — E2E (2 flows) + docs; no new ADR (ADR-0030/0031 already cover F3's decisions, see below) | done | c3611eb |
 
 ### F4 — Run configurations and console
 
