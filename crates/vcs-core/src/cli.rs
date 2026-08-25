@@ -27,28 +27,69 @@ pub const TIMEOUT: Duration = Duration::from_secs(60);
 /// nothing can answer. A missing `git` binary is
 /// [`VcsError::GitNotInstalled`], never folded into some other failure.
 pub fn run(work_dir: &Path, args: &[&str]) -> Result<String, VcsError> {
-    run_with_timeout(work_dir, args, TIMEOUT)
+    run_internal(work_dir, args, None, TIMEOUT)
+}
+
+/// [`run`], but writing `stdin_text` to the child's stdin first — the shape
+/// `staging::stage_hunk` needs to feed a generated patch to
+/// `git apply --cached -`.
+pub fn run_with_stdin(
+    work_dir: &Path,
+    args: &[&str],
+    stdin_text: &str,
+) -> Result<String, VcsError> {
+    run_internal(work_dir, args, Some(stdin_text), TIMEOUT)
 }
 
 /// [`run`] with an explicit timeout, so tests can exercise the timeout path
 /// without waiting out the real [`TIMEOUT`].
+#[cfg(test)]
 fn run_with_timeout(work_dir: &Path, args: &[&str], timeout: Duration) -> Result<String, VcsError> {
+    run_internal(work_dir, args, None, timeout)
+}
+
+fn run_internal(
+    work_dir: &Path,
+    args: &[&str],
+    stdin_text: Option<&str>,
+    timeout: Duration,
+) -> Result<String, VcsError> {
     let command_str = display_command(args);
 
     let child = Command::new("git")
         .args(args)
         .current_dir(work_dir)
         .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(Stdio::null())
+        .stdin(if stdin_text.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn();
 
-    let child = match child {
+    let mut child = match child {
         Ok(child) => child,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(VcsError::GitNotInstalled),
         Err(e) => return Err(VcsError::Read(e.to_string())),
     };
+
+    if let Some(text) = stdin_text {
+        use std::io::Write;
+        // Written synchronously before handing the child to the waiter
+        // thread below, then dropped to close the pipe — `git apply`
+        // reads its patch to EOF before doing anything else, so there is
+        // no output to drain concurrently yet and no deadlock risk from
+        // writing here. A patch big enough to fill the stdin pipe buffer
+        // before `git` starts reading is not a shape this crate produces
+        // (one hunk at a time).
+        let mut stdin = child.stdin.take().expect("stdin was piped");
+        if let Err(e) = stdin.write_all(text.as_bytes()) {
+            return Err(VcsError::Read(e.to_string()));
+        }
+        drop(stdin);
+    }
 
     // A thread, not a poll loop reading the pipes directly: `git` can fill
     // stdout or stderr's OS pipe buffer and block on a write before this

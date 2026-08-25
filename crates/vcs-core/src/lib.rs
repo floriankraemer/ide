@@ -15,7 +15,9 @@ pub mod cli;
 mod error;
 pub mod hunks;
 pub mod repo;
+pub mod staging;
 
 pub use error::VcsError;
 pub use hunks::{HunkCache, WorkingHunks};
 pub use repo::{ChangeKind, DiscoverResult, FileStatus, HeadInfo, RepoStatus, Repository};
+pub use staging::hunk_patch;
