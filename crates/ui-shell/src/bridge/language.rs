@@ -63,6 +63,12 @@ pub struct LanguageServiceRust {
     /// came from — resolving or executing one has to go back to that server.
     actions: RefCell<Vec<lsp_core::CodeActionItem>>,
     actions_language: RefCell<String>,
+    /// F2-8: the offers of the last `requestIntentions`, plus the language
+    /// they came from and the generation that invalidates a stale answer —
+    /// a caret move sends a fresh request rather than waiting for this one.
+    intentions: RefCell<Vec<lsp_core::Intention>>,
+    intentions_language: RefCell<String>,
+    intentions_tracker: RefCell<lsp_core::RequestTracker>,
     /// The refactoring waiting to be applied, if any: what it changes, what
     /// to call it, and — when it came from the server asking us — the gate
     /// that server is blocked on.
@@ -87,6 +93,9 @@ impl Default for LanguageServiceRust {
             triggers: RefCell::default(),
             actions: RefCell::default(),
             actions_language: RefCell::default(),
+            intentions: RefCell::default(),
+            intentions_language: RefCell::default(),
+            intentions_tracker: RefCell::default(),
             pending: RefCell::default(),
             edits: RefCell::default(),
         }
@@ -181,6 +190,21 @@ fn to_ffi_resource_op(op: &lsp_core::ResourceOp) -> ffi::FfiResourceOp {
             path: QString::from(path.as_str()),
             new_path: QString::default(),
         },
+    }
+}
+
+fn to_ffi_intention(intention: &lsp_core::Intention) -> ffi::FfiIntention {
+    ffi::FfiIntention {
+        title: QString::from(intention.title()),
+        kind: QString::from(intention.kind().unwrap_or_default()),
+        group: match intention.group {
+            lsp_core::IntentionGroup::QuickFix => ffi::FfiIntentionGroup::QuickFix,
+            lsp_core::IntentionGroup::Refactor => ffi::FfiIntentionGroup::Refactor,
+            lsp_core::IntentionGroup::Source => ffi::FfiIntentionGroup::Source,
+            lsp_core::IntentionGroup::Other => ffi::FfiIntentionGroup::Other,
+        },
+        preferred: intention.preferred,
+        disabled_reason: QString::from(intention.disabled().unwrap_or_default()),
     }
 }
 
@@ -546,6 +570,51 @@ impl ffi::LanguageService {
         });
     }
 
+    /// F2-8: everything that can be done at the caret — `code.showIntentions`
+    /// (Alt+Enter). Scoped to the caret, not a selection, and merged with
+    /// whatever diagnostic sits under it (`lsp_core::intentions::assemble`,
+    /// via `LspManager::intentions`), which a plain `codeActionsAt` never
+    /// asks for.
+    pub fn request_intentions(mut self: Pin<&mut Self>, path: &QString, line: u32, character: u32) {
+        let path = path.to_string();
+        let Some(language_id) = self.open_docs.borrow().get(&path).cloned() else {
+            return;
+        };
+        let uri = lsp_core::uri_from_path(&path);
+        let diagnostics = self.store.borrow().diagnostics_at(&uri, line, character);
+        let token = self.intentions_tracker.borrow_mut().begin();
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            let result =
+                manager.intentions(&uri, (line, character), (line, character), &diagnostics);
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                if !service.intentions_tracker.borrow().accept(token) {
+                    // A newer caret position superseded this request; its
+                    // answer would show intentions for a place the caret
+                    // has already left.
+                    return;
+                }
+                *service.intentions.borrow_mut() = result.unwrap_or_default();
+                *service.intentions_language.borrow_mut() = language_id;
+                service.as_mut().intentions_ready();
+            });
+        });
+    }
+
+    /// The caret moved (or the tab did): whatever `requestIntentions` is
+    /// still waiting on is no longer wanted.
+    pub fn cancel_intentions(self: Pin<&mut Self>) {
+        self.intentions_tracker.borrow_mut().cancel();
+    }
+
+    pub fn intentions(&self) -> Vec<ffi::FfiIntention> {
+        self.intentions
+            .borrow()
+            .iter()
+            .map(to_ffi_intention)
+            .collect()
+    }
+
     pub fn code_actions(&self) -> Vec<ffi::FfiCodeAction> {
         self.actions
             .borrow()
@@ -563,6 +632,34 @@ impl ffi::LanguageService {
             return;
         };
         let language_id = self.actions_language.borrow().clone();
+        self.as_mut()
+            .run_action(action, language_id, buffer_revision);
+    }
+
+    /// F2-8: the same gesture as `applyCodeAction`, over the caret-scoped
+    /// list `requestIntentions` produced rather than the range-scoped one
+    /// `codeActionsAt` did. Both end at [`Self::run_action`] because an
+    /// `Intention` is a `CodeActionItem` plus a menu group — applying one is
+    /// exactly applying the other.
+    pub fn apply_intention(mut self: Pin<&mut Self>, index: u32, buffer_revision: i64) {
+        let Some(intention) = self.intentions.borrow().get(index as usize).cloned() else {
+            return;
+        };
+        let language_id = self.intentions_language.borrow().clone();
+        self.as_mut()
+            .run_action(intention.item, language_id, buffer_revision);
+    }
+
+    /// Resolve (if needed) and apply one code action, publishing whatever
+    /// `WorkspaceChanges` its steps produce through the pending-refactor
+    /// protocol. Shared by `applyCodeAction` and `applyIntention` — the two
+    /// surfaces differ only in how the action was found.
+    fn run_action(
+        mut self: Pin<&mut Self>,
+        action: lsp_core::CodeActionItem,
+        language_id: String,
+        buffer_revision: i64,
+    ) {
         let open_paths = self.open_document_paths();
         let current_path = self.current_path_of(&action);
         self.edits.borrow_mut().begin(buffer_revision);

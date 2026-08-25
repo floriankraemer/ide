@@ -24,6 +24,7 @@ pub mod manager;
 pub mod navigation;
 pub mod rename;
 pub mod signature_help;
+pub mod tracker;
 pub mod workspace_edit;
 
 pub use apply_edit::{
@@ -68,6 +69,7 @@ pub use signature_help::{
     should_request as should_request_signature_help, CallSite, ParameterInfo, SignatureHelp,
     SignatureInfo, SignatureTriggers,
 };
+pub use tracker::RequestTracker;
 pub use workspace_edit::{
     apply_to_text, descending, parse_workspace_changes, parse_workspace_edit, plan as plan_edit,
     plan_changes, ChangeStep, DocumentEdits, EditError, EditGate, EditPlan, ResourceOp, TextEdit,

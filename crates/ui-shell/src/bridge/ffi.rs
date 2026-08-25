@@ -529,6 +529,27 @@ mod ffi {
         disabled_reason: QString,
     }
 
+    /// Which section of the Alt+Enter popup a row belongs in, 1:1 with
+    /// `lsp_core::IntentionGroup`. Declared in the order the menu is built,
+    /// which the view relies on rather than re-deriving.
+    enum FfiIntentionGroup {
+        QuickFix,
+        Refactor,
+        Source,
+        Other,
+    }
+
+    /// One row of the Alt+Enter popup (F2-8), 1:1 with `lsp_core::Intention`.
+    /// A `disabled_reason`-carrying row is still listed, greyed, exactly as
+    /// `FfiCodeAction`'s is.
+    struct FfiIntention {
+        title: QString,
+        kind: QString,
+        group: FfiIntentionGroup,
+        preferred: bool,
+        disabled_reason: QString,
+    }
+
     /// How many diagnostics of each severity exist right now, 1:1 with
     /// `lsp_core::DiagnosticCounts` — for the status-bar counter and the
     /// Problems panel's filter buttons.
@@ -2502,6 +2523,45 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "applyCodeAction"]
         fn apply_code_action(self: Pin<&mut LanguageService>, index: u32, buffer_revision: i64);
+
+        /// F2-8 — everything that can be done at the caret: `code.
+        /// showIntentions` (Alt+Enter). Merges the diagnostic-scoped and
+        /// range-scoped `codeAction` answers (`lsp_core::intentions::
+        /// assemble`), grouped and ordered for the popup. Answers on
+        /// `intentionsReady`.
+        #[qinvokable]
+        #[cxx_name = "requestIntentions"]
+        fn request_intentions(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            line: u32,
+            character: u32,
+        );
+
+        /// The caret moved, or the tab did: whatever `requestIntentions` is
+        /// waiting on is no longer wanted.
+        #[qinvokable]
+        #[cxx_name = "cancelIntentions"]
+        fn cancel_intentions(self: Pin<&mut LanguageService>);
+
+        /// The offers from the last `requestIntentions`, grouped and ordered
+        /// for the popup — see `lsp_core::intentions::assemble`.
+        #[qinvokable]
+        #[cxx_name = "intentions"]
+        fn intentions(self: &LanguageService) -> Vec<FfiIntention>;
+
+        /// A `requestIntentions` answered — possibly with nothing, which is
+        /// still signalled so the bulb can hide.
+        #[qsignal]
+        #[cxx_name = "intentionsReady"]
+        fn intentions_ready(self: Pin<&mut LanguageService>);
+
+        /// Carry out the offer at `index` of the last `intentions`. Shares
+        /// `applyCodeAction`'s pending-refactor protocol exactly — see
+        /// `run_action` on the Rust side.
+        #[qinvokable]
+        #[cxx_name = "applyIntention"]
+        fn apply_intention(self: Pin<&mut LanguageService>, index: u32, buffer_revision: i64);
 
         /// RF8 — rename the symbol at a position.
         ///
