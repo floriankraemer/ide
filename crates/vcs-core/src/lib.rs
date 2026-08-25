@@ -11,6 +11,7 @@
 //! `VcsService` (F3-12, not yet built) is the only thing that may call this
 //! crate from behind the FFI seam.
 
+pub mod branch;
 pub mod cli;
 pub mod commit;
 mod error;
