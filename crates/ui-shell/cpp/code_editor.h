@@ -46,6 +46,17 @@ struct FoldRange
 };
 
 
+// One line's blame annotation (F3-18), view-local: `block` is the 0-based
+// `QTextBlock` the line's `git blame` entry describes, `text` is the
+// pre-formatted summary this widget paints verbatim ("author, summary" or
+// similar) — deciding what that string says is EditorTabs's job (it reads
+// `FfiBlameLine`), not this widget's, the same split `ChangeMarker` draws.
+struct BlameAnnotation
+{
+    int block;
+    QString text;
+};
+
 // One diagnostic's underline, view-local: [start, end) document (UTF-16)
 // positions plus the colour its severity gets. Converted from the FFI's
 // line/character pairs by whoever owns the mapping (main_window.cpp), so this
@@ -229,6 +240,13 @@ public:
     // setFoldRanges/setDiagnosticSpans.
     void setChangeMarkers(const QVector<ChangeMarker> &markers);
 
+    // F3-18: per-line blame text, off by default (vcs.annotate toggles it).
+    // Replaces whatever was set before — the caller re-sends the whole file's
+    // annotations on every `blameReady`, same as setChangeMarkers.
+    void setBlameAnnotations(const QVector<BlameAnnotation> &annotations);
+    void setBlameEnabled(bool enabled);
+    bool blameEnabled() const { return blameEnabled_; }
+
 signals:
     // N7: Ctrl+Click landed on an identifier-shaped word. `position` is a
     // document (UTF-16) position inside that word; converting it to the
@@ -384,6 +402,11 @@ private:
     bool changeMarkerAt(int blockNumber, ChangeMarker *out) const;
 
     LineNumberArea *lineNumberArea_;
+    // F3-18: blame text keyed by block, and whether the gutter currently
+    // widens to show it — same "empty means default, off by default"
+    // arrangement inlay hints already use.
+    QHash<int, QString> blameAnnotations_;
+    bool blameEnabled_ = false;
     QVector<QPair<int, int>> matchSelections_;
     int currentMatch_ = -1;
     QString currentLineColor_;

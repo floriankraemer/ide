@@ -357,6 +357,12 @@ fn main() {
         .cpp_file("cpp/ai_chat_panel.h")
         .cpp_file("cpp/ai_chat_panel.cpp")
         .cpp_file("cpp/ai_providers_page.cpp")
+        // F3-17/18/19: the Changes/File History docks and the VCS menu.
+        // Q_OBJECT-free like the other panels/pages above, so only the
+        // sources are listed.
+        .cpp_file("cpp/changes_panel.cpp")
+        .cpp_file("cpp/file_history_panel.cpp")
+        .cpp_file("cpp/vcs_menu.cpp")
         .include_dir("cpp")
         .include_dir(ads_dir)
         .cpp_file(compile_ads_qrc(ads_dir, &tool_dirs))

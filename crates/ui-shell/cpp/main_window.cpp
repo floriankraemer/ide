@@ -2,6 +2,7 @@
 
 #include "ai_chat_panel.h"
 #include "appearance_page.h"
+#include "changes_panel.h"
 #include "class_view_panel.h"
 #include "code_editor.h"
 #include "declaration_navigator.h"
@@ -9,6 +10,7 @@
 #include "e2e_mark.h"
 #include "editing_actions.h"
 #include "editor_tabs.h"
+#include "file_history_panel.h"
 #include "find_bar.h"
 #include "find_usages_panel.h"
 #include "hex_viewer.h"
@@ -28,6 +30,7 @@
 #include "syntax_highlighter.h"
 #include "terminal_widget.h"
 #include "theme.h"
+#include "vcs_menu.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include "DockManager.h"
@@ -97,12 +100,15 @@ struct CentralWidgets
     SearchEverywhereDialog *searchEverywhereDialog;
     ProblemsPanel *problemsPanel;
     AiChatPanel *aiChatPanel;
+    ChangesPanel *changesPanel;
+    FileHistoryPanel *fileHistoryPanel;
 };
 
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
                                    DocumentManager *docManager, AppSettings *appSettings,
                                    SearchModel *searchModel, TerminalSession *terminalSession,
-                                   LanguageService *languageService, AiChat *aiChat)
+                                   LanguageService *languageService, AiChat *aiChat,
+                                   VcsService *vcsService)
 {
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
@@ -180,6 +186,19 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     aiChatDock->setWidget(aiChatPanel);
     docks->registerDock(QStringLiteral("aiChat"), aiChatDock, ads::CenterDockWidgetArea, rightArea);
 
+    // F3-17/18: both start hidden; vcs_menu.cpp reveals each in turn.
+    auto *changesPanel = new ChangesPanel(vcsService, dockManager);
+    auto *changesDock = new ads::CDockWidget(dockManager, QObject::tr("Changes"));
+    changesDock->setWidget(changesPanel);
+    docks->registerDock(QStringLiteral("changes"), changesDock, ads::CenterDockWidgetArea, rightArea);
+    docks->hide(QStringLiteral("changes"));
+    auto *fileHistoryPanel = new FileHistoryPanel(vcsService, dockManager);
+    auto *fileHistoryDock = new ads::CDockWidget(dockManager, QObject::tr("File History"));
+    fileHistoryDock->setWidget(fileHistoryPanel);
+    docks->registerDock(QStringLiteral("fileHistory"), fileHistoryDock, ads::CenterDockWidgetArea,
+                        bottomArea);
+    docks->hide(QStringLiteral("fileHistory"));
+
     // Search Everywhere: a transient popup parented to the top-level window
     // (not the dock manager) since it's a floating overlay, not a dock
     // widget. It hands a query off to the Search Results dock on Ctrl+Enter,
@@ -232,11 +251,15 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                       [classViewPanel, editorTabs](quint64, const QString &) {
                           classViewPanel->refresh(editorTabs->currentTabId());
                       });
-    editorTabs->setActiveTabChangedCallback([classViewPanel, editorTabs, problemsPanel]() {
-        classViewPanel->refresh(editorTabs->currentTabId());
-        // The current file's group sorts to the top of the Problems panel.
-        problemsPanel->setCurrentFile(editorTabs->currentPath());
-    });
+    editorTabs->setActiveTabChangedCallback(
+      [classViewPanel, editorTabs, problemsPanel, fileHistoryPanel]() {
+          classViewPanel->refresh(editorTabs->currentTabId());
+          // The current file's group sorts to the top of the Problems panel.
+          problemsPanel->setCurrentFile(editorTabs->currentPath());
+          // F3-18: keep File History/annotate pinned to the current tab.
+          fileHistoryPanel->setCurrentFile(editorTabs->currentPath());
+          editorTabs->setAnnotateEnabled(editorTabs->annotateEnabled());
+      });
     QObject::connect(docManager, &DocumentManager::tabModifiedChanged, classViewPanel,
                       [classViewPanel, editorTabs](quint64 tabId, bool modified) {
                           if (!modified && tabId == editorTabs->currentTabId()) {
@@ -367,7 +390,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     return CentralWidgets{editorTabs,       dockManager,      docks,
                            treeView,         searchResultsPanel, classViewPanel,
                            terminalWidget,   findUsagesPanel,  searchEverywhereDialog,
-                           problemsPanel,    aiChatPanel};
+                           problemsPanel,    aiChatPanel,      changesPanel,
+                           fileHistoryPanel};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -456,7 +480,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     progress(3, QObject::tr("Building workspace..."));
     const CentralWidgets central =
       buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession,
-                          languageService, aiChat);
+                          languageService, aiChat, vcsService);
     EditorTabs *editorTabs = central.editorTabs;
     wireVcsService(vcsService, treeModel, editorTabs); // F3-12a/F3-16
 
@@ -594,6 +618,8 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     };
     QObject::connect(languageService, &LanguageService::diagnosticsChanged, window,
                       updateProblemsButton);
+    // F3-18: the branch widget (vcs_menu.cpp).
+    auto *branchButton = buildBranchWidget(vcsService, window, statusBar);
     // The project index builds on a background thread for seconds to minutes
     // after a folder is opened. Until this existed the only way to find that
     // out was to run a search and be told to try again later.
@@ -653,6 +679,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     statusBar->addPermanentWidget(indexLabel);
     statusBar->addPermanentWidget(indexBar);
     statusBar->addPermanentWidget(problemsButton);
+    statusBar->addPermanentWidget(branchButton);
     statusBar->addPermanentWidget(languageLabel);
     statusBar->addPermanentWidget(positionLabel);
     statusBar->addPermanentWidget(encodingLabel);
@@ -917,6 +944,10 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QObject::connect(goToLineAction, &QAction::triggered, window, [editorTabs]() {
         editorTabs->goToLine();
     });
+
+    // F3-19: the VCS menu (vcs_menu.cpp).
+    buildVcsMenu(window, vcsService, appSettings, *actions, editorTabs, central.docks,
+                 central.fileHistoryPanel, viewMenu);
 
     // N8: code navigation. The Ctrl+Click gesture and every action below
     // route through the one DeclarationNavigator, so there is a single

@@ -11,6 +11,22 @@
 
 namespace ui_shell {
 
+namespace {
+
+// The block a hunk's marker paints on — mirrors applyVcsHunks's own rule for
+// a pure deletion (no line of its own on the new side, so it marks the line
+// the deletion happened in front of). Shared so rollback-at-caret and
+// next/previous-change agree with what the gutter actually shows.
+quint32 hunkMarkerLine(const FfiHunk &hunk)
+{
+    if (hunk.kind == FfiHunkKind::Removed) {
+        return hunk.new_start > 0 ? hunk.new_start - 1 : 0;
+    }
+    return hunk.new_start;
+}
+
+} // namespace
+
 void wireVcsService(VcsService *vcsService, ProjectTreeModel *treeModel, EditorTabs *editorTabs)
 {
     // Same project-open lifecycle event the tree/watcher and the language
@@ -26,6 +42,10 @@ void wireVcsService(VcsService *vcsService, ProjectTreeModel *treeModel, EditorT
     editorTabs->setVcsService(vcsService);
     QObject::connect(vcsService, &VcsService::hunksChanged, editorTabs,
                       [editorTabs](const QString &path) { editorTabs->applyVcsHunks(path); });
+    QObject::connect(vcsService, &VcsService::blameReady, editorTabs,
+                      [editorTabs](const QString &path, const ::rust::Vec<FfiBlameLine> &lines) {
+                          editorTabs->applyVcsBlame(path, lines);
+                      });
 }
 
 void EditorTabs::setVcsService(VcsService *vcsService)
@@ -79,6 +99,139 @@ void EditorTabs::applyVcsHunks(const QString &path)
         }
     }
     editor->setChangeMarkers(markers);
+}
+
+void EditorTabs::setAnnotateEnabled(bool enabled)
+{
+    annotateEnabled_ = enabled;
+    auto *editor = qobject_cast<CodeEditor *>(currentEditor());
+    if (!editor) {
+        return;
+    }
+    editor->setBlameEnabled(enabled);
+    if (!enabled || !vcsService_) {
+        return;
+    }
+    const quint64 tabId = editor->property("tabId").toULongLong();
+    const QString path = docManager_->tabPath(tabId);
+    if (!path.isEmpty()) {
+        vcsService_->blame(path);
+    }
+}
+
+void EditorTabs::applyVcsBlame(const QString &path, const ::rust::Vec<FfiBlameLine> &lines)
+{
+    CodeEditor *editor = editorForPath(path);
+    if (!editor) {
+        return;
+    }
+    QVector<BlameAnnotation> annotations;
+    annotations.reserve(static_cast<int>(lines.size()));
+    for (const FfiBlameLine &line : lines) {
+        const QString shortId = QString(line.commit).left(8);
+        annotations.append(BlameAnnotation{
+          static_cast<int>(line.line) - 1,
+          QStringLiteral("%1 %2 %3").arg(shortId, QString(line.author_name), QString(line.summary))});
+    }
+    editor->setBlameAnnotations(annotations);
+    editor->setBlameEnabled(annotateEnabled_);
+}
+
+void EditorTabs::showDiffAgainstHead()
+{
+    auto *editor = qobject_cast<CodeEditor *>(currentEditor());
+    if (!editor || !vcsService_) {
+        return;
+    }
+    const QString path = currentPath();
+    if (path.isEmpty()) {
+        return;
+    }
+    const QString headText = vcsService_->headText(path);
+    auto *dialog = new QDialog(window_);
+    dialog->setWindowTitle(tr("Diff — %1").arg(path));
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    auto *layout = new QVBoxLayout(dialog);
+    auto *diff = new DiffView(headText, editor->toPlainText(), vcsService_->hunks(path),
+                               ::rust::Vec<FfiInlineSpan>(), QString(), dialog);
+    layout->addWidget(diff);
+    dialog->resize(900, 600);
+    dialog->show();
+}
+
+void EditorTabs::rollbackHunkAtCaret()
+{
+    auto *editor = qobject_cast<CodeEditor *>(currentEditor());
+    if (!editor || !vcsService_) {
+        return;
+    }
+    const QString path = currentPath();
+    if (path.isEmpty()) {
+        return;
+    }
+    const int caretLine = editor->textCursor().blockNumber();
+    const ::rust::Vec<FfiHunk> hunks = vcsService_->hunks(path);
+    for (std::size_t i = 0; i < hunks.size(); ++i) {
+        const FfiHunk &hunk = hunks[i];
+        const quint32 start = hunkMarkerLine(hunk);
+        const quint32 end =
+          hunk.kind == FfiHunkKind::Removed ? start + 1 : hunk.new_start + hunk.new_len;
+        if (static_cast<quint32>(caretLine) >= start && static_cast<quint32>(caretLine) < end) {
+            const ::rust::Vec<FfiTextEdit> edits =
+              vcsService_->revertHunk(path, static_cast<quint32>(i));
+            if (!edits.empty()) {
+                applyEditsTo(editor, edits);
+            }
+            return;
+        }
+    }
+}
+
+void EditorTabs::jumpToChange(bool forward)
+{
+    auto *editor = qobject_cast<CodeEditor *>(currentEditor());
+    if (!editor || !vcsService_) {
+        return;
+    }
+    const QString path = currentPath();
+    if (path.isEmpty()) {
+        return;
+    }
+    const ::rust::Vec<FfiHunk> hunks = vcsService_->hunks(path);
+    if (hunks.empty()) {
+        return;
+    }
+    const int caretLine = editor->textCursor().blockNumber();
+    int target = -1;
+    if (forward) {
+        for (std::size_t i = 0; i < hunks.size(); ++i) {
+            const int line = static_cast<int>(hunkMarkerLine(hunks[i]));
+            if (line > caretLine) {
+                target = line;
+                break;
+            }
+        }
+        if (target < 0) {
+            target = static_cast<int>(hunkMarkerLine(hunks[0]));
+        }
+    } else {
+        for (std::size_t i = hunks.size(); i-- > 0;) {
+            const int line = static_cast<int>(hunkMarkerLine(hunks[i]));
+            if (line < caretLine) {
+                target = line;
+                break;
+            }
+        }
+        if (target < 0) {
+            target = static_cast<int>(hunkMarkerLine(hunks[hunks.size() - 1]));
+        }
+    }
+
+    QTextCursor cursor = editor->textCursor();
+    cursor.movePosition(QTextCursor::Start);
+    cursor.movePosition(QTextCursor::Down, QTextCursor::MoveAnchor, target);
+    editor->setTextCursor(cursor);
+    editor->centerCursor();
 }
 
 void EditorTabs::onChangeMarkerClicked(CodeEditor *editor, int hunkIndex, const QPoint &globalPos)
