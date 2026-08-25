@@ -19,6 +19,17 @@ impl Repository {
         Ok(())
     }
 
+    /// `git reset -- <path>` — unstage the whole file, leaving the working
+    /// tree and `HEAD` untouched. The whole-file inverse of [`Self::stage_file`];
+    /// [`Self::unstage_hunk`] only reverses one hunk already known to the
+    /// caller.
+    pub fn unstage_file(&self, relative_path: &Path) -> Result<(), VcsError> {
+        let work_dir = self.work_dir_or_err()?;
+        let path = path_str(relative_path)?;
+        cli::run(&work_dir, &argv::reset(&[path]))?;
+        Ok(())
+    }
+
     /// Stage exactly one hunk, via a generated patch applied with
     /// `git apply --cached`. `before`/`after` must be the same two texts
     /// the hunk was computed from (typically the index's copy and the
@@ -271,5 +282,22 @@ mod tests {
         repo.stage_file(Path::new("a.txt")).unwrap();
 
         assert_eq!(status_porcelain(dir.path()), "M  a.txt\n");
+    }
+
+    #[test]
+    fn unstage_file_reverses_a_staged_whole_file() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "--quiet"]);
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(dir.path(), &["add", "a.txt"]);
+        git(dir.path(), &["commit", "-m", "first"]);
+
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+        let repo = open(dir.path());
+        repo.stage_file(Path::new("a.txt")).unwrap();
+        assert_eq!(status_porcelain(dir.path()), "M  a.txt\n");
+
+        repo.unstage_file(Path::new("a.txt")).unwrap();
+        assert_eq!(status_porcelain(dir.path()), " M a.txt\n");
     }
 }

@@ -154,6 +154,13 @@ pub mod argv {
         args
     }
 
+    /// `git reset -- <paths>` — unstage without touching the working tree.
+    pub fn reset<'a>(paths: &'a [&str]) -> Vec<&'a str> {
+        let mut args = vec!["reset", "--"];
+        args.extend_from_slice(paths);
+        args
+    }
+
     /// `git apply --cached [--reverse] -` (patch text goes on stdin).
     pub fn apply_cached(reverse: bool) -> Vec<&'static str> {
         if reverse {
@@ -234,6 +241,14 @@ mod tests {
         assert_eq!(
             argv::add(&["a.txt", "b.txt"]),
             vec!["add", "--", "a.txt", "b.txt"]
+        );
+    }
+
+    #[test]
+    fn reset_argv() {
+        assert_eq!(
+            argv::reset(&["a.txt", "b.txt"]),
+            vec!["reset", "--", "a.txt", "b.txt"]
         );
     }
 

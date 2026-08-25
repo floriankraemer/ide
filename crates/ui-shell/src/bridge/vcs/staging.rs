@@ -29,6 +29,21 @@ impl ffi::VcsService {
         });
     }
 
+    pub fn unstage_file(mut self: Pin<&mut Self>, path: &QString) {
+        let path = path.to_string();
+        let qt_thread = self.as_mut().qt_thread();
+        self.as_ref().push_job(move |worker: &VcsWorker| {
+            let result = worker.repo.unstage_file(Path::new(&path));
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| match result {
+                Ok(()) => service.as_mut().refresh_status(),
+                Err(err) => {
+                    let result = to_ffi_result(&err);
+                    service.as_mut().vcs_failed(result);
+                }
+            });
+        });
+    }
+
     pub fn stage_hunk(self: Pin<&mut Self>, path: &QString, hunk_index: u32) {
         self.apply_hunk_op(path, hunk_index, false);
     }

@@ -118,9 +118,9 @@ Renumbered to match §4's Task breakdown, which this table had drifted from (an 
 | F3-14 — view: `TabKind::Diff` + `diff_labels`, deferred until the Git backend exists (§2/ADR-0030) | todo |  |
 | F3-15 — retrofit: refactor preview, project-wide replace preview and AI apply render through `DiffView` | done | fcb917e, 27d3a88 |
 | F3-16 — view: `vcs_gutter` | done | d09bc5c |
-| F3-17 — view: `changes_panel` | todo |  |
-| F3-18 — view: branch widget, `file_history_panel`, blame gutter | todo |  |
-| F3-19 — view: the VCS action set and menu | todo |  |
+| F3-17 — view: `changes_panel` | done | fe4a5fb |
+| F3-18 — view: branch widget, `file_history_panel`, blame gutter | done | fe4a5fb |
+| F3-19 — view: the VCS action set and menu | done | fe4a5fb |
 | F3-20 — E2E + its two ADRs + docs | todo | ADR numbers to be reallocated, see below |
 
 ### F4 — Run configurations and console

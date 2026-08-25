@@ -1,0 +1,249 @@
+#include "vcs_menu.h"
+
+#include "dock_layout.h"
+#include "editor_tabs.h"
+#include "file_history_panel.h"
+#include "keymap_page.h"
+
+#include "DockWidget.h"
+
+#include <QAction>
+#include <QCursor>
+#include <QInputDialog>
+#include <QMainWindow>
+#include <QMenu>
+#include <QMenuBar>
+#include <QMessageBox>
+#include <QStatusBar>
+#include <QStringList>
+#include <QToolButton>
+
+namespace ui_shell {
+
+namespace {
+
+void showBranchMenu(VcsService *vcsService, QWidget *anchor, const QPoint &globalPos)
+{
+    auto *menu = new QMenu(anchor);
+    menu->setAttribute(Qt::WA_DeleteOnClose);
+
+    // Names copied out to a plain QStringList up front: `rust::Vec<T>` is a
+    // borrowed view over Rust-owned memory, not a value this code should
+    // hold onto past this function, and the delete-branch lambda below
+    // needs the list again after the branch that filled it has closed.
+    const QString current = vcsService->currentBranch();
+    QStringList names;
+    for (const FfiBranch &branch : vcsService->branches()) {
+        names.append(branch.name);
+    }
+    for (const QString &name : names) {
+        QAction *action = menu->addAction(name);
+        action->setCheckable(true);
+        action->setChecked(name == current);
+        QObject::connect(action, &QAction::triggered, vcsService,
+                          [vcsService, name]() { vcsService->checkout(name); });
+    }
+    menu->addSeparator();
+
+    QAction *newBranchAction = menu->addAction(QObject::tr("New Branch..."));
+    QObject::connect(newBranchAction, &QAction::triggered, vcsService, [vcsService, anchor]() {
+        const QString name =
+          QInputDialog::getText(anchor, QObject::tr("New Branch"), QObject::tr("Branch name:"));
+        if (!name.isEmpty()) {
+            vcsService->createBranch(name, QString());
+        }
+    });
+
+    QAction *deleteBranchAction = menu->addAction(QObject::tr("Delete Branch..."));
+    QObject::connect(
+      deleteBranchAction, &QAction::triggered, vcsService, [vcsService, anchor, names]() {
+          if (names.isEmpty()) {
+              return;
+          }
+          bool ok = false;
+          const QString name = QInputDialog::getItem(anchor, QObject::tr("Delete Branch"),
+                                                       QObject::tr("Branch:"), names, 0, false, &ok);
+          if (!ok || name.isEmpty()) {
+              return;
+          }
+          // A refusal (unmerged commits) is shown, not silently retried —
+          // force is a deliberate second click, never an automatic fallback
+          // (Repository::delete_branch's own doc comment on why).
+          QObject::connect(
+            vcsService, &VcsService::vcsFailed, vcsService,
+            [vcsService, anchor, name](FfiResult error) {
+                QObject::disconnect(vcsService, &VcsService::vcsFailed, vcsService, nullptr);
+                // vcs_core::VcsError::CODE_UNMERGED_BRANCH (error.rs).
+                if (error.code != 705) {
+                    QMessageBox::warning(anchor, QObject::tr("Delete Branch"), error.message);
+                    return;
+                }
+                const auto choice = QMessageBox::warning(
+                  anchor, QObject::tr("Delete Branch"),
+                  QObject::tr("'%1' has commits not merged anywhere else. Delete anyway?")
+                    .arg(name),
+                  QMessageBox::Cancel | QMessageBox::Yes, QMessageBox::Cancel);
+                if (choice == QMessageBox::Yes) {
+                    vcsService->deleteBranch(name, /*force=*/true);
+                }
+            });
+          vcsService->deleteBranch(name, /*force=*/false);
+      });
+
+    menu->popup(globalPos);
+}
+
+} // namespace
+
+QToolButton *buildBranchWidget(VcsService *vcsService, QWidget *window, QStatusBar *statusBar)
+{
+    auto *button = new QToolButton(statusBar);
+    button->setAutoRaise(true);
+    button->setVisible(false);
+
+    const auto refresh = [button, vcsService]() {
+        const bool isRepo = vcsService->isRepository();
+        button->setVisible(isRepo);
+        if (isRepo) {
+            const QString branch = vcsService->currentBranch();
+            button->setText(branch.isEmpty() ? QObject::tr("(detached)") : branch);
+        }
+    };
+    QObject::connect(vcsService, &VcsService::branchChanged, button, refresh);
+    QObject::connect(vcsService, &VcsService::repositoryChanged, button, [vcsService, refresh]() {
+        if (vcsService->isRepository()) {
+            vcsService->refreshBranches();
+        }
+        refresh();
+    });
+    QObject::connect(button, &QToolButton::clicked, vcsService, [vcsService, button]() {
+        showBranchMenu(vcsService, button, button->mapToGlobal(QPoint(0, 0)));
+    });
+
+    return button;
+}
+
+void buildVcsMenu(QMainWindow *window, VcsService *vcsService, AppSettings *appSettings,
+                   QHash<QString, QAction *> &actions, EditorTabs *editorTabs,
+                   DockRegistry *docks, FileHistoryPanel *fileHistoryPanel, QMenu *viewMenu)
+{
+    // No caller of `VcsService` anywhere in `ui-shell` showed `vcsFailed` to
+    // the user before this menu existed (the gutter's stage/revert and the
+    // Changes dock's stage/commit all rely on it being rare) — this is the
+    // first surface broad enough that it should stop being silent. Code 705
+    // (`VcsError::UnmergedBranch`) is excluded: the branch-delete flow above
+    // shows its own actionable dialog for that one.
+    QObject::connect(vcsService, &VcsService::vcsFailed, window, [window](FfiResult error) {
+        if (error.code == 705) {
+            return;
+        }
+        QMessageBox::warning(window, QObject::tr("Git"), error.message);
+    });
+
+    QMenu *vcsMenu = window->menuBar()->addMenu(QObject::tr("&VCS"));
+
+    QAction *commitAction = registerAction(vcsMenu, QStringLiteral("vcs.commit"),
+                                            QObject::tr("Commit..."), appSettings, actions);
+    QObject::connect(commitAction, &QAction::triggered, window,
+                      [docks]() { docks->show(QStringLiteral("changes")); });
+
+    QAction *pushAction = registerAction(vcsMenu, QStringLiteral("vcs.push"),
+                                          QObject::tr("Push"), appSettings, actions);
+    QObject::connect(pushAction, &QAction::triggered, vcsService, [vcsService]() {
+        const QString branch = vcsService->currentBranch();
+        if (!branch.isEmpty()) {
+            vcsService->push(QStringLiteral("origin"), branch, /*setUpstream=*/false);
+        }
+    });
+
+    QAction *pullAction = registerAction(vcsMenu, QStringLiteral("vcs.pull"),
+                                          QObject::tr("Pull"), appSettings, actions);
+    QObject::connect(pullAction, &QAction::triggered, vcsService, [vcsService]() {
+        const QString branch = vcsService->currentBranch();
+        if (!branch.isEmpty()) {
+            vcsService->pull(QStringLiteral("origin"), branch);
+        }
+    });
+
+    QAction *fetchAction = registerAction(vcsMenu, QStringLiteral("vcs.fetch"),
+                                           QObject::tr("Fetch"), appSettings, actions);
+    QObject::connect(fetchAction, &QAction::triggered, vcsService,
+                      [vcsService]() { vcsService->fetch(QStringLiteral("origin")); });
+
+    QAction *branchesAction = registerAction(vcsMenu, QStringLiteral("vcs.branches"),
+                                              QObject::tr("Branches..."), appSettings, actions);
+    QObject::connect(branchesAction, &QAction::triggered, window, [vcsService, window]() {
+        showBranchMenu(vcsService, window, QCursor::pos());
+    });
+
+    vcsMenu->addSeparator();
+
+    QAction *showDiffAction = registerAction(vcsMenu, QStringLiteral("vcs.showDiff"),
+                                              QObject::tr("Show Diff"), appSettings, actions);
+    QObject::connect(showDiffAction, &QAction::triggered, editorTabs,
+                      [editorTabs]() { editorTabs->showDiffAgainstHead(); });
+
+    QAction *rollbackAction = registerAction(vcsMenu, QStringLiteral("vcs.rollbackHunk"),
+                                              QObject::tr("Rollback Hunk"), appSettings, actions);
+    QObject::connect(rollbackAction, &QAction::triggered, editorTabs,
+                      [editorTabs]() { editorTabs->rollbackHunkAtCaret(); });
+
+    QAction *nextChangeAction = registerAction(vcsMenu, QStringLiteral("vcs.nextChange"),
+                                                QObject::tr("Next Change"), appSettings, actions);
+    QObject::connect(nextChangeAction, &QAction::triggered, editorTabs,
+                      [editorTabs]() { editorTabs->jumpToChange(/*forward=*/true); });
+
+    QAction *previousChangeAction =
+      registerAction(vcsMenu, QStringLiteral("vcs.previousChange"),
+                      QObject::tr("Previous Change"), appSettings, actions);
+    QObject::connect(previousChangeAction, &QAction::triggered, editorTabs,
+                      [editorTabs]() { editorTabs->jumpToChange(/*forward=*/false); });
+
+    QAction *annotateAction = registerAction(vcsMenu, QStringLiteral("vcs.annotate"),
+                                              QObject::tr("Annotate with Blame"), appSettings,
+                                              actions);
+    annotateAction->setCheckable(true);
+    QObject::connect(annotateAction, &QAction::toggled, editorTabs,
+                      [editorTabs](bool checked) { editorTabs->setAnnotateEnabled(checked); });
+
+    QAction *viewChangesAction = registerAction(viewMenu, QStringLiteral("view.changes"),
+                                                 QObject::tr("Changes"), appSettings, actions);
+    QObject::connect(viewChangesAction, &QAction::triggered, window,
+                      [docks]() { docks->show(QStringLiteral("changes")); });
+
+    QAction *viewHistoryAction = registerAction(viewMenu, QStringLiteral("view.vcsHistory"),
+                                                 QObject::tr("File History"), appSettings, actions);
+    QObject::connect(viewHistoryAction, &QAction::triggered, window,
+                      [docks, editorTabs, fileHistoryPanel]() {
+                          docks->show(QStringLiteral("fileHistory"));
+                          fileHistoryPanel->setCurrentFile(editorTabs->currentPath());
+                      });
+
+    // Not built at all for a non-repository project, per the plan — reached
+    // here by disabling rather than omitting (see vcs_menu.h's note): a
+    // project's Git-ness is unknown until well after this menu exists.
+    const auto refreshEnabled = [vcsMenu, viewChangesAction, viewHistoryAction, vcsService]() {
+        const bool isRepo = vcsService->isRepository();
+        vcsMenu->menuAction()->setVisible(isRepo);
+        viewChangesAction->setVisible(isRepo);
+        viewHistoryAction->setVisible(isRepo);
+    };
+    QObject::connect(vcsService, &VcsService::repositoryChanged, vcsMenu, refreshEnabled);
+    refreshEnabled();
+
+    // The Changes dock follows the same rule Problems does (dock_layout.h):
+    // a plain `toggleView(true)` rather than `docks->show()` when a project
+    // turns out to be a repository, so its tab reappears without raising
+    // over whatever the user is already looking at. File History stays
+    // hidden until `view.vcsHistory` deliberately opens it.
+    QObject::connect(vcsService, &VcsService::repositoryChanged, window, [docks, vcsService]() {
+        if (vcsService->isRepository()) {
+            docks->dock(QStringLiteral("changes"))->toggleView(true);
+        } else {
+            docks->hide(QStringLiteral("changes"));
+        }
+        docks->hide(QStringLiteral("fileHistory"));
+    });
+}
+
+} // namespace ui_shell

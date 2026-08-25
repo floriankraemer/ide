@@ -35,6 +35,9 @@ namespace {
 constexpr int kFoldMarkerWidth = 12;
 // F3-16: width of the change-marker strip, left of the fold triangle.
 constexpr int kChangeMarkerWidth = 4;
+// F3-18: width of the blame column, right of the line-number digits — only
+// added to the gutter's width when blame is toggled on.
+constexpr int kBlameWidth = 220;
 
 // Which CompletionEntry a popup row stands for. Read back through the
 // completer's proxy model, so no assumption is made about the proxy keeping
@@ -640,7 +643,8 @@ int CodeEditor::lineNumberAreaWidth() const
         ++digits;
     }
     return kChangeMarkerWidth + kFoldMarkerWidth + 3
-      + fontMetrics().horizontalAdvance(QLatin1Char('9')) * digits;
+      + fontMetrics().horizontalAdvance(QLatin1Char('9')) * digits
+      + (blameEnabled_ ? kBlameWidth : 0);
 }
 
 void CodeEditor::updateLineNumberAreaWidth(int /*newBlockCount*/)
@@ -682,6 +686,13 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
     QPainter painter(lineNumberArea_);
     painter.fillRect(event->rect(), gutterBackground);
 
+    // F3-18: the digit/fold/change-marker area stays a fixed width; blame
+    // text (when on) gets whatever kBlameWidth adds on top of it, so
+    // toggling blame never reflows the digits.
+    const int digitAreaWidth = lineNumberAreaWidth() - (blameEnabled_ ? kBlameWidth : 0);
+    QColor blameColor = palette().color(QPalette::Text);
+    blameColor.setAlpha(110);
+
     QTextBlock block = firstVisibleBlock();
     int blockNumber = block.blockNumber();
     int top = qRound(blockBoundingGeometry(block).translated(contentOffset()).top());
@@ -698,8 +709,19 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
             const QString number = QString::number(blockNumber + 1);
             painter.setPen(isCurrent ? currentDigitColor : digitColor);
             painter.drawText(kChangeMarkerWidth + kFoldMarkerWidth, top,
-                              lineNumberArea_->width() - kChangeMarkerWidth - kFoldMarkerWidth - 2,
+                              digitAreaWidth - kChangeMarkerWidth - kFoldMarkerWidth - 2,
                               fontMetrics().height(), Qt::AlignRight, number);
+
+            if (blameEnabled_) {
+                const auto blameIt = blameAnnotations_.constFind(blockNumber);
+                if (blameIt != blameAnnotations_.constEnd()) {
+                    painter.setPen(blameColor);
+                    painter.drawText(digitAreaWidth + 6, top, kBlameWidth - 10,
+                                      fontMetrics().height(), Qt::AlignLeft | Qt::TextSingleLine,
+                                      fontMetrics().elidedText(blameIt.value(), Qt::ElideRight,
+                                                                kBlameWidth - 10));
+                }
+            }
 
             FoldRange range;
             if (foldStartingAt(blockNumber, &range)) {
@@ -791,6 +813,25 @@ bool CodeEditor::changeMarkerAt(int blockNumber, ChangeMarker *out) const
     }
     *out = it.value();
     return true;
+}
+
+void CodeEditor::setBlameAnnotations(const QVector<BlameAnnotation> &annotations)
+{
+    blameAnnotations_.clear();
+    for (const BlameAnnotation &annotation : annotations) {
+        blameAnnotations_.insert(annotation.block, annotation.text);
+    }
+    lineNumberArea_->update();
+}
+
+void CodeEditor::setBlameEnabled(bool enabled)
+{
+    if (blameEnabled_ == enabled) {
+        return;
+    }
+    blameEnabled_ = enabled;
+    updateLineNumberAreaWidth(0);
+    lineNumberArea_->update();
 }
 
 void CodeEditor::setBlocksVisible(int fromBlockExclusive, int toBlockInclusive, bool visible)

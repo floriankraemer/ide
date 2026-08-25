@@ -407,6 +407,31 @@ public:
     // `path` into that file's gutter, if it is open.
     void applyVcsHunks(const QString &path);
 
+    // F3-18: vcs.annotate. Off by default; toggling asks for blame on the
+    // active tab's file and applies it once `blameReady` answers, the same
+    // "widget never computes it" split every other gutter overlay follows.
+    void setAnnotateEnabled(bool enabled);
+    bool annotateEnabled() const { return annotateEnabled_; }
+
+    // `VcsService::blameReady(path, lines)`: push blame text for `path`
+    // into that file's gutter, if it is still open and annotation is on.
+    void applyVcsBlame(const QString &path, const ::rust::Vec<FfiBlameLine> &lines);
+
+    // F3-19: vcs.showDiff — the working-tree-vs-HEAD diff for the current
+    // file, in the same dialog shape the gutter's "Show Diff" popup uses.
+    // A no-op with nothing cached yet (no VcsService, or the file has no
+    // hunks requested for it).
+    void showDiffAgainstHead();
+
+    // F3-19: vcs.rollbackHunk — reverts whichever cached hunk contains the
+    // caret's line, the keyboard equivalent of the gutter popup's Revert.
+    void rollbackHunkAtCaret();
+
+    // F3-19: vcs.nextChange/vcs.previousChange (F7/Shift+F7 outside a diff
+    // dialog) — moves the caret to the next/previous cached hunk in the
+    // current file, wrapping at either end.
+    void jumpToChange(bool forward);
+
 private:
     // Where a tab lives now: which group's tab strip, and at which index in
     // it. `group == nullptr` means "no such open tab".
@@ -593,6 +618,8 @@ private:
     // one counter shared across every open file is enough (vcs-core's own
     // doc comment on `HunkCache::hunks` says as much).
     quint64 vcsRevision_ = 0;
+    // F3-18: vcs.annotate's state, applied to whichever editor is active.
+    bool annotateEnabled_ = false;
     // F1-13/F1-15: carets and the language-aware editing operations, for
     // every editor this class opens. Owned here rather than passed in
     // because nothing outside the editor surface has anything to ask it.

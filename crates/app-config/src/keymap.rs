@@ -404,6 +404,79 @@ pub const ACTIONS: &[ActionDef] = &[
         category: "Terminal",
         default_shortcut: "Ctrl+Shift+V",
     },
+    // F3-19: Git v1's action set.
+    ActionDef {
+        id: "vcs.commit",
+        label: "Commit...",
+        category: "Git",
+        default_shortcut: "Ctrl+K",
+    },
+    ActionDef {
+        id: "vcs.push",
+        label: "Push",
+        category: "Git",
+        default_shortcut: "Ctrl+Shift+K",
+    },
+    ActionDef {
+        id: "vcs.pull",
+        label: "Pull",
+        category: "Git",
+        default_shortcut: "",
+    },
+    ActionDef {
+        id: "vcs.fetch",
+        label: "Fetch",
+        category: "Git",
+        default_shortcut: "",
+    },
+    ActionDef {
+        id: "vcs.branches",
+        label: "Branches...",
+        category: "Git",
+        default_shortcut: "Ctrl+Shift+`",
+    },
+    ActionDef {
+        id: "vcs.showDiff",
+        label: "Show Diff",
+        category: "Git",
+        default_shortcut: "Ctrl+Alt+G",
+    },
+    ActionDef {
+        id: "vcs.rollbackHunk",
+        label: "Rollback Hunk",
+        category: "Git",
+        default_shortcut: "",
+    },
+    ActionDef {
+        id: "vcs.nextChange",
+        label: "Next Change",
+        category: "Git",
+        default_shortcut: "F7",
+    },
+    ActionDef {
+        id: "vcs.previousChange",
+        label: "Previous Change",
+        category: "Git",
+        default_shortcut: "Shift+F7",
+    },
+    ActionDef {
+        id: "vcs.annotate",
+        label: "Annotate with Blame",
+        category: "Git",
+        default_shortcut: "",
+    },
+    ActionDef {
+        id: "view.changes",
+        label: "Changes",
+        category: "View",
+        default_shortcut: "Alt+9",
+    },
+    ActionDef {
+        id: "view.vcsHistory",
+        label: "File History",
+        category: "View",
+        default_shortcut: "",
+    },
 ];
 
 /// The action with this id, or `None` for an id that no longer exists (an old
