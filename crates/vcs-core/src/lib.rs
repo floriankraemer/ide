@@ -19,6 +19,7 @@ mod error;
 pub mod history;
 pub mod hunks;
 pub mod repo;
+pub mod revert;
 pub mod staging;
 
 pub use blame::{BlameCache, BlameLine};
@@ -26,6 +27,7 @@ pub use error::VcsError;
 pub use history::{HistoryCache, LogEntry};
 pub use hunks::{HunkCache, WorkingHunks};
 pub use repo::{ChangeKind, DiscoverResult, FileStatus, HeadInfo, RepoStatus, Repository};
+pub use revert::{revert_hunk, TextEdit};
 pub use staging::hunk_patch;
 
 pub mod remote;
