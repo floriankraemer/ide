@@ -132,7 +132,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // into equal shares and squeezing the editor down to nothing.
     auto *editorArea = dockManager->setCentralWidget(editorDock);
 
-    QTreeView *treeView = createProjectTreeDock(dockManager, editorArea, treeModel);
+    QTreeView *treeView = createProjectTreeDock(dockManager, editorArea, treeModel, docks);
 
     auto *editorTabs = new EditorTabs(docManager, languageService, editorRoot, window);
 
@@ -887,6 +887,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     });
 
     QMenu *viewMenu = window->menuBar()->addMenu(QObject::tr("&View"));
+    wireProjectTreeViewAction(viewMenu, central.docks, appSettings, *actions);
     QAction *classViewAction = registerAction(viewMenu, QStringLiteral("view.classView"),
                                                QObject::tr("Class View"), appSettings, *actions);
     QObject::connect(classViewAction, &QAction::triggered, window,

@@ -4,6 +4,7 @@
 #include "dock_layout.h"
 #include "icon_cache.h"
 #include "icon_decoration_proxy.h"
+#include "keymap_page.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include "DockAreaWidget.h"
@@ -41,7 +42,8 @@ int treeRole(ProjectTreeModel::Roles role)
 
 QTreeView *createProjectTreeDock(ads::CDockManager *dockManager,
                                   ads::CDockAreaWidget *editorArea,
-                                  ProjectTreeModel *treeModel)
+                                  ProjectTreeModel *treeModel,
+                                  DockRegistry *docks)
 {
     auto *treeView = new QTreeView();
     // The style's small-icon metric rather than a literal 16: it already
@@ -60,7 +62,8 @@ QTreeView *createProjectTreeDock(ads::CDockManager *dockManager,
     treeView->setHeaderHidden(true);
     auto *treeDock = new ads::CDockWidget(dockManager, QObject::tr("Project"));
     treeDock->setWidget(treeView);
-    dockManager->addDockWidget(ads::LeftDockWidgetArea, treeDock, editorArea);
+    docks->registerDock(QStringLiteral("projectTree"), treeDock, ads::LeftDockWidgetArea,
+                        editorArea);
     return treeView;
 }
 
@@ -212,6 +215,17 @@ void wireProjectTree(QTreeView *treeView,
               actions.aiChatPanel->attachAndFocus();
           }
       });
+}
+
+void wireProjectTreeViewAction(QMenu *viewMenu,
+                               DockRegistry *docks,
+                               AppSettings *appSettings,
+                               QHash<QString, QAction *> &actions)
+{
+    QAction *projectTreeAction = registerAction(viewMenu, QStringLiteral("view.projectTree"),
+                                                QObject::tr("Project"), appSettings, actions);
+    QObject::connect(projectTreeAction, &QAction::triggered, viewMenu,
+                     [docks]() { docks->show(QStringLiteral("projectTree")); });
 }
 
 } // namespace ui_shell
