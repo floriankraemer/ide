@@ -110,14 +110,14 @@ Renumbered to match §4's Task breakdown, which this table had drifted from (an 
 | F3-9 — remotes | done | 82289c7 |
 | F3-10 — history and blame | done | b49764a |
 | F3-11 — revert hunk | done | f9dbb4d |
-| F3-12a — bridge: `VcsService` supervisor + status | todo |  |
-| F3-12b — bridge: hunks + revert | todo |  |
-| F3-12c — bridge: staging + commit | todo |  |
-| F3-12d — bridge: branches, remotes, history | todo |  |
+| F3-12a — bridge: `VcsService` supervisor + status | done | 5105dee |
+| F3-12b — bridge: hunks + revert | done | 5105dee |
+| F3-12c — bridge: staging + commit | done | 5105dee |
+| F3-12d — bridge: branches, remotes, history | done | 5105dee |
 | F3-13 — view: `DiffView` | done | 03f89fa |
 | F3-14 — view: `TabKind::Diff` + `diff_labels`, deferred until the Git backend exists (§2/ADR-0030) | todo |  |
 | F3-15 — retrofit: refactor preview, project-wide replace preview and AI apply render through `DiffView` | done | fcb917e, 27d3a88 |
-| F3-16 — view: `vcs_gutter` | todo |  |
+| F3-16 — view: `vcs_gutter` | done | d09bc5c |
 | F3-17 — view: `changes_panel` | todo |  |
 | F3-18 — view: branch widget, `file_history_panel`, blame gutter | todo |  |
 | F3-19 — view: the VCS action set and menu | todo |  |
