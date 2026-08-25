@@ -15,4 +15,4 @@ mod error;
 pub mod repo;
 
 pub use error::VcsError;
-pub use repo::{DiscoverResult, Repository};
+pub use repo::{ChangeKind, DiscoverResult, FileStatus, HeadInfo, RepoStatus, Repository};
