@@ -1,5 +1,6 @@
 #include "refactor_preview_dialog.h"
 
+#include "diff_view.h"
 #include "e2e_mark.h"
 
 #include <QDialogButtonBox>
@@ -7,6 +8,7 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QPushButton>
+#include <QSplitter>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 
@@ -20,12 +22,14 @@ constexpr int kPathRole = Qt::UserRole + 1;
 RefactorPreviewDialog::RefactorPreviewDialog(const QString &title,
                                               const QString &explanation,
                                               const QList<Row> &rows,
-                                              QWidget *parent)
+                                              QWidget *parent,
+                                              DiffProvider diffProvider)
   : QDialog(parent)
+  , diffProvider_(std::move(diffProvider))
 {
     setWindowTitle(title);
     setModal(true);
-    resize(720, 480);
+    resize(diffProvider_ ? 1000 : 720, 560);
 
     auto *layout = new QVBoxLayout(this);
     auto *header = new QLabel(explanation, this);
@@ -36,7 +40,29 @@ RefactorPreviewDialog::RefactorPreviewDialog(const QString &title,
     tree_->setColumnCount(1);
     tree_->setHeaderHidden(true);
     tree_->setUniformRowHeights(true);
-    layout->addWidget(tree_, 1);
+
+    if (diffProvider_) {
+        // A file selected in the tree shows its diff beside it — the panel
+        // exists only when the caller has a real per-file diff to offer.
+        splitter_ = new QSplitter(this);
+        splitter_->addWidget(tree_);
+        auto *diffHost = new QWidget(splitter_);
+        diffLayout_ = new QVBoxLayout(diffHost);
+        diffLayout_->setContentsMargins(0, 0, 0, 0);
+        splitter_->addWidget(diffHost);
+        splitter_->setStretchFactor(0, 1);
+        splitter_->setStretchFactor(1, 2);
+        layout->addWidget(splitter_, 1);
+
+        connect(tree_, &QTreeWidget::currentItemChanged, this,
+                [this](QTreeWidgetItem *current, QTreeWidgetItem *) {
+                    if (current) {
+                        showDiffFor(current->data(0, kPathRole).toString());
+                    }
+                });
+    } else {
+        layout->addWidget(tree_, 1);
+    }
 
     QHash<QString, QTreeWidgetItem *> groups;
     for (const Row &row : rows) {
@@ -90,6 +116,27 @@ void RefactorPreviewDialog::done(int result)
     e2eMark(QStringLiteral("{\"ev\":\"dialog_closed\",\"name\":\"refactor_preview\","
                             "\"accepted\":%1}")
               .arg(result == QDialog::Accepted ? QLatin1String("true") : QLatin1String("false")));
+}
+
+void RefactorPreviewDialog::showDiffFor(const QString &path)
+{
+    if (!diffProvider_ || !diffLayout_) {
+        return;
+    }
+    QString oldText;
+    QString newText;
+    ::rust::Vec<FfiHunk> hunks;
+    ::rust::Vec<FfiInlineSpan> spans;
+    if (path.isEmpty() || !diffProvider_(path, oldText, newText, hunks, spans)) {
+        delete diffView_;
+        diffView_ = nullptr;
+        return;
+    }
+    delete diffView_;
+    // No language id: the dialog does not track which language each row's
+    // file is, and `DiffView` treats an empty one as plain text (F3-13).
+    diffView_ = new DiffView(oldText, newText, hunks, spans, QString());
+    diffLayout_->addWidget(diffView_);
 }
 
 QStringList RefactorPreviewDialog::excludedPaths() const

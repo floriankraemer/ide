@@ -3,6 +3,7 @@
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include <QString>
+#include <QVector>
 #include <QWidget>
 
 #include <functional>
@@ -38,11 +39,27 @@ public:
     void searchFor(const QString &text);
 
 private:
+    // One checked match, as `replaceAll` collected it from the tree. Kept in
+    // plain C++ types rather than an `rust::Vec<FfiFileReplacement>` because
+    // the same set crosses the seam twice — once for the preview, once (a
+    // subset, after the user un-ticks a file) for the real write — and a
+    // `Vec` is not something this code should copy.
+    struct PendingReplacement
+    {
+        QString path;
+        quint32 line;
+        quint32 start;
+        quint32 end;
+    };
+
     void runSearch();
     void appendHits(quint64 generation, const ::rust::Vec<FfiSearchHit> &hits);
     void replaceAll();
+    void onReplacePreviewReady(const QStringList &paths);
+    void onReplacePreviewFailed(const QString &message);
     void openMatch(QTreeWidgetItem *item, int column);
     QTreeWidgetItem *fileGroup(const QString &path);
+    static ::rust::Vec<FfiFileReplacement> toFfiEdits(const QVector<PendingReplacement> &edits);
 
     SearchModel *searchModel_;
     OpenAt openAt_;
@@ -57,4 +74,14 @@ private:
     // generation are dropped rather than mixed in.
     quint64 generation_ = 0;
     int matchCount_ = 0;
+
+    // F3-15: the matches a Replace All is previewing, and the pattern
+    // question it will answer once the dialog confirms — between
+    // `previewReplacements` and `replacePreviewReady`/`Failed`, this is the
+    // only place that gesture's state lives.
+    QVector<PendingReplacement> pendingEdits_;
+    QString pendingPattern_;
+    QString pendingReplacement_;
+    bool pendingIsRegex_ = false;
+    bool pendingCaseSensitive_ = false;
 };

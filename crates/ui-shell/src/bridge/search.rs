@@ -30,6 +30,11 @@ pub struct SearchModelRust {
     /// cancel each other.
     everywhere: std::sync::Arc<QueryGuard>,
     find_in_files: std::sync::Arc<QueryGuard>,
+    /// F3-15: the last `previewReplacements` answer, read back one file at a
+    /// time by `replacePreviewDiff`/`Hunks`/`Spans` as the dialog's
+    /// selection changes — the same "compute once, fetch lazily" shape
+    /// `LanguageService::pending` already uses for the refactor preview.
+    replace_preview: std::cell::RefCell<Vec<index_core::FileDiffPreview>>,
 }
 
 impl Default for SearchModelRust {
@@ -45,6 +50,7 @@ impl Default for SearchModelRust {
             context: Default::default(),
             everywhere: Default::default(),
             find_in_files: Default::default(),
+            replace_preview: Default::default(),
         }
     }
 }
@@ -902,6 +908,122 @@ impl ffi::SearchModel {
                 }
             }
         });
+    }
+
+    /// [`Self::replace_in_files`], without writing: same span resolution,
+    /// `index_core::TextIndex::preview_replacements` instead of
+    /// `replace_in_files`. The result is cached in `replace_preview` for
+    /// `replacePreviewDiff`/`Hunks`/`Spans` to read back per file once the
+    /// dialog is up.
+    pub fn preview_replacements(
+        self: Pin<&mut Self>,
+        edits: Vec<ffi::FfiFileReplacement>,
+        pattern: &QString,
+        replacement: &QString,
+        is_regex: bool,
+        case_sensitive: bool,
+    ) {
+        let pattern = pattern.to_string();
+        let replacement = replacement.to_string();
+        let opts = search_options(is_regex, case_sensitive);
+        let edits: Vec<(std::path::PathBuf, usize, usize, usize)> = edits
+            .into_iter()
+            .map(|e| {
+                (
+                    std::path::PathBuf::from(e.path.to_string()),
+                    e.line as usize,
+                    e.start as usize,
+                    e.end as usize,
+                )
+            })
+            .collect();
+        let qt_thread = self.qt_thread();
+        let slot = std::sync::Arc::clone(&self.index);
+        std::thread::spawn(move || {
+            let guard = slot.read().unwrap();
+            let Some(index) = guard.ready() else {
+                let reason = guard.unavailable_reason().unwrap_or_default();
+                drop(guard);
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                    model
+                        .as_mut()
+                        .replace_preview_failed(QString::from(reason.as_str()));
+                });
+                return;
+            };
+
+            let resolved =
+                match index_core::resolve_replacements(&edits, &pattern, &replacement, opts) {
+                    Ok(resolved) => resolved,
+                    Err(message) => {
+                        drop(guard);
+                        let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                            model
+                                .as_mut()
+                                .replace_preview_failed(QString::from(message.as_str()));
+                        });
+                        return;
+                    }
+                };
+            let previews = index.preview_replacements(&resolved);
+            drop(guard);
+            let paths: Vec<String> = previews
+                .iter()
+                .map(|p| p.path.display().to_string())
+                .collect();
+            let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                *model.replace_preview.borrow_mut() = previews;
+                let list: QStringList = paths.iter().map(|p| QString::from(p.as_str())).collect();
+                model.as_mut().replace_preview_ready(list);
+            });
+        });
+    }
+
+    pub fn replace_preview_diff(&self, path: &QString) -> ffi::FfiFileDiff {
+        let path = path.to_string();
+        match self
+            .replace_preview
+            .borrow()
+            .iter()
+            .find(|p| p.path.display().to_string() == path)
+        {
+            Some(preview) => ffi::FfiFileDiff {
+                path: QString::from(path.as_str()),
+                old_text: QString::from(preview.old_text.as_str()),
+                new_text: QString::from(preview.new_text.as_str()),
+            },
+            None => ffi::FfiFileDiff::default(),
+        }
+    }
+
+    pub fn replace_preview_hunks(&self, path: &QString) -> Vec<ffi::FfiHunk> {
+        let path = path.to_string();
+        match self
+            .replace_preview
+            .borrow()
+            .iter()
+            .find(|p| p.path.display().to_string() == path)
+        {
+            Some(preview) => crate::bridge::convert::to_ffi_hunks(&preview.hunks),
+            None => Vec::new(),
+        }
+    }
+
+    pub fn replace_preview_spans(&self, path: &QString) -> Vec<ffi::FfiInlineSpan> {
+        let path = path.to_string();
+        match self
+            .replace_preview
+            .borrow()
+            .iter()
+            .find(|p| p.path.display().to_string() == path)
+        {
+            Some(preview) => crate::bridge::convert::to_ffi_inline_spans(
+                &preview.old_text,
+                &preview.new_text,
+                &preview.hunks,
+            ),
+            None => Vec::new(),
+        }
     }
 
     /// Task I: project-wide Class View tier — see `project_symbols`'s

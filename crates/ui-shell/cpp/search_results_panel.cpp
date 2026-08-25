@@ -2,6 +2,7 @@
 
 #include "highlight_delegate.h"
 #include "icon_cache.h"
+#include "refactor_preview_dialog.h"
 
 #include <QCheckBox>
 #include <QFileInfo>
@@ -9,9 +10,7 @@
 #include <QHeaderView>
 #include <QLabel>
 #include <QLineEdit>
-#include <QMessageBox>
 #include <QPushButton>
-#include <QSet>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QVariantList>
@@ -115,6 +114,10 @@ SearchResultsPanel::SearchResultsPanel(SearchModel *searchModel, OpenAt openAt, 
     connect(searchModel_, &SearchModel::replaceFailed, this, [this](const QString &message) {
         statusLabel_->setText(tr("Replace failed: %1").arg(message));
     });
+    connect(searchModel_, &SearchModel::replacePreviewReady, this,
+            &SearchResultsPanel::onReplacePreviewReady);
+    connect(searchModel_, &SearchModel::replacePreviewFailed, this,
+            &SearchResultsPanel::onReplacePreviewFailed);
 }
 
 void SearchResultsPanel::focusQuery()
@@ -201,8 +204,7 @@ void SearchResultsPanel::appendHits(quint64 generation, const ::rust::Vec<FfiSea
 
 void SearchResultsPanel::replaceAll()
 {
-    ::rust::Vec<FfiFileReplacement> edits;
-    QSet<QString> files;
+    QVector<PendingReplacement> edits;
     for (int g = 0; g < results_->topLevelItemCount(); ++g) {
         QTreeWidgetItem *group = results_->topLevelItem(g);
         for (int i = 0; i < group->childCount(); ++i) {
@@ -210,41 +212,116 @@ void SearchResultsPanel::replaceAll()
             if (item->checkState(0) != Qt::Checked) {
                 continue;
             }
-            const QString path = item->data(0, kPathRole).toString();
-            files.insert(path);
-            FfiFileReplacement edit;
-            edit.path = path;
-            edit.line = item->data(0, kLineRole).toUInt();
-            edit.start = item->data(0, kStartRole).toUInt();
-            edit.end = item->data(0, kEndRole).toUInt();
-            edits.push_back(std::move(edit));
+            edits.append({item->data(0, kPathRole).toString(),
+                          item->data(0, kLineRole).toUInt(),
+                          item->data(0, kStartRole).toUInt(),
+                          item->data(0, kEndRole).toUInt()});
         }
     }
-    if (edits.empty()) {
+    if (edits.isEmpty()) {
         statusLabel_->setText(tr("No matches selected."));
         return;
     }
 
-    const auto answer = QMessageBox::question(
-      this,
+    pendingEdits_ = edits;
+    pendingPattern_ = queryEdit_->text();
+    pendingReplacement_ = replaceEdit_->text();
+    pendingIsRegex_ = regexCheck_->isChecked();
+    pendingCaseSensitive_ = caseCheck_->isChecked();
+
+    statusLabel_->setText(tr("Preparing preview..."));
+    searchModel_->previewReplacements(toFfiEdits(pendingEdits_),
+                                      pendingPattern_,
+                                      pendingReplacement_,
+                                      pendingIsRegex_,
+                                      pendingCaseSensitive_);
+}
+
+::rust::Vec<FfiFileReplacement> SearchResultsPanel::toFfiEdits(const QVector<PendingReplacement> &edits)
+{
+    ::rust::Vec<FfiFileReplacement> out;
+    for (const PendingReplacement &edit : edits) {
+        FfiFileReplacement ffi;
+        ffi.path = edit.path;
+        ffi.line = edit.line;
+        ffi.start = edit.start;
+        ffi.end = edit.end;
+        out.push_back(std::move(ffi));
+    }
+    return out;
+}
+
+void SearchResultsPanel::onReplacePreviewReady(const QStringList &paths)
+{
+    if (paths.isEmpty()) {
+        statusLabel_->setText(
+          tr("Nothing to preview — every selected file changed since the search."));
+        pendingEdits_.clear();
+        return;
+    }
+
+    QList<ui_shell::RefactorPreviewDialog::Row> rows;
+    for (const QString &path : paths) {
+        const int changes = static_cast<int>(searchModel_->replacePreviewHunks(path).size());
+        rows.append({path, 0,
+                     tr("%n change(s) — replace with \"%1\"", "", changes)
+                       .arg(pendingReplacement_),
+                     true, true});
+    }
+
+    ui_shell::RefactorPreviewDialog::DiffProvider diffProvider =
+      [this](const QString &path, QString &oldText, QString &newText,
+             ::rust::Vec<FfiHunk> &hunks, ::rust::Vec<FfiInlineSpan> &spans) {
+          const FfiFileDiff diff = searchModel_->replacePreviewDiff(path);
+          if (diff.path.isEmpty()) {
+              return false;
+          }
+          oldText = diff.old_text;
+          newText = diff.new_text;
+          hunks = searchModel_->replacePreviewHunks(path);
+          spans = searchModel_->replacePreviewSpans(path);
+          return true;
+      };
+
+    ui_shell::RefactorPreviewDialog dialog(
       tr("Replace in Files"),
-      tr("Replace %1 match(es) across %2 file(s) with \"%3\"?\n\nThis writes to disk and "
-         "cannot be undone.")
-        .arg(edits.size())
-        .arg(files.size())
-        .arg(replaceEdit_->text()),
-      QMessageBox::Yes | QMessageBox::No,
-      QMessageBox::No);
-    if (answer != QMessageBox::Yes) {
+      tr("Replace \"%1\" with \"%2\" across %3 file(s). This writes to disk and cannot be "
+         "undone.")
+        .arg(pendingPattern_, pendingReplacement_)
+        .arg(paths.size()),
+      rows,
+      this,
+      diffProvider);
+    if (dialog.exec() != QDialog::Accepted) {
+        pendingEdits_.clear();
+        return;
+    }
+
+    const QStringList excluded = dialog.excludedPaths();
+    QVector<PendingReplacement> finalEdits;
+    for (const PendingReplacement &edit : pendingEdits_) {
+        if (!excluded.contains(edit.path)) {
+            finalEdits.append(edit);
+        }
+    }
+    pendingEdits_.clear();
+    if (finalEdits.isEmpty()) {
+        statusLabel_->setText(tr("No matches selected."));
         return;
     }
 
     statusLabel_->setText(tr("Replacing..."));
-    searchModel_->replaceInFiles(std::move(edits),
-                                 queryEdit_->text(),
-                                 replaceEdit_->text(),
-                                 regexCheck_->isChecked(),
-                                 caseCheck_->isChecked());
+    searchModel_->replaceInFiles(toFfiEdits(finalEdits),
+                                 pendingPattern_,
+                                 pendingReplacement_,
+                                 pendingIsRegex_,
+                                 pendingCaseSensitive_);
+}
+
+void SearchResultsPanel::onReplacePreviewFailed(const QString &message)
+{
+    statusLabel_->setText(tr("Preview failed: %1").arg(message));
+    pendingEdits_.clear();
 }
 
 void SearchResultsPanel::openMatch(QTreeWidgetItem *item, int column)

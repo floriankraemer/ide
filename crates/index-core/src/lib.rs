@@ -67,6 +67,12 @@ use tantivy::schema::{
     IndexRecordOption, Schema, TextFieldIndexing, TextOptions, Value, INDEXED, STORED, STRING,
 };
 use tantivy::tokenizer::NgramTokenizer;
+
+// F3-15: kept in its own file rather than grown into this one, which is
+// grandfathered at a ratcheted line-count ceiling (`scripts/check-file-size.sh`)
+// that may only shrink.
+mod replace_preview;
+pub use replace_preview::FileDiffPreview;
 use tantivy::{doc, Index, IndexReader, IndexWriter, Term};
 
 use syntax_core::{analyze_file, language_for_path, SymbolKind, SymbolNode};
@@ -1533,67 +1539,6 @@ impl TextIndex {
         }
     }
 
-    /// Apply `edits` to the files they name and re-index each touched file.
-    ///
-    /// Spans are the ones `search` produced: `line` is 1-based, `start`/`end`
-    /// are byte offsets within that line. Edits are grouped per file and
-    /// applied back-to-front (last line first, rightmost span first) so that
-    /// earlier spans keep their recorded offsets.
-    ///
-    /// A file whose lines no longer contain the recorded spans — it changed
-    /// between the search and the replace — is skipped whole and counted in
-    /// [`ReplaceReport::skipped_files`], never partially rewritten.
-    ///
-    /// Open editor tabs need no special handling: the write lands on disk and
-    /// the existing watcher -> `check_external_change` flow prompts affected
-    /// tabs to reload, the same as any other outside-the-editor change.
-    pub fn replace_in_files(
-        &mut self,
-        edits: &[FileReplacement],
-    ) -> Result<ReplaceReport, IndexError> {
-        let mut by_file: BTreeMap<&Path, Vec<&FileReplacement>> = BTreeMap::new();
-        for edit in edits {
-            by_file.entry(edit.path.as_path()).or_default().push(edit);
-        }
-
-        let mut report = ReplaceReport::default();
-        for (path, mut file_edits) in by_file {
-            let Ok(content) = fs::read_to_string(path) else {
-                report.skipped_files += 1;
-                continue;
-            };
-            // `split_inclusive` keeps each line's terminator, so re-joining
-            // preserves the file's original line endings and trailing newline.
-            let mut lines: Vec<String> = content.split_inclusive('\n').map(String::from).collect();
-
-            // Last line first, rightmost span first within a line.
-            file_edits.sort_by(|a, b| b.line.cmp(&a.line).then(b.start.cmp(&a.start)));
-            let applicable = file_edits.iter().all(|e| {
-                e.line >= 1
-                    && e.start <= e.end
-                    && lines
-                        .get(e.line - 1)
-                        .is_some_and(|l| e.end <= l.trim_end_matches(['\n', '\r']).len())
-            });
-            if !applicable {
-                report.skipped_files += 1;
-                continue;
-            }
-
-            for edit in &file_edits {
-                lines[edit.line - 1].replace_range(edit.start..edit.end, &edit.text);
-            }
-            if fs::write(path, lines.concat()).is_err() {
-                report.skipped_files += 1;
-                continue;
-            }
-            report.files += 1;
-            report.matches += file_edits.len();
-            self.reindex_file(path)?;
-        }
-        Ok(report)
-    }
-
     /// Write whole new contents for files a refactoring changed, and
     /// re-index each one.
     ///
@@ -2772,58 +2717,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn replace_in_files_rewrites_every_span_and_keeps_the_rest() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = write(dir.path(), "a.txt", "one two one\nkeep me\none\n");
-        let mut index = TextIndex::build(dir.path()).unwrap();
-
-        let edits: Vec<FileReplacement> = index
-            .search("one", false, true)
-            .unwrap()
-            .into_iter()
-            .map(|m| FileReplacement {
-                path: m.path,
-                line: m.line,
-                start: m.start,
-                end: m.end,
-                text: "1".into(),
-            })
-            .collect();
-        let report = index.replace_in_files(&edits).unwrap();
-
-        assert_eq!(report.files, 1);
-        assert_eq!(report.matches, 3);
-        assert_eq!(report.skipped_files, 0);
-        assert_eq!(fs::read_to_string(&file).unwrap(), "1 two 1\nkeep me\n1\n");
-        // The index followed the write, so the old text is gone from it.
-        assert!(index.search("one", false, true).unwrap().is_empty());
-    }
-
-    #[test]
-    fn replace_in_files_skips_a_file_that_changed_since_the_search() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = write(dir.path(), "a.txt", "needle here\n");
-        let mut index = TextIndex::build(dir.path()).unwrap();
-        let matches = index.search("needle", false, true).unwrap();
-
-        fs::write(&file, "x\n").unwrap();
-        let edits: Vec<FileReplacement> = matches
-            .into_iter()
-            .map(|m| FileReplacement {
-                path: m.path,
-                line: m.line,
-                start: m.start,
-                end: m.end,
-                text: "pin".into(),
-            })
-            .collect();
-        let report = index.replace_in_files(&edits).unwrap();
-
-        assert_eq!(report.files, 0);
-        assert_eq!(report.skipped_files, 1);
-        assert_eq!(fs::read_to_string(&file).unwrap(), "x\n");
-    }
+    // `replace_in_files`/`preview_replacements` and their tests live in
+    // `replace_preview.rs` now (F3-15) — this file is grandfathered at a
+    // ratcheted line-count ceiling that may only shrink.
 
     #[test]
     fn regex_search_finds_matching_lines() {

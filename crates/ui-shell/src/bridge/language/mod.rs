@@ -838,6 +838,65 @@ impl ffi::LanguageService {
         }
     }
 
+    /// The pending plan's document for `path`, and the text it applies
+    /// against — the live buffer if `path` is open, the file on disk
+    /// otherwise. `None` when there is no pending refactoring or `path` is
+    /// not one of its documents.
+    fn pending_file_diff_source(&self, path: &str) -> Option<(lsp_core::DocumentEdits, String)> {
+        let pending = self.pending.borrow();
+        let doc = pending
+            .as_ref()?
+            .plan
+            .buffers
+            .iter()
+            .chain(pending.as_ref()?.plan.files.iter())
+            .find(|doc| doc.path == path)?
+            .clone();
+        let old_text = self
+            .session
+            .borrow()
+            .content_for_path(Path::new(path))
+            .or_else(|| std::fs::read_to_string(path).ok())?;
+        Some((doc, old_text))
+    }
+
+    /// [`Self::pending_file_diff_source`], diffed — the shared computation
+    /// behind `pendingFileDiff`/`pendingFileHunks`/`pendingFileSpans`.
+    fn compute_pending_file_diff(&self, path: &str) -> Option<lsp_core::FileDiff> {
+        let (doc, old_text) = self.pending_file_diff_source(path)?;
+        lsp_core::file_diff(&old_text, &doc).ok()
+    }
+
+    pub fn pending_file_diff(&self, path: &QString) -> ffi::FfiFileDiff {
+        let path = path.to_string();
+        match self.compute_pending_file_diff(&path) {
+            Some(diff) => ffi::FfiFileDiff {
+                path: QString::from(path.as_str()),
+                old_text: QString::from(diff.old_text.as_str()),
+                new_text: QString::from(diff.new_text.as_str()),
+            },
+            None => ffi::FfiFileDiff::default(),
+        }
+    }
+
+    pub fn pending_file_hunks(&self, path: &QString) -> Vec<ffi::FfiHunk> {
+        match self.compute_pending_file_diff(&path.to_string()) {
+            Some(diff) => crate::bridge::convert::to_ffi_hunks(&diff.hunks),
+            None => Vec::new(),
+        }
+    }
+
+    pub fn pending_file_spans(&self, path: &QString) -> Vec<ffi::FfiInlineSpan> {
+        match self.compute_pending_file_diff(&path.to_string()) {
+            Some(diff) => crate::bridge::convert::to_ffi_inline_spans(
+                &diff.old_text,
+                &diff.new_text,
+                &diff.hunks,
+            ),
+            None => Vec::new(),
+        }
+    }
+
     pub fn exclude_from_refactor(self: Pin<&mut Self>, path: &QString) {
         if let Some(pending) = self.pending.borrow_mut().as_mut() {
             pending.excluded.push(path.to_string());

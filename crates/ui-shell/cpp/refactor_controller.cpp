@@ -217,7 +217,23 @@ void RefactorController::onRefactorReady(const FfiRefactorSummary &summary)
            "are not open are written to disk and cannot be undone.",
            "", static_cast<int>(summary.edit_count))
           .arg(summary.document_count);
-    RefactorPreviewDialog dialog(summary.title, explanation, rows, window_);
+    // F3-15: each row's file diff, fetched lazily as the dialog's selection
+    // moves to it — `pendingFileDiff`/`pendingFileHunks`/`pendingFileSpans`
+    // read the same `lsp_core::EditPlan` `pendingEdits()` above already did,
+    // so nothing here recomputes what the refactoring means.
+    auto diffProvider = [this](const QString &path, QString &oldText, QString &newText,
+                               ::rust::Vec<FfiHunk> &hunks, ::rust::Vec<FfiInlineSpan> &spans) {
+        const FfiFileDiff diff = languageService_->pendingFileDiff(path);
+        if (diff.path.isEmpty()) {
+            return false;
+        }
+        oldText = diff.old_text;
+        newText = diff.new_text;
+        hunks = languageService_->pendingFileHunks(path);
+        spans = languageService_->pendingFileSpans(path);
+        return true;
+    };
+    RefactorPreviewDialog dialog(summary.title, explanation, rows, window_, diffProvider);
     if (dialog.exec() != QDialog::Accepted) {
         languageService_->cancelRefactor();
         return;
