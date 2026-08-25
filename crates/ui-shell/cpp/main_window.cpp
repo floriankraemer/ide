@@ -5,6 +5,7 @@
 #include "class_view_panel.h"
 #include "code_editor.h"
 #include "declaration_navigator.h"
+#include "dock_layout.h"
 #include "e2e_mark.h"
 #include "editing_actions.h"
 #include "editor_tabs.h"
@@ -81,23 +82,21 @@ struct CentralWidgets
 {
     EditorTabs *editorTabs;
     ads::CDockManager *dockManager;
+    // Every side/bottom dock's identity, placement and show/hide now lives
+    // in one registry (F0-7) rather than a scattered `toggleView`/`raise()`
+    // pair at each call site — see dock_layout.h.
+    DockRegistry *docks;
     // Only reason it escapes: the project tree carries its own interface
     // font scale, so buildMainWindow has to be able to hand it to
     // applyUiFontScales().
     QTreeView *projectTree;
     SearchResultsPanel *searchResultsPanel;
-    ads::CDockWidget *searchResultsDock;
     ClassViewPanel *classViewPanel;
-    ads::CDockWidget *classViewDock;
-    ads::CDockWidget *terminalDock;
     TerminalWidget *terminalWidget;
     FindUsagesPanel *findUsagesPanel;
-    ads::CDockWidget *findUsagesDock;
     SearchEverywhereDialog *searchEverywhereDialog;
     ProblemsPanel *problemsPanel;
-    ads::CDockWidget *problemsDock;
     AiChatPanel *aiChatPanel;
-    ads::CDockWidget *aiChatDock;
 };
 
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
@@ -109,6 +108,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // manager install itself as the central widget automatically (ADS's own
     // CDockManager::CDockManager) — no explicit QMainWindow::setCentralWidget().
     auto *dockManager = new ads::CDockManager(window);
+    auto *docks = new DockRegistry(dockManager);
 
     // The editor area is a QSplitter tree of tab groups (see EditorTabs) so
     // a tab can be split off into a second pane; ADS still sees the whole
@@ -139,8 +139,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // First bottom panel: it creates the bottom dock area; every panel after
     // it is added *into* that area (CenterDockWidgetArea) so they become tabs
     // rather than each stacking one more split between editor and status bar.
-    auto *bottomArea =
-      dockManager->addDockWidget(ads::BottomDockWidgetArea, searchResultsDock, editorArea);
+    auto *bottomArea = docks->registerDock(QStringLiteral("searchResults"), searchResultsDock,
+                                           ads::BottomDockWidgetArea, editorArea);
 
     // Task J: bottom dock panel, tabbed alongside Find in Files — same
     // "list of locations" shape, just fed by a symbol name instead of typed
@@ -149,25 +149,25 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     auto *findUsagesPanel = new FindUsagesPanel(searchModel, editorTabs, dockManager);
     auto *findUsagesDock = new ads::CDockWidget(dockManager, QObject::tr("Find Usages"));
     findUsagesDock->setWidget(findUsagesPanel);
-    dockManager->addDockWidget(ads::CenterDockWidgetArea, findUsagesDock, bottomArea);
+    docks->registerDock(QStringLiteral("findUsages"), findUsagesDock, ads::CenterDockWidgetArea,
+                        bottomArea);
 
     // Task D: right-side dock panel, matching where JetBrains-style IDEs
     // dock their Class/Structure View. Reuses the one EditorTabs instance
     // above (its jumpToByteOffset) rather than a second navigation path.
     // Task J extends it with a "Find Usages" context-menu action that
-    // raises findUsagesDock and runs the query there.
+    // raises the Find Usages dock and runs the query there.
     auto *classViewPanel = new ClassViewPanel(
       docManager, searchModel, editorTabs,
-      [findUsagesPanel, findUsagesDock](const QString &name) {
-          findUsagesDock->toggleView(true);
-          findUsagesDock->raise();
+      [docks, findUsagesPanel](const QString &name) {
+          docks->show(QStringLiteral("findUsages"));
           findUsagesPanel->findUsages(name);
       },
       dockManager);
     auto *classViewDock = new ads::CDockWidget(dockManager, QObject::tr("Class View"));
     classViewDock->setWidget(classViewPanel);
-    auto *rightArea =
-      dockManager->addDockWidget(ads::RightDockWidgetArea, classViewDock, editorArea);
+    auto *rightArea = docks->registerDock(QStringLiteral("classView"), classViewDock,
+                                          ads::RightDockWidgetArea, editorArea);
 
     // AC16/AC17: the AI Chat dock, tabbed into the right-hand area
     // (CenterDockWidgetArea) exactly as Find Usages and Problems tab into
@@ -178,7 +178,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     auto *aiChatPanel = new AiChatPanel(aiChat, searchModel, dockManager);
     auto *aiChatDock = new ads::CDockWidget(dockManager, QObject::tr("AI Chat"));
     aiChatDock->setWidget(aiChatPanel);
-    dockManager->addDockWidget(ads::CenterDockWidgetArea, aiChatDock, rightArea);
+    docks->registerDock(QStringLiteral("aiChat"), aiChatDock, ads::CenterDockWidgetArea, rightArea);
 
     // Search Everywhere: a transient popup parented to the top-level window
     // (not the dock manager) since it's a floating overlay, not a dock
@@ -199,12 +199,15 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     auto *problemsPanel = new ProblemsPanel(languageService, openAt, dockManager);
     auto *problemsDock = new ads::CDockWidget(dockManager, QObject::tr("Problems"));
     problemsDock->setWidget(problemsPanel);
-    dockManager->addDockWidget(ads::CenterDockWidgetArea, problemsDock, bottomArea);
+    docks->registerDock(QStringLiteral("problems"), problemsDock, ads::CenterDockWidgetArea,
+                        bottomArea);
     // Hidden until there is something to show (or the View menu asks): it
     // opens itself once per session, the first time a diagnostic arrives.
-    problemsDock->toggleView(false);
-    problemsPanel->setFirstDiagnosticCallback([problemsDock]() {
-        problemsDock->toggleView(true);
+    // A plain toggleView rather than docks->show() — this auto-open must not
+    // raise the tab over whatever the user is already looking at.
+    docks->hide(QStringLiteral("problems"));
+    problemsPanel->setFirstDiagnosticCallback([docks]() {
+        docks->dock(QStringLiteral("problems"))->toggleView(true);
     });
     // The squiggles and the panel read the same store, so one signal drives
     // both.
@@ -214,7 +217,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     auto *terminalWidget = new TerminalWidget(terminalSession, appSettings, dockManager);
     auto *terminalDock = new ads::CDockWidget(dockManager, QObject::tr("Terminal"));
     terminalDock->setWidget(terminalWidget);
-    dockManager->addDockWidget(ads::CenterDockWidgetArea, terminalDock, bottomArea);
+    docks->registerDock(QStringLiteral("terminal"), terminalDock, ads::CenterDockWidgetArea,
+                        bottomArea);
 
     // Class View tracks whatever tab is current: refresh on open, on
     // switch, and whenever a tab becomes clean. `tabModifiedChanged`
@@ -355,19 +359,15 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                     ProjectTreeActions{window,
                                        aiChat,
                                        aiChatPanel,
-                                       aiChatDock,
-                                       classViewDock,
-                                       dockManager,
+                                       docks,
                                        [editorTabs](const QString &path) {
                                            editorTabs->openFile(path);
                                        }});
 
-    return CentralWidgets{editorTabs,        dockManager,     treeView,
-                           searchResultsPanel, searchResultsDock, classViewPanel,
-                           classViewDock,     terminalDock,    terminalWidget,
-                           findUsagesPanel,   findUsagesDock,  searchEverywhereDialog,
-                           problemsPanel,     problemsDock,    aiChatPanel,
-                           aiChatDock};
+    return CentralWidgets{editorTabs,       dockManager,      docks,
+                           treeView,         searchResultsPanel, classViewPanel,
+                           terminalWidget,   findUsagesPanel,  searchEverywhereDialog,
+                           problemsPanel,    aiChatPanel};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -460,21 +460,10 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     EditorTabs *editorTabs = central.editorTabs;
     wireVcsService(vcsService, treeModel, editorTabs); // F3-12a/F3-16
 
-    // Every path that shows the AI chat goes through here, because a dock
-    // that a restored layout never mentioned needs putting back before it
-    // can be raised.
-    //
-    // ADS flags a dock absent from the saved blob as unassigned
-    // (DockManager::restoreDockWidgetsOpenState): closed, un-parented and
-    // with no dock area. Reopening one in that state takes the floating
-    // path (CDockWidget::showDockWidget, which floats when DockArea is
-    // null), so a user whose window_state predates this dock would get a
-    // detached window instead of the tab beside Class View that
-    // buildCentralWidget arranged. Re-adding it first is what keeps
-    // "show the panel" meaning the same thing on every config.
-    const auto showAiChat = [central]() {
-        showAiChatDock(central.dockManager, central.aiChatDock, central.classViewDock);
-    };
+    // Every path that shows the AI chat goes through here — see
+    // DockRegistry::show (dock_layout.h) for why "re-add if homeless" runs
+    // on every call rather than only at startup.
+    const auto showAiChat = [central]() { central.docks->show(QStringLiteral("aiChat")); };
 
     window->setEditorTabs(editorTabs);
     window->setAppSettings(appSettings);
@@ -586,8 +575,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     problemsButton->setAutoRaise(true);
     problemsButton->setVisible(false);
     QObject::connect(problemsButton, &QToolButton::clicked, window, [central]() {
-        central.problemsDock->toggleView(true);
-        central.problemsDock->raise();
+        central.docks->show(QStringLiteral("problems"));
         central.problemsPanel->focusTree();
     });
     const auto updateProblemsButton = [problemsButton, languageService]() {
@@ -879,10 +867,8 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QMenu *viewMenu = window->menuBar()->addMenu(QObject::tr("&View"));
     QAction *classViewAction = registerAction(viewMenu, QStringLiteral("view.classView"),
                                                QObject::tr("Class View"), appSettings, *actions);
-    QObject::connect(classViewAction, &QAction::triggered, window, [central]() {
-        central.classViewDock->toggleView(true);
-        central.classViewDock->raise();
-    });
+    QObject::connect(classViewAction, &QAction::triggered, window,
+                      [central]() { central.docks->show(QStringLiteral("classView")); });
     // The AI panel's show-action belongs here with every other dock's, not
     // only on the AI menu: a user looking for a hidden panel opens View.
     QAction *aiChatViewAction = registerAction(viewMenu, QStringLiteral("view.aiChat"),
@@ -894,18 +880,14 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QAction *problemsAction = registerAction(viewMenu, QStringLiteral("view.problems"),
                                              QObject::tr("Problems"), appSettings, *actions);
     QObject::connect(problemsAction, &QAction::triggered, window, [central]() {
-        central.problemsDock->toggleView(true);
-        central.problemsDock->raise();
+        central.docks->show(QStringLiteral("problems"));
         central.problemsPanel->focusTree();
     });
     QAction *terminalAction = registerAction(viewMenu, QStringLiteral("view.terminal"),
                                              QObject::tr("Terminal"), appSettings, *actions);
     QObject::connect(terminalAction, &QAction::triggered, window, [central]() {
-        central.terminalDock->toggleView(true);
-        central.terminalDock->raise();
-        if (QWidget *w = central.terminalDock->widget()) {
-            w->setFocus();
-        }
+        central.docks->show(QStringLiteral("terminal"));
+        central.terminalWidget->setFocus();
     });
     // Every entry point opens the same popup, just preselected on a
     // different tab — one search surface, several doors into it.
@@ -958,8 +940,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
         if (name.isEmpty()) {
             return;
         }
-        central.findUsagesDock->toggleView(true);
-        central.findUsagesDock->raise();
+        central.docks->show(QStringLiteral("findUsages"));
         central.findUsagesPanel->findUsages(name);
     });
 
@@ -972,8 +953,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
                           if (name.isEmpty()) {
                               return;
                           }
-                          central.findUsagesDock->toggleView(true);
-                          central.findUsagesDock->raise();
+                          central.docks->show(QStringLiteral("findUsages"));
                           central.findUsagesPanel->findImplementations(name);
                       });
 
@@ -985,8 +965,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
         if (name.isEmpty()) {
             return;
         }
-        central.findUsagesDock->toggleView(true);
-        central.findUsagesDock->raise();
+        central.docks->show(QStringLiteral("findUsages"));
         central.findUsagesPanel->findSupertypes(name);
     });
 
@@ -1085,11 +1064,11 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
         // A real toggle, unlike the View menu's panels: this one has a
         // shortcut of its own, and a shortcut that only ever opens a panel
         // gives the user no way back with the same keys.
-        if (central.aiChatDock->isClosed()) {
+        if (central.docks->isClosed(QStringLiteral("aiChat"))) {
             showAiChat();
             central.aiChatPanel->focusComposer();
         } else {
-            central.aiChatDock->toggleView(false);
+            central.docks->hide(QStringLiteral("aiChat"));
         }
     });
 
@@ -1119,8 +1098,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
         }
     });
     QObject::connect(findInFilesAction, &QAction::triggered, window, [central]() {
-        central.searchResultsDock->toggleView(true);
-        central.searchResultsDock->raise();
+        central.docks->show(QStringLiteral("searchResults"));
         central.searchResultsPanel->focusQuery();
     });
 
