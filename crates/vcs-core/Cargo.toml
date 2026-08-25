@@ -1,0 +1,29 @@
+[package]
+name = "vcs-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# F3-1's diff engine: hunk computation reuses `editor_core::diff` rather than
+# a second implementation. See `docs/architecture/layering.md`'s `vcs-core`
+# row.
+editor-core = { path = "../editor-core" }
+# Reads only (ADR-0031): discovery, HEAD/blob reads, status, ref listing,
+# log. `default-features = false` because the crate's defaults drag in write
+# paths (worktree checkout, merge, etc.) this layer must never touch — every
+# mutating operation goes through `git` in `cli.rs` instead.
+gix = { version = "0.87", default-features = false, features = [
+    "max-performance-safe",
+    "sha1",
+    "status",
+    "revision",
+    "blob-diff",
+    "index",
+    "dirwalk",
+    "excludes",
+    "attributes",
+] }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+tempfile = "3"
