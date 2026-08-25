@@ -12,16 +12,16 @@ class QTreeView;
 namespace ads {
 class CDockAreaWidget;
 class CDockManager;
-class CDockWidget;
 } // namespace ads
 
 namespace ui_shell {
 
 class AiChatPanel;
+class DockRegistry;
 
 // Everything the project tree's context menu acts on.
 //
-// A struct rather than eight parameters: the list is long because the menu
+// A struct rather than several parameters: the list is long because the menu
 // reaches the AI chat, and a positional call of that length is one
 // transposition away from a bug the compiler cannot see.
 struct ProjectTreeActions
@@ -29,9 +29,9 @@ struct ProjectTreeActions
     QMainWindow *window;
     AiChat *aiChat;
     AiChatPanel *aiChatPanel;
-    ads::CDockWidget *aiChatDock;
-    ads::CDockWidget *classViewDock;
-    ads::CDockManager *dockManager;
+    // Reveals the AI Chat dock (F0-7): re-adds it to its default placement
+    // first if a restored layout left it homeless, same as every other dock.
+    DockRegistry *docks;
     // Opening a file is EditorTabs' job, and the tree does not depend on
     // editor_tabs.h to say so — a callback keeps it that way, the same
     // shape the search results panel already takes.
@@ -52,19 +52,5 @@ QTreeView *createProjectTreeDock(ads::CDockManager *dockManager,
 void wireProjectTree(QTreeView *treeView,
                      ProjectTreeModel *treeModel,
                      const ProjectTreeActions &actions);
-
-// Shows the AI chat dock, putting it back in its tab strip first if a
-// restored layout left it homeless.
-//
-// ADS flags a dock absent from a saved layout as unassigned
-// (DockManager::restoreDockWidgetsOpenState): closed, un-parented, no dock
-// area. Reopening one in that state takes CDockWidget's floating path, so a
-// user whose window_state predates this dock would get a detached window
-// rather than the tab beside Class View that buildCentralWidget arranged.
-// Both the tree's context menu and the menu bar go through here so "show the
-// panel" means the same thing wherever it is asked for.
-void showAiChatDock(ads::CDockManager *dockManager,
-                    ads::CDockWidget *aiChatDock,
-                    ads::CDockWidget *classViewDock);
 
 } // namespace ui_shell

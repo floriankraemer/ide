@@ -270,6 +270,9 @@ fn main() {
         .file("src/bridge/ffi.rs")
         .cpp_file("cpp/main_window.cpp")
         .cpp_file("cpp/e2e_mark.cpp")
+        // F0-7: the dock show/hide registry. Free of Q_OBJECT (plain class,
+        // no signals/slots), so only the source is listed.
+        .cpp_file("cpp/dock_layout.cpp")
         // First hand-written (non-generated) QObject in this crate: header
         // passed to cpp_file() auto-enables moc (CppFile::from, cxx-qt-build
         // 0.9), so this is also the first place build.rs runs moc directly.

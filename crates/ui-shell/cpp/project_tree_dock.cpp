@@ -1,6 +1,7 @@
 #include "project_tree_dock.h"
 
 #include "ai_chat_panel.h"
+#include "dock_layout.h"
 #include "icon_cache.h"
 #include "icon_decoration_proxy.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
@@ -201,7 +202,7 @@ void wireProjectTree(QTreeView *treeView,
                   QMessageBox::information(window, QObject::tr("AI Chat"), result.message);
                   return;
               }
-              showAiChatDock(actions.dockManager, actions.aiChatDock, actions.classViewDock);
+              actions.docks->show(QStringLiteral("aiChat"));
               // A folder's summary names what was skipped and what did not
               // fit; a single file has nothing to report, so only the folder
               // case is worth a line in the status bar.
@@ -211,18 +212,6 @@ void wireProjectTree(QTreeView *treeView,
               actions.aiChatPanel->attachAndFocus();
           }
       });
-}
-
-void showAiChatDock(ads::CDockManager *dockManager,
-                    ads::CDockWidget *aiChatDock,
-                    ads::CDockWidget *classViewDock)
-{
-    if (!aiChatDock->dockAreaWidget()) {
-        dockManager->addDockWidget(ads::CenterDockWidgetArea, aiChatDock,
-                                    classViewDock->dockAreaWidget());
-    }
-    aiChatDock->toggleView(true);
-    aiChatDock->raise();
 }
 
 } // namespace ui_shell

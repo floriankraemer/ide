@@ -1,0 +1,72 @@
+#pragma once
+
+#include "ads_globals.h"
+
+#include <QHash>
+#include <QString>
+
+namespace ads {
+class CDockAreaWidget;
+class CDockManager;
+class CDockWidget;
+} // namespace ads
+
+namespace ui_shell {
+
+// Every dock widget hanging off the main window's one CDockManager, and the
+// one place that knows how to show/hide one of them.
+//
+// Before this existed, each of the six side/bottom docks got its own
+// `dockManager->addDockWidget(...)` at construction and its own scattered
+// `dock->toggleView(true); dock->raise();` pair at every call site that
+// wanted to reveal it (View menu actions, Find Usages' raise-and-focus, the
+// Problems panel's first-diagnostic auto-show...). One of the six (AI Chat)
+// additionally needed a one-off `showAiChatDock()` free function because a
+// dock a restored layout never mentioned comes back from
+// `CDockManager::restoreState()` unassigned — closed, un-parented, no dock
+// area (see `CDockManager::restoreDockWidgetsOpenState`) — and showing it in
+// that state takes ADS's floating path instead of returning it to its
+// tab strip. That risk is not actually specific to AI Chat: it is whatever
+// dock existed in code but not in a since-superseded saved layout, so
+// `show()` below applies the same "re-add if homeless" recovery to every
+// dock, not just the one that happened to need it first.
+class DockRegistry
+{
+public:
+    explicit DockRegistry(ads::CDockManager *dockManager);
+
+    // Registers `dock` under `id` and adds it to the layout now, in `area`
+    // relative to `relativeTo`'s dock area. Returns the dock area
+    // `addDockWidget` created/extended, exactly as `CDockManager` does, so a
+    // caller placing a second dock relative to this one can chain off it.
+    ads::CDockAreaWidget *registerDock(const QString &id, ads::CDockWidget *dock,
+                                       ads::DockWidgetArea area, ads::CDockAreaWidget *relativeTo);
+
+    // Reveals dock `id`: puts it back at its registered placement first if a
+    // restored layout left it homeless, then `toggleView(true)` + `raise()`.
+    void show(const QString &id);
+
+    // `toggleView(false)` on dock `id`.
+    void hide(const QString &id);
+
+    // `CDockWidget::isClosed()` for dock `id`.
+    bool isClosed(const QString &id) const;
+
+    // The raw dock widget registered under `id`, for the call sites that
+    // need more than show/hide/isClosed (focusing a child widget after
+    // raising it, for instance).
+    ads::CDockWidget *dock(const QString &id) const;
+
+private:
+    struct Entry
+    {
+        ads::CDockWidget *dock;
+        ads::DockWidgetArea area;
+        ads::CDockAreaWidget *relativeTo;
+    };
+
+    ads::CDockManager *dockManager_;
+    QHash<QString, Entry> docks_;
+};
+
+} // namespace ui_shell
