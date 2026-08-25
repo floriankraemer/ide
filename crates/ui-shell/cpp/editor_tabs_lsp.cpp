@@ -712,7 +712,18 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
         // after it, so the visible set is asked for again on the same
         // debounce rather than a fourth timer.
         requestInlayHintsFor(editor);
+        // F3-16: the gutter's markers are stale the moment the buffer
+        // changes, exactly like an inlay hint's position is — same
+        // debounce, same reasoning.
+        requestHunksFor(editor);
     });
+
+    // F3-16: a click on a change marker. `window_` (not `editor`) owns the
+    // popup so it survives whichever tab is current changing under it.
+    connect(editor, &CodeEditor::changeMarkerClicked, this,
+            [this, editor](int hunkIndex, const QPoint &globalPos) {
+                onChangeMarkerClicked(editor, hunkIndex, globalPos);
+            });
     connect(editor->document(), &QTextDocument::contentsChanged, changeTimer,
              qOverload<>(&QTimer::start));
     // F2-11: scrolling changes which lines are visible without touching the
@@ -725,6 +736,7 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
     markTab("tab_added", tabId, group, group->indexOf(editor), title);
     applyDiagnostics();
     requestInlayHintsFor(editor);
+    requestHunksFor(editor);
 }
 
 } // namespace ui_shell

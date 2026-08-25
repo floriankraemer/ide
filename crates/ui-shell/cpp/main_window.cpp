@@ -425,6 +425,9 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // per-window QObjects. It launches nothing until a project is opened and
     // a file of a configured language is opened in it.
     auto *languageService = new LanguageService(window);
+    // F3-12/F3-16: one Git adapter per window, discovering nothing until a
+    // project is opened, same as LanguageService.
+    auto *vcsService = new VcsService(window);
     // ADR-0021: one AI chat session per window, alongside the other
     // per-window QObjects, plus the Settings > AI Providers draft — the same
     // arrangement KeymapEditor and LanguageServerEditor use, parented to the
@@ -455,6 +458,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
       buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession,
                           languageService, aiChat);
     EditorTabs *editorTabs = central.editorTabs;
+    wireVcsService(vcsService, treeModel, editorTabs); // F3-12a/F3-16
 
     // Every path that shows the AI chat goes through here, because a dock
     // that a restored layout never mentioned needs putting back before it

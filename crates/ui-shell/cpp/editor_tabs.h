@@ -27,6 +27,14 @@ class FindBar;
 class HexViewer;
 class IntentionBulb;
 
+// F3-12a/F3-16: joins a window's VcsService to the project-open lifecycle
+// (mirroring how LanguageService::openProject is wired) and to EditorTabs's
+// gutter. Free function, not inline in buildMainWindow, so that wiring
+// doesn't grow the already-large main_window.cpp past its file-size
+// ceiling.
+class EditorTabs;
+void wireVcsService(VcsService *vcsService, ProjectTreeModel *treeModel, EditorTabs *editorTabs);
+
 // app_core::TabKind's stable code for a binary tab (ADR-0020).
 constexpr int kTabKindBinary = 1;
 
@@ -389,6 +397,16 @@ public:
     // the rest of the layout.
     void restoreLayout(const QString &json);
 
+    // F3-16: told once a project is known to be (or not be) a repository.
+    // `nullptr` (never called) is the ordinary state for a project with no
+    // Git — every gutter/popup path below is a no-op without it, the same
+    // "no server for this language" shape LanguageService's absence has.
+    void setVcsService(VcsService *vcsService);
+
+    // `VcsService::hunksChanged(path)`: push the hunks it now has for
+    // `path` into that file's gutter, if it is open.
+    void applyVcsHunks(const QString &path);
+
 private:
     // Where a tab lives now: which group's tab strip, and at which index in
     // it. `group == nullptr` means "no such open tab".
@@ -531,6 +549,15 @@ private:
 
     void onInlayHintsReady();
 
+    // F3-16: ask VcsService for `editor`'s hunks against `HEAD`, against its
+    // live text. A no-op without a VcsService or for a file with no path
+    // (an unsaved buffer has nothing in `HEAD` to gutter against).
+    void requestHunksFor(CodeEditor *editor);
+
+    // The gutter's marker was clicked: build and show the popup for that
+    // hunk (Revert / Show Diff / Stage File).
+    void onChangeMarkerClicked(CodeEditor *editor, int hunkIndex, const QPoint &globalPos);
+
     // Public for the same reason onBufferEditedExternally is: an agent's
     // tool can open a tab (AiChat::toolOpenedTab), and that relay lives in
     // buildMainWindow beside MCP's.
@@ -558,6 +585,14 @@ private:
 
     DocumentManager *docManager_;
     LanguageService *languageService_;
+    // F3-16: null for a project with no Git — set once, after construction,
+    // the same retrofit shape setContextMenuCallback uses.
+    VcsService *vcsService_ = nullptr;
+    // A monotonic counter bumped on every requestHunks call: `HunkCache`'s
+    // cache key needs only "same edit state or not", never real history, so
+    // one counter shared across every open file is enough (vcs-core's own
+    // doc comment on `HunkCache::hunks` says as much).
+    quint64 vcsRevision_ = 0;
     // F1-13/F1-15: carets and the language-aware editing operations, for
     // every editor this class opens. Owned here rather than passed in
     // because nothing outside the editor surface has anything to ask it.

@@ -4074,6 +4074,14 @@ mod ffi {
         #[qinvokable]
         fn hunks(self: &VcsService, path: &QString) -> Vec<FfiHunk>;
 
+        /// The `HEAD` text `requestHunks` last cached for `path` — what
+        /// `DiffView`'s left pane needs for the gutter popup's "Show Diff"
+        /// (F3-16), with no second repository read. Empty before an answer
+        /// arrives.
+        #[qinvokable]
+        #[cxx_name = "headText"]
+        fn head_text(self: &VcsService, path: &QString) -> QString;
+
         /// The edit that reverts `hunks(path)[hunk_index]`, to splice into
         /// the open buffer through `EditorTabs::applyBufferEdits` — never a
         /// write to disk (F3-11/ADR-0031). Computed from the same cached

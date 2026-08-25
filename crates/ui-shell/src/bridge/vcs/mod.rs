@@ -242,6 +242,13 @@ impl ffi::VcsService {
         }
     }
 
+    pub fn head_text(&self, path: &QString) -> QString {
+        match self.hunks.borrow().get(&path.to_string()) {
+            Some(cached) => QString::from(cached.before_text.as_str()),
+            None => QString::default(),
+        }
+    }
+
     pub fn revert_hunk(&self, path: &QString, hunk_index: u32) -> Vec<ffi::FfiTextEdit> {
         let path = path.to_string();
         let cache = self.hunks.borrow();
