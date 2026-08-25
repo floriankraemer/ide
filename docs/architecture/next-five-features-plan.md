@@ -95,6 +95,8 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 
 ### F3 — Git v1
 
+Renumbered to match §4's Task breakdown, which this table had drifted from (an earlier draft's F3-2…F3-23 predated the a/b/c/d split of F3-12 and the `DiffView` split of F3-13…F3-15; §4 is the numbering actually implemented against).
+
 | Task | Status | Commit |
 |---|---|---|
 | F3-1 — `editor-core::diff` | done | 0416194 (#87) |
@@ -108,18 +110,18 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F3-9 — remotes | todo |  |
 | F3-10 — history and blame | todo |  |
 | F3-11 — revert hunk | todo |  |
-| F3-12 — bridge: `VcsService` (a) supervisor + status | todo |  |
-| F3-13 — bridge: (b) hunks + revert | todo |  |
-| F3-14 — bridge: (c) staging + commit | todo |  |
-| F3-15 — bridge: (d) branches, remotes, history | todo |  |
-| F3-16 — view: `DiffView` | todo |  |
-| F3-17 — view: diff as a tab | todo |  |
-| F3-18 — retrofit the previews onto `DiffView` | todo |  |
-| F3-19 — view: gutter markers | todo |  |
-| F3-20 — view: Changes dock | todo |  |
-| F3-21 — view: branches and history | todo |  |
-| F3-22 — view: actions and menus | todo |  |
-| F3-23 — E2E + its two ADRs + docs | todo | ADR numbers to be reallocated, see below |
+| F3-12a — bridge: `VcsService` supervisor + status | todo |  |
+| F3-12b — bridge: hunks + revert | todo |  |
+| F3-12c — bridge: staging + commit | todo |  |
+| F3-12d — bridge: branches, remotes, history | todo |  |
+| F3-13 — view: `DiffView` | done | 03f89fa |
+| F3-14 — view: `TabKind::Diff` + `diff_labels`, deferred until the Git backend exists (§2/ADR-0030) | todo |  |
+| F3-15 — retrofit: refactor preview, project-wide replace preview and AI apply render through `DiffView` | done | fcb917e, 27d3a88 |
+| F3-16 — view: `vcs_gutter` | todo |  |
+| F3-17 — view: `changes_panel` | todo |  |
+| F3-18 — view: branch widget, `file_history_panel`, blame gutter | todo |  |
+| F3-19 — view: the VCS action set and menu | todo |  |
+| F3-20 — E2E + its two ADRs + docs | todo | ADR numbers to be reallocated, see below |
 
 ### F4 — Run configurations and console
 
@@ -419,8 +421,10 @@ Advertise `resourceOperations`, parse and order them in `lsp-core`, perform them
 As argued in §2/F3.
 *Rejected*: pure `gix`/`git2` (credential helpers, SSH agents, `insteadOf`, hooks and GPG signing are five re-implementations, each failing in a way that looks like our bug and some by leaking); pure `git` CLI (a subprocess per keystroke for gutter diffs is not a ceiling, it is a defect); `git2`/libgit2 over `gix` (a C dependency in an MXE cross-build — ADR-0021 already refused OpenSSL on exactly this ground); bundling a `git` binary (then we own its CVEs and platform builds, and the user's configured `git` is the one they want used).
 
-**ADR-0028 — One diff component: `editor_core::diff`, `DiffView`, and `TabKind::Diff`.**
-Diff computation is Git-free and lives in `editor-core`; the C++ `DiffView` takes two texts, a hunk list and a language id; a diff opens as a tab kind. The refactor preview, replace preview and AI apply flow are retrofitted onto it within F3.
+**ADR-0030 — One diff component: `editor_core::diff`, `DiffView`, and `TabKind::Diff`.**
+(Written as ADR-0030, not 0028 as first planned here — 0025 through 0029 were claimed by other work in between.)
+Diff computation is Git-free and lives in `editor-core`; the C++ `DiffView` takes two texts, a hunk list, intra-line spans and a language id.
+The refactor preview and Replace in Files are retrofitted onto it within F3 (F3-13/F3-15); `TabKind::Diff` (F3-14) is deferred until the Git backend exists, so it has a real caller.
 *Rejected*: diff in `vcs-core` (then a rename preview needs Git to show a diff, and a project with no repository gets no preview); a diff dock (ADR-0020 gave a tab an explicit kind for exactly this, and a dock cannot hold several open comparisons); a `QWebEngineView` diff (same answer ADR-0021 gave — hundreds of megabytes and a second JS runtime for two text panes); shipping the Git gutter now and generalising later ("later" is how the replace preview ended up with no undo and no diff in the first place).
 
 **ADR-0029 — Run configurations, `LaunchSpec`, and a supervisor shaped for DAP.**

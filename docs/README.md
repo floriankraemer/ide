@@ -35,6 +35,7 @@ ADR numbers 0006 and 0013–0015 were never used; the gaps are historical and in
 - [ADR-0027: icon themes](architecture/decisions/0027-icon-themes.md) — a Qt-free `icon-theme` crate: our own `pack.toml`, `resvg` rasterisation to premultiplied RGBA8, and a resolver handed a language id rather than detecting one.
 - [ADR-0028: wasm plugin tier](architecture/decisions/0028-wasm-plugin-tier.md) — wasmtime components under fuel, an epoch deadline and a memory cap; capabilities that deny rather than omit; a trap disables one plugin and never the process.
 - [ADR-0029: resource operations](architecture/decisions/0029-resource-operations.md) — a `WorkspaceEdit`'s file create/rename/delete steps, parsed by `lsp-core` and performed by `app-core` as `FileOp`, all-or-nothing before any text edit is written.
+- [ADR-0030: `DiffView`](architecture/decisions/0030-diff-view.md) — one Git-free diff component over `editor_core::diff`; the refactor preview and Replace in Files retrofit onto it; `TabKind::Diff` deferred until the Git backend exists.
 
 ## Plans
 
