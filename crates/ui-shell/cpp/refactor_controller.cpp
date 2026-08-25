@@ -230,7 +230,16 @@ void RefactorController::onRefactorReady(const FfiRefactorSummary &summary)
 
 void RefactorController::applyPending()
 {
-    const ::rust::Vec<FfiTextEdit> edits = languageService_->takePendingEdits(revision_);
+    // Read fresh rather than reusing `revision_` (which is only ever set at
+    // the *start* of a gesture, e.g. `onCodeActionsReady`/`askForNewName`):
+    // `lsp_core::EditGate::accept` exists to catch a buffer that changed
+    // while the answer was in flight, and echoing the request-time value
+    // back at it would make that check pass unconditionally. F2-8's
+    // intentions never populate `revision_` at all — they capture their own
+    // revision at `applyIntention`'s call site — so this is also the fix
+    // for those.
+    const ::rust::Vec<FfiTextEdit> edits =
+      languageService_->takePendingEdits(editorTabs_->documentRevision());
     if (edits.empty()) {
         report(tr("The file changed while the refactoring was being prepared; nothing was "
                   "applied."));

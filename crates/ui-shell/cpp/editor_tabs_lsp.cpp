@@ -1,6 +1,7 @@
 #include "editor_tabs.h"
 
 #include "code_editor.h"
+#include "e2e_mark.h"
 #include "find_bar.h"
 #include "intention_bulb.h"
 #include "problems_panel.h"
@@ -365,7 +366,15 @@ void EditorTabs::showIntentionsMenu()
     const QPoint pos = intentionBulb_ && intentionBulb_->isVisible()
       ? intentionBulb_->mapToGlobal(QPoint(0, intentionBulb_->height()))
       : QCursor::pos();
-    menu.exec(pos);
+    // A popup menu takes a keyboard grab rather than the input focus, so
+    // this mark is the only way anything outside the process can know it
+    // is up — same reasoning as the tab context menu's.
+    e2eMark(QStringLiteral("{\"ev\":\"dialog_shown\",\"name\":\"intentions_menu\",\"count\":%1}")
+              .arg(items.size()));
+    QAction *chosen = menu.exec(pos);
+    e2eMark(QStringLiteral("{\"ev\":\"dialog_closed\",\"name\":\"intentions_menu\","
+                            "\"accepted\":%1}")
+              .arg(chosen != nullptr ? QLatin1String("true") : QLatin1String("false")));
 }
 
 void EditorTabs::runEditorOp(

@@ -50,8 +50,8 @@ lint: linux-image ## Run clippy + rustfmt + file-size checks in Docker
 E2E_XVFB = xvfb-run -a --server-args="-screen 0 1600x1200x24"
 
 e2e: linux-image ## Run the E2E flows under Xvfb (ignored by `make test`)
-	$(RUN_LINUX) sh -c 'cargo build -p app && $(E2E_XVFB) \
-		cargo test -p app --test e2e -- --ignored --test-threads=1 --nocapture'
+	$(RUN_LINUX) sh -c 'cargo build -p app && cargo build --bin stub_server -p lsp-core && \
+		$(E2E_XVFB) cargo test -p app --test e2e -- --ignored --test-threads=1 --nocapture'
 
 # Burn-in: `make e2e-repeat TEST=e2e_open_project_edit_save N=20`. A flake is
 # a P1 bug in the product or the harness, so this exists to find one before
@@ -59,7 +59,8 @@ e2e: linux-image ## Run the E2E flows under Xvfb (ignored by `make test`)
 N ?= 20
 e2e-repeat: linux-image ## Repeat one E2E flow N times: make e2e-repeat TEST=<name> N=20
 	@test -n "$(TEST)" || { echo "usage: make e2e-repeat TEST=<name> [N=20]"; exit 2; }
-	$(RUN_LINUX) sh -c 'cargo build -p app && for i in $$(seq 1 $(N)); do \
+	$(RUN_LINUX) sh -c 'cargo build -p app && cargo build --bin stub_server -p lsp-core && \
+		for i in $$(seq 1 $(N)); do \
 		echo "--- run $$i/$(N) ---"; \
 		$(E2E_XVFB) cargo test -p app --test e2e -- --ignored --exact \
 			--test-threads=1 --nocapture $(TEST) || exit 1; \
