@@ -12,6 +12,7 @@
 #include "plugins_page.h"
 #include "icon_decoration_proxy.h"
 #include "syntax_colors_page.h"
+#include "terminal_sessions_panel.h"
 
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -176,6 +177,7 @@ void showSettingsDialog(QWidget *parent, const SettingsContext &context)
         editor.commit();
         context.keymapEditor->commit();
         applyKeymap(*context.actions, appSettings);
+        context.terminalPanel->reapplyKeymap();
         mcp.commit();
         // The AI draft was already committed by the OK handler above; this
         // is the chat session re-reading the provider, the mode and the

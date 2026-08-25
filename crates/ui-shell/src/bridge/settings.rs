@@ -257,7 +257,7 @@ impl ffi::AppSettings {
 /// re-reads `settings.toml` per call) this one holds the settings dialog's
 /// draft keymap, so an edit only reaches disk when `commit` is called.
 /// `RefCell` rather than `Pin<&mut Self>` mutation, matching how
-/// `TerminalSessionRust` keeps its interior state.
+/// `TerminalSupervisorRust` keeps its interior state.
 #[derive(Default)]
 pub struct KeymapEditorRust {
     draft: RefCell<app_config::Keymap>,

@@ -18,21 +18,31 @@ class QShowEvent;
 
 namespace ui_shell {
 
-// Embedded terminal dock widget (Task F3): a custom QWidget that paints the
-// cell grid `TerminalSession` (Rust: `pty_core::PtySession` +
-// `terminal_core::TerminalEmulator`) hands over, and forwards key events
-// back to it. Humble view per CLAUDE.md's hard rule — VT100 interpretation
-// and grid state live entirely in `terminal-core`/the bridge; this class
-// only paints `gridCells()`'s snapshot and translates key events to bytes.
-// Deliberately not QTermWidget (ADR-0007): that would put untestable VT
-// logic behind Qt.
+// Embedded terminal dock widget (Task F3, multi-session since F4-14): a
+// custom QWidget that paints the cell grid `TerminalSupervisor` (Rust:
+// `pty_core::PtySession` + `terminal_core::TerminalEmulator`, one pair per
+// `sessionId`) hands over for its one session, and forwards key events back
+// to it. Humble view per CLAUDE.md's hard rule — VT100 interpretation and
+// grid state live entirely in `terminal-core`/the bridge; this class only
+// paints `gridCells(sessionId)`'s snapshot and translates key events to
+// bytes. Deliberately not QTermWidget (ADR-0007): that would put untestable
+// VT logic behind Qt.
+//
+// One `TerminalWidget` per open tab, all sharing the one `TerminalSupervisor`
+// QObject (see that type's doc comment in `bridge/ffi.rs` for why there is
+// one adapter instance, not N) — `sessionId` is what tells them apart, both
+// for every call this class makes and for filtering the shared
+// `gridUpdated(sessionId)` signal down to the one session this widget cares
+// about.
 class TerminalWidget : public QWidget
 {
     Q_OBJECT
 
 public:
-    explicit TerminalWidget(TerminalSession *session, AppSettings *appSettings,
-                             QWidget *parent = nullptr);
+    TerminalWidget(TerminalSupervisor *supervisor, quint64 sessionId, AppSettings *appSettings,
+                   QWidget *parent = nullptr);
+
+    quint64 sessionId() const { return sessionId_; }
 
     // Copy/Paste are QActions rather than hardcoded key handling so their
     // shortcuts come from the persisted keymap ("terminal.copy"/
@@ -40,6 +50,14 @@ public:
     // registers them under those ids so a rebinding applies live.
     QAction *copyAction() const { return copyAction_; }
     QAction *pasteAction() const { return pasteAction_; }
+
+    // Re-read Copy/Paste's shortcuts from `appSettings` after a keymap
+    // rebind. Each `TerminalWidget` owns its own QActions (see this class's
+    // doc comment on why they cannot live in a shared-by-id map), so a
+    // rebind is applied per open tab, by whoever owns them
+    // (`TerminalSessionsPanel::reapplyKeymap`) — not through the app-wide
+    // `applyKeymap()` every menu action uses.
+    void reapplyKeymap();
 
 protected:
     // A focused terminal owns its Ctrl-combinations, so this intercepts the
@@ -79,7 +97,8 @@ private:
     // plain drag over output never turns into a link gesture.
     void updateHoverLink(const QPoint &pos, bool ctrlHeld);
 
-    TerminalSession *session_;
+    TerminalSupervisor *supervisor_;
+    quint64 sessionId_;
     AppSettings *appSettings_;
     QAction *copyAction_ = nullptr;
     QAction *pasteAction_ = nullptr;

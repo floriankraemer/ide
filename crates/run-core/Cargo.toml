@@ -1,0 +1,28 @@
+[package]
+name = "run-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Transport: spawns the run's shell/process and kills its whole tree
+# (F4-1/F4-2). `run-core` never touches a process directly.
+pty-core = { path = "../pty-core" }
+# Persistence: a run configuration is project-shaped (ADR-0022), so this
+# crate reuses `app_config::RunConfigSetting` as its own `RunConfig` rather
+# than keeping a second type in sync with a manual mapping.
+app-config = { path = "../app-config" }
+# ANSI/SGR state machine reuse (F4-7): the output batcher feeds bytes
+# through `terminal_core::TerminalEmulator` rather than a second VT100
+# parser. Not in the plan doc's original F4 dependency list — added
+# deliberately, see `docs/architecture/layering.md`'s `run-core` row.
+terminal-core = { path = "../terminal-core" }
+serde = { version = "1", features = ["derive"] }
+# Detection reads Cargo.toml (F4-5) and terminal-core's Cargo.lock already
+# pulls the same `toml` version app-config uses.
+toml = "0.8"
+# Detection reads package.json (F4-5).
+serde_json = "1"
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"

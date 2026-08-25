@@ -348,6 +348,9 @@ fn main() {
         .cpp_file("cpp/syntax_highlighter.cpp")
         .cpp_file("cpp/terminal_widget.h")
         .cpp_file("cpp/terminal_widget.cpp")
+        // F4-14b: the tabbed multi-session terminal dock over TerminalWidget.
+        .cpp_file("cpp/terminal_sessions_panel.h")
+        .cpp_file("cpp/terminal_sessions_panel.cpp")
         .cpp_file("cpp/hex_viewer.h")
         .cpp_file("cpp/hex_viewer.cpp")
         // The chat panel declares Q_OBJECT, so its header is listed too
@@ -363,6 +366,13 @@ fn main() {
         .cpp_file("cpp/changes_panel.cpp")
         .cpp_file("cpp/file_history_panel.cpp")
         .cpp_file("cpp/vcs_menu.cpp")
+        // F4-11/F4-12: the Run Console dock, its toolbar, the run
+        // configuration dialog and the Run menu. Q_OBJECT-free, same as the
+        // VCS panels above.
+        .cpp_file("cpp/run_toolbar.cpp")
+        .cpp_file("cpp/run_console_panel.cpp")
+        .cpp_file("cpp/run_config_dialog.cpp")
+        .cpp_file("cpp/run_menu.cpp")
         .include_dir("cpp")
         .include_dir(ads_dir)
         .cpp_file(compile_ads_qrc(ads_dir, &tool_dirs))

@@ -37,6 +37,7 @@ ADR numbers 0006 and 0013–0015 were never used; the gaps are historical and in
 - [ADR-0029: resource operations](architecture/decisions/0029-resource-operations.md) — a `WorkspaceEdit`'s file create/rename/delete steps, parsed by `lsp-core` and performed by `app-core` as `FileOp`, all-or-nothing before any text edit is written.
 - [ADR-0030: `DiffView`](architecture/decisions/0030-diff-view.md) — one Git-free diff component over `editor_core::diff`; the refactor preview and Replace in Files retrofit onto it; `TabKind::Diff` deferred until the Git backend exists.
 - [ADR-0031: Git backend](architecture/decisions/0031-git-backend.md) — `gix` for reads (discovery, status, HEAD, history), the `git` binary for anything touching credentials, hooks or signing (staging, commit, branch, remote); hunks computed in-process, blame shelled out.
+- [ADR-0032: run configurations](architecture/decisions/0032-run-configurations.md) — a PTY-backed console over the debugger-agnostic `LaunchSpec`; ANSI-stripped output in v1; one `TerminalSupervisorRust` QObject for N terminal sessions, not N QObject instances; the AI agent gains no run tool from this.
 
 ## Plans
 

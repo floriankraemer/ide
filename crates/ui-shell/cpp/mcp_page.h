@@ -3,7 +3,9 @@
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include <functional>
+#include <memory>
 
+class QObject;
 class QString;
 class QWidget;
 
@@ -30,5 +32,12 @@ struct McpPage
 // paints the status sentences it is handed.
 McpPage buildMcpPage(QWidget *parent, AppSettings *appSettings, DocumentManager *docManager,
                      const QString &status);
+
+// Keeps a live status sentence for the MCP page above in step with
+// `DocumentManager`'s `mcpStarted`/`mcpStopped`/`mcpFailed` signals. The
+// string outlives the Settings dialog (it is read again whenever Settings
+// reopens), which is why this hands back an owned pointer rather than
+// taking a widget to update directly.
+std::shared_ptr<QString> wireMcpStatus(DocumentManager *docManager, QObject *context);
 
 } // namespace ui_shell

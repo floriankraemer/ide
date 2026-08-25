@@ -27,10 +27,11 @@
 
 namespace ui_shell {
 
-TerminalWidget::TerminalWidget(TerminalSession *session, AppSettings *appSettings,
-                                 QWidget *parent)
+TerminalWidget::TerminalWidget(TerminalSupervisor *supervisor, quint64 sessionId,
+                                AppSettings *appSettings, QWidget *parent)
   : QWidget(parent)
-  , session_(session)
+  , supervisor_(supervisor)
+  , sessionId_(sessionId)
   , appSettings_(appSettings)
 {
     setFocusPolicy(Qt::StrongFocus);
@@ -64,8 +65,21 @@ TerminalWidget::TerminalWidget(TerminalSession *session, AppSettings *appSetting
     setPalette(pal);
 
     // Repaint only in response to genuinely new PTY output (per gridUpdated),
-    // never on a timer — CLAUDE.md's/F3's explicit requirement.
-    connect(session_, &TerminalSession::gridUpdated, this, [this]() { update(); });
+    // never on a timer — CLAUDE.md's/F3's explicit requirement. The signal is
+    // shared by every session, so filter to this widget's own.
+    connect(supervisor_, &TerminalSupervisor::gridUpdated, this, [this](quint64 sessionId) {
+        if (sessionId == sessionId_) {
+            update();
+        }
+    });
+}
+
+void TerminalWidget::reapplyKeymap()
+{
+    copyAction_->setShortcut(QKeySequence(appSettings_->shortcutFor(QStringLiteral("terminal.copy")),
+                                           QKeySequence::PortableText));
+    pasteAction_->setShortcut(QKeySequence(
+      appSettings_->shortcutFor(QStringLiteral("terminal.paste")), QKeySequence::PortableText));
 }
 
 void TerminalWidget::showEvent(QShowEvent *event)
@@ -91,9 +105,9 @@ void TerminalWidget::syncGridSizeToWidget()
     rows_ = newRows;
     if (!started_) {
         started_ = true;
-        session_->start(rows_, cols_);
+        supervisor_->start(sessionId_, rows_, cols_);
     } else {
-        session_->resize(rows_, cols_);
+        supervisor_->resize(sessionId_, rows_, cols_);
     }
 }
 
@@ -104,14 +118,14 @@ void TerminalWidget::paintEvent(QPaintEvent *event)
     painter.setFont(font_);
     painter.fillRect(rect(), Qt::black);
 
-    const quint32 rows = session_->gridRows();
-    const quint32 cols = session_->gridCols();
+    const quint32 rows = supervisor_->gridRows(sessionId_);
+    const quint32 cols = supervisor_->gridCols(sessionId_);
     if (rows == 0 || cols == 0) {
         return;
     }
-    const rust::Vec<FfiTerminalCell> cells = session_->gridCells();
-    const quint32 cursorRow = session_->cursorRow();
-    const quint32 cursorCol = session_->cursorCol();
+    const rust::Vec<FfiTerminalCell> cells = supervisor_->gridCells(sessionId_);
+    const quint32 cursorRow = supervisor_->cursorRow(sessionId_);
+    const quint32 cursorCol = supervisor_->cursorCol(sessionId_);
 
     for (quint32 row = 0; row < rows; ++row) {
         for (quint32 col = 0; col < cols; ++col) {
@@ -164,10 +178,10 @@ bool TerminalWidget::rightHalf(const QPoint &pos) const
 
 void TerminalWidget::copySelection()
 {
-    if (!session_->hasSelection()) {
+    if (!supervisor_->hasSelection(sessionId_)) {
         return;
     }
-    QGuiApplication::clipboard()->setText(session_->selectionText());
+    QGuiApplication::clipboard()->setText(supervisor_->selectionText(sessionId_));
 }
 
 void TerminalWidget::pasteClipboard()
@@ -176,7 +190,7 @@ void TerminalWidget::pasteClipboard()
     if (text.isEmpty()) {
         return;
     }
-    session_->paste(text);
+    supervisor_->paste(sessionId_, text);
 }
 
 void TerminalWidget::openLink(const FfiTerminalLink &link)
@@ -189,9 +203,9 @@ void TerminalWidget::openLink(const FfiTerminalLink &link)
 void TerminalWidget::updateHoverLink(const QPoint &pos, bool ctrlHeld)
 {
     const QPoint cell = cellAt(pos);
-    const FfiTerminalLink link =
-      ctrlHeld ? session_->linkAt(static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()))
-               : FfiTerminalLink{};
+    const FfiTerminalLink link = ctrlHeld
+      ? supervisor_->linkAt(sessionId_, static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()))
+      : FfiTerminalLink{};
     if (link.found == hoverLink_.found && link.row == hoverLink_.row
         && link.start_col == hoverLink_.start_col && link.end_col == hoverLink_.end_col) {
         return;
@@ -216,8 +230,9 @@ void TerminalWidget::mousePressEvent(QMouseEvent *event)
     if (doubleClickTimer_.isValid()
         && doubleClickTimer_.elapsed() < QApplication::doubleClickInterval()) {
         doubleClickTimer_.invalidate();
-        session_->selectionStart(static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()),
-                                  rightHalf(event->pos()), FfiSelectionKind::Line);
+        supervisor_->selectionStart(sessionId_, static_cast<quint32>(cell.y()),
+                                     static_cast<quint32>(cell.x()), rightHalf(event->pos()),
+                                     FfiSelectionKind::Line);
         dragging_ = true;
         update();
         event->accept();
@@ -226,7 +241,7 @@ void TerminalWidget::mousePressEvent(QMouseEvent *event)
 
     if (event->modifiers().testFlag(Qt::ControlModifier)) {
         const FfiTerminalLink link =
-          session_->linkAt(static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()));
+          supervisor_->linkAt(sessionId_, static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()));
         if (link.found) {
             openLink(link);
             event->accept();
@@ -234,9 +249,10 @@ void TerminalWidget::mousePressEvent(QMouseEvent *event)
         }
     }
 
-    session_->selectionClear();
-    session_->selectionStart(static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()),
-                              rightHalf(event->pos()), FfiSelectionKind::Simple);
+    supervisor_->selectionClear(sessionId_);
+    supervisor_->selectionStart(sessionId_, static_cast<quint32>(cell.y()),
+                                 static_cast<quint32>(cell.x()), rightHalf(event->pos()),
+                                 FfiSelectionKind::Simple);
     dragging_ = true;
     update();
     event->accept();
@@ -246,8 +262,8 @@ void TerminalWidget::mouseMoveEvent(QMouseEvent *event)
 {
     if (dragging_) {
         const QPoint cell = cellAt(event->pos());
-        session_->selectionUpdate(static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()),
-                                   rightHalf(event->pos()));
+        supervisor_->selectionUpdate(sessionId_, static_cast<quint32>(cell.y()),
+                                      static_cast<quint32>(cell.x()), rightHalf(event->pos()));
         update();
         event->accept();
         return;
@@ -270,8 +286,8 @@ void TerminalWidget::mouseReleaseEvent(QMouseEvent *event)
     // copied elsewhere; supportsSelection() is false on Windows, where this
     // is simply skipped.
     QClipboard *clipboard = QGuiApplication::clipboard();
-    if (clipboard->supportsSelection() && session_->hasSelection()) {
-        clipboard->setText(session_->selectionText(), QClipboard::Selection);
+    if (clipboard->supportsSelection() && supervisor_->hasSelection(sessionId_)) {
+        clipboard->setText(supervisor_->selectionText(sessionId_), QClipboard::Selection);
     }
     event->accept();
 }
@@ -285,8 +301,9 @@ void TerminalWidget::mouseDoubleClickEvent(QMouseEvent *event)
     doubleClickTimer_.restart();
 
     const QPoint cell = cellAt(event->pos());
-    session_->selectionStart(static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()),
-                              rightHalf(event->pos()), FfiSelectionKind::Word);
+    supervisor_->selectionStart(sessionId_, static_cast<quint32>(cell.y()),
+                                 static_cast<quint32>(cell.x()), rightHalf(event->pos()),
+                                 FfiSelectionKind::Word);
     // A double click also starts a drag in word/line units, matching every
     // other terminal.
     dragging_ = true;
@@ -298,10 +315,10 @@ void TerminalWidget::contextMenuEvent(QContextMenuEvent *event)
 {
     const QPoint cell = cellAt(event->pos());
     const FfiTerminalLink link =
-      session_->linkAt(static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()));
+      supervisor_->linkAt(sessionId_, static_cast<quint32>(cell.y()), static_cast<quint32>(cell.x()));
 
     QMenu menu(this);
-    copyAction_->setEnabled(session_->hasSelection());
+    copyAction_->setEnabled(supervisor_->hasSelection(sessionId_));
     menu.addAction(copyAction_);
     menu.addAction(pasteAction_);
     if (link.found) {
@@ -365,7 +382,7 @@ void TerminalWidget::keyPressEvent(QKeyEvent *event)
         QWidget::keyPressEvent(event);
         return;
     }
-    session_->write(toSend);
+    supervisor_->write(sessionId_, toSend);
     event->accept();
 }
 

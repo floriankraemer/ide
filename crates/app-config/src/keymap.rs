@@ -404,6 +404,20 @@ pub const ACTIONS: &[ActionDef] = &[
         category: "Terminal",
         default_shortcut: "Ctrl+Shift+V",
     },
+    // F4-14b: multi-session terminal — a new tab, and (Windows-only; see
+    // `pty_core::WindowsShellKind`) picking which shell it spawns.
+    ActionDef {
+        id: "terminal.newSession",
+        label: "New Terminal Tab",
+        category: "Terminal",
+        default_shortcut: "Ctrl+Shift+T",
+    },
+    ActionDef {
+        id: "terminal.selectShell",
+        label: "Select Shell...",
+        category: "Terminal",
+        default_shortcut: "",
+    },
     // F3-19: Git v1's action set.
     ActionDef {
         id: "vcs.commit",
@@ -476,6 +490,42 @@ pub const ACTIONS: &[ActionDef] = &[
         label: "File History",
         category: "View",
         default_shortcut: "",
+    },
+    ActionDef {
+        id: "run.run",
+        label: "Run",
+        category: "Run",
+        default_shortcut: "Shift+F10",
+    },
+    ActionDef {
+        id: "run.stop",
+        label: "Stop",
+        category: "Run",
+        default_shortcut: "Ctrl+F2",
+    },
+    ActionDef {
+        id: "run.rerun",
+        label: "Rerun",
+        category: "Run",
+        default_shortcut: "Ctrl+F5",
+    },
+    ActionDef {
+        id: "run.selectConfiguration",
+        label: "Select Run Configuration...",
+        category: "Run",
+        default_shortcut: "Alt+Shift+F10",
+    },
+    ActionDef {
+        id: "run.editConfigurations",
+        label: "Edit Configurations...",
+        category: "Run",
+        default_shortcut: "",
+    },
+    ActionDef {
+        id: "view.runConsole",
+        label: "Run Console",
+        category: "View",
+        default_shortcut: "Alt+4",
     },
 ];
 

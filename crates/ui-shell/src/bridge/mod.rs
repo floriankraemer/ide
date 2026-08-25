@@ -33,6 +33,7 @@ pub mod icons;
 pub mod language;
 pub mod plugins;
 pub mod registry;
+pub mod run;
 pub mod search;
 pub mod settings;
 pub mod terminal;
