@@ -1,13 +1,17 @@
 #pragma once
 
+#include <QHash>
 #include <QString>
 #include <functional>
 
 class AiChat;
 class ProjectTreeModel;
 
+class QAction;
 class QMainWindow;
+class QMenu;
 class QTreeView;
+class AppSettings;
 
 namespace ads {
 class CDockAreaWidget;
@@ -44,7 +48,8 @@ struct ProjectTreeActions
 // scale.
 QTreeView *createProjectTreeDock(ads::CDockManager *dockManager,
                                  ads::CDockAreaWidget *editorArea,
-                                 ProjectTreeModel *treeModel);
+                                 ProjectTreeModel *treeModel,
+                                 DockRegistry *docks);
 
 // Wires the tree's gestures: click to open, right-click for the
 // create/rename/delete/attach menu (US-2b). Separate from construction only
@@ -52,5 +57,14 @@ QTreeView *createProjectTreeDock(ads::CDockManager *dockManager,
 void wireProjectTree(QTreeView *treeView,
                      ProjectTreeModel *treeModel,
                      const ProjectTreeActions &actions);
+
+// Adds the `view.projectTree` action to `viewMenu` so the dock can be raised
+// again after its "x" is closed (#117) — same registerAction/DockRegistry
+// shape as every other dock's View-menu entry, split out here rather than
+// main_window.cpp only to stay under that file's line ceiling.
+void wireProjectTreeViewAction(QMenu *viewMenu,
+                               DockRegistry *docks,
+                               AppSettings *appSettings,
+                               QHash<QString, QAction *> &actions);
 
 } // namespace ui_shell

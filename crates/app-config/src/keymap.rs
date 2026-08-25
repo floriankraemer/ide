@@ -235,6 +235,12 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "Ctrl+Alt+C",
     },
     ActionDef {
+        id: "view.projectTree",
+        label: "Project",
+        category: "View",
+        default_shortcut: "Ctrl+Alt+T",
+    },
+    ActionDef {
         id: "view.terminal",
         label: "Terminal",
         category: "View",
