@@ -12,7 +12,9 @@
 //! crate from behind the FFI seam.
 
 mod error;
+pub mod hunks;
 pub mod repo;
 
 pub use error::VcsError;
+pub use hunks::{HunkCache, WorkingHunks};
 pub use repo::{ChangeKind, DiscoverResult, FileStatus, HeadInfo, RepoStatus, Repository};

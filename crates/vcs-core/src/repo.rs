@@ -9,7 +9,7 @@ use crate::error::VcsError;
 /// different backend) does not ripple past this crate's boundary — the same
 /// reason `settings-model` wraps rather than leaks its dependents' types.
 pub struct Repository {
-    inner: gix::Repository,
+    pub(crate) inner: gix::Repository,
 }
 
 /// The outcome of looking for a repository at or above a path.
