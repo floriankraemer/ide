@@ -41,13 +41,19 @@ impl ffi::VcsService {
     pub fn refresh_branches(mut self: Pin<&mut Self>) {
         let qt_thread = self.as_mut().qt_thread();
         self.as_ref().push_job(move |worker: &VcsWorker| {
-            let result = worker.repo.branches();
-            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| match result {
-                Ok(names) => {
+            // One round trip for both: a caller asking for the branch list
+            // almost always wants to know which one is current too (the
+            // branch widget and menu both do), and `current_branch` is a
+            // cheap `HEAD` read next to a ref listing.
+            let names = worker.repo.branches();
+            let current = worker.repo.current_branch();
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| match (names, current) {
+                (Ok(names), Ok(current)) => {
                     *service.branches.borrow_mut() = names;
+                    *service.current_branch.borrow_mut() = current.unwrap_or_default();
                     service.as_mut().branch_changed();
                 }
-                Err(err) => {
+                (Err(err), _) | (_, Err(err)) => {
                     let result = to_ffi_result(&err);
                     service.as_mut().vcs_failed(result);
                 }
@@ -63,6 +69,10 @@ impl ffi::VcsService {
                 name: QString::from(name.as_str()),
             })
             .collect()
+    }
+
+    pub fn current_branch(&self) -> QString {
+        QString::from(self.current_branch.borrow().as_str())
     }
 
     pub fn checkout(mut self: Pin<&mut Self>, name: &QString) {
@@ -171,6 +181,7 @@ impl ffi::VcsService {
     pub fn file_history(mut self: Pin<&mut Self>, path: &QString) {
         let path = path.to_string();
         let qt_thread = self.as_mut().qt_thread();
+        let signal_path = path.clone();
         self.as_ref().push_job(move |worker: &VcsWorker| {
             let result = worker
                 .history_cache
@@ -179,7 +190,9 @@ impl ffi::VcsService {
                 Ok(entries) => {
                     let entries: Vec<ffi::FfiLogEntry> =
                         entries.iter().map(to_ffi_log_entry).collect();
-                    service.as_mut().history_ready(entries);
+                    service
+                        .as_mut()
+                        .history_ready(QString::from(signal_path.as_str()), entries);
                 }
                 Err(err) => {
                     let result = to_ffi_result(&err);
@@ -192,13 +205,16 @@ impl ffi::VcsService {
     pub fn blame(mut self: Pin<&mut Self>, path: &QString) {
         let path = path.to_string();
         let qt_thread = self.as_mut().qt_thread();
+        let signal_path = path.clone();
         self.as_ref().push_job(move |worker: &VcsWorker| {
             let result = worker.blame_cache.blame(&worker.repo, Path::new(&path));
             let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| match result {
                 Ok(lines) => {
                     let lines: Vec<ffi::FfiBlameLine> =
                         lines.iter().map(to_ffi_blame_line).collect();
-                    service.as_mut().blame_ready(lines);
+                    service
+                        .as_mut()
+                        .blame_ready(QString::from(signal_path.as_str()), lines);
                 }
                 Err(err) => {
                     let result = to_ffi_result(&err);

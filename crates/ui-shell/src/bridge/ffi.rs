@@ -4098,6 +4098,12 @@ mod ffi {
         #[cxx_name = "stageFile"]
         fn stage_file(self: Pin<&mut VcsService>, path: &QString);
 
+        /// `git reset -- <path>`; the whole-file inverse of `stageFile`,
+        /// used by the Changes dock's per-file checkbox in the staged tree.
+        #[qinvokable]
+        #[cxx_name = "unstageFile"]
+        fn unstage_file(self: Pin<&mut VcsService>, path: &QString);
+
         /// Stage `hunks(path)[hunk_index]` via a generated patch
         /// (`vcs_core::stage_hunk`), from the same cached before/working
         /// text `requestHunks` last read for `path`. No-op if nothing is
@@ -4124,6 +4130,13 @@ mod ffi {
         /// The branch names the last `refreshBranches` found, sorted.
         #[qinvokable]
         fn branches(self: &VcsService) -> Vec<FfiBranch>;
+
+        /// The checked-out branch's name, as of the last `refreshBranches` —
+        /// empty for a detached or unborn `HEAD`, or before an answer
+        /// arrives.
+        #[qinvokable]
+        #[cxx_name = "currentBranch"]
+        fn current_branch(self: &VcsService) -> QString;
 
         /// `git checkout <name>`; `branchChanged` and `statusChanged` follow
         /// on success.
@@ -4195,15 +4208,20 @@ mod ffi {
         #[cxx_name = "vcsFailed"]
         fn vcs_failed(self: Pin<&mut VcsService>, error: FfiResult);
 
-        /// `fileHistory`'s answer.
+        /// `fileHistory`'s answer, tagged with the path it was requested
+        /// for — `fileHistory`/`blame` carry no request id, so a caller
+        /// that fired two requests in a row (e.g. the active editor tab
+        /// changed mid-flight) needs this to tell which file a given
+        /// answer belongs to, and drop a stale one.
         #[qsignal]
         #[cxx_name = "historyReady"]
-        fn history_ready(self: Pin<&mut VcsService>, entries: Vec<FfiLogEntry>);
+        fn history_ready(self: Pin<&mut VcsService>, path: QString, entries: Vec<FfiLogEntry>);
 
-        /// `blame`'s answer.
+        /// `blame`'s answer, tagged with the path it was requested for —
+        /// see `historyReady` on why.
         #[qsignal]
         #[cxx_name = "blameReady"]
-        fn blame_ready(self: Pin<&mut VcsService>, lines: Vec<FfiBlameLine>);
+        fn blame_ready(self: Pin<&mut VcsService>, path: QString, lines: Vec<FfiBlameLine>);
     }
 
     // Enables `self.qt_thread()` on `VcsService` for its worker thread,

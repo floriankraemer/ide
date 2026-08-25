@@ -55,6 +55,7 @@ pub struct VcsServiceRust {
     status: RefCell<vcs_core::RepoStatus>,
     hunks: RefCell<HashMap<String, CachedHunks>>,
     branches: RefCell<Vec<String>>,
+    current_branch: RefCell<String>,
 }
 
 impl Default for VcsServiceRust {
@@ -65,6 +66,7 @@ impl Default for VcsServiceRust {
             status: RefCell::default(),
             hunks: RefCell::default(),
             branches: RefCell::default(),
+            current_branch: RefCell::default(),
         }
     }
 }
@@ -98,6 +100,7 @@ impl ffi::VcsService {
         self.jobs.borrow_mut().take();
         self.hunks.borrow_mut().clear();
         self.branches.borrow_mut().clear();
+        self.current_branch.borrow_mut().clear();
         *self.status.borrow_mut() = vcs_core::RepoStatus::default();
         self.is_repository.set(false);
 
