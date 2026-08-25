@@ -100,16 +100,16 @@ Renumbered to match §4's Task breakdown, which this table had drifted from (an 
 | Task | Status | Commit |
 |---|---|---|
 | F3-1 — `editor-core::diff` | done | 0416194 (#87) |
-| F3-2 — `vcs-core` skeleton + discovery | todo |  |
-| F3-3 — status and HEAD reads | todo |  |
-| F3-4 — working-tree hunks + cache | todo |  |
-| F3-5 — the `git` subprocess layer | todo |  |
-| F3-6 — staging | todo |  |
-| F3-7 — commit | todo |  |
-| F3-8 — branches | todo |  |
-| F3-9 — remotes | todo |  |
-| F3-10 — history and blame | todo |  |
-| F3-11 — revert hunk | todo |  |
+| F3-2 — `vcs-core` skeleton + discovery | done | fc15bf1 |
+| F3-3 — status and HEAD reads | done | a31b796 |
+| F3-4 — working-tree hunks + cache | done | 13168ae |
+| F3-5 — the `git` subprocess layer | done | 8a70d3b |
+| F3-6 — staging | done | 73d6a7f |
+| F3-7 — commit | done | c68bd02 |
+| F3-8 — branches | done | 8402857 |
+| F3-9 — remotes | done | 82289c7 |
+| F3-10 — history and blame | done | b49764a |
+| F3-11 — revert hunk | done | f9dbb4d |
 | F3-12a — bridge: `VcsService` supervisor + status | todo |  |
 | F3-12b — bridge: hunks + revert | todo |  |
 | F3-12c — bridge: staging + commit | todo |  |
@@ -316,7 +316,7 @@ That is what makes the viewer reusable rather than a Git widget.
 **A diff opens as a tab, not a dock** (ADR-0020's mechanism), but **not as `TabKind::Diff { left_label, right_label }`** — an earlier draft assumed that was additive and it is not. `TabKind` is a fieldless `Copy` enum with a stable FFI integer (`app-core/src/lib.rs:162-181`, `code(self)`, consumed at `bridge.rs:4121`), and `TabContent` (`:187`) makes every tab path-backed: `path()`, `set_path()` and `title()` are total functions used by rename retargeting and delete flagging. A diff tab has two texts and no single path, so a payload variant would make `TabKind` non-`Copy`, change `code()`'s signature and force those accessors fallible.
 Keep `TabKind` fieldless, add the variant, and carry the labels **out of band** via a `diff_labels(TabId)` lookup. Smaller change, no accessor churn.
 
-**Backend (ADR-0027): hybrid, with a sharper rule than "hybrid"**
+**Backend (ADR-0031): hybrid, with a sharper rule than "hybrid"**
 
 Anything honouring the user's configuration, credentials, hooks or signing **shells out to `git`**: fetch, pull, push, commit, add / `apply --cached` (including per-hunk staging via a generated patch), checkout, branch, `merge --ff-only`.
 Pure reads of object and index state use **`gix`**: discovery, HEAD resolution, reading the HEAD blob for a path, status, ref listing, log for file history.
@@ -346,7 +346,7 @@ No second QObject for the diff viewer: it is given two texts and a `Vec<FfiHunk>
 | `vcs-core` | `editor-core` (+ std, gix, imara-diff, serde) | **No** |
 
 Plus:
-> **Which Git operations run in-process and which shell out** is `vcs-core`'s and is stated in ADR-0027. `ui-shell` never spawns `git`.
+> **Which Git operations run in-process and which shell out** is `vcs-core`'s and is stated in ADR-0031. `ui-shell` never spawns `git`.
 > **What a diff is** is `editor_core::diff`'s — line hunks and intra-line spans over two texts, with no Git in the type. That is why the same viewer serves a rename preview, a replace preview and a commit.
 
 ### F4 — Run configurations and console
@@ -417,7 +417,7 @@ Real language servers live in a separate `linux-lsp` Docker stage layered on `li
 Advertise `resourceOperations`, parse and order them in `lsp-core`, perform them in `AppSession::apply_file_ops`, which also retargets open tabs. `bridge.rs` maps one type to the other.
 *Rejected*: continuing to refuse them (rust-analyzer's "move to module", TypeScript's file rename and every Java extract-to-file are refused *whole* today — the user sees "unsupported" for a correct edit); performing them in `lsp-core` (it would own tab policy, which is `app-core`'s, and `app-core` may not depend on `lsp-core` to get it back); performing them in `bridge.rs` (deciding what happens to an open dirty buffer whose file was renamed is a rule and deserves tests). All-or-nothing across resource ops and text edits is *kept*: a failed resource op aborts before any text edit is written, matching ADR-0019's "half an extract is a corrupted program".
 
-**ADR-0027 — Git backend: `gix` for reads, the `git` binary for anything touching the user's world.**
+**ADR-0031 — Git backend: `gix` for reads, the `git` binary for anything touching the user's world.** (Written as ADR-0031, not 0027 as first planned here — 0027 through 0030 were claimed by other work in between; see ADR-0030's own note for the same renumbering.)
 As argued in §2/F3.
 *Rejected*: pure `gix`/`git2` (credential helpers, SSH agents, `insteadOf`, hooks and GPG signing are five re-implementations, each failing in a way that looks like our bug and some by leaking); pure `git` CLI (a subprocess per keystroke for gutter diffs is not a ceiling, it is a defect); `git2`/libgit2 over `gix` (a C dependency in an MXE cross-build — ADR-0021 already refused OpenSSL on exactly this ground); bundling a `git` binary (then we own its CVEs and platform builds, and the user's configured `git` is the one they want used).
 
@@ -595,7 +595,7 @@ No async runtime, no `moveToThread`, no `QThreadPool`. The `grep -i tokio` layer
 | Intentions | One in-flight request per surface; a caret move cancels rather than queues. |
 | `make e2e` | ≤ 10 minutes wall clock for the whole suite. |
 
-**Windows versus Linux.** Kill-tree is genuinely different (F4-2) and is the single largest Windows risk here. Line endings: F1-11's normalisation and F3's diff must both treat CRLF as one terminator; the diff compares normalised text and reports what it normalised. `git` on Windows may be Git-for-Windows with its own `sh`, so `vcs-core::cli` spawns `git` directly, never through a shell. Path case: the link resolver and the diff cache key canonicalise, and compare case-insensitively on Windows. The MXE cross-build takes no new C dependency — `gix` and `imara-diff` are pure Rust, which is half of why ADR-0027 chose them.
+**Windows versus Linux.** Kill-tree is genuinely different (F4-2) and is the single largest Windows risk here. Line endings: F1-11's normalisation and F3's diff must both treat CRLF as one terminator; the diff compares normalised text and reports what it normalised. `git` on Windows may be Git-for-Windows with its own `sh`, so `vcs-core::cli` spawns `git` directly, never through a shell. Path case: the link resolver and the diff cache key canonicalise, and compare case-insensitively on Windows. The MXE cross-build takes no new C dependency — `gix` and `imara-diff` are pure Rust, which is half of why ADR-0031 chose them.
 
 **Degraded states — all three are *states*, not errors.**
 Not a Git repository: `isRepository()` is false, the VCS menu and both docks are not built at all, the gutter has no VCS column. No greyed-out menu of things that will never work.

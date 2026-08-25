@@ -1,0 +1,143 @@
+//! Commit: message, amend, and only the staged selection (F3-7).
+
+use crate::cli::{self, argv};
+use crate::error::VcsError;
+use crate::repo::Repository;
+
+impl Repository {
+    /// `git commit -m <message> [--amend]`. Deliberately never `-a`: this
+    /// commits exactly what staging (F3-6) put in the index, nothing the
+    /// working tree still holds unstaged.
+    ///
+    /// A pre-commit or commit-msg hook that rejects the commit surfaces as
+    /// [`VcsError::GitFailed`] with the hook's own stderr verbatim — see
+    /// that variant's doc comment for why this crate does not try to
+    /// distinguish "a hook said no" from `git commit`'s other failure
+    /// modes.
+    pub fn commit(&self, message: &str, amend: bool) -> Result<(), VcsError> {
+        let work_dir = self.work_dir().ok_or(VcsError::OutsideWorkingTree)?;
+        cli::run(&work_dir, &argv::commit(message, amend))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::repo::DiscoverResult;
+    use std::path::Path;
+    use std::process::Command;
+
+    fn git(dir: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Test")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .current_dir(dir)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn open(dir: &Path) -> Repository {
+        match Repository::discover(dir).unwrap() {
+            DiscoverResult::Found(repo) => *repo,
+            DiscoverResult::NotARepository => panic!("expected a repository"),
+        }
+    }
+
+    fn log_subjects(dir: &Path) -> Vec<String> {
+        let out = Command::new("git")
+            .args(["log", "--format=%s"])
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&out.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn commit_only_takes_what_was_staged() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "--quiet"]);
+        git(dir.path(), &["config", "user.email", "test@example.com"]);
+        git(dir.path(), &["config", "user.name", "Test"]);
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(dir.path(), &["add", "a.txt"]);
+        git(dir.path(), &["commit", "-m", "first"]);
+
+        // Stage a.txt's edit, but leave a second, unstaged edit to b.txt.
+        std::fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+        git(dir.path(), &["add", "a.txt"]);
+        std::fs::write(dir.path().join("b.txt"), "untracked\n").unwrap();
+
+        let repo = open(dir.path());
+        repo.commit("second", false).unwrap();
+
+        assert_eq!(log_subjects(dir.path()), vec!["second", "first"]);
+        // b.txt was never staged, so it must still be untracked, not
+        // swept in by an accidental `-a`.
+        let status = Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&status.stdout), "?? b.txt\n");
+    }
+
+    #[test]
+    fn amend_replaces_the_previous_commit_rather_than_adding_one() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "--quiet"]);
+        git(dir.path(), &["config", "user.email", "test@example.com"]);
+        git(dir.path(), &["config", "user.name", "Test"]);
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(dir.path(), &["add", "a.txt"]);
+        git(dir.path(), &["commit", "-m", "first"]);
+
+        std::fs::write(dir.path().join("a.txt"), "two\n").unwrap();
+        git(dir.path(), &["add", "a.txt"]);
+
+        let repo = open(dir.path());
+        repo.commit("first, amended", true).unwrap();
+
+        assert_eq!(log_subjects(dir.path()), vec!["first, amended"]);
+    }
+
+    #[test]
+    fn a_rejecting_pre_commit_hook_surfaces_its_own_stderr() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "--quiet"]);
+        git(dir.path(), &["config", "user.email", "test@example.com"]);
+        git(dir.path(), &["config", "user.name", "Test"]);
+
+        let hooks_dir = dir.path().join(".git/hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let hook_path = hooks_dir.join("pre-commit");
+        std::fs::write(
+            &hook_path,
+            "#!/bin/sh\necho 'no commits today' >&2\nexit 1\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&hook_path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(dir.path(), &["add", "a.txt"]);
+
+        let repo = open(dir.path());
+        let err = repo.commit("first", false).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("no commits today"),
+            "hook's stderr was not surfaced verbatim: {message}"
+        );
+    }
+}

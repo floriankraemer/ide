@@ -5,7 +5,7 @@ Hexagonal-lite with a humble Qt view: logic in Qt-free Rust, the view only displ
 
 ## Layers
 
-The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `edit-ops`, `pty-core`, `terminal-core`, `mcp-server`, `plugin-api`, `plugin-host`, `icon-theme`), adapter + view (`ui-shell`), and the `app` binary.
+The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `edit-ops`, `vcs-core`, `pty-core`, `terminal-core`, `mcp-server`, `plugin-api`, `plugin-host`, `icon-theme`), adapter + view (`ui-shell`), and the `app` binary.
 The building-block diagram lives in [overview.md §3](overview.md#3-building-block-view) — one diagram, one place.
 
 ## Allowed imports
@@ -26,6 +26,7 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `icon-theme` | (std, serde, toml, resvg) — **not** `syntax-core` and **not** `plugin-host`, see [ADR-0027](decisions/0027-icon-themes.md) | **No** |
 | `settings-model` | `app-config`, `syntax-core`, `lsp-core`, `edit-ops`, `editor-core`, `plugin-api`, `plugin-host` (+ std, serde, toml, tree-sitter) | **No** |
 | `edit-ops` | `editor-core`, `syntax-core` (+ std, tree-sitter) | **No** |
+| `vcs-core` | `editor-core` (+ std, gix, serde) | **No** |
 | `app-core` | `editor-core`, `project-model`, `plugin-host`, `icon-theme`, `syntax-core` — the last three only for the icon-theme join, see below | **No** |
 | `ai-chat-core` | `lsp-core` (+ std, serde, serde_json, base64, tiktoken-rs, reqwest/rustls) | **No** |
 | `ui-shell` | `app-core`, `editor-core`, `edit-ops`, `project-model`, `app-config`, `settings-model`, `syntax-core`, `mcp-server`, `index-core`, `lsp-core`, `ai-chat-core`, `pty-core`, `terminal-core`, `plugin-host` (+ tokio, cxx, cxx-qt, cxx-qt-lib) | Yes (adapter + view live here) |
@@ -80,6 +81,10 @@ That test target is the one place `app-config` may be read from a test rather th
   `editor-core` may not depend on `syntax-core` and must not start; passing "the comment token for this language" in from `bridge.rs` would put the join in the adapter, which is what these rules forbid. Same situation as `settings-model`, same answer.
   What a comment token, a bracket pair or a quote *is* stays in `syntax-core`'s one registry (ADR-0018) — `edit-ops` reads it and never keeps a second table.
   Every entry point takes `text: &str`, never a `Document`: the rope is only refreshed on save, so it is one save behind the live Qt buffer.
+
+- **Which Git operations run in-process and which shell out** is `vcs-core`'s, and is stated in ADR-0031: pure reads of object/index state (discovery, HEAD, status, branch listing, log) go through `gix`; anything touching the user's configuration, credentials, hooks or signing (staging, commit, branch create/checkout/delete, fetch/pull/push) shells out to `git`.
+  `ui-shell` never spawns `git` and never calls `gix` directly — both live behind `vcs-core`'s own API, wrapped in this crate's own types (`HeadInfo`, `RepoStatus`, `FileStatus`, `LogEntry`, `BlameLine`, `VcsError`) rather than `gix`'s, so a future backend swap stays inside this crate.
+  Working-tree hunks (`hunks::HunkCache`) and a hunk revert (`revert::revert_hunk_edit`) reuse `editor_core::diff` rather than a second diff implementation, the same rule ADR-0028/0030 already established for the refactor preview and Replace in Files.
 
 - **Where multi-caret state lives** (ADR-0023): the `SelectionSet`, the expand/shrink history and the auto-close pair tracker are kept in `ui-shell`'s `EditorOps`, keyed by `TabId` — not on `editor_core::Document` (stale, refreshed only on save) and not in `app_core::AppSession` (which has no reason to know about carets). `EditorOps` computes every operation as one `Transaction` over the live buffer text and hands the seam one `Vec<FfiTextEdit>`, spliced through the same `EditorTabs::applyBufferEdits` path a refactoring already uses — the rule that one keystroke is one undo step lives in `editor-core`, not in `cpp/`.
 - **Which files a workspace edit creates, renames or deletes** is parsed and ordered by `lsp-core` (`ResourceOp`, `WorkspaceChanges`); *performing* one — and retargeting an open tab whose file moved — is `app-core`'s, as `FileOp` (ADR-0029). `ui-shell` maps one type to the other and decides nothing else; every resource operation runs, all-or-nothing, before any of the same edit's text edits are written.
