@@ -12,6 +12,7 @@
 //! crate from behind the FFI seam.
 
 pub mod cli;
+pub mod commit;
 mod error;
 pub mod hunks;
 pub mod repo;

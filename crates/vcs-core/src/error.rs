@@ -34,15 +34,17 @@ pub enum VcsError {
     /// `cli` failure so the caller can say exactly that, once, rather than
     /// have it read as some other kind of failure (F3-5).
     GitNotInstalled,
-    /// `git` was spawned but exited non-zero; `stderr` has already been
-    /// turned into a readable sentence by `cli::run`.
+    /// `git` was spawned but exited non-zero; `stderr` is exactly what
+    /// `git` printed. This is also what a rejected commit looks like: a
+    /// pre-commit or commit-msg hook that fails prints to the same stderr
+    /// `git commit` inherits and fails with, so this crate does not
+    /// special-case "hook rejected the commit" as a distinct variant — the
+    /// hook's own message is already carried here verbatim (F3-7), and
+    /// there is no reliable, non-heuristic way to tell "a hook said no"
+    /// from any other reason `git commit` can fail.
     GitFailed { command: String, stderr: String },
     /// `git` did not finish within `cli::TIMEOUT`; it has been killed.
     GitTimedOut { command: String },
-    /// A commit was refused by a pre-commit/commit-msg hook. Distinct from
-    /// [`VcsError::GitFailed`] so a caller can render the hook's own stderr
-    /// verbatim rather than as a generic "commit failed" (F3-7).
-    HookRejected { hook: String, stderr: String },
     /// `git branch -d` refused to delete a branch with commits not merged
     /// anywhere else. The caller may retry as a force delete; this variant
     /// exists so that retry is a deliberate second call, never automatic
@@ -65,11 +67,10 @@ impl VcsError {
     pub const CODE_GIT_NOT_INSTALLED: i32 = 702;
     pub const CODE_GIT_FAILED: i32 = 703;
     pub const CODE_GIT_TIMED_OUT: i32 = 704;
-    pub const CODE_HOOK_REJECTED: i32 = 705;
-    pub const CODE_UNMERGED_BRANCH: i32 = 706;
-    pub const CODE_OUTSIDE_WORKING_TREE: i32 = 707;
-    pub const CODE_TOO_LARGE_TO_DIFF: i32 = 708;
-    pub const CODE_MALFORMED_PATCH: i32 = 709;
+    pub const CODE_UNMERGED_BRANCH: i32 = 705;
+    pub const CODE_OUTSIDE_WORKING_TREE: i32 = 706;
+    pub const CODE_TOO_LARGE_TO_DIFF: i32 = 707;
+    pub const CODE_MALFORMED_PATCH: i32 = 708;
 
     /// The variant's stable numeric code. Append-only once this crosses an
     /// FFI seam (ADR-0003): existing numbers must never be renumbered.
@@ -80,7 +81,6 @@ impl VcsError {
             VcsError::GitNotInstalled => Self::CODE_GIT_NOT_INSTALLED,
             VcsError::GitFailed { .. } => Self::CODE_GIT_FAILED,
             VcsError::GitTimedOut { .. } => Self::CODE_GIT_TIMED_OUT,
-            VcsError::HookRejected { .. } => Self::CODE_HOOK_REJECTED,
             VcsError::UnmergedBranch { .. } => Self::CODE_UNMERGED_BRANCH,
             VcsError::OutsideWorkingTree => Self::CODE_OUTSIDE_WORKING_TREE,
             VcsError::TooLargeToDiff => Self::CODE_TOO_LARGE_TO_DIFF,
@@ -108,9 +108,6 @@ impl fmt::Display for VcsError {
                 }
             }
             VcsError::GitTimedOut { command } => write!(f, "`{command}` timed out"),
-            VcsError::HookRejected { hook, stderr } => {
-                write!(f, "{hook} hook rejected the commit:\n{}", stderr.trim())
-            }
             VcsError::UnmergedBranch { branch } => write!(
                 f,
                 "branch \"{branch}\" has commits not merged elsewhere; force delete to discard them"
