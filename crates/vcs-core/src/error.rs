@@ -59,6 +59,11 @@ pub enum VcsError {
     /// A generated patch could not be parsed back by `git apply` — a bug in
     /// `staging::hunk_patch`, surfaced rather than silently no-opped.
     MalformedPatch(String),
+    /// `git push` was rejected because the remote has commits the local
+    /// branch does not (a non-fast-forward push). `git`'s own message is
+    /// kept, since "pull first" advice differs by workflow and this crate
+    /// does not decide that for the caller.
+    PushRejected { stderr: String },
 }
 
 impl VcsError {
@@ -71,6 +76,7 @@ impl VcsError {
     pub const CODE_OUTSIDE_WORKING_TREE: i32 = 706;
     pub const CODE_TOO_LARGE_TO_DIFF: i32 = 707;
     pub const CODE_MALFORMED_PATCH: i32 = 708;
+    pub const CODE_PUSH_REJECTED: i32 = 709;
 
     /// The variant's stable numeric code. Append-only once this crosses an
     /// FFI seam (ADR-0003): existing numbers must never be renumbered.
@@ -85,6 +91,7 @@ impl VcsError {
             VcsError::OutsideWorkingTree => Self::CODE_OUTSIDE_WORKING_TREE,
             VcsError::TooLargeToDiff => Self::CODE_TOO_LARGE_TO_DIFF,
             VcsError::MalformedPatch(_) => Self::CODE_MALFORMED_PATCH,
+            VcsError::PushRejected { .. } => Self::CODE_PUSH_REJECTED,
         }
     }
 }
@@ -117,6 +124,9 @@ impl fmt::Display for VcsError {
             }
             VcsError::TooLargeToDiff => write!(f, "file is too large to diff"),
             VcsError::MalformedPatch(msg) => write!(f, "generated patch was rejected: {msg}"),
+            VcsError::PushRejected { stderr } => {
+                write!(f, "push was rejected: {}", stderr.trim())
+            }
         }
     }
 }

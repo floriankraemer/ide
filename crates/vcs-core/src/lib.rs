@@ -23,3 +23,5 @@ pub use error::VcsError;
 pub use hunks::{HunkCache, WorkingHunks};
 pub use repo::{ChangeKind, DiscoverResult, FileStatus, HeadInfo, RepoStatus, Repository};
 pub use staging::hunk_patch;
+
+pub mod remote;
