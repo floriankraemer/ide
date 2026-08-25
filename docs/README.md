@@ -9,7 +9,6 @@
 ### Decisions
 
 ADR numbers 0006 and 0013–0015 were never used; the gaps are historical and intentional.
-ADR-0023 (multi-caret) is reserved and lands with the editor-ergonomics work.
 
 - [ADR-0001: core tech stack](architecture/decisions/0001-core-tech-stack.md) — Rust core + Qt6 UI via cxx-qt; hybrid plugin system direction.
 - [ADR-0002: application layer and humble view](architecture/decisions/0002-application-layer-and-humble-view.md) — `app-core` application layer; the Qt view is humble and holds zero rules.
@@ -29,6 +28,7 @@ ADR-0023 (multi-caret) is reserved and lands with the editor-ergonomics work.
 - [ADR-0020: tab kinds and the binary viewer](architecture/decisions/0020-tab-kinds-and-the-binary-viewer.md) — a tab has an explicit kind; binary files open a read-only hex view instead of erroring.
 - [ADR-0021: AI chat](architecture/decisions/0021-ai-chat.md) — a docked assistant with four providers, environment-only keys, and a policy-gated agent whose edits go through the refactoring path.
 - [ADR-0022: per-project settings](architecture/decisions/0022-per-project-settings.md) — a sparse `.ide/settings.toml` layered over the global file; precedence resolved by `settings-model`.
+- [ADR-0023: multi-caret](architecture/decisions/0023-multi-caret.md) — `SelectionSet`/`Transaction` in `editor-core`, spliced through the existing `applyBufferEdits` seam; no second undo stack.
 - [ADR-0024: verification foundation](architecture/decisions/0024-verification-foundation.md) — a headless E2E harness driving the real binary, and a pinned real-server LSP conformance gate that runs nightly.
 - [ADR-0025: seam split and file-size ceiling](architecture/decisions/0025-seam-split-and-file-size-ceiling.md) — `bridge.rs` and `main_window.cpp` split per feature; a ratcheted size gate; the split proven by byte-identical FFI headers.
 - [ADR-0026: plugin host](architecture/decisions/0026-plugin-host.md) — `plugin-api` as the contract and `plugin-host` as the machinery; declarative contributions, built-ins loaded as plugins, `api_version` the one compatibility lever.

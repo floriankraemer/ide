@@ -57,32 +57,137 @@ QPair<QPair<quint32, quint32>, QPair<quint32, quint32>> EditorTabs::selectionRan
             lspPosition(editor, cursor.selectionEnd())};
 }
 
+namespace {
+
+// Splice one edit through an already-open cursor. Positions resolve against
+// the document as it stands, which is why every producer hands its edits
+// over descending.
+void spliceEdit(QTextCursor &cursor, const FfiTextEdit &edit)
+{
+    cursor.setPosition(
+      EditorTabs::positionAt(cursor.document(), edit.start_line, edit.start_character));
+    cursor.setPosition(EditorTabs::positionAt(cursor.document(), edit.end_line, edit.end_character),
+                       QTextCursor::KeepAnchor);
+    cursor.insertText(edit.new_text);
+}
+
+} // namespace
+
 void EditorTabs::applyBufferEdits(const ::rust::Vec<FfiTextEdit> &edits)
 {
-    QHash<QString, CodeEditor *> editors;
+    // One cursor per file, held open for the whole splice: begin and end
+    // must be the *same* QTextCursor. Two temporaries happen to work
+    // because Qt counts edit blocks on the QTextDocument, but the pairing
+    // is what makes every edit here one Ctrl+Z (ADR-0019, ADR-0023), and
+    // it should not rest on that.
+    QHash<QString, QTextCursor> cursors;
     for (const FfiTextEdit &edit : edits) {
         if (!edit.in_buffer) {
             continue;
         }
         const QString path = edit.path;
-        CodeEditor *editor = editors.value(path);
-        if (!editor) {
-            editor = editorForPath(path);
+        if (!cursors.contains(path)) {
+            CodeEditor *editor = editorForPath(path);
             if (!editor) {
                 continue;
             }
-            editors.insert(path, editor);
-            editor->textCursor().beginEditBlock();
+            QTextCursor cursor(editor->document());
+            cursor.beginEditBlock();
+            cursors.insert(path, cursor);
         }
-        QTextCursor cursor(editor->document());
-        cursor.setPosition(positionAt(editor, edit.start_line, edit.start_character));
-        cursor.setPosition(positionAt(editor, edit.end_line, edit.end_character),
-                            QTextCursor::KeepAnchor);
-        cursor.insertText(edit.new_text);
+        spliceEdit(cursors[path], edit);
     }
-    for (CodeEditor *editor : editors) {
-        editor->textCursor().endEditBlock();
+    for (QTextCursor &cursor : cursors) {
+        cursor.endEditBlock();
     }
+}
+
+void EditorTabs::applyEditsTo(QPlainTextEdit *editor, const ::rust::Vec<FfiTextEdit> &edits)
+{
+    // The whole transaction inside one edit block, which is what makes a
+    // keystroke at 200 carets one Ctrl+Z (ADR-0023). The edits name no file
+    // because they are all this buffer's.
+    QTextCursor cursor(editor->document());
+    cursor.beginEditBlock();
+    for (const FfiTextEdit &edit : edits) {
+        spliceEdit(cursor, edit);
+    }
+    cursor.endEditBlock();
+}
+
+void EditorTabs::refreshCarets(CodeEditor *editor)
+{
+    if (!editor) {
+        return;
+    }
+    const quint64 tabId = editor->property("tabId").toULongLong();
+    const QString text = editor->toPlainText();
+
+    QVector<SecondaryCaret> secondary;
+    QTextCursor primary = editor->textCursor();
+    bool sawPrimary = false;
+    for (const FfiCaret &caret : editorOps_->carets(tabId, text)) {
+        if (caret.primary) {
+            primary.setPosition(static_cast<int>(caret.anchor));
+            primary.setPosition(static_cast<int>(caret.head), QTextCursor::KeepAnchor);
+            sawPrimary = true;
+            continue;
+        }
+        secondary.append(SecondaryCaret{static_cast<int>(caret.anchor),
+                                        static_cast<int>(caret.head)});
+    }
+
+    // Guarded, because setTextCursor emits cursorPositionChanged and that
+    // handler pushes the widget's caret back to Rust — which would replace
+    // the set that was just computed with a single caret.
+    syncingCarets_ = true;
+    if (sawPrimary) {
+        editor->setTextCursor(primary);
+    }
+    editor->setSecondaryCarets(secondary);
+    syncingCarets_ = false;
+}
+
+void EditorTabs::withCurrentEditor(const std::function<void(quint64, const QString &)> &op)
+{
+    auto *editor = qobject_cast<CodeEditor *>(currentEditor());
+    if (!editor) {
+        return;
+    }
+    op(editor->property("tabId").toULongLong(), editor->toPlainText());
+    refreshCarets(editor);
+}
+
+void EditorTabs::jumpToMatchingBracket()
+{
+    auto *editor = qobject_cast<CodeEditor *>(currentEditor());
+    if (!editor) {
+        return;
+    }
+    const quint64 tabId = editor->property("tabId").toULongLong();
+    const qint64 target = editorOps_->matchingBracket(
+      tabId, editor->toPlainText(), static_cast<quint32>(editor->textCursor().position()));
+    if (target < 0) {
+        return;
+    }
+    QTextCursor cursor = editor->textCursor();
+    cursor.setPosition(static_cast<int>(target));
+    editor->setTextCursor(cursor);
+}
+
+void EditorTabs::runEditorOp(
+  const std::function<::rust::Vec<FfiTextEdit>(quint64, const QString &)> &op)
+{
+    auto *editor = qobject_cast<CodeEditor *>(currentEditor());
+    if (!editor) {
+        return;
+    }
+    const quint64 tabId = editor->property("tabId").toULongLong();
+    const ::rust::Vec<FfiTextEdit> edits = op(tabId, editor->toPlainText());
+    if (!edits.empty()) {
+        applyEditsTo(editor, edits);
+    }
+    refreshCarets(editor);
 }
 
 void EditorTabs::setHoverFallbackCallback(std::function<void()> callback)
@@ -109,11 +214,11 @@ void EditorTabs::hoverCanceled()
     }
 }
 
-int EditorTabs::positionAt(QPlainTextEdit *editor, quint32 line, quint32 character)
+int EditorTabs::positionAt(const QTextDocument *document, quint32 line, quint32 character)
 {
-    const QTextBlock block = editor->document()->findBlockByNumber(static_cast<int>(line));
+    const QTextBlock block = document->findBlockByNumber(static_cast<int>(line));
     if (!block.isValid()) {
-        return editor->document()->characterCount() - 1;
+        return document->characterCount() - 1;
     }
     const int within = qMin(static_cast<int>(character), block.length() - 1);
     return block.position() + within;
@@ -279,6 +384,51 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
     connect(editor, &CodeEditor::completionCanceled, this,
             [this]() { languageService_->cancelCompletion(); });
 
+    // F1-15: the multi-caret gestures. The widget reports what happened;
+    // every one of these asks `editor_ops` for a transaction and splices
+    // what comes back, so nothing about what an edit means is decided here.
+    connect(editor, &CodeEditor::multiCaretTyped, this, [this, editor, tabId](const QString &typed) {
+        const ::rust::Vec<FfiTextEdit> edits =
+          editorOps_->typeText(tabId, editor->toPlainText(), typed);
+        applyEditsTo(editor, edits);
+        refreshCarets(editor);
+    });
+    connect(editor, &CodeEditor::multiCaretBackspace, this, [this, editor, tabId]() {
+        applyEditsTo(editor, editorOps_->backspace(tabId, editor->toPlainText()));
+        refreshCarets(editor);
+    });
+    connect(editor, &CodeEditor::multiCaretDelete, this, [this, editor, tabId]() {
+        applyEditsTo(editor, editorOps_->deleteForward(tabId, editor->toPlainText()));
+        refreshCarets(editor);
+    });
+    connect(editor, &CodeEditor::multiCaretNewline, this, [this, editor, tabId]() {
+        applyEditsTo(editor, editorOps_->newline(tabId, editor->toPlainText()));
+        refreshCarets(editor);
+    });
+    connect(editor, &CodeEditor::caretAddRequested, this, [this, editor, tabId](int position) {
+        editorOps_->addCaretAt(tabId, editor->toPlainText(), static_cast<quint32>(position));
+        refreshCarets(editor);
+    });
+    connect(editor,
+            &CodeEditor::columnSelectRequested,
+            this,
+            [this, editor, tabId](int anchor, int head) {
+                editorOps_->columnSelect(tabId, editor->toPlainText(),
+                                         static_cast<quint32>(anchor),
+                                         static_cast<quint32>(head));
+                refreshCarets(editor);
+            });
+    connect(editor, &CodeEditor::secondaryCaretsDropped, this, [this, editor, tabId]() {
+        editorOps_->clearSecondaryCarets(tabId);
+        editor->setSecondaryCarets({});
+    });
+    connect(editor, &CodeEditor::pasteRequested, this, [this, editor, tabId](const QString &text) {
+        const ::rust::Vec<FfiTextEdit> edits =
+          editorOps_->pasteText(tabId, editor->toPlainText(), text);
+        applyEditsTo(editor, edits);
+        refreshCarets(editor);
+    });
+
     // L3: only the visible tab's cursor should move the status bar —
     // guards against a background tab's programmatic cursor change
     // (e.g. a reload) touching labels that describe a different tab.
@@ -287,6 +437,17 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
     // accurate for a tab MCP asks about while it's in the background.
     connect(editor, &QPlainTextEdit::cursorPositionChanged, this, [this, editor, tabId]() {
         const QTextCursor cursor = editor->textCursor();
+        // F1-15: keep `editor_ops` told where the one caret is, so Ctrl+D
+        // and the line operations act on what the user can see. Skipped
+        // while this class is the one moving the caret (it would overwrite
+        // a multi-caret set with a single caret) and while the widget is
+        // showing extra carets, which Rust owns.
+        if (!syncingCarets_ && !editor->hasSecondaryCarets()) {
+            ::rust::Vec<FfiCaret> carets;
+            carets.push_back(FfiCaret{static_cast<quint32>(cursor.anchor()),
+                                      static_cast<quint32>(cursor.position()), true});
+            editorOps_->setCarets(tabId, editor->toPlainText(), carets);
+        }
         docManager_->setCursorPosition(tabId, static_cast<quint32>(cursor.blockNumber()),
                                         static_cast<quint32>(cursor.columnNumber()));
         if (activeGroup_ && activeGroup_->currentWidget() == editor) {

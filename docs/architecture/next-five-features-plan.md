@@ -34,14 +34,14 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F0-1b — promote `Utf16Cursor` to `editor_core::offsets` | done | febd6c0 (#74) |
 | F0-2 — bridge.rs split, part 1 | done | 02b1fa2 (#78) |
 | F0-3 — bridge.rs split, part 2 | done | 02b1fa2 (#78) |
-| F0-4a — main_window.cpp split, part 1: `EditorTabs` | in review | #100 |
-| F0-4b — main_window.cpp split, part 1: `ClassViewPanel`, `FindUsagesPanel`, `IdeMainWindow` | in review | #101 |
-| F0-5 — main_window.cpp split, part 2: `RefactorController`, `DeclarationNavigator` | in review | #102 |
-| F0-6 — settings dialog extraction + `SettingsContext` | in review | #103 |
-| F0-7 — dock registry and general reconciliation | blocked on F0-6 |  |
+| F0-4a — main_window.cpp split, part 1: `EditorTabs` | done | f0f73db (#100) |
+| F0-4b — main_window.cpp split, part 1: `ClassViewPanel`, `FindUsagesPanel`, `IdeMainWindow` | done | dfa35f8 (#101) |
+| F0-5 — main_window.cpp split, part 2: `RefactorController`, `DeclarationNavigator` | done | ddc5160 (#102) |
+| F0-6 — settings dialog extraction + `SettingsContext` | done | a6e745b (#103), follow-ups 5889357 (#106) |
+| F0-7 — dock registry and general reconciliation | todo |  |
 | F0-8 — byte-column fix in `moveCursorToLine` | done | febd6c0 (#74) |
 | F0-9 — per-project settings persistence | done | 720d1d9 (#75) |
-| F0-10 — per-project settings rules + dialog | blocked on F0-6 |  |
+| F0-10 — per-project settings rules + dialog | todo |  |
 | F0-11 — E2E harness | done | 1eb5009 (#76) |
 | F0-12 — E2E seed flows | done | 1eb5009 (#76) |
 | F0-13 — E2E in CI | todo |  |
@@ -56,48 +56,48 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 
 | Task | Status | Commit |
 |---|---|---|
-| F1-1 — `editor-core::selection` | in progress | |
-| F1-2 — `editor-core::transaction` | in progress | |
-| F1-3 — next occurrence + column selection | in progress | |
-| F1-4 — `editor-core::line_ops` | in progress | |
-| F1-4b — `syntax-core` registry: comment tokens + bracket pairs | todo |  |
-| F1-5 — `edit-ops` crate + comment toggle | todo |  |
-| F1-6 — expand/shrink selection | todo |  |
-| F1-7 — auto-indent and indent/unindent | todo |  |
-| F1-8 — smart typing (auto-close, type-over, surround) | todo |  |
-| F1-9 — bracket match | todo |  |
-| F1-10 — editing settings: persistence + rules | todo |  |
-| F1-11 — save rules (trim, final newline, line endings) | todo |  |
-| F1-12 — `lsp-core` formatting | todo |  |
-| F1-13 — bridge: `EditorOps` | todo |  |
-| F1-14 — bridge: `EditingEditor` + formatting | todo |  |
-| F1-15 — view: multi-caret rendering and input | todo |  |
-| F1-16 — view: actions and menus | todo |  |
-| F1-17 — view: editing settings page | todo |  |
-| F1-18 — E2E + ADR-0023 + docs | todo |  |
+| F1-1 — `editor-core::selection` | done | b839b53 (#81) |
+| F1-2 — `editor-core::transaction` | done | b839b53 (#81) |
+| F1-3 — next occurrence + column selection | done | b839b53 (#81) |
+| F1-4 — `editor-core::line_ops` | done | b839b53 (#81) |
+| F1-4b — `syntax-core` registry: comment tokens + bracket pairs | done | 6c787c8 (#89) |
+| F1-5 — `edit-ops` crate + comment toggle | done | 6c787c8 (#89) |
+| F1-6 — expand/shrink selection | done | 6c787c8 (#89) |
+| F1-7 — auto-indent and indent/unindent | done | 6c787c8 (#89) |
+| F1-8 — smart typing (auto-close, type-over, surround) | done | 6c787c8 (#89); view wiring recorded at the end of this branch |
+| F1-9 — bracket match | done | 6c787c8 (#89) |
+| F1-10 — editing settings: persistence + rules | done | 3d4002d (#90) |
+| F1-11 — save rules (trim, final newline, line endings) | done | 3d4002d (#90); wired into the save path at the end of this branch |
+| F1-12 — `lsp-core` formatting | done | 7891f57 (#82) |
+| F1-13 — bridge: `EditorOps` | done | recorded at the end of this branch |
+| F1-14 — bridge: `EditingEditor` + formatting | done | recorded at the end of this branch |
+| F1-15 — view: multi-caret rendering and input | done | recorded at the end of this branch |
+| F1-16 — view: actions and menus | done | recorded at the end of this branch |
+| F1-17 — view: editing settings page | done | recorded at the end of this branch |
+| F1-18 — E2E + ADR-0023 + docs | done | 14f7b76 |
 
 ### F2 — Intentions and LSP surface
 
 | Task | Status | Commit |
 |---|---|---|
-| F2-1 — resource operations: parse and order | todo |  |
-| F2-2 — resource operations: perform as `FileOp` | todo |  |
+| F2-1 — resource operations: parse and order | done | ac32f77 (#84) |
+| F2-2 — resource operations: perform as `FileOp` | done | ac32f77 (#84) |
 | F2-3 — resource operations: bridge + view | todo |  |
-| F2-4 — `lsp-core::intentions` | todo |  |
-| F2-5 — `lsp-core::signature_help` | todo |  |
-| F2-6 — `document_highlight` + `inlay_hint` | todo |  |
-| F2-7 — organize imports | todo |  |
+| F2-4 — `lsp-core::intentions` | done | 264f3b3 (#88) |
+| F2-5 — `lsp-core::signature_help` | done | 264f3b3 (#88) |
+| F2-6 — `document_highlight` + `inlay_hint` | done | 264f3b3 (#88) |
+| F2-7 — organize imports | done | 264f3b3 (#88) |
 | F2-8 — bridge: intentions | todo |  |
 | F2-9 — bridge: signature help, highlights, hints | todo |  |
 | F2-10 — view: bulb and popup | todo |  |
 | F2-11 — view: signature tip, highlights, hints | todo |  |
-| F2-12 — E2E + ADR-0026 + docs | todo |  |
+| F2-12 — E2E + its ADR + docs | todo | ADR number to be reallocated, see below |
 
 ### F3 — Git v1
 
 | Task | Status | Commit |
 |---|---|---|
-| F3-1 — `editor-core::diff` | todo |  |
+| F3-1 — `editor-core::diff` | done | 0416194 (#87) |
 | F3-2 — `vcs-core` skeleton + discovery | todo |  |
 | F3-3 — status and HEAD reads | todo |  |
 | F3-4 — working-tree hunks + cache | todo |  |
@@ -119,14 +119,14 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F3-20 — view: Changes dock | todo |  |
 | F3-21 — view: branches and history | todo |  |
 | F3-22 — view: actions and menus | todo |  |
-| F3-23 — E2E + ADR-0027, ADR-0028 + docs | todo |  |
+| F3-23 — E2E + its two ADRs + docs | todo | ADR numbers to be reallocated, see below |
 
 ### F4 — Run configurations and console
 
 | Task | Status | Commit |
 |---|---|---|
-| F4-1 — `pty-core`: cwd and env | todo |  |
-| F4-2 — `pty-core`: kill tree | todo |  |
+| F4-1 — `pty-core`: cwd and env | done | e1788b0 (#86) |
+| F4-2 — `pty-core`: kill tree | done | e1788b0 (#86) |
 | F4-3 — `run-core` skeleton + model | todo |  |
 | F4-4 — persistence | todo |  |
 | F4-5 — detection | todo |  |
@@ -140,14 +140,13 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F4-13 — view: clickable links | todo |  |
 | F4-14 — terminal multi-session (a) core | todo |  |
 | F4-15 — terminal multi-session (b) view | todo |  |
-| F4-16 — E2E + ADR-0029 + docs | todo |  |
+| F4-16 — E2E + its ADR + docs | todo | ADR number to be reallocated, see below |
 
----|---|---|
-| F0-1 … F0-19 | todo | |
-| F1-1 … F1-18 | todo | |
-| F2-1 … F2-12 | todo | |
-| F3-1 … F3-20 | todo | |
-| F4-1 … F4-15 | todo | |
+**ADR numbering has drifted and must be reallocated.**
+§3 reserves 0022–0029, but the plugin and icon-theme stream that landed alongside F0 took **0026 (plugin-host), 0027 (icon-themes) and 0028 (wasm-plugin-tier)**.
+On disk the free numbers are **0023** — still F1's, as planned — and **0029 onwards**.
+So F2's, F3's two and F4's ADRs renumber from 0029; §3's prose keeps the old numbers and is wrong about them.
+A handful of code comments already cite "ADR-0026" meaning F2's resource-operation split rather than the plugin host, and each is corrected where it is found.
 
 Likewise, each feature's terminal task (F0-17, F1-18, F2-12, F3-20, F4-15) currently bundles two E2E flows with an ADR and two doc updates. **Move each ADR and `layering.md` row onto the task that introduces its crate** — same `CLAUDE.md` rule — leaving the terminal task to the E2E flows and `overview.md`.
 

@@ -8,6 +8,10 @@ app-core = { path = "../app-core" }
 app-config = { path = "../app-config" }
 settings-model = { path = "../settings-model" }
 editor-core = { path = "../editor-core" }
+# The language-aware half of the editing operations (comment toggle, expand
+# selection, indent, bracket pairing): it needs the text and the grammar at
+# once, which is the join `edit-ops` exists to hold so the adapter does not.
+edit-ops = { path = "../edit-ops" }
 project-model = { path = "../project-model" }
 syntax-core = { path = "../syntax-core" }
 index-core = { path = "../index-core" }

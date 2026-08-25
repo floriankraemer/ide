@@ -11,6 +11,8 @@
 #include <QFocusEvent>
 #include <QFontMetrics>
 #include <QHelpEvent>
+#include <QInputMethodEvent>
+#include <QMimeData>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPalette>
@@ -193,25 +195,94 @@ void CodeEditor::keyPressEvent(QKeyEvent *event)
         return;
     }
 
-    QPlainTextEdit::keyPressEvent(event);
+    // A bare modifier key press (Shift held before the letter it modifies
+    // arrives, Ctrl held before a shortcut's second key) carries no meaning
+    // of its own. `xdotool type`'s Shift+digit combos (e.g. "!") deliver
+    // exactly this: a Key_Shift press event with no text, ahead of the
+    // character it is about to shift. Treating it as "some other operation"
+    // would drop the multi-caret selection before the character it is
+    // actually part of ever arrives.
+    switch (event->key()) {
+    case Qt::Key_Shift:
+    case Qt::Key_Control:
+    case Qt::Key_Alt:
+    case Qt::Key_AltGr:
+    case Qt::Key_Meta:
+        QPlainTextEdit::keyPressEvent(event);
+        return;
+    default:
+        break;
+    }
 
-    const bool typed = !event->text().isEmpty() && event->text().at(0).isPrint();
-    const bool deleted = event->key() == Qt::Key_Backspace || event->key() == Qt::Key_Delete;
-    if (!typed && !deleted) {
-        // A caret move (arrows, Home, Enter) leaves the word the popup
-        // describes, so the list stops being about anything.
-        hideCompletionPopup();
+    // F1-8/F1-15: every text-producing key is a transaction computed in
+    // Rust now, one caret or two hundred — smart typing (auto-close,
+    // type-over, smart backspace) is stateful and lives in `edit_ops`, and
+    // there is no separate "plain" path left for it to fall through. This
+    // sits after the popup interception on purpose (the popup owns Enter
+    // and Tab while it is up).
+    if (event->key() == Qt::Key_Escape && hasSecondaryCarets()) {
+        event->accept();
+        emit secondaryCaretsDropped();
         return;
     }
-    if (completer_->popup()->isVisible()) {
-        refreshCompletions();
+
+    const QString typedText = event->text();
+    const bool typed = !typedText.isEmpty() && typedText.at(0).isPrint()
+      && !event->modifiers().testFlag(Qt::ControlModifier);
+    const bool deleted = event->key() == Qt::Key_Backspace || event->key() == Qt::Key_Delete;
+    const bool newline = event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter;
+
+    if (typed || deleted || newline) {
+        event->accept();
+        if (newline) {
+            emit multiCaretNewline();
+            // A newline leaves the word the popup describes, same as an
+            // ordinary caret move.
+            hideCompletionPopup();
+            return;
+        }
+        if (typed) {
+            emit multiCaretTyped(typedText);
+        } else if (event->key() == Qt::Key_Backspace) {
+            emit multiCaretBackspace();
+        } else {
+            emit multiCaretDelete();
+        }
+        if (completer_->popup()->isVisible()) {
+            refreshCompletions();
+        }
+        if (typed) {
+            // Fired on every character: whether it is worth a request — a
+            // trigger character, enough of a word, a list already in
+            // hand — is `lsp_core::completion`'s decision, not this
+            // widget's.
+            emit completionRequested(textCursor().position(), textBeforeCursor(), false);
+        }
+        return;
     }
-    if (typed) {
-        // Fired on every character: whether it is worth a request — a
-        // trigger character, enough of a word, a list already in hand — is
-        // `lsp_core::completion`'s decision, not this widget's.
-        emit completionRequested(textCursor().position(), textBeforeCursor(), false);
+
+    // Everything else — arrows, Home, End, a shortcut — is not a
+    // multi-caret operation in this version: the extra carets are dropped
+    // and the key does exactly what it always did, which is a stated
+    // ceiling (ADR-0023). Moving N carets is its own rule and belongs in
+    // `editor_core::selection`, not here.
+    if (hasSecondaryCarets()) {
+        emit secondaryCaretsDropped();
     }
+
+    QPlainTextEdit::keyPressEvent(event);
+    // A caret move leaves the word the popup describes, so the list stops
+    // being about anything.
+    hideCompletionPopup();
+}
+
+void CodeEditor::insertFromMimeData(const QMimeData *source)
+{
+    if (source->hasText()) {
+        emit pasteRequested(source->text());
+        return;
+    }
+    QPlainTextEdit::insertFromMimeData(source);
 }
 
 void CodeEditor::focusOutEvent(QFocusEvent *event)
@@ -275,9 +346,61 @@ void CodeEditor::clearHoverSpan()
 
 void CodeEditor::mouseMoveEvent(QMouseEvent *event)
 {
+    if (columnDragging_ && event->buttons().testFlag(Qt::LeftButton)) {
+        event->accept();
+        emit columnSelectRequested(columnAnchor_, cursorForPosition(event->pos()).position());
+        return;
+    }
     updateHoverSpan(event->pos(), event->modifiers().testFlag(Qt::ControlModifier));
     cancelHover();
     QPlainTextEdit::mouseMoveEvent(event);
+}
+
+void CodeEditor::mouseReleaseEvent(QMouseEvent *event)
+{
+    if (columnDragging_) {
+        columnDragging_ = false;
+        event->accept();
+        return;
+    }
+    QPlainTextEdit::mouseReleaseEvent(event);
+}
+
+void CodeEditor::inputMethodEvent(QInputMethodEvent *event)
+{
+    if (hasSecondaryCarets()) {
+        emit secondaryCaretsDropped();
+    }
+    QPlainTextEdit::inputMethodEvent(event);
+}
+
+void CodeEditor::setSecondaryCarets(const QVector<SecondaryCaret> &carets)
+{
+    if (carets == secondaryCarets_) {
+        return;
+    }
+    secondaryCarets_ = carets;
+    // The selections ride on the same extra-selection list everything else
+    // does; the bars are painted in paintEvent, which this repaints for.
+    highlightCurrentLine();
+    viewport()->update();
+}
+
+void CodeEditor::paintEvent(QPaintEvent *event)
+{
+    QPlainTextEdit::paintEvent(event);
+    if (secondaryCarets_.isEmpty()) {
+        return;
+    }
+    QPainter painter(viewport());
+    const QColor caretColor = palette().color(QPalette::Text);
+    const int width = qMax(1, cursorWidth());
+    for (const SecondaryCaret &caret : secondaryCarets_) {
+        QTextCursor cursor(document());
+        cursor.setPosition(qBound(0, caret.head, document()->characterCount() - 1));
+        const QRect rect = cursorRect(cursor);
+        painter.fillRect(QRect(rect.left(), rect.top(), width, rect.height()), caretColor);
+    }
 }
 
 bool CodeEditor::viewportEvent(QEvent *event)
@@ -308,6 +431,26 @@ void CodeEditor::cancelHover()
 
 void CodeEditor::mousePressEvent(QMouseEvent *event)
 {
+    // F1-15. Checked before Ctrl+Click so the two gestures cannot both fire
+    // on an Alt+Ctrl+Click; adding a caret is the more specific one.
+    if (event->button() == Qt::LeftButton && event->modifiers().testFlag(Qt::AltModifier)) {
+        const int position = cursorForPosition(event->pos()).position();
+        event->accept();
+        if (event->modifiers().testFlag(Qt::ShiftModifier)) {
+            columnAnchor_ = position;
+            columnDragging_ = true;
+            emit columnSelectRequested(position, position);
+        } else {
+            emit caretAddRequested(position);
+        }
+        return;
+    }
+    // A plain click puts the caret somewhere, which is an answer to "where
+    // is the caret" — so any extra ones stop meaning anything.
+    if (event->button() == Qt::LeftButton && hasSecondaryCarets()) {
+        emit secondaryCaretsDropped();
+    }
+
     if (event->button() == Qt::LeftButton && event->modifiers().testFlag(Qt::ControlModifier)) {
         const QPair<int, int> span = identifierAt(event->pos());
         if (span.first >= 0) {
@@ -388,6 +531,19 @@ void CodeEditor::highlightCurrentLine()
         hover.cursor.setPosition(hoverSpan_.first);
         hover.cursor.setPosition(hoverSpan_.second, QTextCursor::KeepAnchor);
         selections.append(hover);
+    }
+
+    for (const SecondaryCaret &caret : secondaryCarets_) {
+        if (caret.anchor == caret.head) {
+            continue;
+        }
+        QTextEdit::ExtraSelection secondary;
+        secondary.format.setBackground(palette().color(QPalette::Highlight));
+        secondary.format.setForeground(palette().color(QPalette::HighlightedText));
+        secondary.cursor = textCursor();
+        secondary.cursor.setPosition(caret.anchor);
+        secondary.cursor.setPosition(caret.head, QTextCursor::KeepAnchor);
+        selections.append(secondary);
     }
 
     for (const DiagnosticSpan &span : diagnosticSpans_) {

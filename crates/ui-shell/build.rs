@@ -297,6 +297,9 @@ fn main() {
         .cpp_file("cpp/refactor_controller.cpp")
         .cpp_file("cpp/declaration_navigator.cpp")
         .cpp_file("cpp/symbol_kind_label.cpp")
+        // The Edit menu's editing operations (F1-16): free functions, no
+        // Q_OBJECT, so only the source is listed.
+        .cpp_file("cpp/editing_actions.cpp")
         .cpp_file("cpp/keymap_page.cpp")
         .cpp_file("cpp/syntax_colors_page.cpp")
         .cpp_file("cpp/languages_page.cpp")
@@ -309,6 +312,7 @@ fn main() {
         // wired with lambdas — so only the sources are listed.
         .cpp_file("cpp/settings_dialog.cpp")
         .cpp_file("cpp/editor_page.cpp")
+        .cpp_file("cpp/editing_page.cpp")
         .cpp_file("cpp/mcp_page.cpp")
         .cpp_file("cpp/problems_panel.cpp")
         .cpp_file("cpp/icon_cache.cpp")

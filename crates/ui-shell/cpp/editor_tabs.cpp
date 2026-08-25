@@ -125,6 +125,7 @@ EditorTabs::EditorTabs(DocumentManager *docManager, LanguageService *languageSer
                        QSplitter *root, QWidget *window)
   : docManager_(docManager)
   , languageService_(languageService)
+  , editorOps_(new EditorOps(this))
   , root_(root)
   , window_(window)
 {
@@ -625,16 +626,34 @@ void EditorTabs::renderTabText(QTabWidget *group, int index, const QString &titl
 
 bool EditorTabs::saveTab(QTabWidget *group, int index)
 {
+    auto *codeEditor = qobject_cast<CodeEditor *>(group->widget(index));
     auto *editor = qobject_cast<QPlainTextEdit *>(group->widget(index));
     if (!editor) {
         return false;
     }
-    const auto result = docManager_->saveTab(tabIdAt(group, index), editor->toPlainText());
+    const quint64 tabId = tabIdAt(group, index);
+    // F1-11: trim, final newline and line-ending normalisation, applied
+    // *before* the file is read for writing — so they are one undo entry,
+    // separate from whatever the user's last edit was, and the caret lands
+    // wherever the splice's own cursor adjustment puts it rather than
+    // jumping to column 0. Only real editors have this (a hex tab has no
+    // language and nothing to tidy).
+    if (codeEditor) {
+        const ::rust::Vec<FfiTextEdit> tidyEdits =
+          editorOps_->saveRuleEdits(tabId, editor->toPlainText());
+        if (!tidyEdits.empty()) {
+            applyEditsTo(editor, tidyEdits);
+        }
+    }
+    const auto result = docManager_->saveTab(tabId, editor->toPlainText());
     if (result.code != 0) {
         QMessageBox::critical(window_, tr("Cannot save file"), result.message);
         return false;
     }
     editor->document()->setModified(false);
+    if (codeEditor) {
+        refreshCarets(codeEditor);
+    }
     const QString path = editor->property("lspPath").toString();
     if (!path.isEmpty()) {
         // Servers that only re-analyse on save (and linters behind them)
@@ -765,6 +784,9 @@ void EditorTabs::addHexTab(QTabWidget *group, quint64 tabId, const QString &titl
 
 void EditorTabs::onTabClosed(quint64 tabId)
 {
+    // F1-13: drop the carets and the expand/shrink stack this tab
+    // accumulated, or the map grows for the life of the process.
+    editorOps_->forgetTab(tabId);
     const TabLoc loc = locate(tabId);
     if (!loc.group) {
         return;

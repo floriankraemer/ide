@@ -183,6 +183,28 @@ impl Transaction {
         }
         Self::new(edits)
     }
+
+    /// Delete-forward at every caret: a caret with a selection deletes it, a
+    /// collapsed caret deletes the character after it.
+    ///
+    /// The mirror of [`backspace`](Self::backspace), and here for the same
+    /// reason: which character the Delete key removes at each of N carets is
+    /// a rule, and a rule may not live in the adapter or the view.
+    pub fn delete_forward(text: &str, selection: &SelectionSet) -> Self {
+        let mut edits = Vec::with_capacity(selection.len());
+        for caret in selection.carets() {
+            if !caret.is_empty() {
+                edits.push(TextEdit::delete(caret.range()));
+                continue;
+            }
+            let at = clamp_to_boundary(text, caret.head);
+            let Some(next) = text[at..].chars().next() else {
+                continue;
+            };
+            edits.push(TextEdit::delete(at..at + next.len_utf8()));
+        }
+        Self::new(edits)
+    }
 }
 
 /// Where the carets end up once `transaction` has been applied.
@@ -331,6 +353,43 @@ mod tests {
         let selection = carets(&[5]);
         let tx = Transaction::backspace(text, &selection);
         assert_eq!(tx.apply(text).unwrap(), "ab");
+    }
+
+    #[test]
+    fn adjacent_carets_deleting_forward_do_not_double_delete() {
+        // The mirror of the backspace case: carets at 5 and 6 remove two
+        // different characters, not the same one twice.
+        let text = "abcdefgh";
+        let selection = carets(&[5, 6]);
+        let tx = Transaction::delete_forward(text, &selection);
+        assert_eq!(tx.edits.len(), 2);
+        assert_eq!(tx.apply(text).unwrap(), "abcdeh");
+        assert_eq!(spans(&map_carets(&selection, &tx)), vec![(5, 5)]);
+    }
+
+    #[test]
+    fn delete_forward_at_the_end_of_the_text_does_nothing_for_that_caret() {
+        let text = "abc";
+        let selection = carets(&[1, 3]);
+        let tx = Transaction::delete_forward(text, &selection);
+        assert_eq!(tx.edits.len(), 1);
+        assert_eq!(tx.apply(text).unwrap(), "ac");
+    }
+
+    #[test]
+    fn delete_forward_removes_a_whole_multi_byte_character() {
+        let text = "a\u{1f642}b";
+        let selection = carets(&[1]);
+        let tx = Transaction::delete_forward(text, &selection);
+        assert_eq!(tx.apply(text).unwrap(), "ab");
+    }
+
+    #[test]
+    fn delete_forward_with_a_selection_deletes_the_selection() {
+        let text = "abcdef";
+        let selection = SelectionSet::single(Caret::new(1, 4));
+        let tx = Transaction::delete_forward(text, &selection);
+        assert_eq!(tx.apply(text).unwrap(), "aef");
     }
 
     #[test]

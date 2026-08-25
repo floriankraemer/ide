@@ -17,6 +17,7 @@ class QMenu;
 class QPlainTextEdit;
 class QSplitter;
 class QTabWidget;
+class QTextDocument;
 class QWidget;
 
 namespace ui_shell {
@@ -141,6 +142,10 @@ public:
     // buffer edits at all was decided by `lsp_core::plan_edit`.
     void applyBufferEdits(const ::rust::Vec<FfiTextEdit> &edits);
 
+    // F1-15: the same splice into one known editor, for the edits that are
+    // about the buffer the user is typing in and therefore name no file.
+    void applyEditsTo(QPlainTextEdit *editor, const ::rust::Vec<FfiTextEdit> &edits);
+
     // RF12: where the pointer last dwelled, so the index leg of hover can
     // be started from outside this class when the server declines.
     int hoverPosition() const { return hoverPosition_; }
@@ -172,10 +177,36 @@ public:
     // The editor showing `path`, or nullptr when it is not open.
     CodeEditor *editorForPath(const QString &path) const;
 
+    // F1-15/F1-16: run one editing operation over the current editor's
+    // carets and splice what comes back. `op` asks `editorOps_` for a
+    // transaction; everything about what the operation means is decided
+    // there, and this only applies the answer and repaints the carets.
+    void runEditorOp(const std::function<::rust::Vec<FfiTextEdit>(quint64, const QString &)> &op);
+
+    // The caret surface, for the operations that move carets without
+    // editing (Ctrl+D, expand/shrink) and for the settings dialog's
+    // commit.
+    EditorOps *editorOps() const { return editorOps_; }
+
+    // Re-read the carets Rust holds for this editor and show them: the
+    // primary becomes the widget's own cursor, the rest are painted.
+    void refreshCarets(CodeEditor *editor);
+
+    // The caret-only operations (Ctrl+D, add caret above/below,
+    // expand/shrink): run `op` against the current editor's tab and live
+    // text, then repaint whatever carets it left behind. Does nothing when
+    // no editor is current.
+    void withCurrentEditor(const std::function<void(quint64, const QString &)> &op);
+
+    // Ctrl+]: move the caret to the partner of the bracket it is on, or
+    // leave it where it is when it is not on one. Which bracket answers
+    // which is `edit_ops::brackets`' answer.
+    void jumpToMatchingBracket();
+
     // A protocol position as a document position. The inverse of
     // `lspPosition`, and a re-expression for the same reason: both count
     // UTF-16 code units within a block.
-    static int positionAt(QPlainTextEdit *editor, quint32 line, quint32 character);
+    static int positionAt(const QTextDocument *document, quint32 line, quint32 character);
 
     // The word under the caret, used by the caret-driven Find Usages and
     // the type-hierarchy jumps. Empty when no tab is open or the caret is
@@ -465,6 +496,10 @@ private:
 
     DocumentManager *docManager_;
     LanguageService *languageService_;
+    // F1-13/F1-15: carets and the language-aware editing operations, for
+    // every editor this class opens. Owned here rather than passed in
+    // because nothing outside the editor surface has anything to ask it.
+    EditorOps *editorOps_;
     QSplitter *root_;
     QWidget *window_;
     QList<QTabWidget *> groups_;
@@ -481,6 +516,11 @@ private:
     QString editorCurrentLine_;
     QLabel *positionLabel_ = nullptr;
     QLabel *languageLabel_ = nullptr;
+    // Set while this class is the one moving a caret, so the cursor-moved
+    // handler does not push the widget's single caret back over the set
+    // Rust just computed. Same arrangement FindBar uses while it is the one
+    // editing the document.
+    bool syncingCarets_ = false;
 };
 
 } // namespace ui_shell

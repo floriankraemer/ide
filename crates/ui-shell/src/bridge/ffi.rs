@@ -16,13 +16,14 @@
 use crate::bridge::ai::chat::AiChatRust;
 use crate::bridge::convert::{new_syntax_highlighter, syntax_scope_names, SyntaxHighlighterHandle};
 use crate::bridge::editor::DocumentManagerRust;
+use crate::bridge::editor_ops::EditorOpsRust;
 use crate::bridge::icons::IconProviderRust;
 use crate::bridge::language::LanguageServiceRust;
 use crate::bridge::plugins::PluginCatalogRust;
 use crate::bridge::search::SearchModelRust;
 use crate::bridge::settings::{
-    AiProviderEditorRust, AppSettingsRust, KeymapEditorRust, LanguageCatalogRust,
-    LanguageServerEditorRust, SyntaxColorEditorRust,
+    AiProviderEditorRust, AppSettingsRust, EditingEditorRust, KeymapEditorRust,
+    LanguageCatalogRust, LanguageServerEditorRust, SyntaxColorEditorRust,
 };
 use crate::bridge::terminal::TerminalSessionRust;
 use crate::bridge::tree::ProjectTreeModelRust;
@@ -415,6 +416,23 @@ mod ffi {
         /// How many UTF-16 characters before the caret the typed word
         /// occupies — what the view replaces when `has_range` is false.
         prefix_length: u32,
+    }
+
+    /// One caret, as flat document positions in UTF-16 code units — the
+    /// unit `QTextCursor::position()` counts in, so the view uses these
+    /// directly rather than converting.
+    ///
+    /// `anchor == head` is a collapsed caret; `anchor > head` is a
+    /// selection made backwards, and the direction is preserved because
+    /// Shift+Left from the end of a selection has to shrink it, not flip it.
+    #[derive(Default)]
+    struct FfiCaret {
+        anchor: u32,
+        head: u32,
+        /// Exactly one caret in a set is the primary. The view keeps it as
+        /// its own `QTextCursor` — so scrolling, Find and the status bar
+        /// keep working unchanged — and paints the rest itself.
+        primary: bool,
     }
 
     /// One edit a refactoring makes, in the protocol's own units (0-based
@@ -1977,6 +1995,214 @@ mod ffi {
     impl cxx_qt::Threading for TerminalSession {}
 
     extern "RustQt" {
+        /// Editor ergonomics adapter (task F1-13): carets, transactions and
+        /// the language-aware editing operations, for one editor widget.
+        ///
+        /// No threading. Caret arithmetic and line operations are
+        /// microseconds on a rope, and a thread would add a frame of
+        /// latency to every keystroke to save nothing.
+        ///
+        /// **Every slot that computes over the buffer takes the buffer
+        /// text.** `editor_core::Document`'s rope is refreshed only on
+        /// save, so it is one save behind what the user sees; the live text
+        /// is the widget's, and it is passed in. This is the same stateless
+        /// shape `findMatches` and `replacementsFor` already have.
+        ///
+        /// Positions in and out are flat document UTF-16 offsets; edits come
+        /// back as `FfiTextEdit`s in the protocol's line/character units so
+        /// `EditorTabs::applyBufferEdits` can splice them inside one
+        /// `beginEditBlock` — which is what makes a 200-caret keystroke one
+        /// Ctrl+Z (ADR-0023).
+        #[qobject]
+        type EditorOps = super::EditorOpsRust;
+
+        /// Tell this object where the widget's carets are. Called on every
+        /// caret move, including the ordinary single-caret one.
+        #[qinvokable]
+        #[cxx_name = "setCarets"]
+        fn set_carets(
+            self: Pin<&mut EditorOps>,
+            tab_id: u64,
+            text: &QString,
+            carets: Vec<FfiCaret>,
+        );
+
+        /// Where the carets are now, for the widget to paint.
+        #[qinvokable]
+        #[cxx_name = "carets"]
+        fn carets(self: &EditorOps, tab_id: u64, text: &QString) -> Vec<FfiCaret>;
+
+        /// How many carets this tab has. The widget branches on `> 1` to
+        /// decide whether a keystroke is routed through Rust at all — a
+        /// branch about which code path runs, not about what an edit means.
+        #[qinvokable]
+        #[cxx_name = "caretCount"]
+        fn caret_count(self: &EditorOps, tab_id: u64) -> u32;
+
+        /// Esc: back to the primary caret alone.
+        #[qinvokable]
+        #[cxx_name = "clearSecondaryCarets"]
+        fn clear_secondary_carets(self: Pin<&mut EditorOps>, tab_id: u64);
+
+        /// The tab closed — drop everything remembered about it.
+        #[qinvokable]
+        #[cxx_name = "forgetTab"]
+        fn forget_tab(self: Pin<&mut EditorOps>, tab_id: u64);
+
+        /// Re-read the cached settings after the dialog commits, so a
+        /// changed tab width takes effect without a restart.
+        #[qinvokable]
+        #[cxx_name = "reloadSettings"]
+        fn reload_settings(self: Pin<&mut EditorOps>);
+
+        /// Alt+Click: one more caret at a document position. Refuses past
+        /// the caret ceiling with a typed code (ADR-0003).
+        #[qinvokable]
+        #[cxx_name = "addCaretAt"]
+        fn add_caret_at(
+            self: Pin<&mut EditorOps>,
+            tab_id: u64,
+            text: &QString,
+            position: u32,
+        ) -> FfiResult;
+
+        /// Ctrl+Alt+Up / Ctrl+Alt+Down: a caret on the neighbouring line at
+        /// the primary caret's visual column.
+        #[qinvokable]
+        #[cxx_name = "addCaretVertically"]
+        fn add_caret_vertically(
+            self: Pin<&mut EditorOps>,
+            tab_id: u64,
+            text: &QString,
+            downwards: bool,
+        ) -> FfiResult;
+
+        /// Ctrl+D: add the next occurrence of what the primary caret
+        /// covers, selecting the word under it first when it is collapsed.
+        #[qinvokable]
+        #[cxx_name = "selectNextOccurrence"]
+        fn select_next_occurrence(
+            self: Pin<&mut EditorOps>,
+            tab_id: u64,
+            text: &QString,
+        ) -> FfiResult;
+
+        /// Alt+Shift+drag: one caret per line between two document
+        /// positions, at the visual columns those positions sit at.
+        #[qinvokable]
+        #[cxx_name = "columnSelect"]
+        fn column_select(
+            self: Pin<&mut EditorOps>,
+            tab_id: u64,
+            text: &QString,
+            anchor: u32,
+            head: u32,
+        ) -> FfiResult;
+
+        /// Typing at every caret, as one transaction.
+        #[qinvokable]
+        #[cxx_name = "typeText"]
+        fn type_text(
+            self: Pin<&mut EditorOps>,
+            tab_id: u64,
+            text: &QString,
+            typed: &QString,
+        ) -> Vec<FfiTextEdit>;
+
+        /// Backspace at every caret.
+        #[qinvokable]
+        #[cxx_name = "backspace"]
+        fn backspace(self: Pin<&mut EditorOps>, tab_id: u64, text: &QString) -> Vec<FfiTextEdit>;
+
+        /// Insert pasted text verbatim, at every caret. Paste is not
+        /// typing: `foo(bar` must not become `foo(bar)`.
+        #[qinvokable]
+        #[cxx_name = "pasteText"]
+        fn paste_text(
+            self: Pin<&mut EditorOps>,
+            tab_id: u64,
+            text: &QString,
+            pasted: &QString,
+        ) -> Vec<FfiTextEdit>;
+
+        /// Delete at every caret.
+        #[qinvokable]
+        #[cxx_name = "deleteForward"]
+        fn delete_forward(
+            self: Pin<&mut EditorOps>,
+            tab_id: u64,
+            text: &QString,
+        ) -> Vec<FfiTextEdit>;
+
+        /// Enter at every caret: the newline and the indent the language
+        /// wants at that point.
+        #[qinvokable]
+        #[cxx_name = "newline"]
+        fn newline(self: Pin<&mut EditorOps>, tab_id: u64, text: &QString) -> Vec<FfiTextEdit>;
+
+        /// Duplicate (0), move up (1), move down (2), delete (3), join (4).
+        #[qinvokable]
+        #[cxx_name = "lineOp"]
+        fn line_op(
+            self: Pin<&mut EditorOps>,
+            tab_id: u64,
+            text: &QString,
+            kind: u8,
+        ) -> Vec<FfiTextEdit>;
+
+        /// Ctrl+/ (`block` false) and Ctrl+Shift+/ (`block` true).
+        #[qinvokable]
+        #[cxx_name = "toggleComment"]
+        fn toggle_comment(
+            self: Pin<&mut EditorOps>,
+            tab_id: u64,
+            text: &QString,
+            block: bool,
+        ) -> Vec<FfiTextEdit>;
+
+        /// Tab / Shift+Tab over a selection.
+        #[qinvokable]
+        #[cxx_name = "indentSelection"]
+        fn indent_selection(
+            self: Pin<&mut EditorOps>,
+            tab_id: u64,
+            text: &QString,
+            outdent: bool,
+        ) -> Vec<FfiTextEdit>;
+
+        /// Ctrl+W: grow every caret to its enclosing syntax node.
+        #[qinvokable]
+        #[cxx_name = "expandSelection"]
+        fn expand_selection(self: Pin<&mut EditorOps>, tab_id: u64, text: &QString);
+
+        /// Ctrl+Shift+W: back down the path Ctrl+W took. A selection the
+        /// history does not recognise is left alone.
+        #[qinvokable]
+        #[cxx_name = "shrinkSelection"]
+        fn shrink_selection(self: Pin<&mut EditorOps>, tab_id: u64);
+
+        /// Ctrl+]: the document position the bracket at `position` is
+        /// answered by, or -1 when the caret is not on one.
+        #[qinvokable]
+        #[cxx_name = "matchingBracket"]
+        fn matching_bracket(self: &EditorOps, tab_id: u64, text: &QString, position: u32) -> i64;
+
+        /// The edits a save would make before it writes the file (F1-11):
+        /// trim, final newline, line-ending normalisation. Splice these
+        /// into the buffer first so the tidying is one undo entry, then
+        /// read the (now tidied) text to hand to `saveTab`.
+        #[qinvokable]
+        #[cxx_name = "saveRuleEdits"]
+        fn save_rule_edits(self: &EditorOps, tab_id: u64, text: &QString) -> Vec<FfiTextEdit>;
+
+        /// The carets changed without an edit — after Ctrl+D, Alt+Click, a
+        /// column selection or an expansion — so the widget repaints them.
+        #[qsignal]
+        #[cxx_name = "caretsChanged"]
+        fn carets_changed(self: Pin<&mut EditorOps>, tab_id: u64);
+    }
+
+    extern "RustQt" {
         /// Language-server adapter (Task L2): owns one `lsp_core::LspManager`
         /// (on a worker thread) and the `DiagnosticStore` the panel and the
         /// editor read.
@@ -2223,6 +2449,18 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "codeActions"]
         fn code_actions(self: &LanguageService) -> Vec<FfiCodeAction>;
+
+        /// Reformat one open document, whole-file (F1-14). Answers through
+        /// the same `refactorReady`/`refactorFailed`/`pendingEdits`
+        /// protocol a rename uses — `touches_other_files` is always false,
+        /// so the view applies it straight away, and one Ctrl+Z undoes it.
+        #[qinvokable]
+        #[cxx_name = "requestFormatting"]
+        fn request_formatting(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            buffer_revision: i64,
+        );
 
         /// A `codeActionsAt` answered. Empty is a legitimate answer and is
         /// still signalled, so the view can say "nothing here" rather than
@@ -2752,6 +2990,97 @@ mod ffi {
         /// separately, by `LanguageService::applyServerSettings`.
         #[qinvokable]
         fn commit(self: &LanguageServerEditor);
+    }
+
+    /// One editing-settings row — the global section, or one language's
+    /// overrides — as the page edits it. `EditingSettings`'s `Option<T>`
+    /// fields cross as a `has_*` flag plus the value, since cxx shared
+    /// structs have no optional; the value is meaningless when its flag is
+    /// false and the adapter never reads it that way.
+    ///
+    /// `default_encoding` and `line_endings` are carried for the global row
+    /// only — a language may not override either (`settings-model`'s rule,
+    /// not this struct's) — and are empty strings on every language row.
+    #[derive(Default)]
+    struct FfiEditingRow {
+        /// Empty for the global row.
+        language_id: QString,
+        language_name: QString,
+        /// `0` means unset.
+        tab_width: u32,
+        has_use_spaces: bool,
+        use_spaces: bool,
+        has_trim_trailing_whitespace: bool,
+        trim_trailing_whitespace: bool,
+        has_insert_final_newline: bool,
+        insert_final_newline: bool,
+        has_wrap_column: bool,
+        wrap_column: u32,
+        default_encoding: QString,
+        line_endings: QString,
+    }
+
+    /// Something the Editing page must say out loud before it may commit.
+    /// `language_id` is empty for the global section, which is what lets
+    /// the page put the user back on the row that is wrong.
+    #[derive(Default)]
+    struct FfiEditingProblem {
+        language_id: QString,
+        sentence: QString,
+    }
+
+    extern "RustQt" {
+        /// Settings > Editing (F1-14, F1-17): the draft of the `[editing]`
+        /// section and its per-language overrides, committed on OK.
+        ///
+        /// Isomorphic to `LanguageServerEditor` — begin, edit, validate,
+        /// commit — because a settings page with rules to refuse against is
+        /// always this shape, not a special case of it.
+        #[qobject]
+        type EditingEditor = super::EditingEditorRust;
+
+        /// Re-read the settings and start a fresh draft from them.
+        #[qinvokable]
+        #[cxx_name = "beginEdit"]
+        fn begin_edit(self: &EditingEditor);
+
+        /// The global section, as the page's top row.
+        #[qinvokable]
+        #[cxx_name = "globalRow"]
+        fn global_row(self: &EditingEditor) -> FfiEditingRow;
+
+        #[qinvokable]
+        #[cxx_name = "setGlobalRow"]
+        fn set_global_row(self: &EditingEditor, row: &FfiEditingRow);
+
+        /// One row per language the editor knows about, in registry order —
+        /// not just the ones with an override, so the page can offer every
+        /// language and show which already differ.
+        #[qinvokable]
+        #[cxx_name = "languageRows"]
+        fn language_rows(self: &EditingEditor) -> Vec<FfiEditingRow>;
+
+        #[qinvokable]
+        #[cxx_name = "setLanguageRow"]
+        fn set_language_row(self: &EditingEditor, row: &FfiEditingRow);
+
+        /// The tab width a buffer of `language_id` would resolve to if the
+        /// draft were saved right now — what the preview column shows.
+        #[qinvokable]
+        #[cxx_name = "resolvedTabWidth"]
+        fn resolved_tab_width(self: &EditingEditor, language_id: &QString) -> u32;
+
+        /// Everything wrong with the draft, in the order the page should
+        /// walk the user through it. Non-empty means `commit` will refuse.
+        #[qinvokable]
+        fn problems(self: &EditingEditor) -> Vec<FfiEditingProblem>;
+
+        /// Write the draft to settings. Refuses with a typed code
+        /// (ADR-0003) when `problems` is non-empty — a setting that parses
+        /// and then does nothing is worse than one the dialog would not
+        /// save.
+        #[qinvokable]
+        fn commit(self: &EditingEditor) -> FfiResult;
     }
 
     /// One turn as the transcript renders it. `text` is every text block of

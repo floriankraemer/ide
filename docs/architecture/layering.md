@@ -28,7 +28,7 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `edit-ops` | `editor-core`, `syntax-core` (+ std, tree-sitter) | **No** |
 | `app-core` | `editor-core`, `project-model`, `plugin-host`, `icon-theme`, `syntax-core` — the last three only for the icon-theme join, see below | **No** |
 | `ai-chat-core` | `lsp-core` (+ std, serde, serde_json, base64, tiktoken-rs, reqwest/rustls) | **No** |
-| `ui-shell` | `app-core`, `editor-core`, `project-model`, `app-config`, `settings-model`, `syntax-core`, `mcp-server`, `index-core`, `lsp-core`, `ai-chat-core`, `pty-core`, `terminal-core`, `plugin-host` (+ tokio, cxx, cxx-qt, cxx-qt-lib) | Yes (adapter + view live here) |
+| `ui-shell` | `app-core`, `editor-core`, `edit-ops`, `project-model`, `app-config`, `settings-model`, `syntax-core`, `mcp-server`, `index-core`, `lsp-core`, `ai-chat-core`, `pty-core`, `terminal-core`, `plugin-host` (+ tokio, cxx, cxx-qt, cxx-qt-lib) | Yes (adapter + view live here) |
 | `app` | `ui-shell` | Yes |
 | `e2e` | (std, serde_json, tempfile) — **no workspace crate**; drives the built `app` binary over X11 and the filesystem, as a user does (ADR-0024) | **No** |
 
@@ -79,6 +79,7 @@ That test target is the one place `app-config` may be read from a test rather th
   What a comment token, a bracket pair or a quote *is* stays in `syntax-core`'s one registry (ADR-0018) — `edit-ops` reads it and never keeps a second table.
   Every entry point takes `text: &str`, never a `Document`: the rope is only refreshed on save, so it is one save behind the live Qt buffer.
 
+- **Where multi-caret state lives** (ADR-0023): the `SelectionSet`, the expand/shrink history and the auto-close pair tracker are kept in `ui-shell`'s `EditorOps`, keyed by `TabId` — not on `editor_core::Document` (stale, refreshed only on save) and not in `app_core::AppSession` (which has no reason to know about carets). `EditorOps` computes every operation as one `Transaction` over the live buffer text and hands the seam one `Vec<FfiTextEdit>`, spliced through the same `EditorTabs::applyBufferEdits` path a refactoring already uses — the rule that one keystroke is one undo step lives in `editor-core`, not in `cpp/`.
 - **Which language a file is** is answered in exactly one place, `syntax-core`'s registry (ADR-0018).
   `lsp-core` owns only what the protocol owns — the server command per language id, and the few ids LSP names differently from the grammar (`tsx` -> `typescriptreact`) — and `ui-shell` joins the two, which is translation and so allowed in the adapter.
   No crate may grow a second file-extension table.

@@ -9,7 +9,7 @@ The project is a cross-platform IDE with a JetBrains-like layout.
 It is a Rust Cargo workspace with a Qt6 Widgets UI, bridged via `cxx-qt` per [ADR-0001](decisions/0001-core-tech-stack.md).
 
 It has grown past the original MVP (open a folder, browse a tree, edit and save tabs — see the [MVP proposal](../product/mvp-proposal.md)).
-Shipped since: a settings window and keymap, ADS-based docking, theming, tree-sitter syntax highlighting and folding, a Class View outline, an embedded terminal, a project-wide text and symbol index, find and replace, code navigation (Go to Declaration, Find Usages, Go to Implementation, jump history), a language platform with 29 bundled tree-sitter grammar crates covering roughly 35 languages (see `crates/syntax-core/Cargo.toml`) and an LSP client, and refactoring (rename, Extract Method/Class through code actions).
+Shipped since: a settings window and keymap, ADS-based docking, theming, tree-sitter syntax highlighting and folding, a Class View outline, an embedded terminal, a project-wide text and symbol index, find and replace, code navigation (Go to Declaration, Find Usages, Go to Implementation, jump history), a language platform with 29 bundled tree-sitter grammar crates covering roughly 35 languages (see `crates/syntax-core/Cargo.toml`) and an LSP client, refactoring (rename, Extract Method/Class through code actions), and editor ergonomics — multi-caret and column selection, comment toggle, line operations (duplicate/move/delete/join), expand/shrink selection, auto-close/type-over/smart backspace, bracket match, reformat through the LSP client, and per-project-scoped editing settings ([ADR-0023](decisions/0023-multi-caret.md)).
 In progress: an in-IDE AI assistant — a docked chat panel with attachable context, four configurable providers, an Ask mode whose code blocks apply through the refactoring preview, and a policy-gated Agent mode that drives the editor and the index through the same tools the MCP server exposes ([ADR-0021](decisions/0021-ai-chat.md)).
 
 ## 2. Quality goals
@@ -30,7 +30,7 @@ Only `ui-shell` and `app` touch Qt; every other crate is Qt-free and unit-tested
 graph TB
     app["app (main)"] --> view
     subgraph uishell["ui-shell"]
-        view["view: cpp/*.cpp<br/>widgets, layout, wiring"] --> adapter["adapter: src/bridge.rs<br/>thin QObject translation"]
+        view["view: cpp/*.cpp<br/>widgets, layout, wiring"] --> adapter["adapter: src/bridge/*.rs<br/>thin QObject translation"]
     end
     adapter --> appcore["application: app-core<br/>AppSession, commands, AppError"]
     adapter --> support["support: app-config, syntax-core,<br/>index-core, lsp-core, settings-model,<br/>pty-core, terminal-core, mcp-server,<br/>ai-chat-core"]
@@ -49,6 +49,7 @@ graph TB
 | `index-core` | support | Project index: text search (tantivy + ripgrep crates) and symbols/references, plus declaration resolution ([ADR-0011](decisions/0011-code-navigation.md)) | No |
 | `lsp-core` | support | LSP client: framing, supervised server processes, diagnostics, hover, navigation, completion, server catalog ([ADR-0016](decisions/0016-lsp-client.md)); code actions, rename and workspace edits ([ADR-0019](decisions/0019-lsp-refactoring.md)) | No |
 | `settings-model` | support | The settings pages' rules: syntax-colour draft and override origin, language load errors as sentences, language-server draft ([ADR-0017](decisions/0017-settings-model-crate.md)), and the Plugins page's rows including what a load error or a sandbox trap means in English | No |
+| `edit-ops` | support | Language-aware editing operations that need the text *and* the grammar at once: comment toggle, expand/shrink selection over the tree-sitter node tree, indentation, auto-close/type-over/smart backspace, bracket match ([ADR-0023](decisions/0023-multi-caret.md)) | No |
 | `plugin-api` | support | The plugin contract: `plugin.toml`, contribution points, typed load errors, the WebAssembly component world ([ADR-0026](decisions/0026-plugin-host.md)) | No |
 | `plugin-host` | support | Which plugins exist and which may run: the `<config_dir>/plugins` scan, the built-ins embedded in the binary, the disabled list, quarantine and duplicate-id resolution ([ADR-0026](decisions/0026-plugin-host.md)); the sandboxed wasmtime tier with fuel, epoch and memory limits ([ADR-0028](decisions/0028-wasm-plugin-tier.md)) | No |
 | `icon-theme` | support | Icon packs: the resolution order from a file name to an icon id, light/dark art, and `resvg` rasterisation to premultiplied RGBA8 ([ADR-0027](decisions/0027-icon-themes.md)) | No |
@@ -56,7 +57,7 @@ graph TB
 | `terminal-core` | support | VT100/grid state over `alacritty_terminal` | No |
 | `mcp-server` | support | MCP server (protocol + transport) so an agent can read and drive the editor and query the project index ([ADR-0004](decisions/0004-mcp-transport.md), [ADR-0012](decisions/0012-mcp-protocol-index-and-lifecycle.md)) | No |
 | `ai-chat-core` | support | AI assistant rules: provider dialects and capabilities, the conversation block model, token accounting, context assembly and its budget, the tool catalog and approval policy, the agent loop, conversation history, and turning a code block into an edit ([ADR-0021](decisions/0021-ai-chat.md)) | No |
-| `ui-shell` | adapter + view | `src/bridge.rs`: cxx-qt QObject translation; `cpp/`: Widgets, layout, menus, dialogs, `QApplication` | Yes |
+| `ui-shell` | adapter + view | `src/bridge/*.rs`: cxx-qt QObject translation, one module per feature (ADR-0025); `cpp/`: Widgets, layout, menus, dialogs, `QApplication` | Yes |
 | `app` | main | Thin binary; hands off to `ui-shell` | Yes |
 
 The view never decides, it only displays and forwards intent.

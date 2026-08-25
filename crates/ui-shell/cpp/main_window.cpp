@@ -6,6 +6,7 @@
 #include "code_editor.h"
 #include "declaration_navigator.h"
 #include "e2e_mark.h"
+#include "editing_actions.h"
 #include "editor_tabs.h"
 #include "find_bar.h"
 #include "find_usages_panel.h"
@@ -394,6 +395,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     auto *syntaxColorEditor = new SyntaxColorEditor(window);
     auto *languageCatalog = new LanguageCatalog(window);
     auto *languageServerEditor = new LanguageServerEditor(window);
+    auto *editingEditor = new EditingEditor(window);
     // P7's Plugins page, the same arrangement again: it holds the rows of
     // the last scan between the dialog's refresh() calls.
     auto *pluginCatalog = new PluginCatalog(window);
@@ -734,6 +736,7 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
       syntaxColorEditor,
       languageCatalog,
       languageServerEditor,
+      editingEditor,
       languageService,
       aiProviderEditor,
       aiChat,
@@ -778,6 +781,11 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QAction *findInFilesAction = registerAction(editMenu, QStringLiteral("edit.findInFiles"),
                                                  QObject::tr("Find in Files..."), appSettings,
                                                  *actions);
+
+    // F1-16: multi-caret, comment toggling, the line operations,
+    // expand/shrink selection and the bracket jump. Its own translation
+    // unit; every entry routes through EditorTabs to EditorOps.
+    buildEditingActions(editMenu, window, appSettings, *actions, editorTabs);
 
     // RF12: the hover signature fallback. `lsp_core::hover_outcome` decides
     // whether the server answered; this only starts the index leg when it
@@ -834,6 +842,17 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     QObject::connect(refactorThisAction, &QAction::triggered, window, [refactorer]() {
         refactorer->extract(QString(),
                             QObject::tr("The language server offers no refactorings here."));
+    });
+
+    refactorMenu->addSeparator();
+    QAction *reformatAction = registerAction(refactorMenu, QStringLiteral("code.reformat"),
+                                             QObject::tr("Reformat Code"), appSettings, *actions);
+    QObject::connect(reformatAction, &QAction::triggered, window, [editorTabs, languageService]() {
+        const QString path = editorTabs->currentPath();
+        if (path.isEmpty()) {
+            return;
+        }
+        languageService->requestFormatting(path, editorTabs->documentRevision());
     });
 
     // The same gestures on the editor's right-click menu. The actions are

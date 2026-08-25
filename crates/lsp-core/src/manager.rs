@@ -1325,7 +1325,7 @@ fn client_capabilities() -> Value {
                 // Versions let a stale edit be caught before it is applied.
                 "documentChanges": true,
                 // F2: create, rename and delete are performed by
-                // `app_core::AppSession::apply_file_ops` (ADR-0026). Without
+                // `app_core::AppSession::apply_file_ops` (F2). Without
                 // these advertised, rust-analyzer's "move to submodule" and
                 // every extract-to-new-file refactoring is refused whole —
                 // the user sees "unsupported" for a correct edit.

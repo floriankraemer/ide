@@ -477,6 +477,192 @@ fn e2e_split_editor_persistence() {
     assert_eq!(ide.quit(), 0);
 }
 
+/// Two carets, one keystroke, one undo (F1-18).
+///
+/// The caret is walked to the middle of the fixture's first "world" by a
+/// fixed count of `Right` presses from the start of the file — the same
+/// keyboard-only positioning `start_rename` already uses, and deliberately
+/// not Find-then-Escape: closing the find bar hands focus back to the
+/// editor asynchronously, and a `Ctrl+D` sent before that lands collapses
+/// the selection a moment earlier, which is exactly the kind of race this
+/// suite exists to not paper over with a wait.
+///
+/// The first `Ctrl+D` selects the word the (collapsed) caret sits in; the
+/// second finds the next occurrence and adds a caret for it —
+/// `SelectionSet::add_next_occurrence`'s own two-step rule.
+///
+/// Asserted through a save each time, not `read_buffer` on its own: MCP
+/// answers from `editor_core::Document`'s rope, which `save_tab` is what
+/// refreshes (see the note at the top of this file) — the same reason
+/// `e2e_open_project_edit_save` saves before every `buffer()` call.
+#[test]
+#[ignore = "E2E: needs an X server; run via `make e2e`"]
+fn e2e_multi_caret_edit_is_one_undo() {
+    let name = "e2e_multi_caret_edit_is_one_undo";
+    let mut ide = Ide::launch(name, APP, fixture("tiny"));
+    let mcp = ide.mcp();
+    ide.wait_for_ev(Mark::start(), "project_opened");
+    wait_for_index(&mcp);
+
+    let original = fixture_text("tiny", "src/main.rs");
+    assert_eq!(
+        original.matches("world").count(),
+        2,
+        "the fixture's shape changed"
+    );
+
+    let tab = open_file(&ide, "main.rs");
+    let tab_id = tab["tab_id"].as_u64().expect("tab_id");
+
+    // Line 4 (0-indexed from Ctrl+Home): `    println!("{}", greeting::greet("world"));`.
+    // Column 38 sits between the 'o' and the 'r' of "world" — inside the
+    // word, which is what makes the first Ctrl+D select it rather than an
+    // empty caret.
+    ide.key("ctrl+Home");
+    for _ in 0..3 {
+        ide.key("Down");
+    }
+    for _ in 0..38 {
+        ide.key("Right");
+    }
+
+    // First Ctrl+D selects "world"; the second adds the next occurrence.
+    ide.key("ctrl+d");
+    ide.key("ctrl+d");
+
+    let mark = ide.mark();
+    ide.type_text("!");
+    ide.wait_for_event(mark, "the tab to go dirty", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == true
+    });
+    ide.key("ctrl+s");
+    ide.wait_for_event(mark, "the tab to go clean after saving", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false
+    });
+    ide.sync(&mcp);
+
+    let edited = buffer(&mcp, tab_id);
+    let mut expected = original.replacen("world", "!", 1);
+    expected = expected.replacen("world", "!", 1);
+    assert_eq!(
+        edited, expected,
+        "typing at two carets did not replace both selections with one character each"
+    );
+
+    // The guard: one undo restores both occurrences, because the whole
+    // two-caret replacement crossed the seam as one `Vec<FfiTextEdit>` and
+    // was spliced inside one `beginEditBlock` (ADR-0023).
+    let mark = ide.mark();
+    ide.key("ctrl+z");
+    ide.wait_for_event(mark, "the tab to go dirty again", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == true
+    });
+    ide.key("ctrl+s");
+    ide.wait_for_event(mark, "the undone tab to be saved", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false
+    });
+    ide.sync(&mcp);
+    assert_eq!(
+        buffer(&mcp, tab_id),
+        original,
+        "one Ctrl+Z did not undo the two-caret edit"
+    );
+
+    assert_eq!(ide.quit(), 0);
+}
+
+/// Comment toggle and duplicate line, each its own undo (F1-18).
+///
+/// Reformat is not exercised here: no language server is installed in
+/// `linux-builder` (F0-14's rust-analyzer image is a separate, opt-in
+/// stage), so `code.reformat` has nothing to talk to in this environment.
+/// Comment toggle and the line operations need no server at all — they are
+/// `syntax-core`'s registry and a rope, which is exactly why they are
+/// covered here instead.
+///
+/// Asserted through a save each time, not `read_buffer` on its own — see
+/// the note on `e2e_multi_caret_edit_is_one_undo`.
+#[test]
+#[ignore = "E2E: needs an X server; run via `make e2e`"]
+fn e2e_comment_toggle_and_duplicate_line() {
+    let name = "e2e_comment_toggle_and_duplicate_line";
+    let mut ide = Ide::launch(name, APP, fixture("tiny"));
+    let mcp = ide.mcp();
+    ide.wait_for_ev(Mark::start(), "project_opened");
+    wait_for_index(&mcp);
+
+    let original = fixture_text("tiny", "src/main.rs");
+    let tab = open_file(&ide, "main.rs");
+    let tab_id = tab["tab_id"].as_u64().expect("tab_id");
+    ide.key("ctrl+Home");
+
+    // Comment the first line, save, then undo and save again.
+    let mark = ide.mark();
+    ide.key("ctrl+slash");
+    ide.wait_for_event(mark, "the tab to go dirty", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == true
+    });
+    ide.key("ctrl+s");
+    ide.wait_for_event(mark, "the tab to go clean after saving", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false
+    });
+    ide.sync(&mcp);
+    assert!(
+        buffer(&mcp, tab_id).starts_with("// mod greeting;"),
+        "Ctrl+/ did not comment the first line"
+    );
+
+    let mark = ide.mark();
+    ide.key("ctrl+z");
+    ide.wait_for_event(mark, "the tab to go dirty again", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == true
+    });
+    ide.key("ctrl+s");
+    ide.wait_for_event(mark, "the undone tab to be saved", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false
+    });
+    ide.sync(&mcp);
+    assert_eq!(
+        buffer(&mcp, tab_id),
+        original,
+        "one Ctrl+Z did not undo the comment toggle"
+    );
+
+    // Duplicate the first line, save, then undo and save again.
+    let mark = ide.mark();
+    ide.key("ctrl+alt+d");
+    ide.wait_for_event(mark, "the tab to go dirty", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == true
+    });
+    ide.key("ctrl+s");
+    ide.wait_for_event(mark, "the tab to go clean after saving", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false
+    });
+    ide.sync(&mcp);
+    assert!(
+        buffer(&mcp, tab_id).starts_with("mod greeting;\nmod greeting;\n"),
+        "Ctrl+Alt+D did not duplicate the first line"
+    );
+
+    let mark = ide.mark();
+    ide.key("ctrl+z");
+    ide.wait_for_event(mark, "the tab to go dirty again", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == true
+    });
+    ide.key("ctrl+s");
+    ide.wait_for_event(mark, "the undone tab to be saved", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false
+    });
+    ide.sync(&mcp);
+    assert_eq!(
+        buffer(&mcp, tab_id),
+        original,
+        "one Ctrl+Z did not undo the duplicated line"
+    );
+
+    assert_eq!(ide.quit(), 0);
+}
+
 /// The centre of a tab's label on screen, from its `tab_added` marker.
 fn tab_centre(tab: &serde_json::Value) -> (i32, i32) {
     let rect: Vec<i64> = tab["rect"]
