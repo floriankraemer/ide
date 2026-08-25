@@ -17,6 +17,7 @@
 #include "icon_cache.h"
 #include "ide_main_window.h"
 #include "keymap_page.h"
+#include "mcp_page.h"
 #include "search_everywhere_dialog.h"
 #include "problems_panel.h"
 #include "icon_decoration_proxy.h"
@@ -24,6 +25,8 @@
 #include "recent_projects_menu.h"
 #include "refactor_controller.h"
 #include "refactor_preview_dialog.h"
+#include "run_console_panel.h"
+#include "run_menu.h"
 #include "search_results_panel.h"
 #include "settings_dialog.h"
 #include "splash_screen.h"
@@ -102,13 +105,14 @@ struct CentralWidgets
     AiChatPanel *aiChatPanel;
     ChangesPanel *changesPanel;
     FileHistoryPanel *fileHistoryPanel;
+    RunConsolePanel *runConsolePanel;
 };
 
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
                                    DocumentManager *docManager, AppSettings *appSettings,
                                    SearchModel *searchModel, TerminalSession *terminalSession,
                                    LanguageService *languageService, AiChat *aiChat,
-                                   VcsService *vcsService)
+                                   VcsService *vcsService, RunService *runService)
 {
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
@@ -238,6 +242,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     terminalDock->setWidget(terminalWidget);
     docks->registerDock(QStringLiteral("terminal"), terminalDock, ads::CenterDockWidgetArea,
                         bottomArea);
+    auto *runConsolePanel = buildRunConsoleDock(dockManager, docks, bottomArea, runService, openAt);
 
     // Class View tracks whatever tab is current: refresh on open, on
     // switch, and whenever a tab becomes clean. `tabModifiedChanged`
@@ -391,7 +396,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                            treeView,         searchResultsPanel, classViewPanel,
                            terminalWidget,   findUsagesPanel,  searchEverywhereDialog,
                            problemsPanel,    aiChatPanel,      changesPanel,
-                           fileHistoryPanel};
+                           fileHistoryPanel, runConsolePanel};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -452,6 +457,8 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // F3-12/F3-16: one Git adapter per window, discovering nothing until a
     // project is opened, same as LanguageService.
     auto *vcsService = new VcsService(window);
+    auto *runService = new RunService(window);
+    auto *runConfigEditor = new RunConfigEditor(window);
     // ADR-0021: one AI chat session per window, alongside the other
     // per-window QObjects, plus the Settings > AI Providers draft — the same
     // arrangement KeymapEditor and LanguageServerEditor use, parented to the
@@ -464,23 +471,12 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // every EditorCommand back onto this same QObject's Qt thread. Whether
     // it listens at all, and on which port, is the Rust side's decision
     // from settings; this call only says "make it match".
-    //
-    // The status string outlives the Settings dialog, so reopening Settings
-    // shows what the server is actually doing rather than a stale guess.
-    auto mcpStatus = std::make_shared<QString>(QObject::tr("Starting..."));
-    QObject::connect(docManager, &DocumentManager::mcpStarted, window,
-                      [mcpStatus](std::uint16_t port) {
-                          *mcpStatus = QObject::tr("Listening on 127.0.0.1:%1").arg(port);
-                      });
-    QObject::connect(docManager, &DocumentManager::mcpStopped, window,
-                      [mcpStatus]() { *mcpStatus = QObject::tr("Disabled"); });
-    QObject::connect(docManager, &DocumentManager::mcpFailed, window,
-                      [mcpStatus](const QString &message) { *mcpStatus = message; });
+    auto mcpStatus = wireMcpStatus(docManager, window);
     docManager->applyMcpSettings();
     progress(3, QObject::tr("Building workspace..."));
     const CentralWidgets central =
       buildCentralWidget(window, treeModel, docManager, appSettings, searchModel, terminalSession,
-                          languageService, aiChat, vcsService);
+                          languageService, aiChat, vcsService, runService);
     EditorTabs *editorTabs = central.editorTabs;
     wireVcsService(vcsService, treeModel, editorTabs); // F3-12a/F3-16
 
@@ -948,6 +944,8 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // F3-19: the VCS menu (vcs_menu.cpp).
     buildVcsMenu(window, vcsService, appSettings, *actions, editorTabs, central.docks,
                  central.fileHistoryPanel, viewMenu);
+    buildRunMenu(window, runService, runConfigEditor, appSettings, *actions, central.docks,
+                 central.runConsolePanel, treeModel, viewMenu);
 
     // N8: code navigation. The Ctrl+Click gesture and every action below
     // route through the one DeclarationNavigator, so there is a single

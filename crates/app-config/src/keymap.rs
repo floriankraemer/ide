@@ -477,6 +477,42 @@ pub const ACTIONS: &[ActionDef] = &[
         category: "View",
         default_shortcut: "",
     },
+    ActionDef {
+        id: "run.run",
+        label: "Run",
+        category: "Run",
+        default_shortcut: "Shift+F10",
+    },
+    ActionDef {
+        id: "run.stop",
+        label: "Stop",
+        category: "Run",
+        default_shortcut: "Ctrl+F2",
+    },
+    ActionDef {
+        id: "run.rerun",
+        label: "Rerun",
+        category: "Run",
+        default_shortcut: "Ctrl+F5",
+    },
+    ActionDef {
+        id: "run.selectConfiguration",
+        label: "Select Run Configuration...",
+        category: "Run",
+        default_shortcut: "Alt+Shift+F10",
+    },
+    ActionDef {
+        id: "run.editConfigurations",
+        label: "Edit Configurations...",
+        category: "Run",
+        default_shortcut: "",
+    },
+    ActionDef {
+        id: "view.runConsole",
+        label: "Run Console",
+        category: "View",
+        default_shortcut: "Alt+4",
+    },
 ];
 
 /// The action with this id, or `None` for an id that no longer exists (an old

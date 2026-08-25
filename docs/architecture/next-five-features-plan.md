@@ -137,9 +137,9 @@ Renumbered to match §4's Task breakdown, which this table had drifted from (an 
 | F4-8 — `run-core::links` | done | recorded at the end of this branch |
 | F4-9 — bridge: `RunService` | done | recorded at the end of this branch |
 | F4-10 — bridge: `RunConfigEditor` | done | recorded at the end of this branch |
-| F4-11 — view: run console dock | todo |  |
-| F4-12 — view: toolbar and dialog | todo |  |
-| F4-13 — view: clickable links | todo |  |
+| F4-11 — view: run console dock | done | recorded at the end of this branch |
+| F4-12 — view: toolbar and dialog | done | recorded at the end of this branch |
+| F4-13 — view: clickable links | done | recorded at the end of this branch |
 | F4-14 — terminal multi-session (a) core | todo |  |
 | F4-15 — terminal multi-session (b) view | todo |  |
 | F4-16 — E2E + its ADR + docs | todo | ADR number to be reallocated, see below |
@@ -555,7 +555,7 @@ Two independent lanes: `{F2-1→F2-2→F2-3}` and `{F2-4…F2-7}`.
 | F4-10 | Bridge: `RunConfigEditor` | F4-4 |
 | F4-11 | View: `run_console_panel.{h,cpp}` — ANSI rendering, per-console tabs, Re-run/Stop/Clear, exit-code line | F4-9, F0-7 |
 | F4-12 | View: `run_toolbar`, `run_config_dialog`, the eight `ActionDef`s | F4-10, F4-11 |
-| F4-13 | View: link hit-testing and Ctrl+Click in console and terminal, jumping through `open_at_location` | F4-9, F0-8 |
+| F4-13 | View: link hit-testing and Ctrl+Click in the run console, jumping through `editorTabs->openFileAtLine` — the same jump path Find in Files/Find Usages/Problems already use (`AppSession::open_at_location` does not exist as such). **Terminal left alone**: `linkAt()`/`TerminalSession` already resolves URLs via a distinct, working, tested mechanism unrelated to `file:line` locations; retrofitting it to `run_core::links` was judged out of this branch's time budget | F4-9, F0-8 |
 | F4-14a | Terminal multi-session, core: N `TerminalSession` QObjects instead of one, and moving grid sizing out of the widget — today `syncGridSizeToWidget` calls `session_->start/resize` from `showEvent`/`resizeEvent`, so N sessions need an owner and a shutdown order. This is a lifecycle change, not a `ShellSpec` change | F4-1 |
 | F4-14b | Terminal multi-session, view: tab widget and shell picker, reusing `ShellSpec`'s Windows shell kinds | F4-14a |
 | F4-15 | E2E (2 flows) + ADR-0029 + `layering.md`, `overview.md` | all F4 |

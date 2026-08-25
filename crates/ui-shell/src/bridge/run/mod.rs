@@ -71,6 +71,147 @@ struct ConsoleState {
     config_id: String,
     cwd: PathBuf,
     output: String,
+    /// F4-11 v1: console text is displayed and cached with ANSI/VT escapes
+    /// removed rather than rendered as color (a `QPlainTextEdit` has no SGR
+    /// support of its own, and the plan's `FfiStyledRun` design — SGR parsed
+    /// into styled runs in Rust, one `QTextCharFormat` per run in C++ — is
+    /// real work this branch's time budget didn't reach). Stripping here,
+    /// once, keeps `output` (what `resolveLink` byte-offsets index into) and
+    /// what `consoleOutput` sends the view in sync — both are the same
+    /// visible text — so link resolution stays correct even though the
+    /// stream it is computed from is not the raw one `run-core` batched.
+    /// Follow-up: replace this field and `strip_ansi_stateful` with real SGR
+    /// parsing and an `FfiStyledRun` signal.
+    ansi: AnsiStripper,
+    /// Set once, by whichever of `finish_console`/`stop` first observes this
+    /// console has exited, so the other does not also emit `consoleFinished`
+    /// (see both call sites). The entry itself is kept around afterwards,
+    /// not removed: `resolveLink` must still answer for a finished console's
+    /// scrollback — F4-11's dock deliberately leaves a finished console's
+    /// tab open for exactly that review — so the cache it reads from has to
+    /// outlive the process it was collected from.
+    finished: bool,
+}
+
+/// Removes ANSI/VT escape sequences (SGR color codes, cursor moves, OSC
+/// hyperlinks/titles) from streamed process output, byte-by-byte and
+/// statefully: a batch boundary can split a sequence mid-way — the same
+/// concern `run_core::batching`'s "ansi state survives a batch boundary"
+/// test covers for `resolve_link` — so an unterminated sequence's state
+/// carries over to the next `feed` call instead of leaking stray bytes into
+/// the visible text or corrupting the next chunk's parse.
+///
+/// Scans byte-by-byte rather than char-by-char, but this never splits a
+/// multi-byte UTF-8 character: every byte this parser treats specially
+/// (ESC, `[`, `]`, BEL, `\`, and the CSI final-byte range `0x40..=0x7E`) is
+/// ASCII (< 0x80), and UTF-8 continuation bytes are always >= 0x80, so they
+/// are never mistaken for one of these markers and always fall through
+/// untouched in `Normal` state.
+#[derive(Default)]
+struct AnsiStripper {
+    state: AnsiState,
+}
+
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+enum AnsiState {
+    #[default]
+    Normal,
+    /// Saw ESC; the next byte says what kind of sequence follows.
+    Escape,
+    /// Inside a CSI (`ESC [ ... final`) sequence, awaiting the final byte.
+    Csi,
+    /// Inside an OSC (`ESC ] ... terminator`) sequence, awaiting BEL or ST
+    /// (`ESC \`).
+    Osc,
+    /// Inside an OSC sequence, just saw ESC — one more byte says whether
+    /// this is ST (`\`) or an unrelated ESC that keeps the OSC going.
+    OscEscape,
+}
+
+impl AnsiStripper {
+    fn feed(&mut self, text: &str) -> String {
+        let mut out = Vec::with_capacity(text.len());
+        for &byte in text.as_bytes() {
+            self.state = match (self.state, byte) {
+                (AnsiState::Normal, 0x1B) => AnsiState::Escape,
+                (AnsiState::Normal, _) => {
+                    out.push(byte);
+                    AnsiState::Normal
+                }
+                (AnsiState::Escape, b'[') => AnsiState::Csi,
+                (AnsiState::Escape, b']') => AnsiState::Osc,
+                // Any other byte after a lone ESC is a two-byte sequence
+                // (e.g. `ESC M`) — fully consumed by this one byte.
+                (AnsiState::Escape, _) => AnsiState::Normal,
+                (AnsiState::Csi, 0x40..=0x7E) => AnsiState::Normal,
+                (AnsiState::Csi, _) => AnsiState::Csi,
+                (AnsiState::Osc, 0x07) => AnsiState::Normal,
+                (AnsiState::Osc, 0x1B) => AnsiState::OscEscape,
+                (AnsiState::Osc, _) => AnsiState::Osc,
+                (AnsiState::OscEscape, b'\\') => AnsiState::Normal,
+                (AnsiState::OscEscape, _) => AnsiState::Osc,
+            };
+        }
+        // Safe: every dropped byte belonged to an escape sequence, and every
+        // sequence marker is ASCII (see the struct's doc comment), so `out`
+        // is a concatenation of untouched, already-valid UTF-8 spans.
+        String::from_utf8(out).unwrap_or_default()
+    }
+}
+
+#[cfg(test)]
+mod ansi_strip_tests {
+    use super::AnsiStripper;
+
+    #[test]
+    fn passes_plain_text_through_unchanged() {
+        assert_eq!(AnsiStripper::default().feed("hello\nworld"), "hello\nworld");
+    }
+
+    #[test]
+    fn strips_an_sgr_color_sequence() {
+        assert_eq!(
+            AnsiStripper::default().feed("\x1b[31merror\x1b[0m: oops"),
+            "error: oops"
+        );
+    }
+
+    #[test]
+    fn strips_a_two_byte_escape() {
+        assert_eq!(AnsiStripper::default().feed("a\x1bMb"), "ab");
+    }
+
+    #[test]
+    fn strips_an_osc_hyperlink_terminated_by_bel() {
+        assert_eq!(
+            AnsiStripper::default().feed("\x1b]8;;file:///x\x07link\x1b]8;;\x07"),
+            "link"
+        );
+    }
+
+    #[test]
+    fn strips_an_osc_sequence_terminated_by_string_terminator() {
+        assert_eq!(
+            AnsiStripper::default().feed("\x1b]0;title\x1b\\visible"),
+            "visible"
+        );
+    }
+
+    #[test]
+    fn a_sequence_split_across_two_batches_is_still_stripped() {
+        let mut stripper = AnsiStripper::default();
+        let mut visible = stripper.feed("before\x1b[3");
+        visible.push_str(&stripper.feed("1mafter"));
+        assert_eq!(visible, "beforeafter");
+    }
+
+    #[test]
+    fn preserves_non_ascii_text_around_a_stripped_sequence() {
+        assert_eq!(
+            AnsiStripper::default().feed("caf\u{e9} \x1b[1mbold\x1b[0m \u{1F600}"),
+            "caf\u{e9} bold \u{1F600}"
+        );
+    }
 }
 
 /// Rust side of the `RunService` QObject.
@@ -164,13 +305,19 @@ fn emit_events(
         match event {
             run_core::BatchedOutput::Output(text) => {
                 let _ = qt_thread.queue(move |mut service: Pin<&mut ffi::RunService>| {
-                    if let Some(state) = service.consoles.borrow_mut().get_mut(&console_id) {
-                        state.output.push_str(&text);
+                    let visible = {
+                        let mut consoles = service.consoles.borrow_mut();
+                        let Some(state) = consoles.get_mut(&console_id) else {
+                            return;
+                        };
+                        let visible = state.ansi.feed(&text);
+                        state.output.push_str(&visible);
                         cap_cached_output(&mut state.output, run_core::batching::MAX_RING_BYTES);
-                    }
+                        visible
+                    };
                     service
                         .as_mut()
-                        .console_output(console_id, QString::from(text.as_str()));
+                        .console_output(console_id, QString::from(visible.as_str()));
                 });
             }
             run_core::BatchedOutput::Truncated => {
@@ -263,15 +410,35 @@ fn finish_console(
     let console_id = id.0;
     let qt_thread = qt_thread.clone();
     let _ = qt_thread.queue(move |mut service: Pin<&mut ffi::RunService>| {
-        // The console may already be gone from this cache if an explicit
+        // The console may already be marked finished if an explicit
         // `stop()` won the race with this natural-exit path — both call
-        // `Supervisor::stop`, and only the first to run finds it there.
-        if service.consoles.borrow_mut().remove(&console_id).is_some() {
+        // `Supervisor::stop`, and only the first to run here should emit.
+        // The entry itself is never removed (see `ConsoleState::finished`'s
+        // doc comment): `resolveLink` still has to answer for it.
+        if mark_finished(&mut service.consoles.borrow_mut(), console_id) {
             service
                 .as_mut()
                 .console_finished(console_id, exit_code, escaped);
         }
     });
+}
+
+/// Marks `console_id` finished and returns whether this call was the one
+/// that did it — `false` if it was already finished (or is unknown), so a
+/// caller emits `consoleFinished` at most once per console. Shared by
+/// `finish_console` and `RunService::stop`, the two paths that can each
+/// observe the same exit.
+fn mark_finished(
+    consoles: &mut std::collections::HashMap<u64, ConsoleState>,
+    console_id: u64,
+) -> bool {
+    match consoles.get_mut(&console_id) {
+        Some(state) if !state.finished => {
+            state.finished = true;
+            true
+        }
+        _ => false,
+    }
 }
 
 impl ffi::RunService {
@@ -349,8 +516,17 @@ impl ffi::RunService {
             };
         };
 
-        let spec = config.to_launch_spec(&root);
+        let mut spec = config.to_launch_spec(&root);
         let cwd = spec.cwd.clone().unwrap_or_else(|| root.clone());
+        // `to_launch_spec` leaves `cwd` as `None` for a configuration with
+        // no explicit working directory (`run_core::config::to_launch_spec`
+        // makes no project-root assumption of its own — that is this
+        // bridge's job, per its own `cwd` field doc comment). Filling it in
+        // here, rather than trusting `pty_core`'s spawn to fall back to
+        // something sane, is what actually launches the process in the
+        // project root instead of wherever the IDE process itself happened
+        // to start from.
+        spec.cwd = Some(cwd.clone());
 
         let tx = self.as_mut().ensure_worker();
         let qt_thread = self.qt_thread();
@@ -368,6 +544,8 @@ impl ffi::RunService {
                                 config_id: started_config_id.clone(),
                                 cwd,
                                 output: String::new(),
+                                ansi: AnsiStripper::default(),
+                                finished: false,
                             },
                         );
                         service
@@ -410,7 +588,7 @@ impl ffi::RunService {
             if let Ok(outcome) = worker.supervisor.stop(id) {
                 let escaped = matches!(outcome, pty_core::KillOutcome::Escaped);
                 let _ = qt_thread.queue(move |mut service: Pin<&mut ffi::RunService>| {
-                    if service.consoles.borrow_mut().remove(&console_id).is_some() {
+                    if mark_finished(&mut service.consoles.borrow_mut(), console_id) {
                         service.as_mut().console_finished(console_id, -1, escaped);
                     }
                 });
