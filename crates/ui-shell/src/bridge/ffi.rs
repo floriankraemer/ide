@@ -461,7 +461,29 @@ mod ffi {
         title: QString,
         document_count: u32,
         edit_count: u32,
+        /// Files this refactoring creates, renames or deletes (F2-3). Shown
+        /// alongside `edit_count` so "moves a type to a new file" reads as
+        /// what it is rather than as a text edit that mentions a path.
+        op_count: u32,
         touches_other_files: bool,
+    }
+
+    /// What kind of resource operation a `WorkspaceEdit` step performs.
+    /// Mirrors `lsp_core::ResourceOp`'s three variants exactly — the bridge
+    /// translates one to the other and decides nothing (ADR-0026).
+    enum FfiResourceOpKind {
+        Create,
+        Rename,
+        Delete,
+    }
+
+    /// One file a pending refactoring will create, rename or delete, for the
+    /// preview to list as such rather than as a text edit. `new_path` is
+    /// empty except for `Rename`.
+    struct FfiResourceOp {
+        kind: FfiResourceOpKind,
+        path: QString,
+        new_path: QString,
     }
 
     /// Why a name-based rename will not run, as a code rather than a
@@ -2551,6 +2573,13 @@ mod ffi {
         #[cxx_name = "pendingEdits"]
         fn pending_edits(self: &LanguageService) -> Vec<FfiTextEdit>;
 
+        /// Every file the pending refactoring would create, rename or
+        /// delete (F2-3), for the preview to list as such. Reading them
+        /// changes nothing.
+        #[qinvokable]
+        #[cxx_name = "pendingOps"]
+        fn pending_ops(self: &LanguageService) -> Vec<FfiResourceOp>;
+
         /// Leave `path` out of the pending refactoring — the user unticked
         /// it in the preview. Call before `takePendingEdits`; excluding a
         /// path that is not in the plan does nothing.
@@ -2579,6 +2608,14 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "cancelRefactor"]
         fn cancel_refactor(self: Pin<&mut LanguageService>);
+
+        /// A resource operation this service performed (F2-3) retargeted an
+        /// open tab — the same relay `ProjectTreeModel::tabTitleChanged`
+        /// sends for a tree-driven rename, reused here because the tab strip
+        /// listens to it the same way regardless of who moved the file.
+        #[qsignal]
+        #[cxx_name = "tabTitleChanged"]
+        fn tab_title_changed(self: Pin<&mut LanguageService>, tab_id: u64, title: QString);
 
         /// Emitted on the Qt thread after the store changed: a server
         /// published, or a document was closed. The view re-reads whatever it

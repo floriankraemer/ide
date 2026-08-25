@@ -82,7 +82,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 |---|---|---|
 | F2-1 — resource operations: parse and order | done | ac32f77 (#84) |
 | F2-2 — resource operations: perform as `FileOp` | done | ac32f77 (#84) |
-| F2-3 — resource operations: bridge + view | todo |  |
+| F2-3 — resource operations: bridge + view | done | 28ead4b |
 | F2-4 — `lsp-core::intentions` | done | 264f3b3 (#88) |
 | F2-5 — `lsp-core::signature_help` | done | 264f3b3 (#88) |
 | F2-6 — `document_highlight` + `inlay_hint` | done | 264f3b3 (#88) |

@@ -340,7 +340,9 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                           editorTabs->onBufferEditedExternally(tabId, content);
                       });
 
-    // A tree-driven rename/delete retitled an open tab (US-2b).
+    // A tree-driven rename/delete retitled an open tab (US-2b). A
+    // refactoring's own resource operations (F2-3) retitle one too, wired in
+    // RefactorController's constructor since it already owns both ends.
     QObject::connect(treeModel,
                       &ProjectTreeModel::tabTitleChanged,
                       editorTabs,

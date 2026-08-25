@@ -69,6 +69,7 @@ pub use signature_help::{
     SignatureInfo, SignatureTriggers,
 };
 pub use workspace_edit::{
-    apply_to_text, descending, parse_workspace_edit, plan as plan_edit, DocumentEdits, EditError,
-    EditGate, EditPlan, TextEdit,
+    apply_to_text, descending, parse_workspace_changes, parse_workspace_edit, plan as plan_edit,
+    plan_changes, ChangeStep, DocumentEdits, EditError, EditGate, EditPlan, ResourceOp, TextEdit,
+    WorkspaceChanges,
 };

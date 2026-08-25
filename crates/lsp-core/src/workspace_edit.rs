@@ -458,9 +458,16 @@ pub struct EditPlan {
     pub buffers: Vec<DocumentEdits>,
     /// Documents not open, to be rewritten on disk.
     pub files: Vec<DocumentEdits>,
+    /// Files this edit creates, renames or deletes, in the order the server
+    /// sent them. Performed in full, before any text edit is written
+    /// (ADR-0026) — the bridge maps each one to `app_core::FileOp` and
+    /// nothing here decides what performing one means.
+    pub ops: Vec<ResourceOp>,
     /// Whether anything outside the file the gesture started in is touched.
     /// This is what decides "apply straight away" from "show the preview
-    /// first", so it is answered here rather than counted in C++.
+    /// first", so it is answered here rather than counted in C++. A resource
+    /// operation always sets this: creating, renaming or deleting a file is
+    /// never a same-file change.
     pub touches_other_files: bool,
 }
 
@@ -482,7 +489,7 @@ impl EditPlan {
     /// Nothing to do — a rename that changed no text, or an edit whose
     /// documents all resolved to nothing.
     pub fn is_empty(&self) -> bool {
-        self.buffers.is_empty() && self.files.is_empty()
+        self.buffers.is_empty() && self.files.is_empty() && self.ops.is_empty()
     }
 }
 
@@ -532,6 +539,32 @@ pub fn plan(
             out.files.push(doc);
         }
     }
+    Ok(out)
+}
+
+/// [`plan`], extended to carry the resource operations a `WorkspaceChanges`
+/// may include.
+///
+/// Ordering is deliberately simpler than the protocol's own "apply the array
+/// in order": every resource operation is performed first, as one
+/// all-or-nothing step, and only then are the text edits applied — matching
+/// `app_core::apply_file_ops`'s own "abort before any text edit" rule
+/// (ADR-0026). A server that interleaves a rename between two edits to make
+/// the second one address the new path is not served correctly by this; no
+/// server in the conformance suite does that, and getting it wrong reads as
+/// "the refactoring did nothing" rather than corrupting a file, which is the
+/// bar ADR-0019 sets.
+pub fn plan_changes(
+    changes: WorkspaceChanges,
+    open_paths: &[String],
+    current_path: &str,
+    versions: &dyn Fn(&str) -> Option<i32>,
+) -> Result<EditPlan, EditError> {
+    let ops: Vec<ResourceOp> = changes.operations().cloned().collect();
+    let docs: Vec<DocumentEdits> = changes.documents().cloned().collect();
+    let mut out = plan(docs, open_paths, current_path, versions)?;
+    out.touches_other_files |= !ops.is_empty();
+    out.ops = ops;
     Ok(out)
 }
 
@@ -1111,5 +1144,41 @@ mod resource_op_tests {
             parse_workspace_changes(&Value::Null).unwrap(),
             WorkspaceChanges::default()
         );
+    }
+
+    #[test]
+    fn plan_changes_carries_the_operations_and_marks_other_files_touched() {
+        let value = json!({"documentChanges": [
+            {"kind": "create", "uri": "file:///p/new.rs"},
+        ]});
+        let changes = parse_workspace_changes(&value).unwrap();
+        let plan = plan_changes(changes, &[], "", &|_| None).unwrap();
+        assert_eq!(plan.ops.len(), 1);
+        assert!(plan.touches_other_files);
+        assert!(!plan.is_empty());
+    }
+
+    #[test]
+    fn plan_changes_still_splits_documents_between_buffers_and_files() {
+        let value = json!({"documentChanges": [
+            {"textDocument": {"uri": "file:///p/a.rs", "version": null},
+             "edits": [{"range": range(0, 0, 0, 3), "newText": "Bar"}]},
+            {"kind": "delete", "uri": "file:///p/old.rs"},
+        ]});
+        let changes = parse_workspace_changes(&value).unwrap();
+        let open = vec!["/p/a.rs".to_string()];
+        let plan = plan_changes(changes, &open, "/p/a.rs", &|_| None).unwrap();
+        assert_eq!(plan.buffers.len(), 1);
+        assert_eq!(plan.ops.len(), 1);
+        // The edit is to the current file, but the delete still makes this
+        // a multi-file change — a resource operation is never "the same
+        // file", even when it is the only other thing in the plan.
+        assert!(plan.touches_other_files);
+    }
+
+    #[test]
+    fn a_plan_with_no_documents_or_operations_is_empty() {
+        let plan = plan_changes(WorkspaceChanges::default(), &[], "", &|_| None).unwrap();
+        assert!(plan.is_empty());
     }
 }

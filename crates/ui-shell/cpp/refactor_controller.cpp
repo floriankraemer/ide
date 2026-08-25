@@ -6,6 +6,7 @@
 #include <QAction>
 #include <QCursor>
 #include <QDialog>
+#include <QFileInfo>
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMainWindow>
@@ -54,6 +55,10 @@ RefactorController::RefactorController(LanguageService *languageService, SearchM
             });
     connect(languageService_, &LanguageService::codeActionsReady, this,
             &RefactorController::onCodeActionsReady);
+    // F2-3: a resource operation the refactoring performed retitled an open
+    // tab, exactly as a tree-driven rename does.
+    connect(languageService_, &LanguageService::tabTitleChanged, editorTabs_,
+            &EditorTabs::onTabTitleChanged);
 
     connect(searchModel_, &SearchModel::indexRenameReady, this,
             &RefactorController::onIndexRenameReady);
@@ -182,17 +187,36 @@ void RefactorController::onRefactorReady(const FfiRefactorSummary &summary)
     }
 
     QList<RefactorPreviewDialog::Row> rows;
+    for (const FfiResourceOp &op : languageService_->pendingOps()) {
+        QString detail;
+        switch (op.kind) {
+        case FfiResourceOpKind::Create:
+            detail = tr("Create file");
+            break;
+        case FfiResourceOpKind::Rename:
+            detail = tr("Rename to %1").arg(QFileInfo(QString(op.new_path)).fileName());
+            break;
+        case FfiResourceOpKind::Delete:
+            detail = tr("Delete file");
+            break;
+        }
+        rows.append({op.path, 0, detail, true, true});
+    }
     for (const FfiTextEdit &edit : languageService_->pendingEdits()) {
         rows.append({edit.path, static_cast<int>(edit.start_line),
                       previewText(edit.new_text), true, true});
     }
-    RefactorPreviewDialog dialog(summary.title,
-                                  tr("%n change(s) across %1 file(s). Changes to files that "
-                                     "are not open are written to disk and cannot be undone.",
-                                     "", static_cast<int>(summary.edit_count))
-                                    .arg(summary.document_count),
-                                  rows,
-                                  window_);
+    const QString explanation = summary.op_count > 0
+      ? tr("%n change(s) across %1 file(s), including %2 file creation/rename/deletion. Changes "
+           "to files that are not open are written to disk and cannot be undone.",
+           "", static_cast<int>(summary.edit_count))
+          .arg(summary.document_count)
+          .arg(summary.op_count)
+      : tr("%n change(s) across %1 file(s). Changes to files that "
+           "are not open are written to disk and cannot be undone.",
+           "", static_cast<int>(summary.edit_count))
+          .arg(summary.document_count);
+    RefactorPreviewDialog dialog(summary.title, explanation, rows, window_);
     if (dialog.exec() != QDialog::Accepted) {
         languageService_->cancelRefactor();
         return;

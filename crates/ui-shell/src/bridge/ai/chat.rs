@@ -863,6 +863,7 @@ impl ffi::AiChat {
             title: QString::from(format!("Apply to {}", file_name_of(&path)).as_str()),
             document_count: plan.document_count() as u32,
             edit_count: plan.edit_count() as u32,
+            op_count: 0,
             touches_other_files: plan.touches_other_files,
         };
         *self.pending_apply.borrow_mut() = Some(PendingApply {
