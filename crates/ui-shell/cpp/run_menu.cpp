@@ -1,6 +1,7 @@
 #include "run_menu.h"
 
 #include "dock_layout.h"
+#include "e2e_mark.h"
 #include "keymap_page.h"
 #include "run_config_dialog.h"
 #include "run_console_panel.h"
@@ -33,6 +34,14 @@ void buildRunMenu(QMainWindow *window, RunService *runService, RunConfigEditor *
                       });
 
     QMenu *runMenu = window->menuBar()->addMenu(QObject::tr("&Run"));
+    // A top-level menu bar entry never goes through `exec()`, so
+    // `aboutToShow`/`aboutToHide` are the only signal an E2E flow has that
+    // it is safe to send keystrokes into it — same reasoning as
+    // `vcs_menu.cpp`'s "V&CS" markers.
+    QObject::connect(runMenu, &QMenu::aboutToShow, runMenu,
+                      []() { e2eMark("{\"ev\":\"dialog_shown\",\"name\":\"run_menu\"}"); });
+    QObject::connect(runMenu, &QMenu::aboutToHide, runMenu,
+                      []() { e2eMark("{\"ev\":\"dialog_closed\",\"name\":\"run_menu\"}"); });
 
     QAction *runAction = registerAction(runMenu, QStringLiteral("run.run"), QObject::tr("Run"),
                                         appSettings, actions);

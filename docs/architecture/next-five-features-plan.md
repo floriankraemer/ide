@@ -129,20 +129,20 @@ Renumbered to match §4's Task breakdown, which this table had drifted from (an 
 |---|---|---|
 | F4-1 — `pty-core`: cwd and env | done | e1788b0 (#86) |
 | F4-2 — `pty-core`: kill tree | done | e1788b0 (#86) |
-| F4-3 — `run-core` skeleton + model | done | recorded at the end of this branch |
-| F4-4 — persistence | done | recorded at the end of this branch |
-| F4-5 — detection | done | recorded at the end of this branch |
-| F4-6 — supervisor | done | recorded at the end of this branch |
-| F4-7 — output batching | done | recorded at the end of this branch |
-| F4-8 — `run-core::links` | done | recorded at the end of this branch |
-| F4-9 — bridge: `RunService` | done | recorded at the end of this branch |
-| F4-10 — bridge: `RunConfigEditor` | done | recorded at the end of this branch |
-| F4-11 — view: run console dock | done | recorded at the end of this branch |
-| F4-12 — view: toolbar and dialog | done | recorded at the end of this branch |
-| F4-13 — view: clickable links | done | recorded at the end of this branch |
-| F4-14 — terminal multi-session (a) core | done | recorded at the end of this branch |
-| F4-15 — terminal multi-session (b) view | done | recorded at the end of this branch |
-| F4-16 — E2E + its ADR + docs | todo | ADR number to be reallocated, see below |
+| F4-3 — `run-core` skeleton + model | done | 431c545 |
+| F4-4 — persistence | done | 431c545 |
+| F4-5 — detection | done | 431c545 |
+| F4-6 — supervisor | done | 431c545 |
+| F4-7 — output batching | done | 431c545 |
+| F4-8 — `run-core::links` | done | 431c545 |
+| F4-9 — bridge: `RunService` | done | 369928e |
+| F4-10 — bridge: `RunConfigEditor` | done | 369928e |
+| F4-11 — view: run console dock | done | efd9518 |
+| F4-12 — view: toolbar and dialog | done | efd9518 |
+| F4-13 — view: clickable links | done | efd9518 |
+| F4-14 — terminal multi-session (a) core | done | 4036e21 |
+| F4-15 — terminal multi-session (b) view | done | 4036e21 |
+| F4-16 — E2E (2 flows) + ADR-0032 + docs | done | e9c56f2 |
 
 **ADR numbering has drifted and must be reallocated.**
 §3 reserves 0022–0029, but the plugin and icon-theme stream that landed alongside F0 took **0026 (plugin-host), 0027 (icon-themes) and 0028 (wasm-plugin-tier)**.

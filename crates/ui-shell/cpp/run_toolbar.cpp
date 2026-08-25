@@ -1,5 +1,7 @@
 #include "run_toolbar.h"
 
+#include "e2e_mark.h"
+
 #include <QComboBox>
 #include <QHBoxLayout>
 #include <QMessageBox>
@@ -72,6 +74,13 @@ void RunToolbar::refreshConfigurations()
     }
     configCombo_->setCurrentIndex(keepIndex >= 0 ? keepIndex : 0);
     refreshButtons();
+
+    // The only signal an E2E flow has that a just-detected or just-persisted
+    // configuration has actually reached this combo box — `configurations()`
+    // is read fresh from disk on every call, so nothing else here marks a
+    // moment worth waiting for.
+    e2eMark(QStringLiteral("{\"ev\":\"run_configurations_changed\",\"count\":%1}")
+              .arg(configCombo_->count()));
 }
 
 void RunToolbar::refreshButtons()

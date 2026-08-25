@@ -1,0 +1,7 @@
+version = 1
+
+[[run_config]]
+id = "e2e-echo"
+name = "E2E Echo"
+program = "/bin/sh"
+args = ["-c", "echo E2E_RUN_MARKER; sleep 30"]

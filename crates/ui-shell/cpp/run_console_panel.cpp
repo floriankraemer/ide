@@ -122,6 +122,10 @@ void RunConsolePanel::onConsoleStarted(quint64 consoleId, const QString &configI
     consoles_.insert(consoleId, ConsoleTab{edit, /*truncationNoticeShown=*/false});
     tabs_->addTab(edit, configId);
     tabs_->setCurrentWidget(edit);
+
+    e2eMark(QStringLiteral("{\"ev\":\"run_console_tab_added\",\"console_id\":%1,\"config_id\":%2}")
+              .arg(consoleId)
+              .arg(e2eJson(configId)));
 }
 
 void RunConsolePanel::onConsoleOutput(quint64 consoleId, const QString &text)
@@ -130,6 +134,9 @@ void RunConsolePanel::onConsoleOutput(quint64 consoleId, const QString &text)
     if (it != consoles_.constEnd()) {
         appendLine(it->edit, text);
     }
+    e2eMark(QStringLiteral("{\"ev\":\"run_console_output\",\"console_id\":%1,\"text\":%2}")
+              .arg(consoleId)
+              .arg(e2eJson(text)));
 }
 
 void RunConsolePanel::onConsoleTruncated(quint64 consoleId)
@@ -155,6 +162,12 @@ void RunConsolePanel::onConsoleFinished(quint64 consoleId, int exitCode, bool es
         line += tr("Some child processes could not be terminated.\n");
     }
     appendLine(it->edit, line);
+
+    e2eMark(QStringLiteral(
+              "{\"ev\":\"run_console_finished\",\"console_id\":%1,\"exit_code\":%2,\"escaped\":%3}")
+              .arg(consoleId)
+              .arg(exitCode)
+              .arg(escaped ? "true" : "false"));
 }
 
 void RunConsolePanel::onLinkActivated(quint64 consoleId, int textPosition)

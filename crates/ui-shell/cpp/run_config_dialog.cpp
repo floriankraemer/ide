@@ -1,5 +1,7 @@
 #include "run_config_dialog.h"
 
+#include "e2e_mark.h"
+
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
@@ -8,8 +10,11 @@
 #include <QListWidget>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QPoint>
 #include <QPushButton>
+#include <QRect>
 #include <QSignalBlocker>
+#include <QTimer>
 #include <QVBoxLayout>
 
 #include <memory>
@@ -143,6 +148,18 @@ void showRunConfigDialog(QWidget *parent, RunConfigEditor *editor)
         commitForm();
         editor->addConfiguration();
         repaintList(list, editor, configCount(editor) - 1);
+        // `repaintList`'s `QSignalBlocker` means its own `setCurrentRow`
+        // above never fires `currentRowChanged` — so, unlike a row the user
+        // clicks themselves, the form has to be pointed at the new row
+        // explicitly, the same way the dialog's own initial setup below
+        // does after its first `repaintList`. Without this the fields stay
+        // on whatever they last showed (or blank and disabled, on the
+        // dialog's first Add), which is what an E2E flow driving Add then
+        // typing into Program actually caught.
+        *previousIndex = list->currentRow();
+        loadForm(list->currentRow());
+        e2eMark(QStringLiteral("{\"ev\":\"run_config_added\",\"count\":%1}")
+                  .arg(configCount(editor)));
     });
 
     QObject::connect(removeButton, &QPushButton::clicked, &dialog, [=]() {
@@ -156,6 +173,10 @@ void showRunConfigDialog(QWidget *parent, RunConfigEditor *editor)
         // wrong entry.
         *previousIndex = -1;
         repaintList(list, editor, qMin(index, configCount(editor) - 1));
+        // Same reasoning as `addButton`'s handler: `repaintList` never fires
+        // `currentRowChanged` on its own.
+        *previousIndex = list->currentRow();
+        loadForm(list->currentRow());
     });
 
     QObject::connect(buttons, &QDialogButtonBox::accepted, &dialog, [=, &dialog]() {
@@ -181,6 +202,47 @@ void showRunConfigDialog(QWidget *parent, RunConfigEditor *editor)
     *previousIndex = list->currentRow();
     loadForm(list->currentRow());
 
+    // A modal `exec()` blocks here until the dialog closes, so — unlike a
+    // menu bar's `aboutToShow`/`aboutToHide` — `dialog_shown` has to be
+    // marked once the dialog is actually up and `dialog_closed` from
+    // `finished`, which fires whichever button (or Escape) closed it. Same
+    // convention `refactor_preview_dialog.cpp` and
+    // `search_everywhere_dialog.cpp` use.
+    QObject::connect(&dialog, &QDialog::finished, &dialog, [](int result) {
+        e2eMark(QStringLiteral("{\"ev\":\"dialog_closed\",\"name\":\"run_config_dialog\","
+                                "\"accepted\":%1}")
+                  .arg(result == QDialog::Accepted ? QLatin1String("true")
+                                                    : QLatin1String("false")));
+    });
+
+    // A zero-delay timer fired from inside `exec()`'s own modal loop, not a
+    // `show()` called ahead of it: `exec()` is what actually grants this
+    // dialog the (window-manager-free) X input focus an E2E flow's clicks
+    // and typing depend on, and doing that ourselves first — tried and
+    // reverted — left the dialog shown but never focused. The rects give
+    // `dialog_shown` the same kind of ready-to-click geometry
+    // `changes_panel_shown` carries — an E2E flow drives this dialog by
+    // clicking Add and Save and typing into Program, not by guessing a
+    // keyboard tab order through a form whose focus chain is an
+    // implementation detail.
+    QTimer::singleShot(0, &dialog, [=]() {
+        const auto rectJson = [](const QRect &rect) {
+            return QStringLiteral("[%1,%2,%3,%4]")
+              .arg(rect.x())
+              .arg(rect.y())
+              .arg(rect.width())
+              .arg(rect.height());
+        };
+        const QRect addRect(addButton->mapToGlobal(QPoint(0, 0)), addButton->size());
+        const QRect programRect(programEdit->mapToGlobal(QPoint(0, 0)), programEdit->size());
+        QPushButton *saveButton = buttons->button(QDialogButtonBox::Save);
+        const QRect saveRect(saveButton->mapToGlobal(QPoint(0, 0)), saveButton->size());
+        e2eMark(QStringLiteral("{\"ev\":\"dialog_shown\",\"name\":\"run_config_dialog\","
+                                "\"add_rect\":%1,\"program_rect\":%2,\"save_rect\":%3}")
+                  .arg(rectJson(addRect))
+                  .arg(rectJson(programRect))
+                  .arg(rectJson(saveRect)));
+    });
     dialog.exec();
 }
 
