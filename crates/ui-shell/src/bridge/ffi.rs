@@ -27,6 +27,7 @@ use crate::bridge::settings::{
 };
 use crate::bridge::terminal::TerminalSessionRust;
 use crate::bridge::tree::ProjectTreeModelRust;
+use crate::bridge::vcs::VcsServiceRust;
 
 #[cxx_qt::bridge]
 mod ffi {
@@ -536,6 +537,58 @@ mod ffi {
         kind: FfiResourceOpKind,
         path: QString,
         new_path: QString,
+    }
+
+    /// What kind of change a path has, staged or unstaged, 1:1 with
+    /// `vcs_core::ChangeKind` plus `None` (no change of that kind) and
+    /// `Untracked` (F3-12a) — the ADR-0003 "no `Option` at the seam"
+    /// convention `FfiHeadInfo`-style enums already use elsewhere in this
+    /// file.
+    enum FfiChangeKind {
+        None,
+        Added,
+        Modified,
+        Deleted,
+        TypeChanged,
+        Untracked,
+    }
+
+    /// One path `VcsService::changedFiles` reports: `vcs_core::FileStatus`
+    /// plus the untracked pile folded in as `unstaged: Untracked`, so the
+    /// view reads one list rather than three.
+    struct FfiChangedFile {
+        path: QString,
+        staged: FfiChangeKind,
+        unstaged: FfiChangeKind,
+    }
+
+    /// One commit, 1:1 with `vcs_core::LogEntry` (F3-12d).
+    struct FfiLogEntry {
+        id: QString,
+        summary: QString,
+        author_name: QString,
+        author_email: QString,
+        /// Seconds since the Unix epoch, author time.
+        author_time: i64,
+    }
+
+    /// One local branch name. `cxx`'s `Vec<T>` needs `T: ImplVec`, which
+    /// `QString` alone does not satisfy — this one-field wrapper is what
+    /// lets `branches()` cross as a list at all, the same reason
+    /// `FfiResourceOp` wraps a `QString` rather than the seam carrying a
+    /// bare `Vec<QString>` anywhere.
+    struct FfiBranch {
+        name: QString,
+    }
+
+    /// One blamed line, 1:1 with `vcs_core::BlameLine` (F3-12d).
+    struct FfiBlameLine {
+        line: u32,
+        commit: QString,
+        author_name: QString,
+        author_email: QString,
+        summary: QString,
+        content: QString,
     }
 
     /// Why a name-based rename will not run, as a code rather than a
@@ -3960,6 +4013,194 @@ mod ffi {
         #[qinvokable]
         fn revert(self: &AiProviderEditor);
     }
+
+    extern "RustQt" {
+        /// Git v1 (F3-12): owns one `vcs_core::Repository` (on a worker
+        /// thread — a repository handle plus a `git` subprocess call must
+        /// not run on the UI thread) plus the caches `vcs-core` already
+        /// built for hunks, history and blame. The two-thread shape is
+        /// `LanguageService`'s (ADR-0004, ADR-0007): a job-queue `Sender`
+        /// consumed by a worker that owns the handle, shutdown by dropping
+        /// it. Translation only, per `docs/architecture/layering.md`: every
+        /// rule about what a hunk, a status or a branch *is* lives in
+        /// `vcs-core`.
+        #[qobject]
+        type VcsService = super::VcsServiceRust;
+
+        /// Point at a project root: discovers (or re-discovers) the
+        /// repository on the worker thread and drops whatever the previous
+        /// project's worker was doing. `isRepository()` reads `false` until
+        /// discovery answers — same asynchronous-readiness shape
+        /// `LanguageService::openProject` already has.
+        #[qinvokable]
+        #[cxx_name = "openProject"]
+        fn open_project(self: Pin<&mut VcsService>, root_path: &QString);
+
+        /// Whether the current project root is (or is under) a Git
+        /// repository. `false` before `openProject` answers and for a plain
+        /// folder — `vcs_core::DiscoverResult::NotARepository` is an
+        /// ordinary outcome, not a failure.
+        #[qinvokable]
+        #[cxx_name = "isRepository"]
+        fn is_repository(self: &VcsService) -> bool;
+
+        /// Re-read `HEAD`/index/worktree status on the worker thread;
+        /// answers via `statusChanged`.
+        #[qinvokable]
+        #[cxx_name = "refreshStatus"]
+        fn refresh_status(self: Pin<&mut VcsService>);
+
+        /// The status `refreshStatus` last found: staged, unstaged and
+        /// untracked paths in one list.
+        #[qinvokable]
+        #[cxx_name = "changedFiles"]
+        fn changed_files(self: &VcsService) -> Vec<FfiChangedFile>;
+
+        /// Ask for `path`'s hunks against `HEAD`, diffed against
+        /// `workingText` (the live buffer) and cached by `revision` (a
+        /// caller-bumped counter, `HunkCache`'s cache key) — answers via
+        /// `hunksChanged(path)`.
+        #[qinvokable]
+        #[cxx_name = "requestHunks"]
+        fn request_hunks(
+            self: Pin<&mut VcsService>,
+            path: &QString,
+            working_text: &QString,
+            revision: i64,
+        );
+
+        /// The hunks the last `requestHunks` for `path` found. Empty before
+        /// an answer arrives or when `path` has never been asked about.
+        #[qinvokable]
+        fn hunks(self: &VcsService, path: &QString) -> Vec<FfiHunk>;
+
+        /// The edit that reverts `hunks(path)[hunk_index]`, to splice into
+        /// the open buffer through `EditorTabs::applyBufferEdits` — never a
+        /// write to disk (F3-11/ADR-0031). Computed from the same cached
+        /// `HEAD` text `requestHunks` already read, so this needs no worker
+        /// round trip. Empty when `path` or `hunk_index` names nothing
+        /// cached.
+        #[qinvokable]
+        #[cxx_name = "revertHunk"]
+        fn revert_hunk(self: &VcsService, path: &QString, hunk_index: u32) -> Vec<FfiTextEdit>;
+
+        /// `git add <path>` on the worker thread; `statusChanged` follows on
+        /// success, `vcsFailed` on failure.
+        #[qinvokable]
+        #[cxx_name = "stageFile"]
+        fn stage_file(self: Pin<&mut VcsService>, path: &QString);
+
+        /// Stage `hunks(path)[hunk_index]` via a generated patch
+        /// (`vcs_core::stage_hunk`), from the same cached before/working
+        /// text `requestHunks` last read for `path`. No-op if nothing is
+        /// cached for `path`.
+        #[qinvokable]
+        #[cxx_name = "stageHunk"]
+        fn stage_hunk(self: Pin<&mut VcsService>, path: &QString, hunk_index: u32);
+
+        /// The inverse of `stageHunk`.
+        #[qinvokable]
+        #[cxx_name = "unstageHunk"]
+        fn unstage_hunk(self: Pin<&mut VcsService>, path: &QString, hunk_index: u32);
+
+        /// `git commit -m <message> [--amend]`, exactly what is staged.
+        #[qinvokable]
+        fn commit(self: Pin<&mut VcsService>, message: &QString, amend: bool);
+
+        /// Re-list local branches on the worker thread (`gix`, no
+        /// subprocess); answers via `branchChanged`.
+        #[qinvokable]
+        #[cxx_name = "refreshBranches"]
+        fn refresh_branches(self: Pin<&mut VcsService>);
+
+        /// The branch names the last `refreshBranches` found, sorted.
+        #[qinvokable]
+        fn branches(self: &VcsService) -> Vec<FfiBranch>;
+
+        /// `git checkout <name>`; `branchChanged` and `statusChanged` follow
+        /// on success.
+        #[qinvokable]
+        fn checkout(self: Pin<&mut VcsService>, name: &QString);
+
+        /// `git branch <name> [<start_point>]`; empty `start_point` means
+        /// none.
+        #[qinvokable]
+        #[cxx_name = "createBranch"]
+        fn create_branch(self: Pin<&mut VcsService>, name: &QString, start_point: &QString);
+
+        /// `git branch -d`, or `-D` if `force`. An unmerged branch refused
+        /// without `force` surfaces via `vcsFailed`
+        /// (`VcsError::UnmergedBranch`'s code), for a caller to offer a
+        /// deliberate forced retry.
+        #[qinvokable]
+        #[cxx_name = "deleteBranch"]
+        fn delete_branch(self: Pin<&mut VcsService>, name: &QString, force: bool);
+
+        /// `git fetch <remote>`.
+        #[qinvokable]
+        fn fetch(self: Pin<&mut VcsService>, remote: &QString);
+
+        /// `git pull <remote> <branch>`.
+        #[qinvokable]
+        fn pull(self: Pin<&mut VcsService>, remote: &QString, branch: &QString);
+
+        /// `git push [-u] <remote> <branch>`.
+        #[qinvokable]
+        fn push(self: Pin<&mut VcsService>, remote: &QString, branch: &QString, set_upstream: bool);
+
+        /// Commits that touched `path`, newest first; answers via
+        /// `historyReady`.
+        #[qinvokable]
+        #[cxx_name = "fileHistory"]
+        fn file_history(self: Pin<&mut VcsService>, path: &QString);
+
+        /// `git blame --porcelain -- <path>`, parsed; answers via
+        /// `blameReady`.
+        #[qinvokable]
+        fn blame(self: Pin<&mut VcsService>, path: &QString);
+
+        /// Discovery finished, or a later `openProject` retargeted the
+        /// repository: `isRepository()` has a fresh answer.
+        #[qsignal]
+        #[cxx_name = "repositoryChanged"]
+        fn repository_changed(self: Pin<&mut VcsService>);
+
+        /// `changedFiles()` has a fresh answer.
+        #[qsignal]
+        #[cxx_name = "statusChanged"]
+        fn status_changed(self: Pin<&mut VcsService>);
+
+        /// `hunks(path)` has a fresh answer for this path.
+        #[qsignal]
+        #[cxx_name = "hunksChanged"]
+        fn hunks_changed(self: Pin<&mut VcsService>, path: QString);
+
+        /// `branches()` has a fresh answer, or the checked-out branch
+        /// changed.
+        #[qsignal]
+        #[cxx_name = "branchChanged"]
+        fn branch_changed(self: Pin<&mut VcsService>);
+
+        /// A `vcs-core` operation failed — the code/message pair to show
+        /// verbatim (ADR-0003).
+        #[qsignal]
+        #[cxx_name = "vcsFailed"]
+        fn vcs_failed(self: Pin<&mut VcsService>, error: FfiResult);
+
+        /// `fileHistory`'s answer.
+        #[qsignal]
+        #[cxx_name = "historyReady"]
+        fn history_ready(self: Pin<&mut VcsService>, entries: Vec<FfiLogEntry>);
+
+        /// `blame`'s answer.
+        #[qsignal]
+        #[cxx_name = "blameReady"]
+        fn blame_ready(self: Pin<&mut VcsService>, lines: Vec<FfiBlameLine>);
+    }
+
+    // Enables `self.qt_thread()` on `VcsService` for its worker thread,
+    // mirroring `LanguageService`'s listener (ADR-0004).
+    impl cxx_qt::Threading for VcsService {}
 
     unsafe extern "C++" {
         include!("main_window.h");
