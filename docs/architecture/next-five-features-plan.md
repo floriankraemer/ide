@@ -38,7 +38,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F0-4b — main_window.cpp split, part 1: `ClassViewPanel`, `FindUsagesPanel`, `IdeMainWindow` | done | dfa35f8 (#101) |
 | F0-5 — main_window.cpp split, part 2: `RefactorController`, `DeclarationNavigator` | done | ddc5160 (#102) |
 | F0-6 — settings dialog extraction + `SettingsContext` | done | a6e745b (#103), follow-ups 5889357 (#106) |
-| F0-7 — dock registry and general reconciliation | todo |  |
+| F0-7 — dock registry and general reconciliation | done | e5b325f |
 | F0-8 — byte-column fix in `moveCursorToLine` | done | febd6c0 (#74) |
 | F0-9 — per-project settings persistence | done | 720d1d9 (#75) |
 | F0-10 — per-project settings rules + dialog | todo |  |
