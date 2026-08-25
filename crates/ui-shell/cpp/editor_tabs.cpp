@@ -687,6 +687,15 @@ bool EditorTabs::saveTab(QTabWidget *group, int index)
         // need this; the buffer itself already went across as didChange.
         languageService_->documentSaved(path);
     }
+    if (vcsService_ && vcsService_->isRepository()) {
+        // A save is exactly what `changedFiles()` (the Changes dock, the
+        // status bar's branch widget) is supposed to answer about; nothing
+        // else asks `VcsService` to look again after one. The gutter's own
+        // hunks already track the live buffer via `requestHunksFor`'s
+        // didChange debounce — this is the same freshness rule for the
+        // whole-repo status, which only ever changes relative to disk.
+        vcsService_->refreshStatus();
+    }
     return true;
 }
 

@@ -1,13 +1,19 @@
 #include "changes_panel.h"
 
+#include "e2e_mark.h"
+
 #include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QShowEvent>
 #include <QTreeWidget>
 #include <QTreeWidgetItem>
 #include <QVBoxLayout>
+#include <QVector>
+
+#include <tuple>
 
 namespace ui_shell {
 
@@ -61,6 +67,26 @@ QTreeWidgetItem *makeFileRow(QTreeWidgetItem *group, const QString &path, FfiCha
     return row;
 }
 
+// `rect` is this row's own label on screen, in global coordinates — the
+// same reason `EditorTabs::markTab` reports a tab's rect: an E2E flow that
+// has to click a specific file's checkbox would otherwise compute a row's
+// position from the tree's font metrics and row height, which move for
+// reasons unrelated to whatever it is testing.
+void markChangesRow(QTreeWidget *tree, QTreeWidgetItem *row, const QString &path,
+                     const QString &group)
+{
+    const QRect rect = tree->visualItemRect(row);
+    const QPoint origin =
+      rect.isEmpty() ? QPoint() : tree->viewport()->mapToGlobal(rect.topLeft());
+    e2eMark(QStringLiteral("{\"ev\":\"changes_row\",\"path\":%1,\"group\":%2,"
+                            "\"rect\":[%3,%4,%5,%6]}")
+              .arg(e2eJson(path), e2eJson(group))
+              .arg(origin.x())
+              .arg(origin.y())
+              .arg(rect.width())
+              .arg(rect.height()));
+}
+
 } // namespace
 
 ChangesPanel::ChangesPanel(VcsService *vcsService, QWidget *parent)
@@ -107,6 +133,28 @@ ChangesPanel::ChangesPanel(VcsService *vcsService, QWidget *parent)
     refresh();
 }
 
+void ChangesPanel::showEvent(QShowEvent *event)
+{
+    QWidget::showEvent(event);
+    // Same reasoning as `markChangesRow`: the commit message box and the
+    // Commit button move with the dock's own layout, so an E2E flow reads
+    // their on-screen rects here instead of guessing them from the main
+    // window's geometry.
+    const QRect messageRect(messageEdit_->mapToGlobal(QPoint(0, 0)), messageEdit_->size());
+    const QRect commitRect(commitButton_->mapToGlobal(QPoint(0, 0)), commitButton_->size());
+    e2eMark(QStringLiteral("{\"ev\":\"changes_panel_shown\","
+                            "\"message_rect\":[%1,%2,%3,%4],"
+                            "\"commit_rect\":[%5,%6,%7,%8]}")
+              .arg(messageRect.x())
+              .arg(messageRect.y())
+              .arg(messageRect.width())
+              .arg(messageRect.height())
+              .arg(commitRect.x())
+              .arg(commitRect.y())
+              .arg(commitRect.width())
+              .arg(commitRect.height()));
+}
+
 void ChangesPanel::refresh()
 {
     populating_ = true;
@@ -121,6 +169,14 @@ void ChangesPanel::refresh()
     auto *unstaged = makeGroup(tree_, tr("Unstaged Changes"));
     auto *untracked = makeGroup(tree_, tr("Untracked Files"));
 
+    // Row, path and group name, marked only once every row exists and every
+    // empty group is hidden below — `visualItemRect` answers with whatever
+    // the tree's *current* layout is, and an empty "Staged Changes" still
+    // taking up a header row above "draft.txt" at the moment a row is
+    // inserted is not the layout an E2E flow clicking that row's marked
+    // rect will find on screen once `setHidden` below collapses it.
+    QVector<std::tuple<QTreeWidgetItem *, QString, QString>> rows;
+
     const ::rust::Vec<FfiChangedFile> files = vcsService_->changedFiles();
     for (const FfiChangedFile &file : files) {
         const QString path = file.path;
@@ -128,17 +184,27 @@ void ChangesPanel::refresh()
         // then edited again) — it shows up in both groups rather than
         // picking one, since both are true at once.
         if (file.staged != FfiChangeKind::None) {
-            makeFileRow(staged, path, file.staged, /*checked=*/true, /*checksToStage=*/false);
+            QTreeWidgetItem *row =
+              makeFileRow(staged, path, file.staged, /*checked=*/true, /*checksToStage=*/false);
+            rows.append({row, path, QStringLiteral("staged")});
         }
         if (file.unstaged == FfiChangeKind::Untracked) {
-            makeFileRow(untracked, path, file.unstaged, /*checked=*/false, /*checksToStage=*/true);
+            QTreeWidgetItem *row =
+              makeFileRow(untracked, path, file.unstaged, /*checked=*/false, /*checksToStage=*/true);
+            rows.append({row, path, QStringLiteral("untracked")});
         } else if (file.unstaged != FfiChangeKind::None) {
-            makeFileRow(unstaged, path, file.unstaged, /*checked=*/false, /*checksToStage=*/true);
+            QTreeWidgetItem *row =
+              makeFileRow(unstaged, path, file.unstaged, /*checked=*/false, /*checksToStage=*/true);
+            rows.append({row, path, QStringLiteral("unstaged")});
         }
     }
 
     for (QTreeWidgetItem *group : {staged, unstaged, untracked}) {
         group->setHidden(group->childCount() == 0);
+    }
+
+    for (const auto &[row, path, group] : rows) {
+        markChangesRow(tree_, row, path, group);
     }
 
     populating_ = false;

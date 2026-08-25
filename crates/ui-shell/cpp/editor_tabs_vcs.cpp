@@ -2,6 +2,7 @@
 
 #include "code_editor.h"
 #include "diff_view.h"
+#include "e2e_mark.h"
 #include "vcs_gutter.h"
 
 #include <QDialog>
@@ -99,6 +100,14 @@ void EditorTabs::applyVcsHunks(const QString &path)
         }
     }
     editor->setChangeMarkers(markers);
+
+    // The only way anything outside the process can know the gutter has
+    // caught up with a buffer edit — an E2E flow that reverts a hunk right
+    // after typing one needs this, or it races the 300ms didChange debounce
+    // (editor_tabs_lsp.cpp) that got it here.
+    e2eMark(QStringLiteral("{\"ev\":\"vcs_hunks_applied\",\"path\":%1,\"count\":%2}")
+              .arg(e2eJson(path))
+              .arg(markers.size()));
 }
 
 void EditorTabs::setAnnotateEnabled(bool enabled)
@@ -181,6 +190,14 @@ void EditorTabs::rollbackHunkAtCaret()
               vcsService_->revertHunk(path, static_cast<quint32>(i));
             if (!edits.empty()) {
                 applyEditsTo(editor, edits);
+                // Proof the revert went through the buffer's own undo stack
+                // (F3-11's whole design point) rather than the file on
+                // disk — nothing else marks the moment `vcs.rollbackHunk`
+                // actually found and spliced a hunk.
+                e2eMark(QStringLiteral("{\"ev\":\"vcs_hunk_reverted\",\"path\":%1,"
+                                        "\"hunk_index\":%2}")
+                          .arg(e2eJson(path))
+                          .arg(i));
             }
             return;
         }
