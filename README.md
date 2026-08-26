@@ -1,12 +1,13 @@
 # IDE
 
-A fast, open-source, multi-language IDE experiment — built as a Rust core with a Qt6 Widgets UI, bridged via [cxx-qt](https://github.com/KDAB/cxx-qt) (QML planned later).
+A fast, open-source, multi-language IDE **experiment** — built as a Rust core with a Qt6 Widgets UI, bridged via [cxx-qt](https://github.com/KDAB/cxx-qt) (QML planned later).
 
-The goal is a JetBrains-like experience with the performance of a native Rust core: low typing latency, large files that stay smooth, and business logic that is fully testable without a display.
+The goal is a JetBrains-like experience with the _performance_ of a native Rust core: low typing latency, large files that stay smooth, and business logic that is fully testable without a display. VS Code is nice but its UX is not everyones cup of tea either.
 
 ![Screenshot](docs/screenshots/ide.png)
 
 ## What it can do
+
 
 - Open a project folder, browse the tree, edit and save tabs.
 - Tree-sitter syntax highlighting, folding, and a Class View outline — 29 bundled grammar crates covering roughly 35 languages.
