@@ -46,8 +46,25 @@ mod bindings {
     });
 }
 
+// A second bindgen pass over the wider world, mapped onto the first
+// pass's `host` types via `with` rather than regenerated: `interface
+// host` is declared once in the WIT file and both worlds import it, so a
+// second, textually-identical-but-distinct Rust type for it would force
+// two copies of `impl Host for HostState` below. `with` makes the two
+// worlds share one set of host types and one implementation of them.
+mod preview_bindings {
+    wasmtime::component::bindgen!({
+        path: "../plugin-api/wit",
+        world: "preview-plugin",
+        with: {
+            "ide:plugin/host": super::bindings::ide::plugin::host,
+        },
+    });
+}
+
 use bindings::ide::plugin::host::{Host, HostError};
 use bindings::Plugin as PluginBindings;
+use preview_bindings::PreviewPlugin as PreviewPluginBindings;
 
 /// How urgent a plugin thinks its message is.
 pub use bindings::ide::plugin::host::LogLevel;
@@ -136,6 +153,10 @@ pub enum WasmError {
     Command(String),
     /// No running plugin contributes this command id.
     UnknownCommand(String),
+    /// The plugin declares a `previews` contribution and a component, but
+    /// the component does not implement the wider `preview-plugin` world
+    /// — it exports `plugin` only, so it has no `render` to call.
+    NoPreviewExport,
     /// The plugin was disabled by an earlier failure, which is carried
     /// along so the caller learns *why* rather than just "no".
     Disabled(Box<WasmError>),
@@ -150,6 +171,10 @@ impl fmt::Display for WasmError {
             Self::Trapped(message) => write!(f, "the plugin was stopped: {message}"),
             Self::Command(message) => write!(f, "the command failed: {message}"),
             Self::UnknownCommand(id) => write!(f, "no plugin contributes the command `{id}`"),
+            Self::NoPreviewExport => write!(
+                f,
+                "this plugin contributes a preview but its component does not implement it"
+            ),
             Self::Disabled(cause) => write!(f, "this plugin is disabled: {cause}"),
         }
     }
@@ -296,10 +321,111 @@ impl Host for HostState {
     }
 }
 
+/// Which world a running component was instantiated against.
+///
+/// `preview-plugin` `include`s `plugin`, so a `Preview` component answers
+/// `call_activate`/`call_deactivate`/`call_on_command` exactly as a `Base`
+/// one does — this only ever changes which extra thing is available.
+enum PluginBindingsKind {
+    Base(PluginBindings),
+    Preview(PreviewPluginBindings),
+}
+
+impl PluginBindingsKind {
+    fn call_activate<S: wasmtime::AsContextMut>(
+        &self,
+        store: S,
+    ) -> wasmtime::Result<Result<(), String>> {
+        match self {
+            Self::Base(bindings) => bindings.call_activate(store),
+            Self::Preview(bindings) => bindings.call_activate(store),
+        }
+    }
+
+    fn call_deactivate<S: wasmtime::AsContextMut>(&self, store: S) -> wasmtime::Result<()> {
+        match self {
+            Self::Base(bindings) => bindings.call_deactivate(store),
+            Self::Preview(bindings) => bindings.call_deactivate(store),
+        }
+    }
+
+    fn call_on_command<S: wasmtime::AsContextMut>(
+        &self,
+        store: S,
+        id: &str,
+        args: &[String],
+    ) -> wasmtime::Result<Result<(), String>> {
+        match self {
+            Self::Base(bindings) => bindings.call_on_command(store, id, args),
+            Self::Preview(bindings) => bindings.call_on_command(store, id, args),
+        }
+    }
+
+    /// `None` for a `Base` component: it never claimed the wider world, so
+    /// there is no `render` export to call, and that is a manifest/component
+    /// mismatch the caller reports as [`WasmError::NoPreviewExport`] rather
+    /// than a trap.
+    fn call_render<S: wasmtime::AsContextMut>(
+        &self,
+        store: S,
+        id: &str,
+        source: &str,
+    ) -> Option<
+        wasmtime::Result<Result<preview_bindings::exports::ide::plugin::preview::Rendered, String>>,
+    > {
+        match self {
+            Self::Base(_) => None,
+            Self::Preview(bindings) => {
+                Some(bindings.ide_plugin_preview().call_render(store, id, source))
+            }
+        }
+    }
+}
+
+/// What a wasm preview provider handed back, translated out of the
+/// generated bindgen types at the one seam that touches them — nothing
+/// outside this module needs to know the WIT `record` shapes exist.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmPreview {
+    pub html: String,
+    pub images: Vec<WasmPreviewImage>,
+}
+
+/// One diagram a wasm preview provider still needs rasterised — SVG text,
+/// never pixels, so a fuel-metered, 64 MiB sandbox is never asked to do a
+/// rasteriser's job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WasmPreviewImage {
+    pub key: String,
+    pub svg: String,
+}
+
+impl From<preview_bindings::exports::ide::plugin::preview::Rendered> for WasmPreview {
+    fn from(rendered: preview_bindings::exports::ide::plugin::preview::Rendered) -> Self {
+        Self {
+            html: rendered.html,
+            images: rendered
+                .images
+                .into_iter()
+                .map(WasmPreviewImage::from)
+                .collect(),
+        }
+    }
+}
+
+impl From<preview_bindings::exports::ide::plugin::preview::PreviewImage> for WasmPreviewImage {
+    fn from(image: preview_bindings::exports::ide::plugin::preview::PreviewImage) -> Self {
+        Self {
+            key: image.key,
+            svg: image.svg,
+        }
+    }
+}
+
 /// One started component.
 struct Running {
     store: Store<HostState>,
-    bindings: PluginBindings,
+    bindings: PluginBindingsKind,
 }
 
 /// A plugin's slot in the tier: running, or disabled and why.
@@ -434,6 +560,53 @@ impl WasmTier {
         }
     }
 
+    /// Render one preview through a running plugin's `render` export.
+    ///
+    /// Unlike [`WasmTier::invoke`], the caller names the plugin directly
+    /// rather than searching by a global id: a preview id is only unique
+    /// *within* the plugin that contributes it (`app_core`'s join is what
+    /// resolves an extension to a `(plugin id, contribution id)` pair in
+    /// the first place), so there is nothing to search here.
+    pub fn render(
+        &self,
+        plugin_id: &str,
+        contribution_id: &str,
+        source: &str,
+    ) -> Result<WasmPreview, WasmError> {
+        let slot = self
+            .slots
+            .iter()
+            .find(|slot| slot.id == plugin_id)
+            .ok_or_else(|| WasmError::UnknownCommand(contribution_id.to_string()))?;
+
+        let mut state = slot.state.lock().expect("plugin slot lock poisoned");
+        let SlotState::Running(running) = &mut *state else {
+            let SlotState::Disabled(cause) = &*state else {
+                unreachable!("the slot was matched as not running");
+            };
+            return Err(WasmError::Disabled(Box::new(cause.clone())));
+        };
+
+        arm(&mut running.store, self.limits);
+        let called = running
+            .bindings
+            .call_render(&mut running.store, contribution_id, source);
+        match called {
+            None => Err(WasmError::NoPreviewExport),
+            // A trap is the plugin's last act, exactly as in `invoke`: its
+            // store is dropped with the slot's state, freeing its memory.
+            Some(Err(trap)) => {
+                let err = WasmError::Trapped(format!("{trap:?}"));
+                *state = SlotState::Disabled(err.clone());
+                Err(err)
+            }
+            // A returned error is a normal, survivable failure — the
+            // render did not work, the plugin is fine.
+            Some(Ok(Err(message))) => Err(WasmError::Command(message)),
+            Some(Ok(Ok(rendered))) => Ok(WasmPreview::from(rendered)),
+        }
+    }
+
     /// Is this plugin's component still running?
     pub fn is_running(&self, plugin_id: &str) -> bool {
         self.slots.iter().any(|slot| {
@@ -527,15 +700,32 @@ fn start_plugin(
     let mut store = Store::new(&ENGINE, state);
     store.limiter(|state| &mut state.limits);
 
-    let mut linker = Linker::new(&ENGINE);
-    PluginBindings::add_to_linker::<_, HasSelf<HostState>>(&mut linker, |state| state)
-        .map_err(|err| WasmError::Instantiate(format!("{err:?}")))?;
+    // A plugin whose manifest names both a `previews` contribution and a
+    // component is asked to satisfy the wider world; everything else gets
+    // the world it has always gotten. `preview-plugin` `include`s `plugin`,
+    // so this is additive — a `Base` component is never asked for more
+    // than it advertised.
+    let wants_preview =
+        !plugin.manifest().contributes.previews.is_empty() && plugin.manifest().wasm.is_some();
 
-    // Instantiation runs the component's start function, which is guest
-    // code and therefore needs the same budget a call gets.
-    arm(&mut store, limits);
-    let bindings = PluginBindings::instantiate(&mut store, &component, &linker)
-        .map_err(|err| WasmError::Instantiate(format!("{err:?}")))?;
+    let mut linker = Linker::new(&ENGINE);
+    let bindings = if wants_preview {
+        PreviewPluginBindings::add_to_linker::<_, HasSelf<HostState>>(&mut linker, |state| state)
+            .map_err(|err| WasmError::Instantiate(format!("{err:?}")))?;
+        // Instantiation runs the component's start function, which is
+        // guest code and therefore needs the same budget a call gets.
+        arm(&mut store, limits);
+        PreviewPluginBindings::instantiate(&mut store, &component, &linker)
+            .map(PluginBindingsKind::Preview)
+            .map_err(|err| WasmError::Instantiate(format!("{err:?}")))?
+    } else {
+        PluginBindings::add_to_linker::<_, HasSelf<HostState>>(&mut linker, |state| state)
+            .map_err(|err| WasmError::Instantiate(format!("{err:?}")))?;
+        arm(&mut store, limits);
+        PluginBindings::instantiate(&mut store, &component, &linker)
+            .map(PluginBindingsKind::Base)
+            .map_err(|err| WasmError::Instantiate(format!("{err:?}")))?
+    };
 
     arm(&mut store, limits);
     match bindings.call_activate(&mut store) {

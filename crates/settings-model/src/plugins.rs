@@ -301,6 +301,12 @@ pub fn explain_wasm(error: &WasmError, path: &str) -> PluginProblem {
             "This plugin was asked for a command it does not offer.",
             id.clone(),
         ),
+        WasmError::NoPreviewExport => (
+            "This plugin offers a preview but its component does not render one.",
+            "It contributes `previews` and a `[wasm]` component, but the component \
+             does not implement the wider preview world."
+                .to_string(),
+        ),
         // Reached only through a call made against an already-disabled
         // plugin, so the cause is the row's real story and the wrapper is
         // not worth a sentence of its own.

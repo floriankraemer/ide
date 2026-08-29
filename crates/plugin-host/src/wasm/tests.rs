@@ -581,3 +581,48 @@ fn a_plugin_without_a_component_is_not_in_the_tier() {
     assert!(tier.disabled().is_empty());
     assert!(!tier.is_running("declarative"));
 }
+
+/// A `previews` contribution with `[wasm]`, mirroring [`ONE_COMMAND`].
+const ONE_PREVIEW: &str =
+    "[[contributes.previews]]\nid = \"markdown\"\nlabel = \"Markdown\"\nextensions = [\"md\"]\n";
+
+#[test]
+fn rendering_through_a_plugin_with_no_render_export_is_refused_not_a_trap() {
+    // The manifest contributes only a command, so `start_plugin` picks the
+    // narrower `plugin` world — the same fixture `ONE_COMMAND` tests
+    // already use. `render` against it must fail cleanly rather than
+    // panic or trap: there is nothing wrong with the plugin, the caller
+    // just asked for an export this world never had.
+    let tmp = TempDir::new().expect("temp dir");
+    install(tmp.path(), "example", ONE_COMMAND, &on_command("", ""));
+    let (tier, _) = start(tmp.path(), WasmLimits::default());
+
+    assert_eq!(
+        tier.render("example", "whatever", "# hi"),
+        Err(WasmError::NoPreviewExport)
+    );
+}
+
+#[test]
+fn a_previews_component_that_never_implements_render_fails_to_instantiate() {
+    // A manifest naming `contributes.previews` *and* `[wasm]` makes
+    // `start_plugin` try the wider `preview-plugin` world, which requires
+    // a `render` export the world's `include`d `plugin` half never had.
+    // A component built only against `plugin` (this test's fixture is the
+    // same WAT `component()` every other test uses, unchanged) is missing
+    // it, so instantiation must fail — cleanly, as one disabled plugin,
+    // not a panic — and say so through `WasmError::Instantiate`.
+    let tmp = TempDir::new().expect("temp dir");
+    install(tmp.path(), "example", ONE_PREVIEW, &on_command("", ""));
+    let (tier, _) = start(tmp.path(), WasmLimits::default());
+
+    assert!(!tier.is_running("example"));
+    let disabled = tier.disabled();
+    assert_eq!(disabled.len(), 1);
+    assert_eq!(disabled[0].0, "example");
+    assert!(
+        matches!(disabled[0].1, WasmError::Instantiate(_)),
+        "{:?}",
+        disabled[0].1
+    );
+}

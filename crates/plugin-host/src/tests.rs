@@ -400,3 +400,37 @@ fn reload_swaps_the_registry_while_an_older_snapshot_stays_usable() {
         "the pre-swap snapshot is still usable"
     );
 }
+
+#[test]
+fn the_markdown_preview_builtin_loads_through_the_real_path() {
+    let fixture = Fixture::new();
+    let registry = load(fixture.config_dir(), &[builtins::MARKDOWN_PREVIEW], &[]);
+    assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+
+    let plugin = registry
+        .by_id("markdown-preview")
+        .expect("the built-in loaded");
+    assert_eq!(plugin.source(), PluginSource::Builtin);
+
+    let previews: Vec<_> = registry.previews().collect();
+    assert_eq!(previews.len(), 1);
+    let (owner, contribution) = previews[0];
+    assert_eq!(owner.id(), "markdown-preview");
+    assert_eq!(contribution.id, "markdown");
+    assert_eq!(
+        contribution.extensions,
+        vec!["md", "markdown", "mdown", "mkd"]
+    );
+}
+
+#[test]
+fn previews_without_a_component_load_and_need_no_wasm_tier() {
+    // The whole point of the asymmetry with `commands` (M1): a `previews`
+    // contribution with no `[wasm]` section is not `CommandsWithoutComponent`
+    // — it is served by the host's own native renderer table, which this
+    // crate does not know about (`app-core`'s join does).
+    let fixture = Fixture::new();
+    let registry = load(fixture.config_dir(), &[builtins::MARKDOWN_PREVIEW], &[]);
+    let plugin = registry.by_id("markdown-preview").expect("loaded");
+    assert!(plugin.manifest().wasm.is_none());
+}

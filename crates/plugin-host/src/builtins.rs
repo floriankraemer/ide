@@ -33,6 +33,18 @@ macro_rules! icon_files {
     };
 }
 
+/// The built-in Markdown preview, first-party rather than vendored — there
+/// is no upstream package to import and re-run a script over, unlike the
+/// Material icon theme above, so `crates/plugin-host/builtin/` rather than
+/// `third_party/`. It contributes no files through the plugin asset seam:
+/// its font and its renderer are compiled into `markdown-preview` directly
+/// (crate M4), because a font is the renderer's implementation detail and
+/// not something a `previews` contribution describes.
+pub(crate) const MARKDOWN_PREVIEW: BuiltinPlugin = BuiltinPlugin {
+    manifest: include_str!("../builtin/markdown-preview/plugin.toml"),
+    files: &[],
+};
+
 // The id list is packed by line width, which rustfmt would otherwise
 // unpack to one per line and undo the point of the macro.
 #[rustfmt::skip]
