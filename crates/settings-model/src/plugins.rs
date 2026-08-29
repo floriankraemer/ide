@@ -192,6 +192,11 @@ fn contributes(manifest: &PluginManifest) -> String {
         [only] => parts.push(format!("Command: {}", only.title)),
         many => parts.push(format!("{} commands", many.len())),
     }
+    match manifest.contributes.previews.as_slice() {
+        [] => {}
+        [only] => parts.push(format!("Preview: {}", only.label)),
+        many => parts.push(format!("{} previews", many.len())),
+    }
     parts.join(", ")
 }
 
@@ -535,6 +540,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(contributes(&many), "2 commands");
+
+        let preview = PluginManifest::from_toml_str(
+            "id = \"markdown-preview\"\nname = \"Markdown Preview\"\nversion = \"1\"\napi_version = 1\n\
+             \n[[contributes.previews]]\nid = \"markdown\"\nlabel = \"Markdown\"\nextensions = [\"md\"]\n",
+        )
+        .unwrap();
+        assert_eq!(contributes(&preview), "Preview: Markdown");
     }
 
     #[test]
