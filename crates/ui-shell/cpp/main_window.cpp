@@ -1,12 +1,12 @@
 #include "main_window.h"
 
 #include "ai_chat_panel.h"
+#include "ai_menu.h"
 #include "markdown_preview_panel.h"
 #include "appearance_page.h"
 #include "changes_panel.h"
 #include "class_view_panel.h"
 #include "code_editor.h"
-#include "declaration_navigator.h"
 #include "dock_layout.h"
 #include "e2e_mark.h"
 #include "editing_actions.h"
@@ -19,18 +19,19 @@
 #include "ide_main_window.h"
 #include "keymap_page.h"
 #include "mcp_page.h"
+#include "navigate_menu.h"
 #include "search_everywhere_dialog.h"
 #include "problems_panel.h"
 #include "icon_decoration_proxy.h"
 #include "project_tree_dock.h"
 #include "recent_projects_menu.h"
 #include "refactor_controller.h"
-#include "refactor_preview_dialog.h"
 #include "run_console_panel.h"
 #include "run_menu.h"
 #include "search_results_panel.h"
 #include "settings_dialog.h"
 #include "splash_screen.h"
+#include "status_bar.h"
 #include "syntax_highlighter.h"
 #include "terminal_sessions_panel.h"
 #include "theme.h"
@@ -44,23 +45,17 @@
 #include <QByteArray>
 #include <QSet>
 #include <QTimer>
-#include <QToolButton>
 #include <QToolTip>
-#include <QColor>
-#include <QDialog>
 #include <QFileDialog>
 #include <QFont>
 #include <QHash>
 #include <algorithm>
 #include <cstdint>
 #include <functional>
-#include <QLabel>
-#include <QProgressBar>
 #include <memory>
 #include <QMainWindow>
 #include <QMenu>
 #include <QMenuBar>
-#include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QStringList>
 #include <QSplitter>
@@ -555,187 +550,11 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     editorTabs->setEditorColors(savedColors.background, savedColors.foreground,
                                  savedColors.current_line);
 
-    // The AI panel has no route to the editor, so the window hands it the
-    // two things it asks for: the buffer the user is looking at, and what
-    // Apply means.
-    AiChatPanel *aiChatPanel = central.aiChatPanel;
-    aiChatPanel->setCurrentTextProvider([editorTabs]() { return editorTabs->currentContent(); });
-    aiChatPanel->setApplyHandler(
-      [window, aiChat, aiChatPanel, editorTabs, searchModel](quint64 messageIndex,
-                                                              quint64 blockIndex) {
-          // The same protocol — and the same discipline — a refactoring
-          // runs (ADR-0021 §5): the revision is read *before* the plan is
-          // made and handed back to `takePendingEdits`, so an answer
-          // applied to a buffer that has since moved is refused by
-          // `lsp_core::EditGate` instead of being spliced in blind.
-          const int revision = editorTabs->documentRevision();
-          const FfiRefactorSummary summary =
-            aiChat->prepareApply(messageIndex, blockIndex, aiChatPanel->currentText(), revision);
-          if (summary.title.isEmpty()) {
-              // Nothing was planned. Why is `ai-chat-core`'s sentence, and
-              // the user pressed a button, so it is said out loud rather
-              // than dropped in the status bar.
-              QMessageBox::information(window, QObject::tr("AI Chat"),
-                                        aiChat->applyRefusal().message);
-              return;
-          }
+    wireAiChatToEditor(window, aiChat, central.aiChatPanel, editorTabs, searchModel);
 
-          // A change confined to the file the user is looking at applies
-          // straight away and is undone with Ctrl+Z; anything wider is
-          // shown first — and which of the two this is was decided in Rust,
-          // exactly as for a refactoring.
-          if (summary.touches_other_files) {
-              QList<RefactorPreviewDialog::Row> rows;
-              for (const FfiTextEdit &edit : aiChat->pendingEdits()) {
-                  rows.append({edit.path, static_cast<int>(edit.start_line),
-                                previewText(edit.new_text), true, true});
-              }
-              RefactorPreviewDialog dialog(
-                summary.title,
-                QObject::tr("%n change(s) across %1 file(s). Changes to files that are not open "
-                            "are written to disk and cannot be undone.",
-                            "", static_cast<int>(summary.edit_count))
-                  .arg(summary.document_count),
-                rows, window);
-              if (dialog.exec() != QDialog::Accepted) {
-                  aiChat->cancelApply();
-                  return;
-              }
-              for (const QString &path : dialog.excludedPaths()) {
-                  aiChat->excludeFromApply(path);
-              }
-          }
-
-          const ::rust::Vec<FfiTextEdit> edits = aiChat->takePendingEdits(revision);
-          if (edits.empty()) {
-              window->statusBar()->showMessage(
-                QObject::tr("The file changed while the change was being prepared; nothing was "
-                            "applied."),
-                6000);
-              return;
-          }
-          editorTabs->applyBufferEdits(edits);
-          // Files nobody has open are rewritten and re-indexed by the index
-          // worker; it ignores the buffer edits in the same vector.
-          searchModel->applyFileEdits(edits);
-      });
-
-    // Agent-mode tools take the same route MCP's edit_buffer does: the run
-    // thread has already marshalled these onto the Qt thread
-    // (CxxQtThread::queue), and each lands on the handler DocumentManager's
-    // own signal would have reached. Without them the Rust Document moves
-    // under an agent's edit while the widget keeps showing stale text.
-    QObject::connect(aiChat, &AiChat::toolOpenedTab, editorTabs,
-                      [editorTabs](quint64 tabId, const QString &title) {
-                          editorTabs->onTabOpened(tabId, title);
-                      });
-    QObject::connect(aiChat, &AiChat::toolEditedBuffer, editorTabs,
-                      [editorTabs](quint64 tabId, const QString &content) {
-                          editorTabs->onBufferEditedExternally(tabId, content);
-                      });
-    QObject::connect(aiChat, &AiChat::toolSavedBuffer, editorTabs, [editorTabs](quint64 tabId) {
-        editorTabs->onTabModifiedChanged(tabId, false);
-    });
-
-    // L3: line:col + language update per current tab / cursor move; "UTF-8"
-    // is static since only UTF-8 is supported today (US-2b's binary-file
-    // rejection already rules out anything else reaching an open tab).
-    auto *statusBar = window->statusBar();
-    auto *languageLabel = new QLabel(statusBar);
-    auto *positionLabel = new QLabel(statusBar);
-    auto *encodingLabel = new QLabel(QStringLiteral("UTF-8"), statusBar);
-    // Task L2: a compact problem counter, coloured by the worst severity
-    // present and empty when there is nothing wrong. A button rather than a
-    // label because clicking it opens the Problems dock.
-    auto *problemsButton = new QToolButton(statusBar);
-    problemsButton->setAutoRaise(true);
-    problemsButton->setVisible(false);
-    QObject::connect(problemsButton, &QToolButton::clicked, window, [central]() {
-        central.docks->show(QStringLiteral("problems"));
-        central.problemsPanel->focusTree();
-    });
-    const auto updateProblemsButton = [problemsButton, languageService]() {
-        const FfiDiagnosticCounts counts = languageService->diagnosticCounts();
-        const bool any = counts.errors > 0 || counts.warnings > 0;
-        problemsButton->setVisible(any);
-        if (!any) {
-            return;
-        }
-        problemsButton->setText(QObject::tr("%1 errors, %2 warnings")
-                                   .arg(counts.errors)
-                                   .arg(counts.warnings));
-        const QColor color = severityColor(counts.errors > 0 ? FfiSeverity::Error
-                                                             : FfiSeverity::Warning);
-        problemsButton->setStyleSheet(QStringLiteral("color: %1;").arg(color.name()));
-    };
-    QObject::connect(languageService, &LanguageService::diagnosticsChanged, window,
-                      updateProblemsButton);
-    // F3-18: the branch widget (vcs_menu.cpp).
-    auto *branchButton = buildBranchWidget(vcsService, window, statusBar);
-    // The project index builds on a background thread for seconds to minutes
-    // after a folder is opened. Until this existed the only way to find that
-    // out was to run a search and be told to try again later.
-    // Two plain permanent widgets rather than a laid-out container: the
-    // status bar already spaces its own children, and a container's label
-    // stretches to fill whatever room is going, which pushed the bar a
-    // hand's width away from its own caption.
-    auto *indexLabel = new QLabel(statusBar);
-    auto *indexBar = new QProgressBar(statusBar);
-    indexLabel->setVisible(false);
-    indexBar->setVisible(false);
-    indexBar->setTextVisible(false);
-    indexBar->setFixedWidth(90);
-    indexBar->setFixedHeight(statusBar->fontMetrics().height());
-
-    // Everything a font scale has to reach now exists: the menu bar is
-    // created lazily by menuBar() just below, the tree came out of
-    // buildCentralWidget, and the indexing bar is right above. Applied here
-    // (rather than only in run_app) because the two per-widget scales have no
-    // widget to land on until this point.
-    const UiFontTargets uiFontTargets{window->menuBar(), central.projectTree, indexBar};
-    applyUiFontScales(appSettings->uiFontScales(), uiFontTargets);
-    QObject::connect(searchModel, &SearchModel::indexProgress, window,
-                      [indexLabel, indexBar](quint32 done, quint32 total) {
-                          const QString text =
-                              QObject::tr("Indexing... %1/%2").arg(done).arg(total);
-                          // Reserve the width of the widest reading this run
-                          // will ever show — `total/total`. Without it the
-                          // label is sized for "565/2223" one frame and
-                          // "1204/2223" the next, and clips while it catches
-                          // up.
-                          indexLabel->setMinimumWidth(indexLabel->fontMetrics().horizontalAdvance(
-                              QObject::tr("Indexing... %1/%2").arg(total).arg(total)));
-                          indexLabel->setStyleSheet(QString());
-                          indexLabel->setText(text);
-                          indexBar->setRange(0, static_cast<int>(total));
-                          indexBar->setValue(static_cast<int>(done));
-                          indexLabel->setVisible(true);
-                          indexBar->setVisible(true);
-                      });
-    QObject::connect(searchModel, &SearchModel::indexReady, window,
-                      [indexLabel, indexBar]() {
-                          indexLabel->setMinimumWidth(0);
-                          indexLabel->setVisible(false);
-                          indexBar->setVisible(false);
-                      });
-    QObject::connect(searchModel, &SearchModel::indexFailed, window,
-                      [indexLabel, indexBar](const QString &message) {
-                          indexLabel->setMinimumWidth(0);
-                          indexBar->setVisible(false);
-                          indexLabel->setStyleSheet(QStringLiteral("color: %1;")
-                                                       .arg(severityColor(FfiSeverity::Error).name()));
-                          indexLabel->setText(QObject::tr("Index failed: %1").arg(message));
-                          indexLabel->setVisible(true);
-                      });
-
-    statusBar->addPermanentWidget(indexLabel);
-    statusBar->addPermanentWidget(indexBar);
-    statusBar->addPermanentWidget(problemsButton);
-    statusBar->addPermanentWidget(branchButton);
-    statusBar->addPermanentWidget(languageLabel);
-    statusBar->addPermanentWidget(positionLabel);
-    statusBar->addPermanentWidget(encodingLabel);
-    editorTabs->attachStatusBar(positionLabel, languageLabel);
+    const UiFontTargets uiFontTargets =
+      buildStatusBar(window, appSettings, languageService, searchModel, vcsService, editorTabs,
+                     central.projectTree, central.docks, central.problemsPanel);
 
     // Every menu action is registered under a stable id from
     // app_config::ACTIONS and takes its shortcut from the persisted keymap,
@@ -1010,159 +829,11 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     buildRunMenu(window, runService, runConfigEditor, appSettings, *actions, central.docks,
                  central.runConsolePanel, treeModel, viewMenu);
 
-    // N8: code navigation. The Ctrl+Click gesture and every action below
-    // route through the one DeclarationNavigator, so there is a single
-    // place that turns a resolution result into a jump.
-    auto *navigator = new DeclarationNavigator(languageService, searchModel, editorTabs, window);
-    editorTabs->setDeclarationRequestedCallback(
-      [navigator](int position) { navigator->resolveAt(position); });
+    buildNavigateMenu(window, languageService, searchModel, editorTabs, appSettings, *actions,
+                       central.docks, central.findUsagesPanel);
 
-    QMenu *navigateMenu = window->menuBar()->addMenu(QObject::tr("&Navigate"));
-    QAction *goToDeclarationAction =
-      registerAction(navigateMenu, QStringLiteral("navigate.goToDeclaration"),
-                      QObject::tr("Go to Declaration"), appSettings, *actions);
-    QObject::connect(goToDeclarationAction, &QAction::triggered, window,
-                      [editorTabs]() { editorTabs->requestDeclarationAtCaret(); });
-
-    QAction *findUsagesAction =
-      registerAction(navigateMenu, QStringLiteral("navigate.findUsages"),
-                      QObject::tr("Find Usages"), appSettings, *actions);
-    QObject::connect(findUsagesAction, &QAction::triggered, window, [central, editorTabs]() {
-        const QString name = editorTabs->wordUnderCursor();
-        if (name.isEmpty()) {
-            return;
-        }
-        central.docks->show(QStringLiteral("findUsages"));
-        central.findUsagesPanel->findUsages(name);
-    });
-
-    QAction *goToImplementationAction =
-      registerAction(navigateMenu, QStringLiteral("navigate.goToImplementation"),
-                      QObject::tr("Go to Implementation"), appSettings, *actions);
-    QObject::connect(goToImplementationAction, &QAction::triggered, window,
-                      [central, editorTabs]() {
-                          const QString name = editorTabs->wordUnderCursor();
-                          if (name.isEmpty()) {
-                              return;
-                          }
-                          central.docks->show(QStringLiteral("findUsages"));
-                          central.findUsagesPanel->findImplementations(name);
-                      });
-
-    QAction *goToInterfaceAction =
-      registerAction(navigateMenu, QStringLiteral("navigate.goToInterface"),
-                      QObject::tr("Go to Interface"), appSettings, *actions);
-    QObject::connect(goToInterfaceAction, &QAction::triggered, window, [central, editorTabs]() {
-        const QString name = editorTabs->wordUnderCursor();
-        if (name.isEmpty()) {
-            return;
-        }
-        central.docks->show(QStringLiteral("findUsages"));
-        central.findUsagesPanel->findSupertypes(name);
-    });
-
-    navigateMenu->addSeparator();
-    QAction *backAction = registerAction(navigateMenu, QStringLiteral("navigate.back"),
-                                          QObject::tr("Back"), appSettings, *actions);
-    QObject::connect(backAction, &QAction::triggered, window,
-                      [editorTabs]() { editorTabs->jumpBack(); });
-    QAction *forwardAction = registerAction(navigateMenu, QStringLiteral("navigate.forward"),
-                                             QObject::tr("Forward"), appSettings, *actions);
-    QObject::connect(forwardAction, &QAction::triggered, window,
-                      [editorTabs]() { editorTabs->jumpForward(); });
-
-    // Enabled state comes from the session's stack, not from a second copy
-    // kept here. Applied once now and again after every jump.
-    auto refreshNavigationActions = [editorTabs, backAction, forwardAction]() {
-        backAction->setEnabled(editorTabs->canJumpBack());
-        forwardAction->setEnabled(editorTabs->canJumpForward());
-    };
-    editorTabs->setNavigationChangedCallback(refreshNavigationActions);
-    refreshNavigationActions();
-
-    // ADR-0021: the AI menu. Every entry is a registered action, so its
-    // shortcut comes from the persisted keymap and Settings > Keymap can
-    // rebind it like any other.
-    QMenu *aiMenu = window->menuBar()->addMenu(QObject::tr("&AI"));
-
-    // Both selection entries share this: the only difference between them
-    // is whether the conversation is cleared first, and duplicating the
-    // 0-based-to-1-based conversion is how one of the two copies ends up
-    // off by one.
-    const auto attachSelection = [window, aiChat, central, editorTabs, showAiChat](bool newChat) {
-        if (newChat) {
-            aiChat->newConversation();
-        }
-        // The protocol positions the editor reports are 0-based; an
-        // attachment names the lines the way the user reads them off the
-        // gutter.
-        const auto range = editorTabs->selectionRange();
-        const FfiResult result = aiChat->attachSelection(editorTabs->currentPath(),
-                                                          range.first.first + 1,
-                                                          range.second.first + 1,
-                                                          editorTabs->selectedText());
-        if (result.code != 0) {
-            // An attachment can be refused — a secret-shaped file, a path
-            // outside the project — and the reason is Rust's sentence, not
-            // one composed here.
-            QMessageBox::information(window, QObject::tr("AI Chat"), result.message);
-            return;
-        }
-        showAiChat();
-        central.aiChatPanel->attachAndFocus();
-    };
-
-    QAction *aiAddSelectionAction =
-      registerAction(aiMenu, QStringLiteral("ai.addSelection"),
-                      QObject::tr("Add Selection to AI Chat"), appSettings, *actions);
-    QObject::connect(aiAddSelectionAction, &QAction::triggered, window,
-                      [attachSelection]() { attachSelection(false); });
-
-    QAction *aiAddSelectionNewChatAction =
-      registerAction(aiMenu, QStringLiteral("ai.addSelectionNewChat"),
-                      QObject::tr("Add Selection to New AI Chat"), appSettings, *actions);
-    QObject::connect(aiAddSelectionNewChatAction, &QAction::triggered, window,
-                      [attachSelection]() { attachSelection(true); });
-
-    QAction *aiAddFileAction = registerAction(aiMenu, QStringLiteral("ai.addFile"),
-                                               QObject::tr("Add File to AI Chat"), appSettings,
-                                               *actions);
-    QObject::connect(aiAddFileAction, &QAction::triggered, window,
-                      [window, aiChat, central, editorTabs, showAiChat]() {
-                          const FfiResult result = aiChat->attachFile(editorTabs->currentPath());
-                          if (result.code != 0) {
-                              QMessageBox::information(window, QObject::tr("AI Chat"),
-                                                        result.message);
-                              return;
-                          }
-                          showAiChat();
-                          central.aiChatPanel->attachAndFocus();
-                      });
-
-    aiMenu->addSeparator();
-    QAction *aiNewChatAction = registerAction(aiMenu, QStringLiteral("ai.newChat"),
-                                               QObject::tr("New AI Chat"), appSettings, *actions);
-    QObject::connect(aiNewChatAction, &QAction::triggered, window,
-                      [central, aiChat, showAiChat]() {
-        aiChat->newConversation();
-        showAiChat();
-        central.aiChatPanel->attachAndFocus();
-    });
-
-    QAction *aiTogglePanelAction = registerAction(aiMenu, QStringLiteral("ai.togglePanel"),
-                                                   QObject::tr("AI Chat"), appSettings, *actions);
-    QObject::connect(aiTogglePanelAction, &QAction::triggered, window,
-                      [central, showAiChat]() {
-        // A real toggle, unlike the View menu's panels: this one has a
-        // shortcut of its own, and a shortcut that only ever opens a panel
-        // gives the user no way back with the same keys.
-        if (central.docks->isClosed(QStringLiteral("aiChat"))) {
-            showAiChat();
-            central.aiChatPanel->focusComposer();
-        } else {
-            central.docks->hide(QStringLiteral("aiChat"));
-        }
-    });
+    buildAiMenu(window, aiChat, editorTabs, appSettings, *actions, central.docks,
+                central.aiChatPanel);
 
     QObject::connect(undoAction, &QAction::triggered, window, [editorTabs]() {
         if (auto *editor = editorTabs->currentEditor()) {
