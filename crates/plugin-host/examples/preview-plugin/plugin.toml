@@ -1,0 +1,14 @@
+id = "example-preview"
+name = "Plain Text Preview Example"
+version = "0.1.0"
+api_version = 1
+license = "MIT"
+description = "A worked example of the wasm tier's preview export (ADR-0033)."
+
+[wasm]
+component = "plugin.wasm"
+
+[[contributes.previews]]
+id = "plain-text"
+label = "Plain Text (example)"
+extensions = ["txt"]

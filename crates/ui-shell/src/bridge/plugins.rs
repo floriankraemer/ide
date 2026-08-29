@@ -16,7 +16,9 @@ use std::rc::Rc;
 use cxx_qt_lib::QString;
 
 use crate::bridge::ffi::{self, FfiResult};
-use crate::bridge::registry::{shared_icons, start_plugin_tier, SharedIcons};
+use crate::bridge::registry::{
+    reload_shared_preview, shared_icons, start_plugin_tier, SharedIcons,
+};
 
 pub struct PluginCatalogRust {
     rows: RefCell<Vec<settings_model::PluginRow>>,
@@ -141,6 +143,11 @@ impl ffi::PluginCatalog {
             &settings.icon_theme,
         );
         start_plugin_tier();
+        // A `previews` provider the toggle just added or removed has to be
+        // picked up the same way the icon theme just was above — both are
+        // answers to "which plugins are loaded", and only one of the two
+        // questions had a home here until ADR-0033.
+        reload_shared_preview();
         self.refresh();
         FfiResult::default()
     }

@@ -193,6 +193,11 @@ void EditorTabs::setActiveTabChangedCallback(std::function<void()> callback)
     activeTabChanged_ = std::move(callback);
 }
 
+void EditorTabs::setPreviewChangedCallback(std::function<void(quint64)> callback)
+{
+    previewChanged_ = std::move(callback);
+}
+
 void EditorTabs::openFile(const QString &path)
 {
     const auto result = docManager_->openFile(path);

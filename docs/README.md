@@ -38,6 +38,7 @@ ADR numbers 0006 and 0013–0015 were never used; the gaps are historical and in
 - [ADR-0030: `DiffView`](architecture/decisions/0030-diff-view.md) — one Git-free diff component over `editor_core::diff`; the refactor preview and Replace in Files retrofit onto it; `TabKind::Diff` deferred until the Git backend exists.
 - [ADR-0031: Git backend](architecture/decisions/0031-git-backend.md) — `gix` for reads (discovery, status, HEAD, history), the `git` binary for anything touching credentials, hooks or signing (staging, commit, branch, remote); hunks computed in-process, blame shelled out.
 - [ADR-0032: run configurations](architecture/decisions/0032-run-configurations.md) — a PTY-backed console over the debugger-agnostic `LaunchSpec`; ANSI-stripped output in v1; one `TerminalSupervisorRust` QObject for N terminal sessions, not N QObject instances; the AI agent gains no run tool from this.
+- [ADR-0033: Markdown and Mermaid preview](architecture/decisions/0033-markdown-preview.md) — the `previews` contribution point (no `api_version` bump), a second wasm world (`preview-plugin`) for a sandboxed renderer, comrak + merman + resvg native rendering joined in `app_core::preview`, an ADS dock rather than a new `TabKind`.
 
 ## Plans
 
@@ -56,6 +57,7 @@ All plan documents are complete except the next-five-features plan and the plugi
 - [Large files and the binary viewer plan](architecture/large-files-and-binary-viewer-plan.md) — no-wrap default, highlighting size ceilings, O(1) fold lookup, read-only hex view for binary files.
 - [Next five features plan](architecture/next-five-features-plan.md) — the current roadmap: verification foundation, editor ergonomics, Alt+Enter intentions, Git v1, run configurations. Carries the living Progress table.
 - [Plugin host and icon themes plan](architecture/plugin-host-and-icon-themes-plan.md) — a two-tier plugin host and the Material icon themes built on it; in delivery, carries its own Progress table.
+- [Markdown and Mermaid preview plan](architecture/markdown-preview-plan.md) — the plugin host's third contribution point and its first content-returning wasm export; comrak + merman + resvg rendering.
 
 - [LSP conformance](architecture/lsp-conformance.md) — checking the LSP client against a real rust-analyzer; the executable expectations file and why it is not a per-PR gate.
 

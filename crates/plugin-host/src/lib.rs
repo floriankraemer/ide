@@ -48,7 +48,7 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 use plugin_api::{
     CommandContribution, IconThemeContribution, LoadErrorKind, PluginLoadError, PluginManifest,
-    MANIFEST_FILE, QUARANTINE_DIR,
+    PreviewContribution, MANIFEST_FILE, QUARANTINE_DIR,
 };
 
 pub use plugin::{BuiltinPlugin, LoadedPlugin, PluginSource};
@@ -56,14 +56,18 @@ pub use plugin::{BuiltinPlugin, LoadedPlugin, PluginSource};
 /// about the host, and a consumer that only asks it should not have to
 /// depend on the contract crate to hear the answer.
 pub use plugin_api::PLUGINS_DIR;
-pub use wasm::{HostServices, LogLevel, StderrServices, WasmError, WasmLimits, WasmTier};
+pub use wasm::{
+    HostServices, LogLevel, StderrServices, WasmError, WasmLimits, WasmPreview, WasmPreviewImage,
+    WasmTier,
+};
 
 /// The plugins shipped inside the binary.
 ///
 /// [`load`] still takes `builtins` as an argument rather than reading this
 /// constant, so a test can push its own fixtures through the real path
 /// without the vendored 1.03 MB of Material SVGs in the way.
-pub const BUILTIN_PLUGINS: &[BuiltinPlugin] = &[builtins::MATERIAL_ICON_THEME];
+pub const BUILTIN_PLUGINS: &[BuiltinPlugin] =
+    &[builtins::MATERIAL_ICON_THEME, builtins::MARKDOWN_PREVIEW];
 
 /// Every plugin that loaded, and every one that did not.
 #[derive(Debug, Default)]
@@ -119,6 +123,18 @@ impl PluginRegistry {
                 .commands
                 .iter()
                 .map(move |command| (plugin, command))
+        })
+    }
+
+    /// Every `previews` contribution, with the plugin that offers it.
+    pub fn previews(&self) -> impl Iterator<Item = (&LoadedPlugin, &PreviewContribution)> {
+        self.plugins.iter().flat_map(|plugin| {
+            plugin
+                .manifest()
+                .contributes
+                .previews
+                .iter()
+                .map(move |preview| (plugin, preview))
         })
     }
 

@@ -192,6 +192,11 @@ fn contributes(manifest: &PluginManifest) -> String {
         [only] => parts.push(format!("Command: {}", only.title)),
         many => parts.push(format!("{} commands", many.len())),
     }
+    match manifest.contributes.previews.as_slice() {
+        [] => {}
+        [only] => parts.push(format!("Preview: {}", only.label)),
+        many => parts.push(format!("{} previews", many.len())),
+    }
     parts.join(", ")
 }
 
@@ -257,6 +262,10 @@ pub fn explain(error: &PluginLoadError) -> PluginProblem {
             "This plugin asks to read files outside its own folder.".to_string(),
             format!("The request was `{value}`, and the editor grants no such thing."),
         ),
+        LoadErrorKind::InvalidExtension(value) => problem(
+            format!("The preview extension `{value}` is not a usable one."),
+            "An extension is lowercase letters and digits only, with no leading dot.".to_string(),
+        ),
         LoadErrorKind::DuplicateId => problem(
             format!("Another plugin already uses the id `{}`.", error.id),
             String::new(),
@@ -296,6 +305,12 @@ pub fn explain_wasm(error: &WasmError, path: &str) -> PluginProblem {
         WasmError::UnknownCommand(id) => (
             "This plugin was asked for a command it does not offer.",
             id.clone(),
+        ),
+        WasmError::NoPreviewExport => (
+            "This plugin offers a preview but its component does not render one.",
+            "It contributes `previews` and a `[wasm]` component, but the component \
+             does not implement the wider preview world."
+                .to_string(),
         ),
         // Reached only through a call made against an already-disabled
         // plugin, so the cause is the row's real story and the wrapper is
@@ -525,6 +540,13 @@ mod tests {
         )
         .unwrap();
         assert_eq!(contributes(&many), "2 commands");
+
+        let preview = PluginManifest::from_toml_str(
+            "id = \"markdown-preview\"\nname = \"Markdown Preview\"\nversion = \"1\"\napi_version = 1\n\
+             \n[[contributes.previews]]\nid = \"markdown\"\nlabel = \"Markdown\"\nextensions = [\"md\"]\n",
+        )
+        .unwrap();
+        assert_eq!(contributes(&preview), "Preview: Markdown");
     }
 
     #[test]

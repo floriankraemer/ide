@@ -1,0 +1,17 @@
+# Hand-written, unlike third_party/material-icon-theme/plugin.toml: this
+# built-in has no upstream package to import, so there is no generator
+# script to re-run. `extensions` below is meant to mirror the extensions
+# syntax-core registers for markdown (crates/syntax-core/src/registry.rs);
+# `plugin-host` does not depend on `syntax-core` (layering.md), so nothing
+# enforces that beyond this comment — check both when either changes.
+id = "markdown-preview"
+name = "Markdown Preview"
+version = "0.1.0"
+api_version = 1
+license = "MIT"
+description = "Renders Markdown and Mermaid diagrams in the Preview dock."
+
+[[contributes.previews]]
+id = "markdown"
+label = "Markdown"
+extensions = ["md", "markdown", "mdown", "mkd"]

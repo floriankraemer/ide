@@ -123,8 +123,8 @@ Choosing its `HostServices` stays in `ui-shell`, because the implementation that
 
 `wasmtime` with fuel accounting, epoch interruption plus a watchdog, and a `StoreLimits` memory cap.
 A capability-gated `Linker`: `log` always, `notify` and `workspace-root` by declaration, `read-file` restricted to prefixes granted under `${plugin_dir}`.
-`contributes.commands` is wired into the command palette, so invoking a command calls the component's `on-command`.
-A worked example plugin lives under `crates/plugin-host/examples/`.
+`contributes.commands` is a fully working mechanism — `WasmTier::invoke` calls a component's `on-command` by id — but it has no palette consumer: the palette's action list is `app_config::keymap::ACTIONS`, a static table, and nothing merges a plugin's contributed commands into it. Found while writing [the markdown preview plan](../markdown-preview-plan.md); wiring the palette up is not part of that plan's scope and remains open.
+A worked example plugin lives under `crates/plugin-host/examples/` (`hello-plugin`, exercising `on-command`; `preview-plugin`, exercising the preview world's `render` export added in ADR-0033).
 A trap disables the plugin with a typed error on the Plugins page; it never takes the process down, which is the whole reason for choosing a sandbox over the `dlopen` tier.
 
 ### P9 — docs and the end-to-end pass

@@ -13,6 +13,11 @@ project-model = { path = "../project-model" }
 icon-theme = { path = "../icon-theme" }
 plugin-host = { path = "../plugin-host" }
 syntax-core = { path = "../syntax-core" }
+# The previews join (ADR-0033), the same shape as the icon-theme join
+# above: the host stores contributions, `markdown-preview` renders,
+# neither may depend on the other. Qt-free, so app-core's no-Qt rule is
+# untouched.
+markdown-preview = { path = "../markdown-preview" }
 
 [dev-dependencies]
 tempfile = "3"

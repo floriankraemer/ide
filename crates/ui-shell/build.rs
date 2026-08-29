@@ -360,6 +360,11 @@ fn main() {
         .cpp_file("cpp/ai_chat_panel.h")
         .cpp_file("cpp/ai_chat_panel.cpp")
         .cpp_file("cpp/ai_providers_page.cpp")
+        // The Preview dock (ADR-0033). Declares Q_OBJECT for
+        // `anchorClicked`/`previewReady`'s slots, so its header is listed
+        // too, same as the chat panel above.
+        .cpp_file("cpp/markdown_preview_panel.h")
+        .cpp_file("cpp/markdown_preview_panel.cpp")
         // F3-17/18/19: the Changes/File History docks and the VCS menu.
         // Q_OBJECT-free like the other panels/pages above, so only the
         // sources are listed.

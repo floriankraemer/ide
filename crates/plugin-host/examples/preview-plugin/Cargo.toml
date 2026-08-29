@@ -1,0 +1,15 @@
+[package]
+name = "preview-plugin"
+version = "0.1.0"
+edition = "2021"
+
+# Not a member of the IDE workspace, for the same reason hello-plugin's own
+# Cargo.toml gives: built for wasm32-unknown-unknown with tooling the
+# builder image does not carry.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"

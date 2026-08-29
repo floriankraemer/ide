@@ -5,7 +5,7 @@ Hexagonal-lite with a humble Qt view: logic in Qt-free Rust, the view only displ
 
 ## Layers
 
-The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `edit-ops`, `vcs-core`, `pty-core`, `terminal-core`, `run-core`, `mcp-server`, `plugin-api`, `plugin-host`, `icon-theme`), adapter + view (`ui-shell`), and the `app` binary.
+The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `edit-ops`, `vcs-core`, `pty-core`, `terminal-core`, `run-core`, `mcp-server`, `plugin-api`, `plugin-host`, `icon-theme`, `markdown-preview`), adapter + view (`ui-shell`), and the `app` binary.
 The building-block diagram lives in [overview.md §3](overview.md#3-building-block-view) — one diagram, one place.
 
 ## Allowed imports
@@ -24,13 +24,14 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `plugin-api` | (std, serde, toml) — a leaf on purpose, see [ADR-0026](decisions/0026-plugin-host.md) | **No** |
 | `plugin-host` | `plugin-api` (+ std, wasmtime) — discovery, the registry and the built-ins ([ADR-0026](decisions/0026-plugin-host.md)), plus the sandboxed wasm tier ([ADR-0028](decisions/0028-wasm-plugin-tier.md)); `icon-theme` as a **dev**-dependency only, to check the vendored Material pack through the real load path | **No** |
 | `icon-theme` | (std, serde, toml, resvg) — **not** `syntax-core` and **not** `plugin-host`, see [ADR-0027](decisions/0027-icon-themes.md) | **No** |
+| `markdown-preview` | `syntax-core` (+ std, comrak, resvg, merman `=0.7.0-alpha.1` pinned exactly with its sibling crates, regex-lite) — **not** `plugin-api` and **not** `plugin-host`, the same isolation `icon-theme` keeps, see [ADR-0033](decisions/0033-markdown-preview.md) | **No** |
 | `settings-model` | `app-config`, `syntax-core`, `lsp-core`, `edit-ops`, `editor-core`, `plugin-api`, `plugin-host` (+ std, serde, toml, tree-sitter) | **No** |
 | `edit-ops` | `editor-core`, `syntax-core` (+ std, tree-sitter) | **No** |
 | `vcs-core` | `editor-core` (+ std, gix, serde) | **No** |
 | `run-core` | `pty-core`, `app-config`, `terminal-core` (+ std, serde, toml, serde_json, regex) | **No** |
-| `app-core` | `editor-core`, `project-model`, `plugin-host`, `icon-theme`, `syntax-core` — the last three only for the icon-theme join, see below | **No** |
+| `app-core` | `editor-core`, `project-model`, `plugin-host`, `icon-theme`, `syntax-core`, `markdown-preview` — the last four only for the icon-theme and previews joins, see below | **No** |
 | `ai-chat-core` | `lsp-core` (+ std, serde, serde_json, base64, tiktoken-rs, reqwest/rustls) | **No** |
-| `ui-shell` | `app-core`, `editor-core`, `edit-ops`, `project-model`, `app-config`, `settings-model`, `syntax-core`, `mcp-server`, `index-core`, `lsp-core`, `ai-chat-core`, `pty-core`, `terminal-core`, `plugin-host`, `vcs-core`, `run-core` (+ tokio, cxx, cxx-qt, cxx-qt-lib) | Yes (adapter + view live here) |
+| `ui-shell` | `app-core`, `editor-core`, `edit-ops`, `project-model`, `app-config`, `settings-model`, `syntax-core`, `mcp-server`, `index-core`, `lsp-core`, `ai-chat-core`, `pty-core`, `terminal-core`, `plugin-host`, `vcs-core`, `run-core`, `markdown-preview` (+ tokio, cxx, cxx-qt, cxx-qt-lib) | Yes (adapter + view live here) |
 | `app` | `ui-shell` | Yes |
 | `e2e` | (std, serde_json, tempfile) — **no workspace crate**; drives the built `app` binary over X11 and the filesystem, as a user does (ADR-0024) | **No** |
 
@@ -70,6 +71,9 @@ That test target is the one place `app-config` may be read from a test rather th
   Mapping a colour theme name to a light or dark icon set is a rule and lives here too, not in `theme.cpp`.
   Which icon theme is active is the same kind of answer: `IconService` is handed the persisted id and falls back to the first theme there is when nothing offers it, so a setting that outlives its plugin costs the user no icons (P7).
   This is why `app-core`'s dependency row grew past the two domain crates: all three additions are Qt-free, so the hard rule below is untouched, and the `cargo tree` gate is what proves it rather than the claim.
+- **Which preview a document gets, and who renders it** — the extension-to-provider table built from `previews` contributions (installed shadowing built-in, exactly `icon_themes`' direction and for the same reason), and the dispatch between the built-in native renderer and a running wasm plugin's `render` export — lives in `app_core::preview` (ADR-0033), the same shape as `app_core::icons` and joined for the same reason: `plugin-host` stores a contribution and never interprets it, `markdown-preview` renders and knows nothing about plugins.
+  A wasm provider's SVG is rasterised with the host's own bundled font, in `markdown-preview`, never inside the sandbox — a fuel-metered 64 MiB store is not where a rasteriser belongs, and the host already owns one.
+  A trap or a failed render from a wasm provider is never silently swapped for the native path: two different answers for one file would be worse than one honest `PreviewError`.
 - **Which kind of page a tab needs** is `app-core`'s answer, carried across the seam as `TabKind` (ADR-0020). The view builds a `CodeEditor` or a `HexViewer` from it and never infers the kind from the path or the bytes. What a hex row *says* — offset format, byte grouping, printable-byte rule, short-row padding — belongs to `editor_core::hex`, next to the `binary_detect` rule that decides what counts as binary in the first place.
 - **Rules the AI assistant needs** (how attachments are assembled into a prompt and in what order they are truncated, how many tokens that costs, which files are too secret to attach or read, whether a model-supplied path escapes the project, which tool an approval policy allows, how a code block or an approved tool call becomes an edit, and when an agent run must stop) live in `ai-chat-core` (ADR-0021).
   It depends on `lsp-core` because a proposed edit is expressed as `Vec<lsp_core::DocumentEdits>` and applied through the same `plan_edit` path a refactoring uses — there is no second apply semantics and no second undo story.
@@ -136,6 +140,7 @@ cargo tree -p e2e -e normal | grep -i qt            # must be empty
 cargo tree -p plugin-api -e normal | grep -i qt     # must be empty
 cargo tree -p plugin-host -e normal | grep -i qt    # must be empty
 cargo tree -p icon-theme -e normal | grep -i qt     # must be empty
+cargo tree -p markdown-preview -e normal | grep -i qt  # must be empty
 ```
 
 ## Known debt at time of writing

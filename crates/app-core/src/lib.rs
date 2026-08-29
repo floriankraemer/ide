@@ -21,6 +21,8 @@ use project_model::{FileOpError, OpenFolderError, Project, ProjectSession};
 pub mod file_ops;
 /// Where plugins and icon packs are joined (ADR-0026, ADR-0027).
 pub mod icons;
+/// Where plugins and the Markdown/Mermaid renderer are joined (ADR-0033).
+pub mod preview;
 mod tree_sort;
 
 pub use file_ops::{FileOp, ResourceOpError};

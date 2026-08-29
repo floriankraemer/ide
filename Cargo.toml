@@ -16,6 +16,7 @@ members = [
     "crates/icon-theme",
     "crates/plugin-host",
     "crates/settings-model",
+    "crates/markdown-preview",
     "crates/vcs-core",
     "crates/run-core",
     "crates/app-core",
