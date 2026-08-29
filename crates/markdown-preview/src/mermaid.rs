@@ -90,7 +90,8 @@ impl Renderer {
     ) -> Result<&RasterisedDiagram, DiagramError> {
         let cache_key = (key.to_string(), width_px);
         if !self.cache.contains_key(&cache_key) {
-            let rasterised = render_one(source, key, width_px, std::sync::Arc::clone(&self.fonts))?;
+            let svg = layout_mermaid(source, key)?;
+            let rasterised = rasterise_svg(&svg, width_px, std::sync::Arc::clone(&self.fonts))?;
             self.cache.insert(cache_key.clone(), rasterised);
         }
         Ok(self
@@ -98,21 +99,43 @@ impl Renderer {
             .get(&cache_key)
             .expect("just inserted or already present"))
     }
+
+    /// Rasterise SVG a wasm preview provider already produced (ADR-0033):
+    /// a guest returns SVG text, never pixels, so the host's own bundled
+    /// font and rasteriser are what turn it into an image either way —
+    /// this is the seam `app_core::preview` calls for that case. Not
+    /// cached: a wasm provider's own [`plugin_host::WasmTier`] result
+    /// already went through that plugin's own store, and caching a second
+    /// time here would key on content this module cannot itself hash
+    /// cheaply (the caller already has one, in the wasm binding's key).
+    pub fn rasterise_guest_svg(
+        &self,
+        svg: &str,
+        width_px: u32,
+    ) -> Result<RasterisedDiagram, DiagramError> {
+        rasterise_svg(svg, width_px, std::sync::Arc::clone(&self.fonts))
+    }
 }
 
-fn render_one(
-    source: &str,
-    diagram_id: &str,
+/// Mermaid source → SVG, via merman's headless renderer. Split from
+/// rasterising on purpose: a wasm preview provider already did its own
+/// equivalent of this step in its own sandbox and hands the host raw SVG
+/// directly ([`Renderer::rasterise_guest_svg`]), so only the built-in
+/// Markdown provider ever calls this half.
+fn layout_mermaid(source: &str, diagram_id: &str) -> Result<String, DiagramError> {
+    let renderer = HeadlessRenderer::new().with_diagram_id(diagram_id);
+    renderer
+        .render_svg_with_pipeline_sync(source, &SvgPipeline::resvg_safe())
+        .map_err(|err| DiagramError::Invalid(err.to_string()))?
+        .ok_or_else(|| DiagramError::Invalid("not a Mermaid diagram".to_string()))
+}
+
+fn rasterise_svg(
+    svg: &str,
     width_px: u32,
     fonts: std::sync::Arc<resvg::usvg::fontdb::Database>,
 ) -> Result<RasterisedDiagram, DiagramError> {
-    let renderer = HeadlessRenderer::new().with_diagram_id(diagram_id);
-    let svg = renderer
-        .render_svg_with_pipeline_sync(source, &SvgPipeline::resvg_safe())
-        .map_err(|err| DiagramError::Invalid(err.to_string()))?
-        .ok_or_else(|| DiagramError::Invalid("not a Mermaid diagram".to_string()))?;
-
-    let svg = rewrite_font_family(&svg, font::FAMILY);
+    let svg = rewrite_font_family(svg, font::FAMILY);
 
     let options = resvg::usvg::Options {
         fontdb: fonts,

@@ -165,6 +165,7 @@ version = "0.1.0"
 dependencies = [
  "editor-core",
  "icon-theme",
+ "markdown-preview",
  "plugin-host",
  "project-model",
  "syntax-core",

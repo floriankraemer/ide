@@ -35,7 +35,7 @@ mod mermaid;
 
 pub use html::{Anchor, Diagram, RenderOptions};
 pub use links::{resolve_link, LinkTarget};
-pub use mermaid::DiagramError;
+pub use mermaid::{DiagramError, RasterisedDiagram};
 
 /// What one document rendered to, diagrams included as pixels.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +80,21 @@ impl Renderer {
     /// colours that no longer apply.
     pub fn clear_diagram_cache(&mut self) {
         self.diagrams.clear();
+    }
+
+    /// Rasterise SVG a wasm preview provider already produced, with the
+    /// same bundled font every other diagram in this document uses. The
+    /// only route into this crate's rasteriser that does not start from
+    /// Mermaid source — `app_core::preview` calls it for a sandboxed
+    /// provider's `WasmPreviewImage` and attaches the key that struct
+    /// already carries, which is why this returns a bare
+    /// [`RasterisedDiagram`] rather than a [`PreviewImage`].
+    pub fn rasterise_guest_svg(
+        &self,
+        svg: &str,
+        width_px: u32,
+    ) -> Result<RasterisedDiagram, DiagramError> {
+        self.diagrams.rasterise_guest_svg(svg, width_px)
     }
 
     /// Render `source` at `width_px` (the preview pane's content width, in
