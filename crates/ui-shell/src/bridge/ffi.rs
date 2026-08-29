@@ -941,6 +941,19 @@ mod ffi {
         #[cxx_name = "roleNames"]
         fn role_names(self: &ProjectTreeModel) -> QHash_i32_QByteArray;
 
+        /// Whether the tree currently sorts descending (folders still lead
+        /// either way — this only flips the name comparison within each
+        /// group). Read fresh from `settings.toml` on every call, the same
+        /// pattern `AppSettings::mcpEnabled` uses.
+        #[qinvokable]
+        #[cxx_name = "sortDescending"]
+        fn sort_descending(self: &ProjectTreeModel) -> bool;
+
+        /// Flip the sort direction, persist it, and reset the model.
+        #[qinvokable]
+        #[cxx_name = "setSortDescending"]
+        fn set_sort_descending(self: Pin<&mut ProjectTreeModel>, descending: bool);
+
         /// Open `path` as the active project (persisted as last-opened) and
         /// reset the model to reflect the new tree. The current tree (if
         /// any) is left unchanged on failure (US-1).
