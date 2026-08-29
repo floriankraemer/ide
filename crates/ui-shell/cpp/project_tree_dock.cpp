@@ -14,17 +14,25 @@
 #include <QAbstractItemModel>
 #include <QAction>
 #include <QFileInfo>
+#include <QHBoxLayout>
+#include <QIcon>
 #include <QInputDialog>
 #include <QLineEdit>
 #include <QMainWindow>
 #include <QMenu>
 #include <QMessageBox>
 #include <QModelIndex>
+#include <QPainter>
+#include <QPalette>
+#include <QPixmap>
 #include <QPoint>
 #include <QSize>
 #include <QStatusBar>
 #include <QStyle>
+#include <QToolButton>
 #include <QTreeView>
+#include <QVBoxLayout>
+#include <QWidget>
 
 namespace ui_shell {
 
@@ -49,12 +57,87 @@ void updateSortAction(QAction *action, QWidget *iconSource, bool descending)
     action->setToolTip(descending ? QObject::tr("Sort Z to A") : QObject::tr("Sort A to Z"));
 }
 
+// A reticle (circle + four ticks) drawn directly rather than loaded from an
+// asset: no standard QStyle icon looks like "locate", and unlike the tab
+// close icon (which had to match a specific vendored glyph), any reasonable
+// crosshair shape satisfies this button — QPainter is the smaller diff.
+QIcon locateIcon(const QColor &tint)
+{
+    constexpr int kSide = 16;
+    QPixmap pixmap(kSide, kSide);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(QPen(tint, 1.4));
+    const QPointF center(kSide / 2.0, kSide / 2.0);
+    constexpr qreal kRadius = 4.5;
+    constexpr qreal kTickGap = 1.0;
+    constexpr qreal kTickLength = 2.5;
+    painter.drawEllipse(center, kRadius, kRadius);
+    painter.drawLine(QPointF(center.x(), center.y() - kRadius - kTickGap - kTickLength),
+                     QPointF(center.x(), center.y() - kRadius - kTickGap));
+    painter.drawLine(QPointF(center.x(), center.y() + kRadius + kTickGap),
+                     QPointF(center.x(), center.y() + kRadius + kTickGap + kTickLength));
+    painter.drawLine(QPointF(center.x() - kRadius - kTickGap - kTickLength, center.y()),
+                     QPointF(center.x() - kRadius - kTickGap, center.y()));
+    painter.drawLine(QPointF(center.x() + kRadius + kTickGap, center.y()),
+                     QPointF(center.x() + kRadius + kTickGap + kTickLength, center.y()));
+    return QIcon(pixmap);
+}
+
+// Descends the tree one level at a time rather than splitting `path` into
+// components: `Roles::Path` is always a node's full path, so the child
+// whose path is a directory prefix of the target is the next step down —
+// no separator-splitting or root-relative math needed.
+void revealPathInTree(QTreeView *treeView, const QString &path)
+{
+    if (path.isEmpty()) {
+        return;
+    }
+    QAbstractItemModel *model = treeView->model();
+    QModelIndex parent;
+    QModelIndex found;
+    while (true) {
+        const int rows = model->rowCount(parent);
+        QModelIndex next;
+        for (int row = 0; row < rows; ++row) {
+            const QModelIndex index = model->index(row, 0, parent);
+            const QString indexPath =
+              model->data(index, treeRole(ProjectTreeModel::Roles::Path)).toString();
+            if (indexPath == path) {
+                next = index;
+                break;
+            }
+            const bool isDir = model->data(index, treeRole(ProjectTreeModel::Roles::IsDir)).toBool();
+            const bool isAncestor = path.length() > indexPath.length()
+              && path.startsWith(indexPath)
+              && (path.at(indexPath.length()) == QLatin1Char('/')
+                  || path.at(indexPath.length()) == QLatin1Char('\\'));
+            if (isDir && isAncestor) {
+                next = index;
+                break;
+            }
+        }
+        if (!next.isValid()) {
+            return; // Not found — e.g. the file sits outside the open project.
+        }
+        found = next;
+        if (model->data(next, treeRole(ProjectTreeModel::Roles::Path)).toString() == path) {
+            break;
+        }
+        treeView->expand(next);
+        parent = next;
+    }
+    treeView->setCurrentIndex(found);
+    treeView->scrollTo(found);
+}
+
 } // namespace
 
-QTreeView *createProjectTreeDock(ads::CDockManager *dockManager,
-                                  ads::CDockAreaWidget *editorArea,
-                                  ProjectTreeModel *treeModel,
-                                  DockRegistry *docks)
+ProjectTreeDock createProjectTreeDock(ads::CDockManager *dockManager,
+                                       ads::CDockAreaWidget *editorArea,
+                                       ProjectTreeModel *treeModel,
+                                       DockRegistry *docks)
 {
     auto *treeView = new QTreeView();
     // The style's small-icon metric rather than a literal 16: it already
@@ -71,13 +154,16 @@ QTreeView *createProjectTreeDock(ads::CDockManager *dockManager,
 
     treeView->setModel(proxy);
     treeView->setHeaderHidden(true);
-    auto *treeDock = new ads::CDockWidget(dockManager, QObject::tr("Project"));
-    treeDock->setWidget(treeView);
 
-    // JetBrains-style sort toggle in the dock's own title bar, next to the
-    // close button — folders always lead; this only flips the direction the
-    // names within each group compare in (rust `apply_sort_order`).
-    auto *sortAction = new QAction(treeDock);
+    // Toolbar above the tree: the sort toggle (moved off the dock's title
+    // bar) and the locate-in-tree button, so both stay visible even when
+    // the dock is docked next to others and its title bar gets crowded.
+    auto *toolbar = new QWidget();
+    auto *toolbarLayout = new QHBoxLayout(toolbar);
+    toolbarLayout->setContentsMargins(4, 2, 4, 2);
+    toolbarLayout->setSpacing(2);
+
+    auto *sortAction = new QAction(toolbar);
     sortAction->setCheckable(true);
     sortAction->setChecked(treeModel->sortDescending());
     updateSortAction(sortAction, treeView, sortAction->isChecked());
@@ -85,17 +171,48 @@ QTreeView *createProjectTreeDock(ads::CDockManager *dockManager,
         treeModel->setSortDescending(descending);
         updateSortAction(sortAction, treeView, descending);
     });
-    treeDock->setTitleBarActions({ sortAction });
+    auto *sortButton = new QToolButton(toolbar);
+    sortButton->setDefaultAction(sortAction);
+
+    // Disabled until an editor tab is open — main_window.cpp's active-tab-
+    // changed callback flips this — and the icon is tinted to the tree's
+    // own text color (QPalette::WindowText) rather than a TabColors field,
+    // since this button lives in the tree's own chrome, not a tab strip.
+    auto *locateAction = new QAction(QObject::tr("Locate in Project Tree"), toolbar);
+    locateAction->setIcon(locateIcon(treeView->palette().color(QPalette::WindowText)));
+    locateAction->setEnabled(false);
+    auto *locateButton = new QToolButton(toolbar);
+    locateButton->setDefaultAction(locateAction);
+
+    toolbarLayout->addWidget(sortButton);
+    toolbarLayout->addWidget(locateButton);
+    toolbarLayout->addStretch(1);
+
+    auto *container = new QWidget();
+    auto *containerLayout = new QVBoxLayout(container);
+    containerLayout->setContentsMargins(0, 0, 0, 0);
+    containerLayout->setSpacing(0);
+    containerLayout->addWidget(toolbar);
+    containerLayout->addWidget(treeView);
+
+    auto *treeDock = new ads::CDockWidget(dockManager, QObject::tr("Project"));
+    treeDock->setWidget(container);
 
     docks->registerDock(QStringLiteral("projectTree"), treeDock, ads::LeftDockWidgetArea,
                         editorArea);
-    return treeView;
+    return ProjectTreeDock{treeView, locateAction};
 }
 
 void wireProjectTree(QTreeView *treeView,
+                     QAction *locateAction,
                      ProjectTreeModel *treeModel,
                      const ProjectTreeActions &actions)
 {
+    QObject::connect(locateAction, &QAction::triggered, treeView,
+                     [treeView, currentEditorPath = actions.currentEditorPath]() {
+                         revealPathInTree(treeView, currentEditorPath());
+                     });
+
     // Indexes from the view belong to the proxy, so every data() lookup goes
     // through the view's own model rather than the source directly.
     QAbstractItemModel *model = treeView->model();

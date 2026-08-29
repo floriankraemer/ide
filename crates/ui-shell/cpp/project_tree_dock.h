@@ -40,21 +40,34 @@ struct ProjectTreeActions
     // editor_tabs.h to say so — a callback keeps it that way, the same
     // shape the search results panel already takes.
     std::function<void(const QString &)> openFile;
+    // The active editor tab's path ("" if none), for the locate-in-tree
+    // button — same reasoning as `openFile`: EditorTabs' job, reached
+    // through a callback rather than a dependency on editor_tabs.h.
+    std::function<QString()> currentEditorPath;
 };
 
-// Builds the Project dock: the tree view, the icon-decoration proxy between
-// it and the model, and the dock widget itself, docked left of `editorArea`.
-// Returns the tree view, which the caller needs for the interface font
-// scale.
-QTreeView *createProjectTreeDock(ads::CDockManager *dockManager,
-                                 ads::CDockAreaWidget *editorArea,
-                                 ProjectTreeModel *treeModel,
-                                 DockRegistry *docks);
+// The tree view plus the toolbar's locate action, which the active-tab-
+// changed callback (main_window.cpp) enables only while a tab is open.
+struct ProjectTreeDock
+{
+    QTreeView *view;
+    QAction *locateAction;
+};
+
+// Builds the Project dock: the toolbar (sort, locate), the tree view, the
+// icon-decoration proxy between it and the model, and the dock widget
+// itself, docked left of `editorArea`.
+ProjectTreeDock createProjectTreeDock(ads::CDockManager *dockManager,
+                                      ads::CDockAreaWidget *editorArea,
+                                      ProjectTreeModel *treeModel,
+                                      DockRegistry *docks);
 
 // Wires the tree's gestures: click to open, right-click for the
-// create/rename/delete/attach menu (US-2b). Separate from construction only
-// because the panels the menu reaches are built after the dock is.
+// create/rename/delete/attach menu (US-2b), and the locate action's reveal-
+// in-tree behavior. Separate from construction only because the panels the
+// menu reaches are built after the dock is.
 void wireProjectTree(QTreeView *treeView,
+                     QAction *locateAction,
                      ProjectTreeModel *treeModel,
                      const ProjectTreeActions &actions);
 

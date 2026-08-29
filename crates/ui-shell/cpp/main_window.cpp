@@ -151,7 +151,9 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // into equal shares and squeezing the editor down to nothing.
     auto *editorArea = dockManager->setCentralWidget(editorDock);
 
-    QTreeView *treeView = createProjectTreeDock(dockManager, editorArea, treeModel, docks);
+    const ProjectTreeDock projectTreeDock = createProjectTreeDock(dockManager, editorArea, treeModel, docks);
+    QTreeView *treeView = projectTreeDock.view;
+    QAction *projectTreeLocateAction = projectTreeDock.locateAction;
 
     auto *editorTabs = new EditorTabs(docManager, languageService, editorRoot, window);
 
@@ -298,13 +300,15 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
 
     editorTabs->setActiveTabChangedCallback(
       [classViewPanel, editorTabs, problemsPanel, fileHistoryPanel, previewPanel,
-       previewDocks, previewProvider]() {
+       previewDocks, previewProvider, projectTreeLocateAction]() {
           classViewPanel->refresh(editorTabs->currentTabId());
           // The current file's group sorts to the top of the Problems panel.
           problemsPanel->setCurrentFile(editorTabs->currentPath());
           // F3-18: keep File History/annotate pinned to the current tab.
           fileHistoryPanel->setCurrentFile(editorTabs->currentPath());
           editorTabs->setAnnotateEnabled(editorTabs->annotateEnabled());
+          // Locate-in-tree only makes sense while a tab is open.
+          projectTreeLocateAction->setEnabled(!editorTabs->currentPath().isEmpty());
 
           // ADR-0033: follow the active tab, and reveal the dock the first
           // time a previewable file is opened — `toggleView(true)` rather
@@ -452,6 +456,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                       });
 
     wireProjectTree(treeView,
+                    projectTreeDock.locateAction,
                     treeModel,
                     ProjectTreeActions{window,
                                        aiChat,
@@ -459,7 +464,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                                        docks,
                                        [editorTabs](const QString &path) {
                                            editorTabs->openFile(path);
-                                       }});
+                                       },
+                                       [editorTabs]() { return editorTabs->currentPath(); }});
 
     return CentralWidgets{editorTabs,       dockManager,      docks,
                            treeView,         searchResultsPanel, classViewPanel,
