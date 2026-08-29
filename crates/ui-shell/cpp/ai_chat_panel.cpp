@@ -172,7 +172,12 @@ AiChatPanel::AiChatPanel(AiChat *chat, SearchModel *searchModel, QWidget *parent
 {
     // ---- Header: provider, mode, new chat, history -----------------------
     providerCombo_ = new QComboBox(this);
-    providerCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    // Not AdjustToContents: a provider label long enough to widen the combo
+    // past its share of a narrow dock would push the model picker off the
+    // row. The full text is one click away in the popup, which is sized to
+    // its contents regardless.
+    providerCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    providerCombo_->setMinimumContentsLength(8);
     providerCombo_->setToolTip(tr("Which provider the next message goes to."));
 
     // Editable, because the catalogue is a convenience and never a gate: a
@@ -184,7 +189,8 @@ AiChatPanel::AiChatPanel(AiChat *chat, SearchModel *searchModel, QWidget *parent
     modelCombo_ = modelCombo;
     modelCombo_->setEditable(true);
     modelCombo_->setInsertPolicy(QComboBox::NoInsert);
-    modelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
+    modelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    modelCombo_->setMinimumContentsLength(8);
 
     askButton_ = new QPushButton(tr("Ask"), this);
     agentButton_ = new QPushButton(tr("Agent"), this);
@@ -203,13 +209,25 @@ AiChatPanel::AiChatPanel(AiChat *chat, SearchModel *searchModel, QWidget *parent
     historyButton_ = new QPushButton(tr("History"), this);
     historyButton_->setCheckable(true);
 
-    auto *header = new QHBoxLayout;
-    header->addWidget(providerCombo_, 1);
-    header->addWidget(modelCombo_, 1);
-    header->addWidget(askButton_);
-    header->addWidget(agentButton_);
-    header->addWidget(newChatButton);
-    header->addWidget(historyButton_);
+    // Two rows, not one: the dock is routinely docked narrow, and one row
+    // holding two combos and four buttons overflows it — which in a dock
+    // means a horizontal scrollbar and buttons off the edge, not a tidy
+    // squeeze. The pickers get a row of their own and the mode and history
+    // buttons get theirs.
+    auto *pickers = new QHBoxLayout;
+    pickers->addWidget(providerCombo_, 1);
+    pickers->addWidget(modelCombo_, 1);
+
+    auto *buttons = new QHBoxLayout;
+    buttons->addWidget(askButton_);
+    buttons->addWidget(agentButton_);
+    buttons->addWidget(newChatButton);
+    buttons->addWidget(historyButton_);
+    buttons->addStretch(1);
+
+    auto *header = new QVBoxLayout;
+    header->addLayout(pickers);
+    header->addLayout(buttons);
 
     // ---- History sidebar -------------------------------------------------
     historyList_ = new QListWidget(this);
