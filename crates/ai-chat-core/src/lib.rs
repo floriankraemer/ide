@@ -25,6 +25,7 @@ pub mod agent;
 pub mod context;
 pub mod conversation;
 pub mod history;
+pub mod models;
 pub mod proposal;
 pub mod providers;
 pub mod request;

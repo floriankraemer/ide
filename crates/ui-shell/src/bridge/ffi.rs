@@ -3730,6 +3730,19 @@ mod ffi {
         supports_images: bool,
     }
 
+    /// One model the active provider offers, as its catalogue reports it.
+    ///
+    /// *Discovered*, unlike the capabilities above: a model catalogue is
+    /// what a vendor publishes and changes between releases of this IDE,
+    /// so it is fetched rather than compiled in. `label` falls back to the
+    /// id when the provider publishes no friendlier name, so it is never
+    /// empty.
+    #[derive(Default)]
+    struct FfiAiModel {
+        id: QString,
+        label: QString,
+    }
+
     /// One row of Settings > AI Providers. `status` is a finished sentence
     /// from `settings_model::ai::key_status`, rendered verbatim;
     /// `key_present` exists only so the page can pick a colour for it. The
@@ -3948,6 +3961,42 @@ mod ffi {
         #[cxx_name = "applyAiSettings"]
         fn apply_ai_settings(self: Pin<&mut AiChat>);
 
+        // --- choosing a model ------------------------------------------
+
+        /// The active provider's model catalogue as last fetched. Empty
+        /// until `refreshModels` has answered, and empty for good when the
+        /// provider lists none — the model stays typeable either way, so
+        /// this list is a convenience and never a gate.
+        #[qinvokable]
+        fn models(self: &AiChat) -> Vec<FfiAiModel>;
+
+        /// Ask the active provider what it offers. Returns immediately: the
+        /// fetch runs on its own `std::thread` like every other blocking
+        /// call here, and answers with `modelsChanged`.
+        #[qinvokable]
+        #[cxx_name = "refreshModels"]
+        fn refresh_models(self: Pin<&mut AiChat>);
+
+        /// A finished sentence about the last fetch, from
+        /// `ai_chat_core::models::models_status`. The panel shows it; it
+        /// does not write it.
+        #[qinvokable]
+        #[cxx_name = "modelsStatus"]
+        fn models_status(self: &AiChat) -> QString;
+
+        /// The model the next message goes to: this conversation's
+        /// override, or the active provider's configured default.
+        #[qinvokable]
+        #[cxx_name = "currentModel"]
+        fn current_model(self: &AiChat) -> QString;
+
+        /// Run this conversation on `model`. An empty id puts it back on
+        /// the provider's default. Per conversation, not per provider: the
+        /// settings page owns the default, and this owns the exception.
+        #[qinvokable]
+        #[cxx_name = "setModel"]
+        fn set_model(self: Pin<&mut AiChat>, model: &QString) -> FfiResult;
+
         // --- the agent loop's approval protocol ------------------------
 
         /// Let the waiting call run. `remember` promotes that tool to
@@ -4086,6 +4135,12 @@ mod ffi {
         #[cxx_name = "providersChanged"]
         fn providers_changed(self: Pin<&mut AiChat>);
 
+        /// The model catalogue or the chosen model changed — re-read
+        /// `models()`, `modelsStatus()` and `currentModel()`.
+        #[qsignal]
+        #[cxx_name = "modelsChanged"]
+        fn models_changed(self: Pin<&mut AiChat>);
+
         #[qsignal]
         #[cxx_name = "tokenUsageChanged"]
         fn token_usage_changed(self: Pin<&mut AiChat>);
@@ -4197,7 +4252,39 @@ mod ffi {
 
         #[qinvokable]
         fn revert(self: &AiProviderEditor);
+
+        // --- the model catalogue, per row ------------------------------
+
+        /// Ask the row's endpoint what models it offers, using the *draft*
+        /// values: a base URL the user has just typed is the one that gets
+        /// asked, which is what makes pointing a local runtime somewhere
+        /// and picking its model one gesture instead of two dialogs.
+        ///
+        /// Returns immediately; answers with `modelsChanged`.
+        #[qinvokable]
+        #[cxx_name = "fetchModels"]
+        fn fetch_models(self: Pin<&mut AiProviderEditor>, id: &QString);
+
+        /// What that row's endpoint last reported. Empty until fetched, and
+        /// never a gate: the Model cell stays typeable.
+        #[qinvokable]
+        fn models(self: &AiProviderEditor, id: &QString) -> Vec<FfiAiModel>;
+
+        /// A finished sentence about that row's last fetch, from
+        /// `ai_chat_core::models::models_status`.
+        #[qinvokable]
+        #[cxx_name = "modelsStatus"]
+        fn models_status(self: &AiProviderEditor, id: &QString) -> QString;
+
+        /// That row's catalogue changed — re-read `models(id)`.
+        #[qsignal]
+        #[cxx_name = "modelsChanged"]
+        fn models_changed(self: Pin<&mut AiProviderEditor>, id: QString);
     }
+
+    // The catalogue fetch's one cross-thread hop; blocking HTTP must not
+    // run on the thread painting the dialog.
+    impl cxx_qt::Threading for AiProviderEditor {}
 
     extern "RustQt" {
         /// Git v1 (F3-12): owns one `vcs_core::Repository` (on a worker

@@ -1,5 +1,6 @@
 #include "ai_chat_panel.h"
 
+#include "flow_layout.h"
 #include "theme.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
@@ -69,95 +70,6 @@ constexpr quint32 kMentionLimit = 20;
 constexpr int kHeightPadding = 6;
 constexpr int kPopupWidthPadding = 8;
 
-// A layout that wraps its items onto as many rows as they need — Qt ships no
-// such layout, and the attachment chips are exactly the case it exists for:
-// an unbounded number of small items above a composer that must not be
-// pushed off screen. This is Qt's own documented FlowLayout example, trimmed
-// to what the chips bar uses.
-class FlowLayout : public QLayout
-{
-public:
-    explicit FlowLayout(QWidget *parent, int spacing)
-      : QLayout(parent)
-      , spacing_(spacing)
-    {
-        setContentsMargins(0, 0, 0, 0);
-    }
-
-    ~FlowLayout() override
-    {
-        while (QLayoutItem *item = takeAt(0)) {
-            delete item;
-        }
-    }
-
-    void addItem(QLayoutItem *item) override { items_.append(item); }
-    int count() const override { return static_cast<int>(items_.size()); }
-    QLayoutItem *itemAt(int index) const override { return items_.value(index); }
-
-    QLayoutItem *takeAt(int index) override
-    {
-        if (index < 0 || index >= items_.size()) {
-            return nullptr;
-        }
-        return items_.takeAt(index);
-    }
-
-    Qt::Orientations expandingDirections() const override { return {}; }
-    bool hasHeightForWidth() const override { return true; }
-
-    int heightForWidth(int width) const override
-    {
-        return layoutRows(QRect(0, 0, width, 0), false);
-    }
-
-    void setGeometry(const QRect &rect) override
-    {
-        QLayout::setGeometry(rect);
-        layoutRows(rect, true);
-    }
-
-    QSize sizeHint() const override { return minimumSize(); }
-
-    QSize minimumSize() const override
-    {
-        QSize size;
-        for (const QLayoutItem *item : items_) {
-            size = size.expandedTo(item->minimumSize());
-        }
-        const QMargins margins = contentsMargins();
-        return size + QSize(margins.left() + margins.right(), margins.top() + margins.bottom());
-    }
-
-private:
-    // Places every item, wrapping when the next one would not fit, and
-    // returns the total height. `apply == false` measures without moving
-    // anything, which is what heightForWidth needs.
-    int layoutRows(const QRect &rect, bool apply) const
-    {
-        int x = rect.x();
-        int y = rect.y();
-        int rowHeight = 0;
-        for (QLayoutItem *item : items_) {
-            const QSize hint = item->sizeHint();
-            if (rowHeight > 0 && x + hint.width() > rect.right()) {
-                x = rect.x();
-                y += rowHeight + spacing_;
-                rowHeight = 0;
-            }
-            if (apply) {
-                item->setGeometry(QRect(QPoint(x, y), hint));
-            }
-            x += hint.width() + spacing_;
-            rowHeight = qMax(rowHeight, hint.height());
-        }
-        return y + rowHeight - rect.y();
-    }
-
-    QList<QLayoutItem *> items_;
-    int spacing_;
-};
-
 // Delete every widget a rebuilt layout used to hold. deleteLater rather than
 // delete because a rebuild can be triggered from inside a chip's own clicked
 // handler, and destroying the sender mid-signal is a crash.
@@ -224,6 +136,33 @@ QLabel *subordinateLabel(const QString &text, const QColor &color)
     return label;
 }
 
+/// A combo box that asks for its contents the first time — and every time —
+/// it is opened.
+///
+/// The model catalogue is fetched over the network, and nothing should
+/// contact a provider because a panel was built or a combo repainted. Qt
+/// offers no "about to show popup" signal, so opening it is the only hook,
+/// and `AiChat::refreshModels` is the one that decides whether a request is
+/// actually needed.
+class LazyComboBox : public QComboBox
+{
+public:
+    using QComboBox::QComboBox;
+
+    void setPopulator(std::function<void()> populate) { populate_ = std::move(populate); }
+
+    void showPopup() override
+    {
+        if (populate_) {
+            populate_();
+        }
+        QComboBox::showPopup();
+    }
+
+private:
+    std::function<void()> populate_;
+};
+
 } // namespace
 
 AiChatPanel::AiChatPanel(AiChat *chat, SearchModel *searchModel, QWidget *parent)
@@ -233,8 +172,25 @@ AiChatPanel::AiChatPanel(AiChat *chat, SearchModel *searchModel, QWidget *parent
 {
     // ---- Header: provider, mode, new chat, history -----------------------
     providerCombo_ = new QComboBox(this);
-    providerCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
-    providerCombo_->setToolTip(tr("Which provider and model the next message goes to."));
+    // Not AdjustToContents: a provider label long enough to widen the combo
+    // past its share of a narrow dock would push the model picker off the
+    // row. The full text is one click away in the popup, which is sized to
+    // its contents regardless.
+    providerCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    providerCombo_->setMinimumContentsLength(8);
+    providerCombo_->setToolTip(tr("Which provider the next message goes to."));
+
+    // Editable, because the catalogue is a convenience and never a gate: a
+    // model the endpoint does not list — a preview id, a fine-tune — must
+    // stay typeable, which is the behaviour Settings > AI Providers has
+    // always had for this field.
+    auto *modelCombo = new LazyComboBox(this);
+    modelCombo->setPopulator([this]() { chat_->refreshModels(); });
+    modelCombo_ = modelCombo;
+    modelCombo_->setEditable(true);
+    modelCombo_->setInsertPolicy(QComboBox::NoInsert);
+    modelCombo_->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
+    modelCombo_->setMinimumContentsLength(8);
 
     askButton_ = new QPushButton(tr("Ask"), this);
     agentButton_ = new QPushButton(tr("Agent"), this);
@@ -253,12 +209,25 @@ AiChatPanel::AiChatPanel(AiChat *chat, SearchModel *searchModel, QWidget *parent
     historyButton_ = new QPushButton(tr("History"), this);
     historyButton_->setCheckable(true);
 
-    auto *header = new QHBoxLayout;
-    header->addWidget(providerCombo_, 1);
-    header->addWidget(askButton_);
-    header->addWidget(agentButton_);
-    header->addWidget(newChatButton);
-    header->addWidget(historyButton_);
+    // Two rows, not one: the dock is routinely docked narrow, and one row
+    // holding two combos and four buttons overflows it — which in a dock
+    // means a horizontal scrollbar and buttons off the edge, not a tidy
+    // squeeze. The pickers get a row of their own and the mode and history
+    // buttons get theirs.
+    auto *pickers = new QHBoxLayout;
+    pickers->addWidget(providerCombo_, 1);
+    pickers->addWidget(modelCombo_, 1);
+
+    auto *buttons = new QHBoxLayout;
+    buttons->addWidget(askButton_);
+    buttons->addWidget(agentButton_);
+    buttons->addWidget(newChatButton);
+    buttons->addWidget(historyButton_);
+    buttons->addStretch(1);
+
+    auto *header = new QVBoxLayout;
+    header->addLayout(pickers);
+    header->addLayout(buttons);
 
     // ---- History sidebar -------------------------------------------------
     historyList_ = new QListWidget(this);
@@ -355,6 +324,17 @@ AiChatPanel::AiChatPanel(AiChat *chat, SearchModel *searchModel, QWidget *parent
             reportResult(chat_->setActiveProvider(id));
         }
     });
+    connect(modelCombo_, &QComboBox::activated, this, [this](int index) {
+        reportResult(chat_->setModel(modelCombo_->itemText(index)));
+    });
+    // A typed id is a choice too, and the only way to reach a model the
+    // endpoint does not list.
+    connect(modelCombo_->lineEdit(), &QLineEdit::editingFinished, this, [this]() {
+        const QString typed = modelCombo_->currentText().trimmed();
+        if (typed != chat_->currentModel()) {
+            reportResult(chat_->setModel(typed));
+        }
+    });
     connect(askButton_, &QPushButton::clicked, this, [this]() {
         reportResult(chat_->setMode(QStringLiteral("ask")));
     });
@@ -401,6 +381,7 @@ AiChatPanel::AiChatPanel(AiChat *chat, SearchModel *searchModel, QWidget *parent
     connect(chat_, &AiChat::chatFailed, this, &AiChatPanel::onChatFailed);
     connect(chat_, &AiChat::attachmentsChanged, this, &AiChatPanel::reloadAttachments);
     connect(chat_, &AiChat::providersChanged, this, &AiChatPanel::reloadProviders);
+    connect(chat_, &AiChat::modelsChanged, this, &AiChatPanel::reloadModels);
     connect(chat_, &AiChat::tokenUsageChanged, this, &AiChatPanel::reloadTokenUsage);
     connect(chat_, &AiChat::conversationsChanged, this, &AiChatPanel::reloadConversations);
     connect(chat_, &AiChat::toolCallPending, this, &AiChatPanel::onToolCallPending);
@@ -457,9 +438,9 @@ void AiChatPanel::reloadProviders()
     const ::rust::Vec<FfiAiProvider> providers = chat_->providers();
     for (std::size_t i = 0; i < providers.size(); ++i) {
         const FfiAiProvider &provider = providers[i];
-        // The model is part of the identity of a choice — "Anthropic" alone
-        // does not tell the user which model their tokens are going to.
-        QString label = tr("%1 · %2").arg(provider.label, provider.model);
+        // The model has its own control beside this one, so repeating it
+        // here would only make the header line longer.
+        QString label = provider.label;
         if (!provider.key_present) {
             label = tr("%1 (no API key)").arg(label);
         }
@@ -490,6 +471,39 @@ void AiChatPanel::reloadProviders()
     const QString mode = chat_->mode();
     askButton_->setChecked(mode != QStringLiteral("agent"));
     agentButton_->setChecked(mode == QStringLiteral("agent"));
+
+    // The provider that changed owns the catalogue, so the models on screen
+    // belong to the old one. The new one's are fetched when the user opens
+    // the box, not now: nothing should contact a third party because a
+    // combo repainted.
+    reloadModels();
+}
+
+void AiChatPanel::reloadModels()
+{
+    const QSignalBlocker blocker(modelCombo_);
+    const QString current = chat_->currentModel();
+    modelCombo_->clear();
+    const ::rust::Vec<FfiAiModel> models = chat_->models();
+    for (std::size_t i = 0; i < models.size(); ++i) {
+        // The entry is the id, not the provider's display name: the box is
+        // editable, so whatever it shows is also what a user can type and
+        // what `setModel` is handed. The display name rides along as the
+        // tooltip rather than becoming a second spelling of the choice.
+        modelCombo_->addItem(models[i].id);
+        modelCombo_->setItemData(modelCombo_->count() - 1, models[i].label, Qt::ToolTipRole);
+    }
+    const int row = modelCombo_->findText(current);
+    if (row >= 0) {
+        modelCombo_->setCurrentIndex(row);
+    } else {
+        // A model the catalogue does not list — not yet fetched, a fetch
+        // that failed, or an id the user typed — is still what the next
+        // message goes to, so it is what the box says.
+        modelCombo_->setEditText(current);
+    }
+    // The sentence is `ai-chat-core`'s; this shows it and does not write it.
+    modelCombo_->setToolTip(chat_->modelsStatus());
 }
 
 void AiChatPanel::reloadConversations()

@@ -105,6 +105,7 @@ private:
 
     // Header / history.
     void reloadProviders();
+    void reloadModels();
     void reloadConversations();
     void toggleHistory();
     void showHistoryMenu(const QPoint &pos);
@@ -154,6 +155,7 @@ private:
     CurrentTextProvider currentTextProvider_;
 
     QComboBox *providerCombo_ = nullptr;
+    QComboBox *modelCombo_ = nullptr;
     QButtonGroup *modeGroup_ = nullptr;
     QPushButton *askButton_ = nullptr;
     QPushButton *agentButton_ = nullptr;

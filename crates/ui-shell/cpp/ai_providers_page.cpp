@@ -53,10 +53,21 @@ QColor statusColor(bool keyPresent)
 // QTreeWidgetItem carries flags per item, not per column, so "editable" is
 // all-or-nothing without this: the three fields that are settings open an
 // editor, and label, type and the composed Status sentence never do.
+//
+// The Model column additionally opens an *editable* combo box offering what
+// the row's endpoint says it has. Editable, not a menu: the catalogue is a
+// convenience and never a gate — a preview id or a fine-tune that no
+// catalogue lists must stay typeable, which is what this cell has always
+// been. `QComboBox`'s user property is its text, so the existing
+// itemChanged -> setModel path reads the result unchanged.
 class ColumnEditableDelegate : public QStyledItemDelegate
 {
 public:
-    using QStyledItemDelegate::QStyledItemDelegate;
+    ColumnEditableDelegate(AiProviderEditor *editor, QObject *delegateParent)
+      : QStyledItemDelegate(delegateParent)
+      , editor_(editor)
+    {
+    }
 
     QWidget *createEditor(QWidget *editorParent, const QStyleOptionViewItem &option,
                           const QModelIndex &index) const override
@@ -65,8 +76,48 @@ public:
         if (column != kBaseUrlColumn && column != kModelColumn && column != kKeyEnvColumn) {
             return nullptr;
         }
-        return QStyledItemDelegate::createEditor(editorParent, option, index);
+        if (column != kModelColumn) {
+            return QStyledItemDelegate::createEditor(editorParent, option, index);
+        }
+
+        const QString id = index.sibling(index.row(), kProviderColumn)
+                             .data(kProviderIdRole)
+                             .toString();
+        auto *combo = new QComboBox(editorParent);
+        combo->setEditable(true);
+        combo->setInsertPolicy(QComboBox::NoInsert);
+        fill(combo, id);
+        // Opening the cell is the gesture that asks the endpoint; nothing
+        // contacts a provider because the page was drawn.
+        QObject::connect(editor_, &AiProviderEditor::modelsChanged, combo,
+                         [this, combo, id](const QString &changed) {
+                             if (changed == id) {
+                                 const QString typed = combo->currentText();
+                                 fill(combo, id);
+                                 combo->setCurrentText(typed);
+                             }
+                         });
+        editor_->fetchModels(id);
+        return combo;
     }
+
+private:
+    void fill(QComboBox *combo, const QString &id) const
+    {
+        const QSignalBlocker blocker(combo);
+        combo->clear();
+        for (const FfiAiModel &model : editor_->models(id)) {
+            // The *id* is the entry, because the id is what this cell
+            // stores and what a request carries; the friendlier name the
+            // provider publishes rides along as the tooltip.
+            combo->addItem(model.id);
+            combo->setItemData(combo->count() - 1, model.label, Qt::ToolTipRole);
+        }
+        // The sentence is Rust's; this shows it and never composes one.
+        combo->setToolTip(editor_->modelsStatus(id));
+    }
+
+    AiProviderEditor *editor_ = nullptr;
 };
 
 QTreeWidgetItem *policyGroup(QTreeWidget *tree, const QString &title)
@@ -121,7 +172,7 @@ QWidget *buildAiProvidersPage(QWidget *parent, AiProviderEditor *editor)
     // grouping key worth having (status) changes while the page is open.
     providers->setRootIsDecorated(false);
     providers->setIndentation(0);
-    providers->setItemDelegate(new ColumnEditableDelegate(providers));
+    providers->setItemDelegate(new ColumnEditableDelegate(editor, providers));
     layout->addWidget(providers, 1);
 
     auto repaintProviders = [=]() {

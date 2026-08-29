@@ -129,6 +129,18 @@ pub struct Conversation {
     /// finished, and an older record without the field must still load.
     #[serde(default)]
     streaming: bool,
+    /// The model this conversation runs on, overriding the active
+    /// provider's configured default. `None` means "use the provider's
+    /// default", which is what a fresh conversation starts as.
+    ///
+    /// Per conversation rather than per provider so that a user can ask a
+    /// cheap fast model one question and a large one the next, without
+    /// editing settings in between.
+    ///
+    /// `#[serde(default)]` so a record written before model choice existed
+    /// still loads, as `None`.
+    #[serde(default)]
+    model: Option<String>,
 }
 
 impl Conversation {
@@ -154,6 +166,23 @@ impl Conversation {
     /// Whether an assistant turn is currently being streamed into.
     pub fn is_streaming(&self) -> bool {
         self.streaming
+    }
+
+    /// This conversation's model override, if it has one.
+    pub fn model(&self) -> Option<&str> {
+        self.model.as_deref()
+    }
+
+    /// Sets the model this conversation runs on. An empty id clears the
+    /// override, putting the conversation back on the provider's default —
+    /// which is also what switching provider does, since a model id from
+    /// one vendor means nothing to another.
+    pub fn set_model(&mut self, model: &str) {
+        self.model = if model.is_empty() {
+            None
+        } else {
+            Some(model.to_string())
+        };
     }
 
     /// The index of the in-flight assistant turn, which the bridge needs
@@ -308,9 +337,14 @@ impl Conversation {
     }
 
     /// Drops the whole transcript — "New conversation".
+    ///
+    /// The model override goes with it: a new conversation starts on the
+    /// provider's configured default, which is the thing the settings page
+    /// exists to set.
     pub fn clear(&mut self) {
         self.turns.clear();
         self.streaming = false;
+        self.model = None;
     }
 
     /// The `call_id`s the model asked about and has not been answered on,
@@ -643,5 +677,42 @@ mod tests {
             conversation.is_empty(),
             "a contentless turn would be rejected by every dialect"
         );
+    }
+
+    #[test]
+    fn a_fresh_conversation_runs_on_the_providers_default_model() {
+        assert_eq!(Conversation::new().model(), None);
+    }
+
+    #[test]
+    fn an_empty_model_id_clears_the_override_rather_than_setting_a_blank_one() {
+        let mut conversation = Conversation::new();
+        conversation.set_model("claude-opus-5");
+        assert_eq!(conversation.model(), Some("claude-opus-5"));
+        conversation.set_model("");
+        assert_eq!(
+            conversation.model(),
+            None,
+            "a blank model would be sent to the provider as one"
+        );
+    }
+
+    #[test]
+    fn a_transcript_written_before_model_choice_existed_still_loads() {
+        // The persisted shape of a record from before this field, which
+        // must deserialise rather than fail the whole history sidebar.
+        let stored = r#"{"turns":[],"streaming":false}"#;
+        let conversation: Conversation = serde_json::from_str(stored).expect("older record");
+        assert_eq!(conversation.model(), None);
+    }
+
+    #[test]
+    fn a_model_override_survives_a_round_trip_through_the_store_format() {
+        let mut conversation = Conversation::new();
+        conversation.push_user_text("hello");
+        conversation.set_model("gpt-4.1");
+        let json = serde_json::to_string(&conversation).expect("serialise");
+        let restored: Conversation = serde_json::from_str(&json).expect("deserialise");
+        assert_eq!(restored.model(), Some("gpt-4.1"));
     }
 }

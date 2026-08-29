@@ -279,6 +279,24 @@ The same pass added the attachment gestures the editor already had, on the proje
 
 The editor gained `ai.addSelectionNewChat` beside the existing Ctrl+L, sharing one handler so the 0-based-to-1-based line conversion exists in exactly one place.
 
+## Follow-up: choosing a model, not just a provider
+
+The panel shipped with one picker, over providers, labelled `"<provider> · <model>"`.
+The model behind that label was a free-text field in Settings > AI Providers, which made it two things it should not have been: a value the user had to know by heart, and a global setting they had to edit between two questions.
+
+Both are addressed without changing what the field stores (ADR-0034):
+
+| Piece | Where |
+|---|---|
+| `list_models` / `parse_models` / `models_status` | `ai-chat-core/src/models.rs`, one dispatch on `ProviderKind` and one pure parse per dialect |
+| `get_json`, shared `credential_header` | `ai-chat-core/src/transport.rs` — still the only module holding a key |
+| `Conversation::model: Option<String>` | `ai-chat-core/src/conversation.rs`; persists through `ConversationRecord`, `#[serde(default)]` so old records load |
+| `models` / `refreshModels` / `modelsStatus` / `currentModel` / `setModel`, `modelsChanged` | `AiChat` |
+| `fetchModels` / `models(id)` / `modelsStatus(id)`, `modelsChanged(id)` | `AiProviderEditor`, which gained a `Threading` impl for the fetch |
+| The header's editable model combo, and the Model column's editable combo delegate | `ai_chat_panel.cpp`, `ai_providers_page.cpp` |
+
+Three behaviours are worth stating because they are the ones a later change is most likely to break: the catalogue is fetched **when the picker is opened** and never on construction or repaint, both combos display **ids** rather than display names because both are editable, and the override is applied in `AiChat::provider()` **only** — the one function that builds the `ProviderConfig` a request is made from.
+
 ## Known limits that follow from decisions already taken
 
 - **Keys are environment-only**, so launching from a desktop launcher rather than a configured shell means no key — the Settings page says so rather than failing silently.
