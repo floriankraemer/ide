@@ -5,7 +5,7 @@ Hexagonal-lite with a humble Qt view: logic in Qt-free Rust, the view only displ
 
 ## Layers
 
-The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `edit-ops`, `vcs-core`, `pty-core`, `terminal-core`, `run-core`, `mcp-server`, `plugin-api`, `plugin-host`, `icon-theme`), adapter + view (`ui-shell`), and the `app` binary.
+The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `edit-ops`, `vcs-core`, `pty-core`, `terminal-core`, `run-core`, `mcp-server`, `plugin-api`, `plugin-host`, `icon-theme`, `markdown-preview`), adapter + view (`ui-shell`), and the `app` binary.
 The building-block diagram lives in [overview.md §3](overview.md#3-building-block-view) — one diagram, one place.
 
 ## Allowed imports
@@ -24,6 +24,7 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `plugin-api` | (std, serde, toml) — a leaf on purpose, see [ADR-0026](decisions/0026-plugin-host.md) | **No** |
 | `plugin-host` | `plugin-api` (+ std, wasmtime) — discovery, the registry and the built-ins ([ADR-0026](decisions/0026-plugin-host.md)), plus the sandboxed wasm tier ([ADR-0028](decisions/0028-wasm-plugin-tier.md)); `icon-theme` as a **dev**-dependency only, to check the vendored Material pack through the real load path | **No** |
 | `icon-theme` | (std, serde, toml, resvg) — **not** `syntax-core` and **not** `plugin-host`, see [ADR-0027](decisions/0027-icon-themes.md) | **No** |
+| `markdown-preview` | `syntax-core` (+ std, comrak, resvg, merman `=0.7.0-alpha.1` pinned exactly with its sibling crates, regex-lite) — **not** `plugin-api` and **not** `plugin-host`, the same isolation `icon-theme` keeps, see [ADR-0033](decisions/0033-markdown-preview.md) | **No** |
 | `settings-model` | `app-config`, `syntax-core`, `lsp-core`, `edit-ops`, `editor-core`, `plugin-api`, `plugin-host` (+ std, serde, toml, tree-sitter) | **No** |
 | `edit-ops` | `editor-core`, `syntax-core` (+ std, tree-sitter) | **No** |
 | `vcs-core` | `editor-core` (+ std, gix, serde) | **No** |
@@ -135,6 +136,7 @@ cargo tree -p e2e -e normal | grep -i qt            # must be empty
 cargo tree -p plugin-api -e normal | grep -i qt     # must be empty
 cargo tree -p plugin-host -e normal | grep -i qt    # must be empty
 cargo tree -p icon-theme -e normal | grep -i qt     # must be empty
+cargo tree -p markdown-preview -e normal | grep -i qt  # must be empty
 ```
 
 ## Known debt at time of writing

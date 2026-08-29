@@ -1,0 +1,7 @@
+2.1.5
+https://github.com/liberationfonts/liberation-fonts/releases/tag/2.1.5
+Only LiberationSans-Regular.ttf and LiberationSans-Bold.ttf are vendored
+here (out of the full Sans/Serif/Mono x Regular/Bold/Italic/BoldItalic
+set) — the preview's mermaid diagrams need one weight pair, not a whole
+family, and the metric-compatible-with-Arial choice is what makes
+merman's font-agnostic layout least wrong against it (ADR-0033).
