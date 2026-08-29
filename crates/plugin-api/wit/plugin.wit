@@ -64,3 +64,37 @@ world plugin {
     /// id, never a name the host invented.
     export on-command: func(id: string, args: list<string>) -> result<_, string>;
 }
+
+// A preview renderer. Not part of `interface host` or `world plugin`: a
+// fourth export added to `plugin` itself would make every component built
+// against it fail to instantiate, which is exactly the `api_version` bump
+// ADR-0026 lets a new contribution point avoid. A second world that
+// `include`s the first is additive instead — an existing component's world
+// is untouched, and only a component that opts into `preview-plugin`
+// (because its manifest names both `contributes.previews` and `[wasm]`)
+// is asked to satisfy the wider one.
+interface preview {
+    /// One diagram the host must still rasterise. `svg` is Mermaid-style
+    /// SVG text, never pixels — rasterising inside a fuel-metered, 64 MiB
+    /// sandbox would be slow for no reason when the host already owns a
+    /// rasteriser and the font to do it with.
+    record preview-image {
+        /// The key `html` references as `<img src="ide-preview:{key}">`.
+        key: string,
+        svg: string,
+    }
+
+    record rendered {
+        html: string,
+        images: list<preview-image>,
+    }
+
+    /// Render one document. `id` is the contributed previews id, never a
+    /// name the host invented — the same convention `on-command` uses.
+    render: func(id: string, source: string) -> result<rendered, string>;
+}
+
+world preview-plugin {
+    include plugin;
+    export preview;
+}

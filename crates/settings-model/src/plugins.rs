@@ -257,6 +257,10 @@ pub fn explain(error: &PluginLoadError) -> PluginProblem {
             "This plugin asks to read files outside its own folder.".to_string(),
             format!("The request was `{value}`, and the editor grants no such thing."),
         ),
+        LoadErrorKind::InvalidExtension(value) => problem(
+            format!("The preview extension `{value}` is not a usable one."),
+            "An extension is lowercase letters and digits only, with no leading dot.".to_string(),
+        ),
         LoadErrorKind::DuplicateId => problem(
             format!("Another plugin already uses the id `{}`.", error.id),
             String::new(),

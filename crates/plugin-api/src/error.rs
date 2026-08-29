@@ -43,6 +43,9 @@ pub enum LoadErrorKind {
     /// A capability path is not scoped to the plugin's own directory.
     /// Version 1 grants nothing wider.
     UnscopedCapabilityPath(String),
+    /// A `previews` extension is empty, too long, has a leading dot, a path
+    /// separator, or anything outside `[a-z0-9]+`.
+    InvalidExtension(String),
     /// A second plugin claimed an id an earlier one already took.
     DuplicateId,
     /// This plugin was being loaded when the process last died. Delete the
@@ -80,6 +83,11 @@ impl fmt::Display for LoadErrorKind {
                 f,
                 "a capability path must start with `{}`, but is `{path}`",
                 crate::manifest::PLUGIN_DIR_TOKEN
+            ),
+            Self::InvalidExtension(value) => write!(
+                f,
+                "a previews extension must be lowercase letters and digits only, \
+                 with no leading dot, but is `{value}`"
             ),
             Self::DuplicateId => write!(f, "another plugin already claimed this id"),
             Self::Quarantined { marker } => write!(

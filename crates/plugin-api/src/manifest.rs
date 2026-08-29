@@ -6,6 +6,7 @@
 //! host should be left with the parts that genuinely need a disk — reading
 //! directories, opening components, granting capabilities.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -34,6 +35,7 @@ pub const PLUGIN_DIR_TOKEN: &str = "${plugin_dir}";
 pub enum ContributionPoint {
     IconThemes,
     Commands,
+    Previews,
 }
 
 impl ContributionPoint {
@@ -42,6 +44,7 @@ impl ContributionPoint {
         match self {
             Self::IconThemes => "icon-themes",
             Self::Commands => "commands",
+            Self::Previews => "previews",
         }
     }
 }
@@ -69,14 +72,45 @@ pub struct CommandContribution {
     pub title: String,
 }
 
-/// Everything a plugin contributes, by point.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+/// One document preview a plugin offers.
+///
+/// Unlike [`CommandContribution`], a preview needs no `[wasm]` component:
+/// the built-in Markdown preview is served by a native renderer the host
+/// already ships, and a manifest naming a preview with no component is not
+/// an error, in contrast to `CommandsWithoutComponent`. A component is
+/// still how a *third-party* preview renders — the host tries it when both
+/// are present.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct PreviewContribution {
+    /// Stable id, handed to the host's own renderer table or to the guest's
+    /// `render` export.
+    pub id: String,
+    /// What the Preview dock's empty state and the Plugins page show.
+    pub label: String,
+    /// File extensions this preview claims, lowercase and without the
+    /// leading dot (`"md"`, not `".md"` or `"MD"`).
+    pub extensions: Vec<String>,
+}
+
+/// Everything a plugin contributes, by point.
+///
+/// Deliberately *not* `deny_unknown_fields`: [`API_VERSION`]'s doc comment
+/// promises that an older host ignores a contribution point it does not
+/// recognise rather than refusing the whole manifest, and every other
+/// struct in this module enforces the opposite rule — a typo in a *known*
+/// field is still a load error. `unknown` is where a point this build has
+/// never heard of goes to be silently dropped; nothing reads it.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize)]
 pub struct Contributes {
     #[serde(default, rename = "icon-themes")]
     pub icon_themes: Vec<IconThemeContribution>,
     #[serde(default)]
     pub commands: Vec<CommandContribution>,
+    #[serde(default)]
+    pub previews: Vec<PreviewContribution>,
+    #[serde(flatten)]
+    unknown: BTreeMap<String, toml::Value>,
 }
 
 impl Contributes {
@@ -84,7 +118,7 @@ impl Contributes {
     /// declares no contributions and no component does nothing, but it is
     /// not an error: it is how a plugin is emptied out without deleting it.
     pub fn is_empty(&self) -> bool {
-        self.icon_themes.is_empty() && self.commands.is_empty()
+        self.icon_themes.is_empty() && self.commands.is_empty() && self.previews.is_empty()
     }
 }
 
@@ -117,7 +151,7 @@ pub struct Capabilities {
 }
 
 /// `plugin.toml`, parsed and validated.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PluginManifest {
     /// Stable id. Also the directory name a plugin is installed under.
@@ -187,6 +221,27 @@ impl PluginManifest {
             ContributionPoint::Commands,
             self.contributes.commands.iter().map(|c| c.id.as_str()),
         )?;
+
+        for preview in &self.contributes.previews {
+            check_id("contributes.previews.id", &preview.id)?;
+            non_empty("contributes.previews.label", &preview.label)?;
+            if preview.extensions.is_empty() {
+                return Err(LoadErrorKind::EmptyField("contributes.previews.extensions"));
+            }
+            for extension in &preview.extensions {
+                check_extension(extension)?;
+            }
+        }
+        check_unique(
+            ContributionPoint::Previews,
+            self.contributes.previews.iter().map(|p| p.id.as_str()),
+        )?;
+
+        // Unlike `commands`, a `previews` contribution needs no `[wasm]`
+        // component: it may be served entirely by the host's own native
+        // renderer table (the built-in Markdown preview is). A component is
+        // only how a *third-party* preview renders, so its absence here is
+        // never `CommandsWithoutComponent`'s twin.
 
         if let Some(wasm) = &self.wasm {
             check_relative("wasm.component", &wasm.component)?;
@@ -319,6 +374,25 @@ fn check_unique<'a>(
         seen.push(id);
     }
     Ok(())
+}
+
+/// An extension is what the Preview dock keys a provider by, so it is held
+/// to a narrower charset than an id: lowercase ASCII letters and digits
+/// only, no leading dot (`"md"`, never `".md"`), no path separator, and
+/// short enough that a typo reads as a typo rather than a path.
+const EXTENSION_MAX_LEN: usize = 16;
+
+fn check_extension(value: &str) -> Result<(), LoadErrorKind> {
+    let ok = !value.is_empty()
+        && value.len() <= EXTENSION_MAX_LEN
+        && value
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
+    if ok {
+        Ok(())
+    } else {
+        Err(LoadErrorKind::InvalidExtension(value.to_string()))
+    }
 }
 
 #[cfg(test)]
@@ -542,5 +616,144 @@ mod tests {
         ))
         .expect("valid");
         assert!(!manifest.contributes.is_empty());
+    }
+
+    #[test]
+    fn a_previews_contribution_round_trips() {
+        let manifest = PluginManifest::from_toml_str(&with(
+            r#"
+            [[contributes.previews]]
+            id = "markdown"
+            label = "Markdown"
+            extensions = ["md", "markdown"]
+            "#,
+        ))
+        .expect("valid");
+        let previews = &manifest.contributes.previews;
+        assert_eq!(previews.len(), 1);
+        assert_eq!(previews[0].id, "markdown");
+        assert_eq!(previews[0].label, "Markdown");
+        assert_eq!(previews[0].extensions, vec!["md", "markdown"]);
+        assert!(!manifest.contributes.is_empty());
+    }
+
+    #[test]
+    fn a_previews_contribution_needs_at_least_one_extension() {
+        let err = PluginManifest::from_toml_str(&with(
+            r#"
+            [[contributes.previews]]
+            id = "markdown"
+            label = "Markdown"
+            extensions = []
+            "#,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            LoadErrorKind::EmptyField("contributes.previews.extensions")
+        );
+    }
+
+    #[test]
+    fn an_extension_with_a_dot_or_a_separator_or_uppercase_is_rejected() {
+        // A backslash is not exercised here: TOML's own string escaping
+        // rejects a bare `\` before this code ever sees it, so that case is
+        // already covered by `a_typo_in_a_key_is_refused_rather_than_ignored`'s
+        // sibling, `MalformedManifest`, not `InvalidExtension`.
+        for bad in [".md", "md/x", "MD", "m d", ""] {
+            let err = PluginManifest::from_toml_str(&with(&format!(
+                r#"
+                [[contributes.previews]]
+                id = "markdown"
+                label = "Markdown"
+                extensions = ["{bad}"]
+                "#
+            )))
+            .unwrap_err();
+            assert_eq!(
+                err,
+                LoadErrorKind::InvalidExtension(bad.to_string()),
+                "`{bad}` should have been rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn duplicate_preview_ids_in_one_manifest_are_rejected() {
+        let err = PluginManifest::from_toml_str(&with(
+            r#"
+            [[contributes.previews]]
+            id = "markdown"
+            label = "Markdown"
+            extensions = ["md"]
+
+            [[contributes.previews]]
+            id = "markdown"
+            label = "Markdown, again"
+            extensions = ["mkd"]
+            "#,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            LoadErrorKind::DuplicateContributionId {
+                point: "previews",
+                id: "markdown".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn previews_without_a_component_are_accepted_unlike_commands() {
+        // The asymmetry with `commands_need_a_component_to_run_them` is the
+        // point: a `previews` contribution may be served entirely by the
+        // host's own native renderer table.
+        let manifest = PluginManifest::from_toml_str(&with(
+            r#"
+            [[contributes.previews]]
+            id = "markdown"
+            label = "Markdown"
+            extensions = ["md"]
+            "#,
+        ))
+        .expect("valid");
+        assert!(manifest.wasm.is_none());
+    }
+
+    #[test]
+    fn an_unknown_contribution_point_is_ignored_not_an_error() {
+        // The property `API_VERSION`'s doc comment promises: a manifest
+        // naming a point this build has never heard of still loads, with
+        // everything else about it intact.
+        let manifest = PluginManifest::from_toml_str(&with(
+            r#"
+            [[contributes.icon-themes]]
+            id = "material"
+            label = "Material"
+            pack = "pack.toml"
+
+            [[contributes.some-future-point]]
+            id = "whatever"
+            "#,
+        ))
+        .expect("an unrecognised point must not fail the whole manifest");
+        assert_eq!(manifest.contributes.icon_themes.len(), 1);
+    }
+
+    #[test]
+    fn a_typo_in_a_known_previews_field_is_still_refused() {
+        // `Contributes` dropped `deny_unknown_fields` so an *unrecognised
+        // point* is tolerated; a typo inside a point this build does know
+        // must still be a load error, or nobody would ever notice one.
+        let err = PluginManifest::from_toml_str(&with(
+            r#"
+            [[contributes.previews]]
+            id = "markdown"
+            lable = "Markdown"
+            extensions = ["md"]
+            "#,
+        ))
+        .unwrap_err();
+        assert!(matches!(err, LoadErrorKind::MalformedManifest(_)), "{err}");
     }
 }
