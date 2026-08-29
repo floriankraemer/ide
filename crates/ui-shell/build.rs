@@ -390,6 +390,11 @@ fn main() {
     for source in ADS_SOURCES {
         builder = builder.cpp_file(ads_dir.join(source));
     }
+    if is_windows {
+        // DwmSetWindowAttribute (native rounded-corner + shadow opt-in on
+        // Windows 11, applyNativeWindowChrome() in main_window.cpp).
+        println!("cargo:rustc-link-lib=dwmapi");
+    }
     if needs_xcb {
         // Matches CMakeLists.txt's `if (UNIX AND NOT APPLE) ... linux/FloatingWidgetTitleBar` block.
         let linux_header = "linux/FloatingWidgetTitleBar.h";

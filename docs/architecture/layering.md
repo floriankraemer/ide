@@ -93,6 +93,7 @@ That test target is the one place `app-config` may be read from a test rather th
   `lsp-core` owns only what the protocol owns — the server command per language id, and the few ids LSP names differently from the grammar (`tsx` -> `typescriptreact`) — and `ui-shell` joins the two, which is translation and so allowed in the adapter.
   No crate may grow a second file-extension table.
 - **The index instance** is built and updated by `ui-shell`'s `SearchModel` and shared with `mcp-server` as an `Arc<RwLock<IndexSlot>>` (ADR-0012). `mcp-server` only queries it; it never builds or owns one.
+- **Window-frame rounding/shadow** stays inside ADR-0001's native-chrome constraint: `main_window.cpp`'s `applyNativeWindowChrome()` opts into Windows 11's own `DWMWA_WINDOW_CORNER_PREFERENCE`, a DWM setting rather than app-painted chrome, and is a no-op elsewhere. macOS's `NSWindow` already casts a native shadow with no code needed. On Linux this is entirely WM/compositor-controlled; getting the app to influence it would require going frameless (client-side decorations), which ADR-0001 rules out — so there is no Linux code path here, by design, not by omission.
 - **`bridge.rs` (adapter)**: translation only — QString/QModelIndex ↔ Rust types, session call, emit signal, refresh model. No domain state, no rules, no branching beyond type mapping.
 - **`cpp/` (view)**: widget construction, layout, menus, dialogs, signal wiring only. It may ask "what happened" and show the answer; it never decides "what should happen".
 
