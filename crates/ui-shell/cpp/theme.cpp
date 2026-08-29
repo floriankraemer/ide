@@ -1,8 +1,14 @@
 #include "theme.h"
 
+#include "DockManager.h"
+#include "IconProvider.h"
+
 #include <QApplication>
 #include <QEvent>
+#include <QFile>
 #include <QFont>
+#include <QImage>
+#include <QPixmap>
 #include <QWidget>
 
 namespace ui_shell {
@@ -698,6 +704,31 @@ QString activeThemeName()
     return activeTheme;
 }
 
+QIcon tabCloseIcon()
+{
+    // The mask is read once and kept around: it never changes, only the
+    // tint color does.
+    static const QByteArray mask = [] {
+        QFile file(QStringLiteral(":/ui/icons/close_mask_32.a8"));
+        file.open(QIODevice::ReadOnly);
+        return file.readAll();
+    }();
+    constexpr int kSide = 32;
+    Q_ASSERT(mask.size() == kSide * kSide);
+
+    const QColor tint = tabColorsForTheme(activeThemeName()).tabText;
+    QImage image(kSide, kSide, QImage::Format_ARGB32_Premultiplied);
+    image.fill(Qt::transparent);
+    for (int y = 0; y < kSide; ++y) {
+        for (int x = 0; x < kSide; ++x) {
+            QColor pixel = tint;
+            pixel.setAlpha(static_cast<uchar>(mask[y * kSide + x]));
+            image.setPixelColor(x, y, pixel);
+        }
+    }
+    return QIcon(QPixmap::fromImage(image));
+}
+
 void applyTheme(const QString &themeName)
 {
     activeTheme = themeName;
@@ -707,6 +738,18 @@ void applyTheme(const QString &themeName)
     // manager's own sheet.
     qApp->setStyleSheet(styleSheetForTheme(themeName));
     restyleDockManagers();
+
+    // ads::CIconProvider is a process-wide singleton (CDockManager::
+    // iconProvider() is static), so this is safe to call before any
+    // CDockManager exists — it just primes what the first one will read.
+    // Existing dock tabs/title bars already painted keep their old-tint
+    // icon until they're recreated (ADS caches the QIcon on the button at
+    // construction, not resolved per paint) — a live theme switch fully
+    // catching up needs restarting the app, same as it already does for a
+    // few other chrome details.
+    const QIcon closeIcon = tabCloseIcon();
+    ads::CDockManager::iconProvider().registerCustomIcon(ads::TabCloseIcon, closeIcon);
+    ads::CDockManager::iconProvider().registerCustomIcon(ads::DockAreaCloseIcon, closeIcon);
 }
 
 namespace {

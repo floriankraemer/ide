@@ -388,6 +388,10 @@ fn main() {
         .include_dir("cpp")
         .include_dir(ads_dir)
         .cpp_file(compile_ads_qrc(ads_dir, &tool_dirs))
+        // The close-icon mask (F?): a plain qrc, named by us, so CxxQtBuilder's
+        // own filename-derived init symbol works — unlike ads.qrc above, no
+        // manual rcc step is needed here.
+        .qrc("resources/ui_icons.qrc")
         .qt_module("Widgets")
         // Widgets code uses QTextDocument (QtGui) directly. On Linux this
         // resolves transitively via the shared Qt6Widgets.so's own NEEDED

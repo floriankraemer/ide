@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QColor>
+#include <QIcon>
 #include <QPalette>
 #include <QString>
 
@@ -109,6 +110,14 @@ QPalette paletteForTheme(const QString &themeName);
 // use this rather than setStyleSheet() alone, so palette and QSS can never
 // drift apart.
 void applyTheme(const QString &themeName);
+
+// The tab/dock close (x) glyph, tinted to the active theme's tab text color
+// (no Qt6Svg in this build, so the vendored ADS icon is rasterized to an
+// alpha mask once — see resources/ui_icons.qrc — and recolored here rather
+// than loaded as-is). Called by applyTheme() itself to keep both the plain
+// QTabWidget close buttons (via a QProxyStyle) and ADS's own dock/tab close
+// buttons (via ads::CIconProvider) in sync with a live theme switch.
+QIcon tabCloseIcon();
 
 // Scales the whole application's default UI font to `percent` of the font
 // Qt picked for the platform (100 = unchanged). Widgets that were never

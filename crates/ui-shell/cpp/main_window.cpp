@@ -57,6 +57,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QPlainTextEdit>
+#include <QProxyStyle>
 #include <QStringList>
 #include <QSplitter>
 #include <QStatusBar>
@@ -68,6 +69,26 @@
 namespace ui_shell {
 
 namespace {
+
+// Swaps Qt's platform close glyph for ui_shell::tabCloseIcon() (theme.cpp),
+// so every plain QTabWidget's close button — editor tab groups, terminal
+// session tabs — matches ADS's own dock/tab close buttons, themed the same
+// way (see applyTheme()'s ads::CIconProvider registration for that half of
+// the swap). Everything else falls through to the base style unchanged.
+class TabCloseIconStyle : public QProxyStyle
+{
+public:
+    using QProxyStyle::QProxyStyle;
+
+    QIcon standardIcon(StandardPixmap standardIcon, const QStyleOption *option,
+                        const QWidget *widget) const override
+    {
+        if (standardIcon == QStyle::SP_TabCloseButton) {
+            return tabCloseIcon();
+        }
+        return QProxyStyle::standardIcon(standardIcon, option, widget);
+    }
+};
 
 // Sidebar tree + tabbed editor area, PHPStorm-style (US-5): each panel is
 // its own ADS CDockWidget (D3) — float/redock each independently, room left
@@ -896,6 +917,10 @@ int run_app()
 {
     int argc = 0;
     QApplication app(argc, nullptr);
+    // Wraps whatever platform style Qt picked, intercepting only the tab
+    // close-button icon (see TabCloseIconStyle above) — every QTabWidget in
+    // the app picks it up with no per-call-site change.
+    app.setStyle(new TabCloseIconStyle(app.style()));
 
     // Parentless for now: the splash needs the persisted theme before any
     // window exists, and buildMainWindow() adopts this object as soon as it

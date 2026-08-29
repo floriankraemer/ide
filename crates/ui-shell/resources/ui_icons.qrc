@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/ui">
+        <file>icons/close_mask_32.a8</file>
+    </qresource>
+</RCC>
