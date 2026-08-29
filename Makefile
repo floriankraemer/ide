@@ -8,7 +8,8 @@ LSP_IMAGE := ide-lsp-conformance
 # C++ translation unit from scratch.
 DOCKER_MOUNTS = -v "$(CURDIR)":/workspace -w /workspace \
 	-v ide-cargo-registry:/usr/local/cargo/registry \
-	-v ide-ccache:/ccache
+	-v ide-ccache:/ccache \
+	-v ide-sccache:/sccache
 RUN_LINUX = $(DOCKER) run --rm $(DOCKER_MOUNTS) $(LINUX_IMAGE)
 
 .PHONY: help all test lint e2e e2e-repeat build build-linux build-windows linux-image shell clean \
@@ -25,8 +26,9 @@ all: test build ## Run tests, then build all targets
 linux-image: ## Build the linux-builder Docker image
 	$(DOCKER) build --target linux-builder -t $(LINUX_IMAGE) -f $(DOCKERFILE) .
 
-test: linux-image ## Run cargo test --workspace in Docker
-	$(RUN_LINUX) cargo test --workspace
+test: linux-image ## Run cargo nextest + doctests in Docker
+	$(RUN_LINUX) cargo nextest run --workspace
+	$(RUN_LINUX) cargo test --doc --workspace
 
 # The conformance suite runs against a REAL language server, so it is opt-in:
 # it needs its own image, takes minutes, and can go red because upstream

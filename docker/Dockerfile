@@ -61,9 +61,39 @@ ENV QMAKE=/usr/bin/qmake6
 # build script recompiles all ~213 translation units from scratch.
 # CCACHE_DIR is a plain path so the Makefile can mount a named volume there
 # and the cache survives `docker run --rm`.
+#
+# RUSTC_WRAPPER=sccache covers the other half: cargo's own incremental
+# compilation already skips unchanged crates in a warm `target/` (bind-mounted
+# by the Makefile, so it survives `--rm` too), but a fresh worktree or a
+# `cargo clean` still recompiles every crate from source with nothing to
+# fall back on. sccache is a compilation cache keyed on source+flags, so it
+# still hits in that cold case as long as some other checkout built the same
+# crate/version/flags combination before. SCCACHE_DIR is a plain path for the
+# same named-volume-survives-`--rm` reason as CCACHE_DIR above.
 ENV CC="ccache gcc" \
     CXX="ccache g++" \
-    CCACHE_DIR=/ccache
+    CCACHE_DIR=/ccache \
+    RUSTC_WRAPPER=sccache \
+    SCCACHE_DIR=/sccache
+
+# Pinned binary releases, not `cargo install`: the latter would compile both
+# tools from source on every image rebuild, which is exactly the slow cold
+# build these tools exist to avoid.
+ARG NEXTEST_VERSION=0.9.143
+RUN curl -fsSL -o /tmp/nextest.tar.gz \
+      "https://get.nexte.st/${NEXTEST_VERSION}/linux" \
+    && tar -xzf /tmp/nextest.tar.gz -C /usr/local/cargo/bin cargo-nextest \
+    && rm /tmp/nextest.tar.gz \
+    && cargo nextest --version
+
+ARG SCCACHE_VERSION=0.17.0
+RUN curl -fsSL -o /tmp/sccache.tar.gz \
+      "https://github.com/mozilla/sccache/releases/download/v${SCCACHE_VERSION}/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl.tar.gz" \
+    && tar -xzf /tmp/sccache.tar.gz -C /tmp \
+    && mv "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl/sccache" /usr/local/cargo/bin/sccache \
+    && chmod +x /usr/local/cargo/bin/sccache \
+    && rm -rf /tmp/sccache.tar.gz "/tmp/sccache-v${SCCACHE_VERSION}-x86_64-unknown-linux-musl" \
+    && sccache --version
 
 # ---------------------------------------------------------------------------
 # lsp-conformance: linux-builder plus a real language server, for the
