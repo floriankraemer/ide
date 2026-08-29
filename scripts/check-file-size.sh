@@ -42,7 +42,9 @@ baseline() {
 	# impl went to app-core/src/file_ops.rs rather than in here.
 	# Raised from 1569 by 1 line for the tree_sort module declaration; the
 	# two sort-order methods themselves live in app-core/src/tree_sort.rs.
-	crates/app-core/src/lib.rs) echo 1570 ;;           # no split planned; ratcheted so it cannot grow
+	# Raised from 1570 by 2 lines for the preview module declaration and its
+	# doc comment; PreviewService itself lives in app-core/src/preview.rs.
+	crates/app-core/src/lib.rs) echo 1572 ;;           # no split planned; ratcheted so it cannot grow
 	esac
 }
 

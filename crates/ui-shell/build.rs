@@ -378,6 +378,13 @@ fn main() {
         .cpp_file("cpp/run_console_panel.cpp")
         .cpp_file("cpp/run_config_dialog.cpp")
         .cpp_file("cpp/run_menu.cpp")
+        // Split out of main_window.cpp to keep it under its 1200-line
+        // ceiling (ADR-0025): the status bar's permanent widgets, the
+        // Navigate menu, and the AI chat wiring/menu. Q_OBJECT-free, same
+        // as the VCS/Run menus above.
+        .cpp_file("cpp/status_bar.cpp")
+        .cpp_file("cpp/navigate_menu.cpp")
+        .cpp_file("cpp/ai_menu.cpp")
         .include_dir("cpp")
         .include_dir(ads_dir)
         .cpp_file(compile_ads_qrc(ads_dir, &tool_dirs))
