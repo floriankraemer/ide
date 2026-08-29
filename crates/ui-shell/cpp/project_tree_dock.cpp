@@ -23,6 +23,7 @@
 #include <QPoint>
 #include <QSize>
 #include <QStatusBar>
+#include <QStyle>
 #include <QTreeView>
 
 namespace ui_shell {
@@ -36,6 +37,16 @@ namespace {
 int treeRole(ProjectTreeModel::Roles role)
 {
     return Qt::UserRole + static_cast<int>(role);
+}
+
+// Icon + tooltip for the title-bar sort toggle reflect its current state —
+// the title-bar button is icon-only (DockAreaTitleBar wraps it with no
+// text), so the direction has to read from the arrow, JetBrains-style.
+void updateSortAction(QAction *action, QWidget *iconSource, bool descending)
+{
+    const auto standardIcon = descending ? QStyle::SP_ArrowDown : QStyle::SP_ArrowUp;
+    action->setIcon(iconSource->style()->standardIcon(standardIcon));
+    action->setToolTip(descending ? QObject::tr("Sort Z to A") : QObject::tr("Sort A to Z"));
 }
 
 } // namespace
@@ -62,6 +73,20 @@ QTreeView *createProjectTreeDock(ads::CDockManager *dockManager,
     treeView->setHeaderHidden(true);
     auto *treeDock = new ads::CDockWidget(dockManager, QObject::tr("Project"));
     treeDock->setWidget(treeView);
+
+    // JetBrains-style sort toggle in the dock's own title bar, next to the
+    // close button — folders always lead; this only flips the direction the
+    // names within each group compare in (rust `apply_sort_order`).
+    auto *sortAction = new QAction(treeDock);
+    sortAction->setCheckable(true);
+    sortAction->setChecked(treeModel->sortDescending());
+    updateSortAction(sortAction, treeView, sortAction->isChecked());
+    QObject::connect(sortAction, &QAction::toggled, treeModel, [treeModel, sortAction, treeView](bool descending) {
+        treeModel->setSortDescending(descending);
+        updateSortAction(sortAction, treeView, descending);
+    });
+    treeDock->setTitleBarActions({ sortAction });
+
     docks->registerDock(QStringLiteral("projectTree"), treeDock, ads::LeftDockWidgetArea,
                         editorArea);
     return treeView;

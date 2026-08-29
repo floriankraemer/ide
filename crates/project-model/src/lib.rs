@@ -98,8 +98,11 @@ impl DirectoryTree {
         self.nodes.is_empty()
     }
 
-    /// Walk `root` recursively and build the arena. Entries are visited in
-    /// directory-read order; no sorting/filtering beyond that for MVP.
+    /// Walk `root` recursively and build the arena, with each directory's
+    /// children sorted folders-first, then case-insensitively by name
+    /// ascending — matching every file manager's default and JetBrains'
+    /// default. `apply_sort_order` re-sorts an already-built tree without
+    /// touching the filesystem, for the sort-direction toggle.
     fn build(root: &Path) -> io::Result<Self> {
         let mut nodes = vec![TreeNode {
             path: root.to_path_buf(),
@@ -112,12 +115,13 @@ impl DirectoryTree {
             children: Vec::new(),
         }];
         Self::walk(&mut nodes, 0, root)?;
-        Ok(Self { nodes })
+        let mut tree = Self { nodes };
+        tree.apply_sort_order(SortOrder::Ascending);
+        Ok(tree)
     }
 
     fn walk(nodes: &mut Vec<TreeNode>, parent_id: usize, dir: &Path) -> io::Result<()> {
-        let mut entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
-        entries.sort_by_key(|e| e.file_name());
+        let entries: Vec<_> = fs::read_dir(dir)?.collect::<Result<_, _>>()?;
 
         for entry in entries {
             let path = entry.path();
@@ -145,6 +149,43 @@ impl DirectoryTree {
         }
         Ok(())
     }
+
+    /// Re-order every node's children in place: folders before files in
+    /// both directions, then by name — case-insensitively, with the raw
+    /// name as a tie-break so casing differences stay deterministic.
+    /// `order` flips the name comparison only; folders stay on top either
+    /// way, matching a file manager's "Sort by name, descending".
+    pub fn apply_sort_order(&mut self, order: SortOrder) {
+        for id in 0..self.nodes.len() {
+            let mut children = std::mem::take(&mut self.nodes[id].children);
+            children.sort_by(|&a, &b| Self::compare_nodes(&self.nodes[a], &self.nodes[b], order));
+            self.nodes[id].children = children;
+        }
+    }
+
+    fn compare_nodes(a: &TreeNode, b: &TreeNode, order: SortOrder) -> std::cmp::Ordering {
+        b.is_dir.cmp(&a.is_dir).then_with(|| {
+            let name_order = a
+                .name
+                .to_lowercase()
+                .cmp(&b.name.to_lowercase())
+                .then_with(|| a.name.cmp(&b.name));
+            match order {
+                SortOrder::Ascending => name_order,
+                SortOrder::Descending => name_order.reverse(),
+            }
+        })
+    }
+}
+
+/// Direction the project tree's children are sorted in. Folders always sort
+/// above files in either direction — only the name comparison within each
+/// group flips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SortOrder {
+    #[default]
+    Ascending,
+    Descending,
 }
 
 /// A successfully opened project: its root and the directory tree snapshot
@@ -291,11 +332,29 @@ pub struct ProjectSession {
     /// `None` until `start_watcher` is called, or after a project with no
     /// watcher started yet.
     watcher: Option<ProjectWatcher>,
+    /// Persists across "Open Folder" and tree rebuilds, so a mutation or a
+    /// watcher-triggered refresh doesn't silently reset the user's chosen
+    /// direction back to ascending.
+    sort_order: SortOrder,
 }
 
 impl ProjectSession {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn sort_order(&self) -> SortOrder {
+        self.sort_order
+    }
+
+    /// Change the sort direction and re-order the open tree in place, if
+    /// any — no filesystem walk, since the arena already has everything
+    /// `apply_sort_order` needs.
+    pub fn set_sort_order(&mut self, order: SortOrder) {
+        self.sort_order = order;
+        if let Some(project) = self.current.as_mut() {
+            project.tree.apply_sort_order(order);
+        }
     }
 
     /// (Re)start the filesystem watcher for the current project root,
@@ -329,7 +388,8 @@ impl ProjectSession {
         path: impl AsRef<Path>,
         config_dir: &Path,
     ) -> Result<(), OpenFolderError> {
-        let project = open_folder(path)?;
+        let mut project = open_folder(path)?;
+        project.tree.apply_sort_order(self.sort_order);
         // Persistence failure shouldn't prevent the project from opening —
         // it only degrades "reopen last project" on next launch.
         let _ = persist_last_project(config_dir, project.root.path());
@@ -348,6 +408,7 @@ impl ProjectSession {
         };
         let root_path = project.root.path().to_path_buf();
         project.tree = DirectoryTree::build(&root_path)?;
+        project.tree.apply_sort_order(self.sort_order);
         Ok(())
     }
 
@@ -392,7 +453,7 @@ mod tests {
             .iter()
             .map(|&id| tree.node(id).name.as_str())
             .collect();
-        assert_eq!(root_children, vec!["README.md", "empty_dir", "src"]);
+        assert_eq!(root_children, vec!["empty_dir", "src", "README.md"]);
 
         let src_id = tree
             .children(root_id)
@@ -415,6 +476,76 @@ mod tests {
             .copied()
             .unwrap();
         assert!(tree.children(empty_id).is_empty());
+    }
+
+    #[test]
+    fn folders_stay_above_files_and_names_sort_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path().join("zebra_dir")).unwrap();
+        fs::write(dir.path().join("apple.txt"), "").unwrap();
+        fs::write(dir.path().join("Banana.txt"), "").unwrap();
+        fs::write(dir.path().join("Cargo.toml"), "").unwrap();
+
+        let project = open_folder(dir.path()).unwrap();
+        let tree = &project.tree;
+        let names: Vec<&str> = tree
+            .children(tree.root_id())
+            .iter()
+            .map(|&id| tree.node(id).name.as_str())
+            .collect();
+        assert_eq!(
+            names,
+            vec!["zebra_dir", "apple.txt", "Banana.txt", "Cargo.toml"]
+        );
+    }
+
+    #[test]
+    fn descending_reverses_names_within_each_group_but_keeps_folders_on_top() {
+        let dir = tempfile::tempdir().unwrap();
+        make_fixture_tree(dir.path());
+
+        let mut project = open_folder(dir.path()).unwrap();
+        project.tree.apply_sort_order(SortOrder::Descending);
+        let names: Vec<&str> = project
+            .tree
+            .children(project.tree.root_id())
+            .iter()
+            .map(|&id| project.tree.node(id).name.as_str())
+            .collect();
+        assert_eq!(names, vec!["src", "empty_dir", "README.md"]);
+    }
+
+    #[test]
+    fn set_sort_order_reorders_the_open_tree_without_touching_disk() {
+        let dir = tempfile::tempdir().unwrap();
+        make_fixture_tree(dir.path());
+        let config_dir = tempfile::tempdir().unwrap();
+        let mut session = ProjectSession::new();
+        session.open_folder(dir.path(), config_dir.path()).unwrap();
+        assert_eq!(session.sort_order(), SortOrder::Ascending);
+
+        session.set_sort_order(SortOrder::Descending);
+        assert_eq!(session.sort_order(), SortOrder::Descending);
+        let tree = &session.current().unwrap().tree;
+        let names: Vec<&str> = tree
+            .children(tree.root_id())
+            .iter()
+            .map(|&id| tree.node(id).name.as_str())
+            .collect();
+        assert_eq!(names, vec!["src", "empty_dir", "README.md"]);
+
+        // rebuild_tree() re-walks the filesystem (a create/rename/delete
+        // mutation) and must keep the chosen direction, not silently reset
+        // it back to ascending.
+        fs::write(dir.path().join("zzz.txt"), "").unwrap();
+        session.rebuild_tree().unwrap();
+        let tree = &session.current().unwrap().tree;
+        let names: Vec<&str> = tree
+            .children(tree.root_id())
+            .iter()
+            .map(|&id| tree.node(id).name.as_str())
+            .collect();
+        assert_eq!(names, vec!["src", "empty_dir", "zzz.txt", "README.md"]);
     }
 
     #[test]
