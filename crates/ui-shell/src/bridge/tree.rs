@@ -20,8 +20,20 @@ pub struct ProjectTreeModelRust {
 
 impl Default for ProjectTreeModelRust {
     fn default() -> Self {
+        let session = shared_session();
+        // Seed the shared session's sort order from the persisted setting
+        // before any tree gets built — `reopenLastProject`'s startup call
+        // must land in the right order the first time, not flip after.
+        let descending = app_config::load(&app_core::resolve_config_dir())
+            .unwrap_or_default()
+            .project_tree_sort_descending;
+        if descending {
+            session
+                .borrow_mut()
+                .set_tree_sort_order(project_model::SortOrder::Descending);
+        }
         Self {
-            session: shared_session(),
+            session,
             icons: shared_icons(),
         }
     }
@@ -184,6 +196,35 @@ impl ffi::ProjectTreeModel {
         roles.insert(user_role(Roles::IsDir), QByteArray::from("isDir"));
         roles.insert(user_role(Roles::IconKey), QByteArray::from("iconKey"));
         roles
+    }
+
+    /// Persisted sort direction — read fresh from `settings.toml` rather
+    /// than cached on this QObject, so it matches whatever
+    /// `AppSettings`/the settings dialog last wrote, the same pattern
+    /// `AppSettings::ui_font_scales` uses.
+    pub fn sort_descending(&self) -> bool {
+        app_config::load(&app_core::resolve_config_dir())
+            .unwrap_or_default()
+            .project_tree_sort_descending
+    }
+
+    /// Flip the sort direction: persist it, then re-order the open tree
+    /// in place and reset the model. No filesystem walk — the arena
+    /// already has everything `apply_sort_order` needs.
+    pub fn set_sort_descending(mut self: Pin<&mut Self>, descending: bool) {
+        let _ = app_config::update(&app_core::resolve_config_dir(), |settings| {
+            settings.project_tree_sort_descending = descending;
+        });
+        let order = if descending {
+            project_model::SortOrder::Descending
+        } else {
+            project_model::SortOrder::Ascending
+        };
+        self.session.borrow_mut().set_tree_sort_order(order);
+        unsafe {
+            self.as_mut().begin_reset_model();
+            self.as_mut().end_reset_model();
+        }
     }
 
     pub fn open_folder(mut self: Pin<&mut Self>, path: &QString) -> FfiResult {

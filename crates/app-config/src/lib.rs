@@ -205,6 +205,13 @@ pub struct Settings {
     /// independent of [`Settings::ui_font_scale`].
     #[serde(default)]
     pub project_tree_font_scale: u32,
+    /// Project tree sort direction: `false` (default) sorts folders then
+    /// files, each group ascending; `true` reverses the name comparison
+    /// within each group. A bare `bool` is correct here, unlike
+    /// `mcp_enabled` below — "never chosen" and "ascending" are the same
+    /// thing, so there is no default-vs-unset distinction to preserve.
+    #[serde(default)]
+    pub project_tree_sort_descending: bool,
     /// Interface font scale in percent for the menu bar and its popup menus,
     /// independent of [`Settings::ui_font_scale`].
     #[serde(default)]
@@ -791,6 +798,7 @@ mod tests {
             editor_font_family: "Fira Code".to_string(),
             ui_font_scale: 130,
             project_tree_font_scale: 150,
+            project_tree_sort_descending: true,
             menu_font_scale: 90,
             mcp_enabled: Some(true),
             mcp_port: 7337,
@@ -988,6 +996,7 @@ use_spaces = false
         let settings = Settings {
             ui_font_scale: 130,
             project_tree_font_scale: 150,
+            project_tree_sort_descending: true,
             menu_font_scale: 90,
             ..Settings::default()
         };

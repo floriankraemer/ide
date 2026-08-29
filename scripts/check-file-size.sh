@@ -40,7 +40,9 @@ baseline() {
 	# code and the file_ops module declaration — the parts that must live
 	# beside AppError. The operation itself, its 12 tests and its Display
 	# impl went to app-core/src/file_ops.rs rather than in here.
-	crates/app-core/src/lib.rs) echo 1569 ;;           # no split planned; ratcheted so it cannot grow
+	# Raised from 1569 by 1 line for the tree_sort module declaration; the
+	# two sort-order methods themselves live in app-core/src/tree_sort.rs.
+	crates/app-core/src/lib.rs) echo 1570 ;;           # no split planned; ratcheted so it cannot grow
 	esac
 }
 
