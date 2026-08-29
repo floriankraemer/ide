@@ -1356,3 +1356,51 @@ fn e2e_run_config_dialog_persists_across_relaunch() {
 
     assert_eq!(ide.quit(), 0);
 }
+
+/// The Preview dock (ADR-0033): opens a Markdown file, toggles the dock,
+/// waits for the first render, edits the buffer, and waits for a second,
+/// later revision — proving the debounce fires and a stale render is not
+/// what the dock ends up showing. Every assertion is against the marker
+/// stream, never a screenshot, per this file's own rule.
+#[test]
+#[ignore = "E2E: needs an X server; run via `make e2e`"]
+fn e2e_markdown_preview_dock() {
+    let name = "e2e_markdown_preview_dock";
+    let mut ide = Ide::launch(name, APP, fixture("markdown"));
+    let mcp = ide.mcp();
+    ide.wait_for_ev(Mark::start(), "project_opened");
+    wait_for_index(&mcp);
+
+    let tab = open_file(&ide, "demo.md");
+    let tab_id = tab["tab_id"].as_u64().expect("tab_id");
+
+    let mark = ide.mark();
+    ide.key("ctrl+alt+v");
+    let first = ide.wait_for_event(mark, "the first preview render", |e| {
+        e["ev"] == "preview_ready" && e["tab_id"].as_u64() == Some(tab_id)
+    });
+    let first_revision = first["revision"].as_u64().expect("revision");
+
+    // One character is enough: the debounce timer only cares that
+    // `contentsChanged` fired, not how much changed.
+    let mark = ide.mark();
+    ide.type_text("x");
+    let second = ide.wait_for_event(mark, "a later preview revision", |e| {
+        e["ev"] == "preview_ready" && e["tab_id"].as_u64() == Some(tab_id)
+    });
+    assert!(
+        second["revision"].as_u64().expect("revision") > first_revision,
+        "the edit must produce a strictly later revision, not a repeat of the first"
+    );
+
+    // Undo the one-character edit rather than leaving the tab dirty: a
+    // dirty tab makes Ctrl+Q pop the "save before closing?" dialog, which
+    // this test has no business asserting on.
+    let mark = ide.mark();
+    ide.key("ctrl+z");
+    ide.wait_for_event(mark, "the undo to clean the tab", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false
+    });
+
+    assert_eq!(ide.quit(), 0);
+}

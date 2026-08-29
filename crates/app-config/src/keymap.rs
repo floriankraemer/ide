@@ -308,6 +308,13 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "",
     },
     ActionDef {
+        id: "view.preview",
+        label: "Preview",
+        category: "View",
+        // Ctrl+Alt+M is already Extract Method's; Ctrl+Alt+V is free.
+        default_shortcut: "Ctrl+Alt+V",
+    },
+    ActionDef {
         id: "view.findAction",
         label: "Find Action...",
         category: "View",

@@ -9,6 +9,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use app_core::AppSession;
 
@@ -85,6 +86,50 @@ pub(crate) fn start_plugin_tier() {
 
 pub(crate) fn shared_icons() -> Rc<SharedIcons> {
     ICONS.with(Rc::clone)
+}
+
+/// The one preview renderer in this process — `Arc<Mutex<_>>`, not the
+/// `Rc<RefCell<_>>` every other shared handle here uses, because
+/// `PreviewProvider`'s slot (M6) renders off the Qt thread: a request
+/// spawns a `std::thread`, and that thread needs to reach the same
+/// `app_core::preview::PreviewService` a second request from the Qt thread
+/// might reach at the same moment, for the same reason `icon_pixels`
+/// shares one `IconService` rather than rasterising twice — the diagram
+/// cache only helps if there is one of it.
+///
+/// Built from whatever `plugin_host::registry()`/`plugin_host::tier()`
+/// already hold rather than scanning again: [`shared_icons`] is what
+/// performs the one process-wide scan and starts the tier, so this calls
+/// it first to guarantee that has happened, exactly as `apply_icon_theme`
+/// and `apply_color_theme` rely on the same ordering implicitly today.
+pub(crate) fn shared_preview() -> Arc<Mutex<app_core::preview::PreviewService>> {
+    static PREVIEW: OnceLock<Arc<Mutex<app_core::preview::PreviewService>>> = OnceLock::new();
+    Arc::clone(PREVIEW.get_or_init(|| {
+        let _ = shared_icons();
+        Arc::new(Mutex::new(
+            app_core::preview::PreviewService::from_registry(
+                plugin_host::registry(),
+                plugin_host::tier(),
+            ),
+        ))
+    }))
+}
+
+/// Rebuild the preview service over the registry as it stands — the
+/// Plugins page's enable/disable path, so a `previews` provider a plugin
+/// toggle just added or removed is picked up the same way `apply_icon_theme`
+/// picks up an icon-theme change. Called after [`start_plugin_tier`], for
+/// the same reason `IconService::from_registry` is rebuilt after a reload:
+/// the wasm tier a preview might dispatch to has to be the one just
+/// (re)started over the new registry, not the one from before the toggle.
+pub(crate) fn reload_shared_preview() {
+    let rebuilt = app_core::preview::PreviewService::from_registry(
+        plugin_host::registry(),
+        plugin_host::tier(),
+    );
+    *shared_preview()
+        .lock()
+        .expect("preview service lock poisoned") = rebuilt;
 }
 
 /// The one project index in this process, shared by `SearchModel` (which

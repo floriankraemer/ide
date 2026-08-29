@@ -71,6 +71,14 @@ public:
     // Usages" hook.
     void setActiveTabChangedCallback(std::function<void()> callback);
 
+    // Debounced (300ms) like `didChange`'s own timer in editor_tabs_lsp.cpp
+    // — a document being typed is not a document worth re-rendering on
+    // every keystroke. Fires only for the *current* tab's own edits, with
+    // its id, so the Preview dock knows which tab's content just changed
+    // without asking `currentTabId()` and hoping nothing switched in
+    // between.
+    void setPreviewChangedCallback(std::function<void(quint64 tabId)> callback);
+
     // N7: a Ctrl+Click inside any editor. Same callback shape as above.
     std::function<void(int)> declarationRequested_;
     std::function<void()> navigationChanged_;
@@ -634,6 +642,7 @@ private:
     // user activating a group.
     bool suspendActivation_ = false;
     std::function<void()> activeTabChanged_;
+    std::function<void(quint64)> previewChanged_;
     QFont editorFont_;
     QString editorBackground_;
     QString editorForeground_;

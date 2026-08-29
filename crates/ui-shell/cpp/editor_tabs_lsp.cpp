@@ -726,6 +726,24 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
             });
     connect(editor->document(), &QTextDocument::contentsChanged, changeTimer,
              qOverload<>(&QTimer::start));
+
+    // The Preview dock's own debounce (ADR-0033), separate from the LSP
+    // one above: a `didChange` and a re-render answer different questions
+    // at different costs, and tying the dock's cadence to the language
+    // server's would make one plugin's slow re-render throttle the
+    // other's fast one for no reason. Fires only when this editor is the
+    // *current* one — the dock has nothing to show for a background tab's
+    // edits.
+    auto *previewTimer = new QTimer(editor);
+    previewTimer->setSingleShot(true);
+    previewTimer->setInterval(300);
+    connect(previewTimer, &QTimer::timeout, this, [this, editor, tabId]() {
+        if (previewChanged_ && activeGroup_ && activeGroup_->currentWidget() == editor) {
+            previewChanged_(tabId);
+        }
+    });
+    connect(editor->document(), &QTextDocument::contentsChanged, previewTimer,
+             qOverload<>(&QTimer::start));
     // F2-11: scrolling changes which lines are visible without touching the
     // document or the caret, so it needs its own trigger.
     connect(editor->verticalScrollBar(), &QScrollBar::valueChanged, this,

@@ -14,6 +14,7 @@ editor-core = { path = "../editor-core" }
 edit-ops = { path = "../edit-ops" }
 project-model = { path = "../project-model" }
 syntax-core = { path = "../syntax-core" }
+markdown-preview = { path = "../markdown-preview" }
 index-core = { path = "../index-core" }
 lsp-core = { path = "../lsp-core" }
 # Git v1 (F3-12): repository discovery, status, hunks, staging, commit,

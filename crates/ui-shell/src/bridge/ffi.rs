@@ -20,6 +20,7 @@ use crate::bridge::editor_ops::EditorOpsRust;
 use crate::bridge::icons::IconProviderRust;
 use crate::bridge::language::LanguageServiceRust;
 use crate::bridge::plugins::PluginCatalogRust;
+use crate::bridge::preview::PreviewProviderRust;
 use crate::bridge::run::{RunConfigEditorRust, RunServiceRust};
 use crate::bridge::search::SearchModelRust;
 use crate::bridge::settings::{
@@ -1431,6 +1432,109 @@ mod ffi {
         #[cxx_name = "applyColorTheme"]
         fn apply_color_theme(self: &IconProvider, theme_name: &QString);
     }
+
+    /// One rasterised diagram inside a rendered preview — premultiplied
+    /// RGBA8, `IconProvider::iconPixels`'s own byte order, so the view's
+    /// `QImage::Format_RGBA8888_Premultiplied` decode is one function
+    /// shared between the two rather than written twice.
+    struct FfiPreviewImage {
+        key: QString,
+        width: u32,
+        height: u32,
+        pixels: QByteArray,
+    }
+
+    /// What a link in the preview turned out to be, for
+    /// `PreviewProvider::previewLinkTarget` — never acted on by the view
+    /// itself beyond the one case `kind` names.
+    enum FfiPreviewLinkKind {
+        /// Scroll to an anchor already in the current document.
+        Anchor,
+        /// Open `path` as a tab, at `line` when it is not negative.
+        OpenFile,
+        /// Never opened. `message` is shown in the status bar.
+        Refused,
+    }
+
+    /// See [`FfiPreviewLinkKind`]. `path`/`line` are meaningful only for
+    /// `OpenFile`; `message` only for `Anchor` (the anchor name) and
+    /// `Refused` (why).
+    struct FfiPreviewLinkTarget {
+        kind: FfiPreviewLinkKind,
+        path: QString,
+        line: i32,
+        message: QString,
+    }
+
+    extern "RustQt" {
+        /// Renders Markdown (and inline Mermaid diagrams) for the Preview
+        /// dock (ADR-0033). Pull-based like `DocumentManager`: `requestPreview`
+        /// schedules a render on a worker thread and returns immediately;
+        /// `previewReady` announces a finished revision; the view then pulls
+        /// `previewHtml`/`previewImages` for that tab.
+        ///
+        /// A request carries a revision the caller never sees — an older
+        /// result racing a newer request is dropped rather than shown, so a
+        /// document edited faster than it renders never flickers backwards.
+        #[qobject]
+        type PreviewProvider = super::PreviewProviderRust;
+
+        /// Does any loaded plugin preview `path`'s extension? Drives the
+        /// dock's enabled/empty state without rendering anything.
+        #[qinvokable]
+        #[cxx_name = "hasPreview"]
+        fn has_preview(self: &PreviewProvider, path: &QString) -> bool;
+
+        /// Schedule a render of `source` (the tab's current buffer text,
+        /// already read by the caller — this object never touches a
+        /// document itself) at `width_px`, the dock's content width in
+        /// device pixels. Returns immediately; the result arrives via
+        /// `previewReady`.
+        #[qinvokable]
+        #[cxx_name = "requestPreview"]
+        fn request_preview(
+            self: Pin<&mut PreviewProvider>,
+            tab_id: u64,
+            path: &QString,
+            source: &QString,
+            width_px: u32,
+        );
+
+        /// The finished HTML for `tabId`'s latest ready revision, or empty
+        /// when nothing has rendered yet.
+        #[qinvokable]
+        #[cxx_name = "previewHtml"]
+        fn preview_html(self: &PreviewProvider, tab_id: u64) -> QString;
+
+        /// Every diagram the latest ready revision needs painted, keyed the
+        /// way `previewHtml`'s `<img src="ide-preview:{key}">` tags name
+        /// them.
+        #[qinvokable]
+        #[cxx_name = "previewImages"]
+        fn preview_images(self: &PreviewProvider, tab_id: u64) -> Vec<FfiPreviewImage>;
+
+        /// Classify one `href` clicked in the preview — see
+        /// [`FfiPreviewLinkTarget`]. `doc_path` is the previewed file's own
+        /// path, so a relative link resolves against its directory.
+        #[qinvokable]
+        #[cxx_name = "previewLinkTarget"]
+        fn preview_link_target(
+            self: &PreviewProvider,
+            doc_path: &QString,
+            href: &QString,
+        ) -> FfiPreviewLinkTarget;
+
+        /// Emitted on the Qt thread once `tabId`'s render for `revision`
+        /// finished — success or failure both arrive this way, since a
+        /// failed render still has something to show (M4's fallback
+        /// block), not nothing. `main_window.cpp` connects this to the
+        /// Preview dock.
+        #[qsignal]
+        #[cxx_name = "previewReady"]
+        fn preview_ready(self: Pin<&mut PreviewProvider>, tab_id: u64, revision: u64);
+    }
+
+    impl cxx_qt::Threading for PreviewProvider {}
 
     extern "RustQt" {
         /// Settings-I/O adapter (L1 window geometry/state, C2 recent

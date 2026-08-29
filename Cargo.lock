@@ -6625,6 +6625,7 @@ dependencies = [
  "editor-core",
  "index-core",
  "lsp-core",
+ "markdown-preview",
  "mcp-server",
  "plugin-host",
  "project-model",

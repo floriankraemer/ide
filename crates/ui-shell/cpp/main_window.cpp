@@ -1,6 +1,7 @@
 #include "main_window.h"
 
 #include "ai_chat_panel.h"
+#include "markdown_preview_panel.h"
 #include "appearance_page.h"
 #include "changes_panel.h"
 #include "class_view_panel.h"
@@ -106,13 +107,15 @@ struct CentralWidgets
     ChangesPanel *changesPanel;
     FileHistoryPanel *fileHistoryPanel;
     RunConsolePanel *runConsolePanel;
+    MarkdownPreviewPanel *previewPanel;
 };
 
 CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeModel,
                                    DocumentManager *docManager, AppSettings *appSettings,
                                    SearchModel *searchModel, TerminalSupervisor *terminalSupervisor,
                                    LanguageService *languageService, AiChat *aiChat,
-                                   VcsService *vcsService, RunService *runService)
+                                   VcsService *vcsService, RunService *runService,
+                                   PreviewProvider *previewProvider)
 {
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
@@ -190,6 +193,17 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     aiChatDock->setWidget(aiChatPanel);
     docks->registerDock(QStringLiteral("aiChat"), aiChatDock, ads::CenterDockWidgetArea, rightArea);
 
+    // ADR-0033: the Preview dock, tabbed beside AI Chat and Class View —
+    // it sits next to the document it is showing rather than squeezing a
+    // third split into the window, the same reasoning the AI Chat comment
+    // above gives. Starts hidden; `view.preview` and opening a previewable
+    // file both reveal it (see below).
+    auto *previewPanel = new MarkdownPreviewPanel(previewProvider, dockManager);
+    auto *previewDock = new ads::CDockWidget(dockManager, QObject::tr("Preview"));
+    previewDock->setWidget(previewPanel);
+    docks->registerDock(QStringLiteral("preview"), previewDock, ads::CenterDockWidgetArea, rightArea);
+    docks->hide(QStringLiteral("preview"));
+
     // F3-17/18: both start hidden; vcs_menu.cpp reveals each in turn.
     auto *changesPanel = new ChangesPanel(vcsService, dockManager);
     auto *changesDock = new ads::CDockWidget(dockManager, QObject::tr("Changes"));
@@ -254,15 +268,56 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                       [classViewPanel, editorTabs](quint64, const QString &) {
                           classViewPanel->refresh(editorTabs->currentTabId());
                       });
+    DockRegistry *previewDocks = docks;
+    previewPanel->setOpenFileHandler([editorTabs](const QString &path, int line) {
+        if (line >= 0) {
+            editorTabs->openFileAtLine(path, line, 0);
+        } else {
+            editorTabs->openFile(path);
+        }
+    });
+    previewPanel->setStatusHandler([window](const QString &message) {
+        window->statusBar()->showMessage(message, 4000);
+    });
+
     editorTabs->setActiveTabChangedCallback(
-      [classViewPanel, editorTabs, problemsPanel, fileHistoryPanel]() {
+      [classViewPanel, editorTabs, problemsPanel, fileHistoryPanel, previewPanel,
+       previewDocks, previewProvider]() {
           classViewPanel->refresh(editorTabs->currentTabId());
           // The current file's group sorts to the top of the Problems panel.
           problemsPanel->setCurrentFile(editorTabs->currentPath());
           // F3-18: keep File History/annotate pinned to the current tab.
           fileHistoryPanel->setCurrentFile(editorTabs->currentPath());
           editorTabs->setAnnotateEnabled(editorTabs->annotateEnabled());
+
+          // ADR-0033: follow the active tab, and reveal the dock the first
+          // time a previewable file is opened — `toggleView(true)` rather
+          // than `previewDocks->show()`, so switching to a markdown tab
+          // never steals focus from whatever the user is already looking
+          // at, the same restraint the Problems panel's first-diagnostic
+          // auto-open already uses.
+          const quint64 tabId = editorTabs->currentTabId();
+          const QString path = editorTabs->currentPath();
+          previewPanel->setCurrentTab(tabId, path, editorTabs->currentContent());
+          // Auto-opens once per session, the first time a previewable file
+          // becomes the active tab — `toggleView(true)`, not `show()`, so
+          // it never raises the dock over whatever the user is already
+          // looking at. Exactly the Problems panel's own "opens itself
+          // once, on the first diagnostic" restraint
+          // (`setFirstDiagnosticCallback` above), applied to "the first
+          // previewable file" instead.
+          static bool everShown = false;
+          if (!everShown && !path.isEmpty() && previewProvider->hasPreview(path)) {
+              everShown = true;
+              previewDocks->dock(QStringLiteral("preview"))->toggleView(true);
+          }
       });
+
+    // ADR-0033's own debounce (editor_tabs_lsp.cpp's `previewTimer`, 300ms,
+    // separate from the LSP one): the *current* tab's content changed.
+    editorTabs->setPreviewChangedCallback([editorTabs, previewPanel](quint64 tabId) {
+        previewPanel->setCurrentTab(tabId, editorTabs->currentPath(), editorTabs->currentContent());
+    });
     QObject::connect(docManager, &DocumentManager::tabModifiedChanged, classViewPanel,
                       [classViewPanel, editorTabs](quint64 tabId, bool modified) {
                           if (!modified && tabId == editorTabs->currentTabId()) {
@@ -394,7 +449,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                            treeView,         searchResultsPanel, classViewPanel,
                            terminalPanel,    findUsagesPanel,  searchEverywhereDialog,
                            problemsPanel,    aiChatPanel,      changesPanel,
-                           fileHistoryPanel, runConsolePanel};
+                           fileHistoryPanel, runConsolePanel,  previewPanel};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -463,6 +518,9 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     // on the way up, so both are built after appSettings.
     auto *aiChat = new AiChat(window);
     auto *aiProviderEditor = new AiProviderEditor(window);
+    // ADR-0033: one Preview provider per window, alongside the other
+    // per-window QObjects.
+    auto *previewProvider = new PreviewProvider(window);
     // One MCP server per process, brought up right after the shared
     // DocumentManager exists — the listener thread it spawns dispatches
     // every EditorCommand back onto this same QObject's Qt thread. Whether
@@ -473,7 +531,8 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     progress(3, QObject::tr("Building workspace..."));
     const CentralWidgets central =
       buildCentralWidget(window, treeModel, docManager, appSettings, searchModel,
-                          terminalSupervisor, languageService, aiChat, vcsService, runService);
+                          terminalSupervisor, languageService, aiChat, vcsService, runService,
+                          previewProvider);
     EditorTabs *editorTabs = central.editorTabs;
     wireVcsService(vcsService, treeModel, editorTabs); // F3-12a/F3-16
 
@@ -900,6 +959,10 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
         showAiChat();
         central.aiChatPanel->focusComposer();
     });
+    QAction *previewViewAction = registerAction(viewMenu, QStringLiteral("view.preview"),
+                                                QObject::tr("Preview"), appSettings, *actions);
+    QObject::connect(previewViewAction, &QAction::triggered, window,
+                      [central]() { central.docks->show(QStringLiteral("preview")); });
     QAction *problemsAction = registerAction(viewMenu, QStringLiteral("view.problems"),
                                              QObject::tr("Problems"), appSettings, *actions);
     QObject::connect(problemsAction, &QAction::triggered, window, [central]() {
