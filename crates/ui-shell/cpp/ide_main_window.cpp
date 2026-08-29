@@ -10,6 +10,10 @@
 #include <QRect>
 #include <QString>
 
+#ifdef Q_OS_WIN
+#include <dwmapi.h>
+#endif
+
 namespace ui_shell {
 
 IdeMainWindow::IdeMainWindow()
@@ -90,6 +94,18 @@ void IdeMainWindow::closeEvent(QCloseEvent *event)
         docManager_->shutdownMcpServer();
     }
     QMainWindow::closeEvent(event);
+}
+
+void applyNativeWindowChrome(QMainWindow *window)
+{
+#ifdef Q_OS_WIN
+    auto hwnd = reinterpret_cast<HWND>(window->winId());
+    DWM_WINDOW_CORNER_PREFERENCE preference = DWMWCP_ROUND;
+    DwmSetWindowAttribute(
+      hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &preference, sizeof(preference));
+#else
+    Q_UNUSED(window);
+#endif
 }
 
 } // namespace ui_shell

@@ -1188,6 +1188,7 @@ int run_app()
           splash.setStage(step, text);
       });
     window->show();
+    applyNativeWindowChrome(window);
     // Closes the splash exactly when the main window is up — no timer, no gap.
     splash.finish(window);
     e2eMark("{\"ev\":\"main_window_shown\"}");

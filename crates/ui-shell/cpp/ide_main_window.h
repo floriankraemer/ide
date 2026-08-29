@@ -63,4 +63,10 @@ private:
     DocumentManager *docManager_ = nullptr;
 };
 
+// Windows 11's DWM rounds a top-level window's corners and casts its drop
+// shadow on its own — but only once the window has a native handle, so this
+// has to run after show(), not during construction. No-op elsewhere (DWM
+// setting, not app-drawn chrome, per ADR-0001's native-chrome constraint).
+void applyNativeWindowChrome(QMainWindow *window);
+
 } // namespace ui_shell
