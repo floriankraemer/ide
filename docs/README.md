@@ -39,6 +39,7 @@ ADR numbers 0006 and 0013–0015 were never used; the gaps are historical and in
 - [ADR-0031: Git backend](architecture/decisions/0031-git-backend.md) — `gix` for reads (discovery, status, HEAD, history), the `git` binary for anything touching credentials, hooks or signing (staging, commit, branch, remote); hunks computed in-process, blame shelled out.
 - [ADR-0032: run configurations](architecture/decisions/0032-run-configurations.md) — a PTY-backed console over the debugger-agnostic `LaunchSpec`; ANSI-stripped output in v1; one `TerminalSupervisorRust` QObject for N terminal sessions, not N QObject instances; the AI agent gains no run tool from this.
 - [ADR-0033: Markdown and Mermaid preview](architecture/decisions/0033-markdown-preview.md) — the `previews` contribution point (no `api_version` bump), a second wasm world (`preview-plugin`) for a sandboxed renderer, comrak + merman + resvg native rendering joined in `app_core::preview`, an ADS dock rather than a new `TabKind`.
+- [ADR-0034: model selection](architecture/decisions/0034-model-selection.md) — the model catalogue is fetched from the provider and never compiled in; the picker stays typeable; the chosen model belongs to the conversation, not the provider row.
 
 ## Plans
 

@@ -179,19 +179,7 @@ fn send(
     for (name, value) in headers {
         request = request.header(name, value);
     }
-    // An empty key means "send no credential" — the keyless local endpoint
-    // (see `providers::resolve_api_key`), not a missing one.
-    if !api_key.is_empty() {
-        let (name, value) = match config.kind {
-            ProviderKind::Anthropic => ("x-api-key", api_key.to_string()),
-            ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
-                ("authorization", format!("Bearer {api_key}"))
-            }
-            // A header, never the `?key=` query parameter Gemini also
-            // accepts: a URL ends up in logs, error text and proxy access
-            // logs, and a header does not.
-            ProviderKind::Gemini => ("x-goog-api-key", api_key.to_string()),
-        };
+    if let Some((name, value)) = credential_header(config.kind, api_key) {
         if !headers
             .iter()
             .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
@@ -208,6 +196,65 @@ fn send(
             // this redaction is load-bearing even though we send a header.
             detail: redact(&format!("the request did not complete: {error}"), api_key),
         })
+}
+
+/// This dialect's credential header, or `None` when there is no credential
+/// to send.
+///
+/// An empty key means "send no credential" — the keyless local endpoint
+/// (see `providers::resolve_api_key`), not a missing one.
+fn credential_header(kind: ProviderKind, api_key: &str) -> Option<(&'static str, String)> {
+    if api_key.is_empty() {
+        return None;
+    }
+    Some(match kind {
+        ProviderKind::Anthropic => ("x-api-key", api_key.to_string()),
+        ProviderKind::OpenAi | ProviderKind::OpenAiCompatible => {
+            ("authorization", format!("Bearer {api_key}"))
+        }
+        // A header, never the `?key=` query parameter Gemini also accepts:
+        // a URL ends up in logs, error text and proxy access logs, and a
+        // header does not.
+        ProviderKind::Gemini => ("x-goog-api-key", api_key.to_string()),
+    })
+}
+
+/// Fetches and parses a JSON document — the shape a catalogue listing needs,
+/// where there is no body to send and nothing to stream.
+///
+/// Redacts exactly as [`stream_chat`] does: it holds the same key, so it
+/// carries the same obligation.
+pub fn get_json(
+    config: &ProviderConfig,
+    url: &str,
+    headers: &[(String, String)],
+    api_key: &str,
+) -> Result<Value, ChatError> {
+    let mut request = client()?.get(url);
+    for (name, value) in headers {
+        request = request.header(name, value);
+    }
+    if let Some((name, value)) = credential_header(config.kind, api_key) {
+        if !headers
+            .iter()
+            .any(|(existing, _)| existing.eq_ignore_ascii_case(name))
+        {
+            request = request.header(name, value);
+        }
+    }
+    let response = request.send().map_err(|error| ChatError::Transport {
+        detail: redact(&format!("the request did not complete: {error}"), api_key),
+    })?;
+    let response = check_status(config, response, api_key)?;
+    let text = response.text().map_err(|error| ChatError::Transport {
+        detail: redact(&format!("the answer could not be read: {error}"), api_key),
+    })?;
+    serde_json::from_str(&text).map_err(|error| ChatError::MalformedResponse {
+        detail: redact(
+            &format!("the provider's answer was not the JSON it promises: {error}"),
+            api_key,
+        ),
+    })
 }
 
 /// Passes a 2xx response through, and turns anything else into the error
@@ -365,6 +412,41 @@ mod tests {
             headers: vec![("content-type".to_string(), "application/json".to_string())],
             body: serde_json::json!({"model": "canned", "stream": true}),
         }
+    }
+
+    #[test]
+    fn a_catalogue_is_fetched_and_parsed_end_to_end() {
+        // The one test that exercises `get_json` over a real socket: the
+        // parse arms are covered purely in `models`, but the GET path, the
+        // status check and the JSON decode only meet here.
+        let url = serve_once(concat!(
+            "HTTP/1.1 200 OK\r\n",
+            "content-type: application/json\r\n",
+            "content-length: 49\r\n",
+            "\r\n",
+            r#"{"data":[{"id":"qwen2.5-coder"},{"id":"llama3"}]}"#,
+        ));
+        let config = local_provider();
+        let fetched = get_json(&config, &url, &[], "").expect("the catalogue is fetched");
+        let models = crate::models::parse_models(config.kind, &fetched).expect("parsed");
+        let ids: Vec<&str> = models.iter().map(|model| model.id.as_str()).collect();
+        assert_eq!(ids, vec!["qwen2.5-coder", "llama3"]);
+    }
+
+    #[test]
+    fn a_catalogue_error_body_comes_back_as_the_sentence_the_panel_shows() {
+        let url = serve_once(concat!(
+            "HTTP/1.1 401 Unauthorized\r\n",
+            "content-type: application/json\r\n",
+            "content-length: 30\r\n",
+            "\r\n",
+            r#"{"error":"invalid api key sk"}"#,
+        ));
+        let error = get_json(&local_provider(), &url, &[], "").expect_err("a 401 is an error");
+        assert!(
+            matches!(error, ChatError::Unauthorized { .. }),
+            "got {error:?}"
+        );
     }
 
     #[test]

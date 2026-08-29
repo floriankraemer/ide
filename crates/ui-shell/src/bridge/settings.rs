@@ -1,8 +1,13 @@
+use core::pin::Pin;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::Path;
 
+use ai_chat_core::models::{self, ModelInfo};
+use ai_chat_core::providers::{ProviderConfig, ProviderKind};
 use ai_chat_core::tools;
+use ai_chat_core::ChatError;
+use cxx_qt::Threading;
 use cxx_qt_lib::{QString, QStringList};
 use syntax_core::theme;
 
@@ -763,6 +768,28 @@ pub struct AiProviderEditorRust {
     draft: RefCell<Option<settings_model::ai::AiProviderDraft>>,
     /// The policies as the page has them, applied to settings on commit.
     policies: RefCell<HashMap<String, settings_model::ai::ToolPolicy>>,
+    /// Each row's last catalogue fetch, keyed by provider id. A row that
+    /// has never been asked is absent.
+    ///
+    /// ponytail: per-dialog cache with no TTL; the dialog is short-lived,
+    /// and `beginEdit` clears it.
+    models: RefCell<HashMap<String, Result<Vec<ModelInfo>, ChatError>>>,
+    /// Rows with a fetch in flight, so opening the same cell twice does not
+    /// start two requests.
+    fetching: RefCell<HashMap<String, ()>>,
+}
+
+/// The draft row as `ai-chat-core` wants it, so a fetch uses what the user
+/// has typed rather than what is saved.
+fn row_config(row: &settings_model::ai::AiProviderRow) -> Result<ProviderConfig, ChatError> {
+    Ok(ProviderConfig {
+        id: row.label.clone(),
+        kind: ProviderKind::from_str(&row.kind)?,
+        base_url: row.base_url.clone(),
+        model: row.model.clone(),
+        api_key_env: row.api_key_env.clone(),
+        enabled: true,
+    })
 }
 
 impl ffi::AiProviderEditor {
@@ -777,6 +804,7 @@ impl ffi::AiProviderEditor {
             })
             .collect();
         *self.draft.borrow_mut() = Some(settings_model::ai::AiProviderDraft::begin(&settings));
+        self.models.borrow_mut().clear();
     }
 
     pub fn rows(&self) -> Vec<ffi::FfiAiProviderRow> {
@@ -836,6 +864,79 @@ impl ffi::AiProviderEditor {
         if let Some(draft) = self.draft.borrow_mut().as_mut() {
             draft.set_model(&id.to_string(), &model.to_string());
         }
+    }
+
+    pub fn models(&self, id: &QString) -> Vec<ffi::FfiAiModel> {
+        match self.models.borrow().get(&id.to_string()) {
+            Some(Ok(models)) => models
+                .iter()
+                .map(|model| ffi::FfiAiModel {
+                    id: QString::from(model.id.as_str()),
+                    label: QString::from(model.label.as_str()),
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn models_status(&self, id: &QString) -> QString {
+        let id = id.to_string();
+        match self.models.borrow().get(&id) {
+            Some(result) => QString::from(models::models_status(result).as_str()),
+            None if self.fetching.borrow().contains_key(&id) => {
+                QString::from("Asking the provider…")
+            }
+            None => QString::from("No models listed yet."),
+        }
+    }
+
+    pub fn fetch_models(mut self: Pin<&mut Self>, id: &QString) {
+        let id = id.to_string();
+        if self.fetching.borrow().contains_key(&id) {
+            return;
+        }
+        let config = {
+            let draft = self.draft.borrow();
+            let row = draft
+                .as_ref()
+                .and_then(|draft| draft.rows().iter().find(|row| row.id == id).cloned());
+            match row {
+                Some(row) => row_config(&row),
+                None => return,
+            }
+        };
+        let config = match config {
+            Ok(config) => config,
+            Err(error) => {
+                self.models.borrow_mut().insert(id.clone(), Err(error));
+                self.as_mut().models_changed(QString::from(id.as_str()));
+                return;
+            }
+        };
+        self.fetching.borrow_mut().insert(id.clone(), ());
+        self.as_mut().models_changed(QString::from(id.as_str()));
+
+        let qt_thread = self.as_mut().qt_thread();
+        // Blocking HTTP on its own thread (ADR-0021 §4): a settings dialog
+        // that freezes while a provider thinks is a settings dialog nobody
+        // opens twice.
+        std::thread::spawn(move || {
+            let fetched = models::list_models(&config);
+            let _ = qt_thread.queue(move |editor: Pin<&mut Self>| {
+                editor.finish_model_fetch(id, fetched);
+            });
+        });
+    }
+
+    /// Lands a catalogue fetch back on the Qt thread.
+    fn finish_model_fetch(
+        mut self: Pin<&mut Self>,
+        id: String,
+        fetched: Result<Vec<ModelInfo>, ChatError>,
+    ) {
+        self.fetching.borrow_mut().remove(&id);
+        self.models.borrow_mut().insert(id.clone(), fetched);
+        self.as_mut().models_changed(QString::from(id.as_str()));
     }
 
     pub fn set_key_env_var(&self, id: &QString, key_env_var: &QString) {

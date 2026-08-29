@@ -19,6 +19,7 @@ use ai_chat_core::agent::Decision;
 use ai_chat_core::context::{self, Attachment, DiagnosticNote};
 use ai_chat_core::conversation::{Block, Conversation};
 use ai_chat_core::history::{ConversationRecord, HistoryStore};
+use ai_chat_core::models::{self, ModelInfo};
 use ai_chat_core::proposal::{self, ApplyRefusal, ApplyTarget, CodeBlock};
 use ai_chat_core::providers::{ProviderConfig, ProviderKind};
 use ai_chat_core::tokens::TokenCounter;
@@ -168,6 +169,22 @@ pub struct AiChatRust {
     /// keystroke path, and re-parsing the settings file per character typed
     /// is the difference between a live counter and a stuttering one.
     pub(crate) provider: RefCell<Option<ProviderConfig>>,
+    /// The last model catalogue fetched for the active provider, and the
+    /// sentence describing that fetch. `None` means nothing has been asked
+    /// for yet, which is what an unopened dropdown looks like.
+    ///
+    /// ponytail: per-process cache with no TTL, invalidated only by a
+    /// provider or settings change; add expiry if catalogues start moving
+    /// mid-session.
+    ///
+    /// ponytail: staged ahead of the FFI accessor/QML dropdown that reads
+    /// it; allowed dead for now, wire up (or delete) in that follow-up.
+    #[allow(dead_code)]
+    pub(crate) models: RefCell<Option<Result<Vec<ModelInfo>, ChatError>>>,
+    /// True while a catalogue fetch is in flight, so opening the dropdown
+    /// twice does not start two requests.
+    #[allow(dead_code)]
+    pub(crate) models_loading: std::cell::Cell<bool>,
 }
 
 impl Default for AiChatRust {
@@ -194,6 +211,8 @@ impl Default for AiChatRust {
             apply_refusal: RefCell::default(),
             edits: RefCell::default(),
             provider: RefCell::default(),
+            models: RefCell::default(),
+            models_loading: std::cell::Cell::default(),
         }
     }
 }
@@ -206,11 +225,24 @@ impl ffi::AiChat {
     /// can change while the panel is open — the settings dialog routes
     /// through the second.
     fn provider(&self) -> Result<ProviderConfig, ChatError> {
-        if let Some(config) = self.provider.borrow().as_ref() {
-            return Ok(config.clone());
+        // Cloned out of the cell before the match, so refreshing the cache
+        // in the miss arm cannot collide with the borrow that read it.
+        let cached = self.provider.borrow().clone();
+        let mut config = match cached {
+            Some(config) => config,
+            None => {
+                let resolved = active_provider(&load_settings())?;
+                *self.provider.borrow_mut() = Some(resolved.clone());
+                resolved
+            }
+        };
+        // The conversation's model wins over the provider's default. This
+        // is the one place a request's `ProviderConfig` is built, so the
+        // override reaches sending, token counting and the Gemini
+        // path-embedded model without a second application.
+        if let Some(model) = self.conversation.borrow().model() {
+            config.model = model.to_string();
         }
-        let config = active_provider(&load_settings())?;
-        *self.provider.borrow_mut() = Some(config.clone());
         Ok(config)
     }
 
@@ -408,6 +440,8 @@ impl ffi::AiChat {
         self.usage.set((0, 0));
         self.as_mut().attachments_changed();
         self.as_mut().token_usage_changed();
+        // `clear` dropped the model override with the transcript.
+        self.as_mut().models_changed();
     }
 
     pub fn set_mode(mut self: Pin<&mut Self>, mode: &QString) -> FfiResult {
@@ -959,6 +993,11 @@ impl ffi::AiChat {
             settings.ai_active_provider = active;
         });
         *self.provider.borrow_mut() = None;
+        // A model id from one vendor means nothing to another, so switching
+        // provider puts the conversation back on the new provider's default
+        // rather than sending it a name it has never heard of.
+        self.conversation.borrow_mut().set_model("");
+        self.as_mut().forget_models();
         // Agent mode against a provider that cannot use tools is not a mode
         // this build offers, so switching to one drops back to Ask rather
         // than leaving a toggle that would fail on the next send.
@@ -972,8 +1011,95 @@ impl ffi::AiChat {
         FfiResult::default()
     }
 
+    // --- choosing a model -------------------------------------------------
+
+    pub fn models(&self) -> Vec<ffi::FfiAiModel> {
+        match self.models.borrow().as_ref() {
+            Some(Ok(models)) => models
+                .iter()
+                .map(|model| ffi::FfiAiModel {
+                    id: QString::from(model.id.as_str()),
+                    label: QString::from(model.label.as_str()),
+                })
+                .collect(),
+            // A failed fetch lists nothing; `models_status` says why, and
+            // the combo stays typeable.
+            _ => Vec::new(),
+        }
+    }
+
+    pub fn models_status(&self) -> QString {
+        match self.models.borrow().as_ref() {
+            Some(result) => QString::from(models::models_status(result).as_str()),
+            None if self.models_loading.get() => QString::from("Asking the provider…"),
+            None => QString::from("No models listed yet."),
+        }
+    }
+
+    pub fn current_model(&self) -> QString {
+        match self.provider() {
+            Ok(config) => QString::from(config.model.as_str()),
+            // No provider configured is a state the picker shows as empty;
+            // the panel already reports it where it matters, on send.
+            Err(_) => QString::default(),
+        }
+    }
+
+    pub fn set_model(mut self: Pin<&mut Self>, model: &QString) -> FfiResult {
+        self.conversation.borrow_mut().set_model(&model.to_string());
+        self.as_mut().save_conversation();
+        self.as_mut().models_changed();
+        self.as_mut().token_usage_changed();
+        FfiResult::default()
+    }
+
+    pub fn refresh_models(mut self: Pin<&mut Self>) {
+        // Opening the dropdown twice must not start two requests; the
+        // second call simply rides the first one's answer.
+        if self.models_loading.get() {
+            return;
+        }
+        let config = match self.provider() {
+            Ok(config) => config,
+            Err(error) => {
+                *self.models.borrow_mut() = Some(Err(error));
+                self.as_mut().models_changed();
+                return;
+            }
+        };
+        self.models_loading.set(true);
+        self.as_mut().models_changed();
+
+        let qt_thread = self.as_mut().qt_thread();
+        // Blocking HTTP on its own thread, marshalled back with `queue` —
+        // the same pattern the stream uses (ADR-0021 §4). The Qt thread
+        // must not wait on a provider, least of all to paint a dropdown.
+        std::thread::spawn(move || {
+            let fetched = models::list_models(&config);
+            let _ = qt_thread.queue(move |chat: Pin<&mut Self>| {
+                chat.finish_model_fetch(fetched);
+            });
+        });
+    }
+
+    /// Lands a catalogue fetch back on the Qt thread.
+    fn finish_model_fetch(mut self: Pin<&mut Self>, fetched: Result<Vec<ModelInfo>, ChatError>) {
+        self.models_loading.set(false);
+        *self.models.borrow_mut() = Some(fetched);
+        self.as_mut().models_changed();
+    }
+
+    /// Drops the catalogue, because it belongs to the provider that is no
+    /// longer active.
+    fn forget_models(mut self: Pin<&mut Self>) {
+        *self.models.borrow_mut() = None;
+        self.models_loading.set(false);
+        self.as_mut().models_changed();
+    }
+
     pub fn apply_ai_settings(mut self: Pin<&mut Self>) {
         *self.provider.borrow_mut() = None;
+        self.as_mut().forget_models();
         let settings = load_settings();
         self.persist
             .set(settings.ai_persist_conversations_or_default());
@@ -1016,6 +1142,8 @@ impl ffi::AiChat {
                 self.attachments.borrow_mut().clear();
                 self.as_mut().attachments_changed();
                 self.as_mut().token_usage_changed();
+                // The restored transcript may carry its own model.
+                self.as_mut().models_changed();
                 FfiResult::default()
             }
             Err(error) => to_chat_result(error),
