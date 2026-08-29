@@ -25,11 +25,13 @@ Always use Docker containers for development (builds, tests, running the app) �
 
 ```sh
 make linux-image     # build/refresh the builder image
-make test            # cargo test --workspace inside it
+make test            # cargo nextest run --workspace + doctests inside it
 make lint            # clippy -D warnings + rustfmt --check
 ```
 
-Go through the Makefile rather than a hand-written `docker run`: its `RUN_LINUX` mounts named volumes for the crate registry and the ccache object store, and a bare `docker run --rm` throws both away — re-downloading 390-odd crates and recompiling every C++ translation unit each time.
+Go through the Makefile rather than a hand-written `docker run`: its `RUN_LINUX` mounts named volumes for the crate registry, the ccache object store, and the sccache object store, and a bare `docker run --rm` throws all three away — re-downloading 390-odd crates and recompiling every C++ translation unit and every Rust crate from scratch each time.
+
+`target/` is bind-mounted (not baked into the image), so cargo's own incremental compilation already means a warm rebuild only recompiles the crates you actually touched plus their dependents — `make test`/`make lint` after a one-crate edit are not full-workspace-from-scratch builds. While iterating inside one crate, `make shell` then `cargo check -p <crate>` / `cargo test -p <crate>` is faster still than waiting on the full workspace; run the full `make test`/`make lint` gate before committing.
 
 Debug builds carry line tables only, so backtraces keep file and line but a debugger sees no variable or type information.
 When you need to step through something — usually the cxx-qt seam — build with `cargo build --profile debugging -p app`, which is `dev` plus full DWARF.
