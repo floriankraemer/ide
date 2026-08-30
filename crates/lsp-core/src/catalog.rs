@@ -110,6 +110,90 @@ pub const SERVERS: &[ServerDef] = &[
         command: "omnisharp",
         args: &["-lsp"],
     },
+    ServerDef {
+        language_id: "java",
+        name: "Eclipse JDT.LS",
+        command: "jdtls",
+        args: &[],
+    },
+    ServerDef {
+        language_id: "kotlin",
+        name: "kotlin-language-server",
+        command: "kotlin-language-server",
+        args: &[],
+    },
+    ServerDef {
+        language_id: "swift",
+        name: "SourceKit-LSP",
+        command: "sourcekit-lsp",
+        args: &[],
+    },
+    ServerDef {
+        language_id: "scala",
+        name: "Metals",
+        command: "metals",
+        args: &[],
+    },
+    ServerDef {
+        language_id: "haskell",
+        name: "Haskell Language Server",
+        command: "haskell-language-server-wrapper",
+        args: &["--lsp"],
+    },
+    ServerDef {
+        language_id: "fsharp",
+        name: "FsAutoComplete",
+        command: "fsautocomplete",
+        args: &[],
+    },
+    ServerDef {
+        language_id: "zig",
+        name: "ZLS",
+        command: "zls",
+        args: &[],
+    },
+    ServerDef {
+        language_id: "ruby",
+        name: "Solargraph",
+        command: "solargraph",
+        args: &["stdio"],
+    },
+    ServerDef {
+        language_id: "toml",
+        name: "Taplo",
+        command: "taplo",
+        args: &["lsp", "stdio"],
+    },
+    ServerDef {
+        language_id: "sql",
+        name: "sqls",
+        command: "sqls",
+        args: &[],
+    },
+    ServerDef {
+        language_id: "html",
+        name: "HTML Language Server",
+        command: "vscode-html-language-server",
+        args: &["--stdio"],
+    },
+    ServerDef {
+        language_id: "css",
+        name: "CSS Language Server",
+        command: "vscode-css-language-server",
+        args: &["--stdio"],
+    },
+    ServerDef {
+        language_id: "xml",
+        name: "Lemminx",
+        command: "lemminx",
+        args: &[],
+    },
+    ServerDef {
+        language_id: "dockerfile",
+        name: "Docker Language Server",
+        command: "docker-language-server",
+        args: &["start", "--stdio"],
+    },
 ];
 
 /// The shipped default for a language id, if we know one.
@@ -307,25 +391,25 @@ mod tests {
     #[test]
     fn user_can_add_an_unknown_language() {
         let resolved = resolve_servers(&[ServerOverride {
-            language_id: "zig".into(),
-            command: Some("zls".into()),
+            language_id: "nim".into(),
+            command: Some("nimlsp".into()),
             args: Some(vec!["--stdio".into()]),
             ..Default::default()
         }]);
-        let zig = resolved.iter().find(|c| c.language_id == "zig").unwrap();
-        assert_eq!(zig.command, "zls");
-        assert_eq!(zig.args, ["--stdio"]);
-        assert_eq!(zig.name, "zls");
+        let nim = resolved.iter().find(|c| c.language_id == "nim").unwrap();
+        assert_eq!(nim.command, "nimlsp");
+        assert_eq!(nim.args, ["--stdio"]);
+        assert_eq!(nim.name, "nimlsp");
     }
 
     #[test]
     fn an_unknown_language_without_a_command_is_dropped() {
         let resolved = resolve_servers(&[ServerOverride {
-            language_id: "zig".into(),
+            language_id: "nim".into(),
             enabled: Some(true),
             ..Default::default()
         }]);
-        assert!(resolved.iter().all(|c| c.language_id != "zig"));
+        assert!(resolved.iter().all(|c| c.language_id != "nim"));
     }
 
     #[test]
