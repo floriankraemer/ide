@@ -12,6 +12,7 @@ use cxx_qt_lib::{QString, QStringList};
 use syntax_core::theme;
 
 use crate::bridge::convert::{load_settings, user_styles};
+use crate::bridge::errors;
 use crate::bridge::ffi::{
     self, FfiEditingProblem, FfiEditingRow, FfiEditorColors, FfiEditorFont, FfiResult,
     FfiUiFontScales, FfiWindowGeometry,
@@ -581,7 +582,7 @@ fn to_ffi_io_result(result: std::io::Result<String>) -> FfiResult {
     match result {
         Ok(_) => FfiResult::default(),
         Err(err) => FfiResult {
-            code: 1,
+            code: errors::CODE_SETTINGS_IO,
             message: QString::from(err.to_string().as_str()),
         },
     }
@@ -687,7 +688,7 @@ impl ffi::LanguageCatalog {
             Ok(settings) => settings,
             Err(err) => {
                 return FfiResult {
-                    code: 1,
+                    code: errors::CODE_SETTINGS_IO,
                     message: QString::from(err.to_string().as_str()),
                 }
             }
@@ -705,14 +706,14 @@ impl ffi::LanguageCatalog {
             };
             if let Err(err) = enabled {
                 return FfiResult {
-                    code: 1,
+                    code: errors::CODE_REFUSED,
                     message: QString::from(err.to_string().as_str()),
                 };
             }
         }
         if let Err(err) = app_config::save(&config_dir, &settings) {
             return FfiResult {
-                code: 1,
+                code: errors::CODE_SETTINGS_IO,
                 message: QString::from(err.to_string().as_str()),
             };
         }
@@ -1094,7 +1095,7 @@ impl ffi::AiProviderEditor {
         match draft.validate_all() {
             Ok(()) => FfiResult::default(),
             Err(problem) => FfiResult {
-                code: 1,
+                code: errors::CODE_REFUSED,
                 message: QString::from(problem.sentence.as_str()),
             },
         }
@@ -1119,7 +1120,7 @@ impl ffi::AiProviderEditor {
         }) {
             Ok(()) => FfiResult::default(),
             Err(error) => FfiResult {
-                code: 1,
+                code: errors::CODE_SETTINGS_IO,
                 message: QString::from(error.to_string().as_str()),
             },
         }
@@ -1310,7 +1311,7 @@ impl ffi::EditingEditor {
         };
         if !draft.validate().is_empty() {
             return FfiResult {
-                code: 1,
+                code: errors::CODE_REFUSED,
                 message: QString::from("Fix the highlighted editing settings first."),
             };
         }
@@ -1329,7 +1330,7 @@ impl ffi::EditingEditor {
         match app_config::update(&config_dir, |settings| draft.apply_to(settings)) {
             Ok(()) => FfiResult::default(),
             Err(error) => FfiResult {
-                code: 1,
+                code: errors::CODE_SETTINGS_IO,
                 message: QString::from(error.to_string().as_str()),
             },
         }

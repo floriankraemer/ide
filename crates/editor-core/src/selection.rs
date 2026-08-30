@@ -108,6 +108,21 @@ pub enum SelectionError {
     TooManyCarets { requested: usize, max: usize },
 }
 
+impl SelectionError {
+    /// Refusing more carets than the editor works with (ADR-0003 §4:
+    /// 900–999 is `editor-core`/`edit-ops`' range).
+    pub const CODE_TOO_MANY_CARETS: i32 = 900;
+
+    /// The variant's stable numeric code. Append-only: this crosses the FFI
+    /// seam, where it used to arrive as a bare `1` that meant nothing on its
+    /// own.
+    pub fn code(&self) -> i32 {
+        match self {
+            SelectionError::TooManyCarets { .. } => Self::CODE_TOO_MANY_CARETS,
+        }
+    }
+}
+
 impl std::fmt::Display for SelectionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

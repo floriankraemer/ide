@@ -15,6 +15,7 @@ use std::rc::Rc;
 
 use cxx_qt_lib::QString;
 
+use crate::bridge::errors;
 use crate::bridge::ffi::{self, FfiResult};
 use crate::bridge::registry::{
     reload_shared_preview, shared_icons, start_plugin_tier, SharedIcons,
@@ -123,7 +124,7 @@ impl ffi::PluginCatalog {
             Ok(settings) => settings,
             Err(err) => {
                 return FfiResult {
-                    code: 1,
+                    code: errors::CODE_SETTINGS_IO,
                     message: QString::from(err.to_string().as_str()),
                 }
             }
@@ -131,7 +132,7 @@ impl ffi::PluginCatalog {
         settings.set_plugin_disabled(&id, disabled);
         if let Err(err) = app_config::save(&config_dir, &settings) {
             return FfiResult {
-                code: 1,
+                code: errors::CODE_SETTINGS_IO,
                 message: QString::from(err.to_string().as_str()),
             };
         }

@@ -24,6 +24,14 @@ namespace ui_shell {
 
 namespace {
 
+/// One `vcs-core` error code as the plain `int` `FfiResult::code` carries.
+/// The view names the constant rather than writing the number (ADR-0003 §4);
+/// the enum itself is declared in the bridge, beside the struct it labels.
+constexpr int vcsErrorCode(FfiVcsErrorCode code)
+{
+    return static_cast<int>(code);
+}
+
 void showBranchMenu(VcsService *vcsService, QWidget *anchor, const QPoint &globalPos)
 {
     auto *menu = new QMenu(anchor);
@@ -75,8 +83,7 @@ void showBranchMenu(VcsService *vcsService, QWidget *anchor, const QPoint &globa
             vcsService, &VcsService::vcsFailed, vcsService,
             [vcsService, anchor, name](FfiResult error) {
                 QObject::disconnect(vcsService, &VcsService::vcsFailed, vcsService, nullptr);
-                // vcs_core::VcsError::CODE_UNMERGED_BRANCH (error.rs).
-                if (error.code != 705) {
+                if (error.code != vcsErrorCode(FfiVcsErrorCode::UnmergedBranch)) {
                     QMessageBox::warning(anchor, QObject::tr("Delete Branch"), error.message);
                     return;
                 }
@@ -132,21 +139,21 @@ void buildVcsMenu(QMainWindow *window, VcsService *vcsService, AppSettings *appS
     // No caller of `VcsService` anywhere in `ui-shell` showed `vcsFailed` to
     // the user before this menu existed (the gutter's stage/revert and the
     // Changes dock's stage/commit all rely on it being rare) — this is the
-    // first surface broad enough that it should stop being silent. Code 705
-    // (`VcsError::UnmergedBranch`) is excluded: the branch-delete flow above
-    // shows its own actionable dialog for that one.
+    // first surface broad enough that it should stop being silent.
+    // `UnmergedBranch` is excluded: the branch-delete flow above shows its
+    // own actionable dialog for that one.
     QObject::connect(vcsService, &VcsService::vcsFailed, window, [window, vcsService](FfiResult error) {
-        if (error.code == 705) {
+        if (error.code == vcsErrorCode(FfiVcsErrorCode::UnmergedBranch)) {
             return;
         }
-        // vcs_core::VcsError::CODE_DUBIOUS_OWNERSHIP (error.rs): git refuses
+        // Git refuses
         // to touch this project root because its ownership looks dubious to
         // it (common on WSL `//wsl.localhost/...` paths and networked
         // drives). The path is already embedded in `error.message`, which
         // `vcs_core::VcsError::DubiousOwnership`'s `Display` impl formats as
         // "Git doesn't trust the ownership of <path>" — reused as-is here
         // rather than re-parsing the path back out of it.
-        if (error.code == 710) {
+        if (error.code == vcsErrorCode(FfiVcsErrorCode::DubiousOwnership)) {
             QMessageBox box(window);
             box.setWindowTitle(QObject::tr("Git"));
             box.setIcon(QMessageBox::Warning);
