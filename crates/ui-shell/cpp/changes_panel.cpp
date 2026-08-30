@@ -5,6 +5,7 @@
 #include <QFont>
 #include <QHBoxLayout>
 #include <QHeaderView>
+#include <QLabel>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QShowEvent>
@@ -114,10 +115,46 @@ ChangesPanel::ChangesPanel(VcsService *vcsService, QWidget *parent)
     buttonRow->addWidget(amendButton_);
     buttonRow->addStretch(1);
 
+    repoWidgets_ = new QWidget(this);
+    auto *repoLayout = new QVBoxLayout(repoWidgets_);
+    repoLayout->setContentsMargins(0, 0, 0, 0);
+    repoLayout->addWidget(tree_, 1);
+    repoLayout->addWidget(messageEdit_);
+    repoLayout->addLayout(buttonRow);
+
+    // Shown instead of `repoWidgets_` for a project that isn't a Git
+    // repository at all (F3-2's "not a repository" outcome) — `refresh()`
+    // never used to give this case any feedback, leaving an empty tree with
+    // no way to get from "no repository" to "I can commit" without a
+    // terminal. Humble view: this widget only calls `initRepository`/
+    // `setDeclinedGitInit` and re-reads `declinedGitInit()`/`isRepository()`
+    // to pick its own wording — it does not decide what either means.
+    emptyState_ = new QWidget(this);
+    emptyStateLabel_ = new QLabel(emptyState_);
+    emptyStateLabel_->setAlignment(Qt::AlignCenter);
+    emptyStateLabel_->setWordWrap(true);
+    initButton_ = new QPushButton(tr("Initialize Git Repository"), emptyState_);
+    notNowButton_ = new QPushButton(tr("Not now"), emptyState_);
+    notNowButton_->setFlat(true);
+
+    auto *emptyLayout = new QVBoxLayout(emptyState_);
+    emptyLayout->addStretch(1);
+    emptyLayout->addWidget(emptyStateLabel_);
+    auto *initRow = new QHBoxLayout();
+    initRow->addStretch(1);
+    initRow->addWidget(initButton_);
+    initRow->addStretch(1);
+    emptyLayout->addLayout(initRow);
+    auto *notNowRow = new QHBoxLayout();
+    notNowRow->addStretch(1);
+    notNowRow->addWidget(notNowButton_);
+    notNowRow->addStretch(1);
+    emptyLayout->addLayout(notNowRow);
+    emptyLayout->addStretch(1);
+
     auto *layout = new QVBoxLayout(this);
-    layout->addWidget(tree_, 1);
-    layout->addWidget(messageEdit_);
-    layout->addLayout(buttonRow);
+    layout->addWidget(repoWidgets_, 1);
+    layout->addWidget(emptyState_, 1);
 
     connect(tree_, &QTreeWidget::itemChanged, this, &ChangesPanel::onItemChanged);
     connect(commitButton_, &QPushButton::clicked, this,
@@ -126,6 +163,12 @@ ChangesPanel::ChangesPanel(VcsService *vcsService, QWidget *parent)
             [this]() { doCommit(/*amend=*/false, /*push=*/true); });
     connect(amendButton_, &QPushButton::clicked, this,
             [this]() { doCommit(/*amend=*/true, /*push=*/false); });
+    connect(initButton_, &QPushButton::clicked, vcsService_,
+            [this]() { vcsService_->initRepository(); });
+    connect(notNowButton_, &QPushButton::clicked, vcsService_, [this]() {
+        vcsService_->setDeclinedGitInit(true);
+        refreshEmptyState();
+    });
 
     connect(vcsService_, &VcsService::statusChanged, this, &ChangesPanel::refresh);
     connect(vcsService_, &VcsService::repositoryChanged, this, &ChangesPanel::refresh);
@@ -157,13 +200,13 @@ void ChangesPanel::showEvent(QShowEvent *event)
 
 void ChangesPanel::refresh()
 {
-    populating_ = true;
-    tree_->clear();
-
+    refreshEmptyState();
     if (!vcsService_->isRepository()) {
-        populating_ = false;
         return;
     }
+
+    populating_ = true;
+    tree_->clear();
 
     auto *staged = makeGroup(tree_, tr("Staged Changes"));
     auto *unstaged = makeGroup(tree_, tr("Unstaged Changes"));
@@ -208,6 +251,20 @@ void ChangesPanel::refresh()
     }
 
     populating_ = false;
+}
+
+void ChangesPanel::refreshEmptyState()
+{
+    const bool isRepo = vcsService_->isRepository();
+    repoWidgets_->setVisible(isRepo);
+    emptyState_->setVisible(!isRepo);
+    if (isRepo) {
+        return;
+    }
+    const bool declined = vcsService_->declinedGitInit();
+    emptyStateLabel_->setText(declined ? tr("No Git Repository initialized.")
+                                        : tr("This folder is not a Git repository."));
+    notNowButton_->setVisible(!declined);
 }
 
 void ChangesPanel::onItemChanged(QTreeWidgetItem *item, int column)

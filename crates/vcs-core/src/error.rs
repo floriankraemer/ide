@@ -64,6 +64,14 @@ pub enum VcsError {
     /// kept, since "pull first" advice differs by workflow and this crate
     /// does not decide that for the caller.
     PushRejected { stderr: String },
+    /// `git` refused to operate because the repository's ownership looks
+    /// dubious to it (a mismatch between the current user and the
+    /// directory's owner — common on WSL paths under `//wsl.localhost/...`
+    /// and on networked drives). `path` is the directory `git` itself named
+    /// in its error, extracted so a caller can offer to mark it safe
+    /// (`git config --global --add safe.directory <path>`) rather than just
+    /// showing the raw message.
+    DubiousOwnership { path: std::path::PathBuf },
 }
 
 impl VcsError {
@@ -77,6 +85,7 @@ impl VcsError {
     pub const CODE_TOO_LARGE_TO_DIFF: i32 = 707;
     pub const CODE_MALFORMED_PATCH: i32 = 708;
     pub const CODE_PUSH_REJECTED: i32 = 709;
+    pub const CODE_DUBIOUS_OWNERSHIP: i32 = 710;
 
     /// The variant's stable numeric code. Append-only once this crosses an
     /// FFI seam (ADR-0003): existing numbers must never be renumbered.
@@ -92,6 +101,7 @@ impl VcsError {
             VcsError::TooLargeToDiff => Self::CODE_TOO_LARGE_TO_DIFF,
             VcsError::MalformedPatch(_) => Self::CODE_MALFORMED_PATCH,
             VcsError::PushRejected { .. } => Self::CODE_PUSH_REJECTED,
+            VcsError::DubiousOwnership { .. } => Self::CODE_DUBIOUS_OWNERSHIP,
         }
     }
 }
@@ -126,6 +136,9 @@ impl fmt::Display for VcsError {
             VcsError::MalformedPatch(msg) => write!(f, "generated patch was rejected: {msg}"),
             VcsError::PushRejected { stderr } => {
                 write!(f, "push was rejected: {}", stderr.trim())
+            }
+            VcsError::DubiousOwnership { path } => {
+                write!(f, "Git doesn't trust the ownership of {}", path.display())
             }
         }
     }

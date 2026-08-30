@@ -24,6 +24,24 @@ pub enum DiscoverResult {
 }
 
 impl Repository {
+    /// `git init` in `path`, then open what it just created.
+    ///
+    /// Shells out rather than using `gix::init`: this is a one-off, rare
+    /// write a user explicitly asked for (the Changes dock's "Initialize
+    /// Git Repository" button), not a hot path, so it goes through the same
+    /// `git` binary the rest of this crate's writes do (ADR-0031) rather
+    /// than adding a second code path for repository creation.
+    pub fn init(path: &Path) -> Result<Repository, VcsError> {
+        crate::cli::run(path, &["init"])?;
+        match Self::discover(path)? {
+            DiscoverResult::Found(repo) => Ok(*repo),
+            DiscoverResult::NotARepository => Err(VcsError::Discover(format!(
+                "`git init` succeeded but no repository was found at {}",
+                path.display()
+            ))),
+        }
+    }
+
     /// Walk upward from `path` looking for a `.git`. Returns
     /// [`DiscoverResult::NotARepository`], not an error, when none is found
     /// before the filesystem root or a discovery ceiling.
@@ -231,6 +249,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = Repository::discover(dir.path()).unwrap();
         assert!(matches!(result, DiscoverResult::NotARepository));
+    }
+
+    #[test]
+    fn init_creates_a_repository_discover_then_finds() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = Repository::init(dir.path()).unwrap();
+        assert_eq!(
+            repo.work_dir().unwrap().canonicalize().unwrap(),
+            dir.path().canonicalize().unwrap()
+        );
+        let result = Repository::discover(dir.path()).unwrap();
+        assert!(matches!(result, DiscoverResult::Found(_)));
     }
 
     #[test]
