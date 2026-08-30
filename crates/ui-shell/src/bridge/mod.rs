@@ -23,6 +23,18 @@
 // `chat` is the panel surface (conversation, attachments, applying an
 // answer, history), `agent` is a run (the approval gate, `run_ask` /
 // `run_agent`, and what the worker queues back onto the Qt thread).
+//
+// This crate is one rustc compilation unit, and nearly every module above
+// references types `ffi` generates, so editing any one of them recompiles
+// the whole crate — measured at ~17-23s per edit even for a one-line change
+// in a 123-line leaf file, regardless of ccache/sccache/mold (all already
+// in place, none of them touch this). Splitting the crate to shrink that
+// isn't a quick option: it would mean multiple independent cxx-qt bridges
+// (one per crate), each redeclaring the shared FFI types (`FfiResult`,
+// `TabId`, …) identically, plus untangling QObject parent/child ownership
+// that currently crosses these modules — an architecture-level rework, not
+// a build tweak. Investigated 2026-08-30; re-check only if cxx-qt itself
+// grows multi-bridge or incremental support for this pattern.
 
 pub mod ai;
 pub mod convert;
