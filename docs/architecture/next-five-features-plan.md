@@ -41,16 +41,16 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F0-7 — dock registry and general reconciliation | done | e5b325f |
 | F0-8 — byte-column fix in `moveCursorToLine` | done | febd6c0 (#74) |
 | F0-9 — per-project settings persistence | done | 720d1d9 (#75) |
-| F0-10 — per-project settings rules + dialog | done | 1b9b238; index excludes included, so ADR-0022's four areas are all real |
+| F0-10 — per-project settings rules + dialog | done | 00275a6 (#139); index excludes included, so ADR-0022's four areas are all real |
 | F0-11 — E2E harness | done | 1eb5009 (#76) |
 | F0-12 — E2E seed flows | done | 1eb5009 (#76) |
-| F0-13 — E2E in CI | done | 557edb8 (#135) |
+| F0-13 — E2E in CI | done | 05d7d9d (#135) |
 | F0-14 — `lsp-conformance` image stage | done | 2f1d4ec (#77) |
-| F0-15 — LSP conformance harness + expectations | done | harness 2f1d4ec (#77), nightly CI job 557edb8 (#135) |
-| F0-16 — conformance fix: `$/progress` indexing state | done | (#136) — the one defect F0-15 produced; each further one gets its own row |
+| F0-15 — LSP conformance harness + expectations | done | harness 2f1d4ec (#77), nightly CI job 05d7d9d (#135) |
+| F0-16 — conformance fix: `$/progress` indexing state | done | 47726ae (#136) — the one defect F0-15 produced; each further one gets its own row |
 | F0-17 — docs: this plan, ADRs, layering, overview | done | 5675b3f (#80) |
-| F0-18 — route every buffer edit through `applyBufferEdits` | done | 6a53c93 (#137) |
-| F0-19 — error-code ranges (ADR-0003 amendment) | done | 05f2b27; 25 literals, not the 5 this plan predicted |
+| F0-18 — route every buffer edit through `applyBufferEdits` | done | dd1fdb6 (#137) |
+| F0-19 — error-code ranges (ADR-0003 amendment) | done | 5d3d9a1 (#138); 25 literals, not the 5 this plan predicted |
 
 ### F1 — Editor ergonomics
 
