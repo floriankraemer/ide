@@ -152,10 +152,12 @@ fn started(fixture: &Fixture) -> (LspManager, Receiver<LspEvent>) {
 /// tens of seconds on a cold cache. Every request before that returns an
 /// empty result that is indistinguishable from "no answer exists".
 ///
-/// The client has no `$/progress` handling, so there is nothing better to
-/// wait on today; see the note in the PR. A real editor papers over this the
-/// same way, by the user trying again. Returns how long it took, so the suite
-/// can report the real cost rather than hiding it.
+/// F0-16 gave the *product* something better than retrying: the client now
+/// handles `$/progress`, so the status bar says which server is indexing and
+/// how far along it is instead of silently answering nothing. The suite still
+/// retries, because a test has to get an answer either way and progress is
+/// advisory — a server that reports none must not hang it. Returns how long
+/// it took, so the suite keeps reporting the real cost rather than hiding it.
 fn retry_until<T>(
     what: &str,
     timeout: Duration,
@@ -245,6 +247,25 @@ fn rust_analyzer_matches_the_recorded_expectations() {
             .flatten()
     });
     eprintln!("rust-analyzer answered its first request after {indexing_took:?} of indexing");
+    // F0-16: the silent window above is now visible rather than only
+    // survivable — rust-analyzer reports it as `$/progress`, and this asserts
+    // it against the real server, which is the half a stub cannot prove.
+    let reported: Vec<String> = rx
+        .try_iter()
+        .filter_map(|e| match e {
+            LspEvent::ServerBusy {
+                activity: Some(activity),
+                ..
+            } => Some(activity.title),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !reported.is_empty(),
+        "rust-analyzer indexed for {indexing_took:?} without a single $/progress \
+         reaching the client — check `window.workDoneProgress` is still advertised",
+    );
+    eprintln!("it reported that work as: {reported:?}");
     let hover = true;
 
     // From the call site in `caller`, definition must land back on `add`.

@@ -93,6 +93,13 @@ pub struct LanguageServiceRust {
     /// RF2's staleness rule. The comparison is `lsp_core`'s; only its state
     /// lives here.
     edits: RefCell<lsp_core::EditGate>,
+    /// F0-16: what each server is currently working on, as its own
+    /// `$/progress` reported it (`lsp_core::ProgressTracker` decides that
+    /// per server; this only collects the answers). A `BTreeMap` because
+    /// several servers can be busy at once and the status bar shows one:
+    /// keying by language id makes which one deterministic rather than
+    /// dependent on event arrival order.
+    busy: RefCell<std::collections::BTreeMap<String, (String, lsp_core::ServerActivity)>>,
 }
 
 impl Default for LanguageServiceRust {
@@ -122,6 +129,7 @@ impl Default for LanguageServiceRust {
             inlay_hints_tracker: RefCell::default(),
             pending: RefCell::default(),
             edits: RefCell::default(),
+            busy: RefCell::default(),
         }
     }
 }
@@ -275,6 +283,11 @@ impl ffi::LanguageService {
         self.open_docs.borrow_mut().clear();
         self.triggers.borrow_mut().clear();
         self.store.borrow_mut().clear();
+        // The previous project's servers are gone with their worker, so
+        // whatever they were still working on is over.
+        self.busy.borrow_mut().clear();
+        self.as_mut()
+            .server_busy_changed(false, QString::default(), QString::default(), false, 0);
 
         let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
         let overrides: Vec<lsp_core::ServerOverride> = settings
@@ -1277,6 +1290,44 @@ impl ffi::LanguageService {
                         self.as_mut()
                             .refactor_failed(QString::from(e.to_string().as_str()));
                     }
+                }
+            }
+            // F0-16: ready is not the same as able to answer. What the
+            // server is doing is its own words; picking which busy server to
+            // report is the map's ordering, and how to word it is the view's.
+            lsp_core::LspEvent::ServerBusy {
+                language_id,
+                activity,
+            } => {
+                let name = name_of(&language_id);
+                {
+                    let mut busy = self.busy.borrow_mut();
+                    match activity {
+                        Some(activity) => busy.insert(language_id, (name, activity)),
+                        None => busy.remove(&language_id),
+                    };
+                }
+                let first = self
+                    .busy
+                    .borrow()
+                    .values()
+                    .next()
+                    .map(|(name, activity)| (name.clone(), activity.clone()));
+                match first {
+                    Some((name, activity)) => self.as_mut().server_busy_changed(
+                        true,
+                        QString::from(name.as_str()),
+                        QString::from(activity.title.as_str()),
+                        activity.percentage.is_some(),
+                        activity.percentage.unwrap_or(0),
+                    ),
+                    None => self.as_mut().server_busy_changed(
+                        false,
+                        QString::default(),
+                        QString::default(),
+                        false,
+                        0,
+                    ),
                 }
             }
             lsp_core::LspEvent::Notification { .. } => {}

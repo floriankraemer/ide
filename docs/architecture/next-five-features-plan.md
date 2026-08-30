@@ -47,7 +47,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F0-13 — E2E in CI | done | 557edb8 (#135) |
 | F0-14 — `lsp-conformance` image stage | done | 2f1d4ec (#77) |
 | F0-15 — LSP conformance harness + expectations | done | harness 2f1d4ec (#77), nightly CI job 557edb8 (#135) |
-| F0-16 — conformance fixes | todo | one row per defect once F0-15 lands |
+| F0-16 — conformance fix: `$/progress` indexing state | done | (#136) — the one defect F0-15 produced; each further one gets its own row |
 | F0-17 — docs: this plan, ADRs, layering, overview | done | 5675b3f (#80) |
 | F0-18 — route every buffer edit through `applyBufferEdits` | todo |  |
 | F0-19 — error-code ranges (ADR-0003 amendment) | todo |  |

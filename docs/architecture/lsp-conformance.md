@@ -47,18 +47,29 @@ The version is **pinned**.
 An unpinned language server turns a conformance suite into a random number generator, and "upstream changed its `codeAction` shape" arriving as a red build on an unrelated pull request is how the suite stops being trusted.
 Bumping the pin is a deliberate commit.
 
-## What the first run found
+## What the first run found — and how it was fixed
 
-The client's `ServerReady` event fires as soon as `initialize` returns.
-rust-analyzer accepts requests at that point but cannot answer any of them until it has run `cargo metadata` and indexed the crate — about 3–5 seconds for a one-file fixture, and far longer for a real project on a cold cache.
+`ServerReady` fires as soon as `initialize` returns.
+rust-analyzer accepts requests at that point but cannot answer any of them until it has run `cargo metadata` and indexed the crate — about 2–3 seconds for a one-file fixture, and far longer for a real project on a cold cache.
 Until then every request returns an empty result, which is indistinguishable from "no answer exists".
 
-So for the first seconds of a Rust project the IDE reports the server as ready and silently answers nothing: hover shows no tooltip, Go to Declaration does nothing, completion offers an empty list.
-There is no `$/progress` handling in `lsp-core` today, so there is nothing better to wait on.
+So for the first seconds of a Rust project the IDE reported the server as ready and silently answered nothing: hover showed no tooltip, Go to Declaration did nothing, completion offered an empty list.
+There was no `$/progress` handling in `lsp-core`, so there was nothing better to wait on.
 
-The suite works around it by retrying until an answer arrives, and reports how long that took.
-The product does not work around it at all.
-Handling `$/progress` and surfacing an "indexing" state — the way the project index already does in the status bar — would fix it, and is worth doing before the intention bulb makes a request on every caret move.
+**Fixed in F0-16.**
+The client now advertises `window.workDoneProgress`, answers the `window/workDoneProgress/create` request a server sends to open a token, and tracks that server's open work in `crates/lsp-core/src/progress.rs` (`ProgressTracker`, applied on the reader thread in `manager.rs`'s `dispatch`).
+Every visible change becomes an `LspEvent::ServerBusy`, carrying the server's own words for the work and its percentage when it reports one.
+`crates/ui-shell/src/bridge/language/mod.rs` translates that into `LanguageService::serverBusyChanged`, and `crates/ui-shell/cpp/status_bar.cpp` shows it as a label plus a progress bar beside the project index's own — "rust-analyzer: Indexing..." with a determinate bar when there is a percentage and an indeterminate one when there is not.
+
+The state is **advisory**: nothing waits on it, and no request is gated behind it.
+A server that never sends `$/progress` — the stub, and most small servers — reads as idle from `ServerReady` onwards and behaves exactly as it did before, which is the only safe default when "no progress yet" and "no progress ever" look identical from outside.
+A server that dies mid-index has the work it left open closed on its behalf by its supervisor, so the status bar never outlives the server it describes.
+
+The regressions live with the stub, per the rule below: `stub/indexingRun` in `crates/lsp-core/src/bin/stub_server.rs` performs the full create-plus-begin/report/end sequence on demand, and `crates/lsp-core/tests/stub_server_session.rs` drives it through indexing → idle, checks a silent server stays usable, and checks a dead one stops being busy.
+The conformance suite asserts the other half — that a real rust-analyzer's progress actually reaches the client — and prints the work it named.
+
+The suite still retries until an answer arrives, and still reports how long that took.
+That is not a workaround for the defect any more: a test needs an answer whether or not the server reports progress, and progress being advisory is exactly what it has to keep tolerating.
 
 ## The division of labour
 

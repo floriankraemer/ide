@@ -33,6 +33,7 @@ use crate::hover::{parse_hover, HoverText};
 use crate::inlay_hint::{line_range, parse_inlay_hints, InlayHint};
 use crate::intentions::{assemble, Intention, ORGANIZE_IMPORTS};
 use crate::navigation::{parse_definition, DefinitionTarget};
+use crate::progress::{ProgressTracker, ServerActivity};
 use crate::rename::{parse_prepare_rename, PrepareRename};
 use crate::signature_help::{
     parse_signature_help, parse_signature_triggers, SignatureHelp, SignatureTriggers,
@@ -130,6 +131,18 @@ pub enum LspEvent {
         language_id: String,
         message: String,
     },
+    /// F0-16: what the server is working on, from its `$/progress`
+    /// notifications. `activity` is `None` when it has no work open, i.e.
+    /// it is idle and its answers can be trusted.
+    ///
+    /// Emitted only when the visible activity changes, and only by servers
+    /// that report progress at all. A server that never sends `$/progress`
+    /// never sends this event and is idle from [`LspEvent::ServerReady`]
+    /// onwards — nothing waits on it, the state is advisory.
+    ServerBusy {
+        language_id: String,
+        activity: Option<ServerActivity>,
+    },
     /// `textDocument/publishDiagnostics`.
     Diagnostics {
         language_id: String,
@@ -224,6 +237,10 @@ struct Server {
     pending: Mutex<HashMap<i64, Sender<Result<Value, LspError>>>>,
     next_id: AtomicI64,
     stopping: AtomicBool,
+    /// F0-16: the `$/progress` work this server currently has open. Owned
+    /// per server because a token is only unique within one server, and
+    /// touched only from that server's reader thread and its supervisor.
+    progress: Mutex<ProgressTracker>,
     /// Whether the editor currently has a refactoring in flight — read by
     /// `dispatch` to decide whether an inbound `workspace/applyEdit` was
     /// asked for. Shared with the manager, not owned here.
@@ -337,6 +354,7 @@ impl LspManager {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicI64::new(1),
             stopping: AtomicBool::new(false),
+            progress: Mutex::new(ProgressTracker::default()),
             sessions: Arc::clone(&self.sessions),
         });
 
@@ -1004,6 +1022,14 @@ fn spawn_supervisor(
                 let _ = conn.child.wait();
             }
             server.drop_pending();
+            // Work a dead server left open can never end, and a status bar
+            // stuck on its last percentage would outlive the server itself.
+            if server.progress.lock().unwrap().clear() {
+                let _ = events.send(LspEvent::ServerBusy {
+                    language_id: cfg.language_id.clone(),
+                    activity: None,
+                });
+            }
 
             if server.stopping.load(Ordering::SeqCst) {
                 return;
@@ -1185,6 +1211,15 @@ fn dispatch(server: &Arc<Server>, language_id: &str, message: Value, events: &Se
                 ));
             });
         }
+        // F0-16: the server asking permission to open a progress token.
+        // There is nothing to decide — the client advertised
+        // `window.workDoneProgress`, so the answer is always yes, and the
+        // token itself arrives with the `$/progress` that follows. Answered
+        // here rather than falling through to "not implemented" below,
+        // which is what would otherwise make a server stop reporting.
+        (Some("window/workDoneProgress/create"), Some(id)) => {
+            let _ = server.send(&json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}));
+        }
         // Every other server-to-client request. The server blocks until it
         // gets an answer, so answer honestly rather than not at all.
         // ponytail: a real handler (workspace/configuration, registerCapability)
@@ -1201,6 +1236,20 @@ fn dispatch(server: &Arc<Server>, language_id: &str, message: Value, events: &Se
             let params = message.get("params").cloned().unwrap_or(Value::Null);
             let event = if method == "textDocument/publishDiagnostics" {
                 publish_diagnostics(language_id, &params)
+            } else if method == "$/progress" {
+                // Handled on the reader thread like any other notification:
+                // the tracker is a `Mutex` around a `Vec`, so this costs
+                // nothing and adds no thread. `apply` says whether anything
+                // visible changed, which is what keeps a server reporting
+                // every percent from flooding the channel with no-ops.
+                let mut progress = server.progress.lock().unwrap();
+                if !progress.apply(&params) {
+                    return;
+                }
+                Some(LspEvent::ServerBusy {
+                    language_id: language_id.to_string(),
+                    activity: progress.current(),
+                })
             } else {
                 None
             };
@@ -1353,6 +1402,10 @@ fn client_capabilities() -> Value {
                 "normalizesLineEndings": false,
             },
         },
+        // F0-16: without this a server has no permission to open a progress
+        // token, and rust-analyzer stays silent while it indexes — which is
+        // exactly the window in which it answers every request with nothing.
+        "window": {"workDoneProgress": true},
         "general": {"positionEncodings": ["utf-16"]},
     })
 }

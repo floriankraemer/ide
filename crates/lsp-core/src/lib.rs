@@ -23,6 +23,7 @@ pub mod inlay_hint;
 pub mod intentions;
 pub mod manager;
 pub mod navigation;
+pub mod progress;
 pub mod rename;
 pub mod signature_help;
 pub mod tracker;
@@ -61,6 +62,7 @@ pub use manager::{
     INLAY_HINT_TIMEOUT, INTENTION_TIMEOUT, REFACTOR_TIMEOUT, SIGNATURE_HELP_TIMEOUT,
 };
 pub use navigation::{definition_outcome, parse_definition, DefinitionOutcome, DefinitionTarget};
+pub use progress::{ProgressTracker, ServerActivity};
 pub use rename::{
     parse_prepare_rename, prepare_outcome, rename_outcome, PrepareOutcome, PrepareRename,
     RenameOutcome,
