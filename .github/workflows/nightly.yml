@@ -1,0 +1,86 @@
+# Gates that are too slow or too flaky-by-nature to sit on a pull request.
+# E2E drives a real Qt binary under Xvfb, and the LSP conformance suite talks
+# to a real rust-analyzer, so it can go red because upstream changed rather
+# than because we did. Neither runs per-PR — by decision, not by accident.
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 3 * * *'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  builder-image:
+    name: Builder image
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/builder-image.yml
+    with:
+      target: linux-builder
+
+  conformance-image:
+    name: Conformance image
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/builder-image.yml
+    with:
+      target: lsp-conformance
+
+  e2e:
+    name: E2E flows
+    needs: builder-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    container:
+      image: ${{ needs.builder-image.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      # ui-shell's build script compiles the Qt Advanced Docking System
+      # sources, so the submodule has to be there.
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: Swatinem/rust-cache@v2
+
+      # The same command `make e2e` runs locally, minus the Docker wrapper —
+      # we are already inside the image.
+      - name: E2E flows
+        run: make e2e-ci
+
+      # The harness writes events.jsonl always, and stdout/stderr/screenshot
+      # on panic (crates/e2e/src/lib.rs, `impl Drop for Ide`). Those are the
+      # only evidence of a failure nobody can reproduce locally.
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: e2e-artifacts
+          path: target/e2e-artifacts/**
+          if-no-files-found: warn
+
+  lsp-conformance:
+    name: LSP conformance
+    needs: conformance-image
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    container:
+      image: ${{ needs.conformance-image.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Conformance suite
+        run: make lsp-conformance-ci
