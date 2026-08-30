@@ -176,31 +176,35 @@ pub enum ChatError {
 impl ChatError {
     /// Success code at the FFI seam; never produced by a `ChatError`.
     pub const CODE_OK: i32 = 0;
-    pub const CODE_NO_PROVIDER_CONFIGURED: i32 = 1;
-    pub const CODE_UNKNOWN_PROVIDER: i32 = 2;
-    pub const CODE_MISSING_API_KEY: i32 = 3;
-    pub const CODE_MISSING_BASE_URL: i32 = 4;
-    pub const CODE_UNAUTHORIZED: i32 = 5;
-    pub const CODE_FORBIDDEN: i32 = 6;
-    pub const CODE_RATE_LIMITED: i32 = 7;
-    pub const CODE_PAYLOAD_TOO_LARGE: i32 = 8;
-    pub const CODE_SERVER_ERROR: i32 = 9;
-    pub const CODE_TRANSPORT: i32 = 10;
-    pub const CODE_MALFORMED_RESPONSE: i32 = 11;
-    pub const CODE_CANCELLED: i32 = 12;
-    pub const CODE_RUN_CEILING_EXCEEDED: i32 = 13;
-    pub const CODE_TOOL_DENIED: i32 = 14;
-    pub const CODE_TOOL_FAILED: i32 = 15;
-    pub const CODE_PATH_OUTSIDE_PROJECT: i32 = 16;
-    pub const CODE_SECRET_SHAPED_FILE: i32 = 17;
-    pub const CODE_UNSUPPORTED_CAPABILITY: i32 = 18;
-    pub const CODE_HISTORY_IO: i32 = 19;
-    pub const CODE_UNSUPPORTED_IMAGE_FORMAT: i32 = 20;
+    pub const CODE_NO_PROVIDER_CONFIGURED: i32 = 100;
+    pub const CODE_UNKNOWN_PROVIDER: i32 = 101;
+    pub const CODE_MISSING_API_KEY: i32 = 102;
+    pub const CODE_MISSING_BASE_URL: i32 = 103;
+    pub const CODE_UNAUTHORIZED: i32 = 104;
+    pub const CODE_FORBIDDEN: i32 = 105;
+    pub const CODE_RATE_LIMITED: i32 = 106;
+    pub const CODE_PAYLOAD_TOO_LARGE: i32 = 107;
+    pub const CODE_SERVER_ERROR: i32 = 108;
+    pub const CODE_TRANSPORT: i32 = 109;
+    pub const CODE_MALFORMED_RESPONSE: i32 = 110;
+    pub const CODE_CANCELLED: i32 = 111;
+    pub const CODE_RUN_CEILING_EXCEEDED: i32 = 112;
+    pub const CODE_TOOL_DENIED: i32 = 113;
+    pub const CODE_TOOL_FAILED: i32 = 114;
+    pub const CODE_PATH_OUTSIDE_PROJECT: i32 = 115;
+    pub const CODE_SECRET_SHAPED_FILE: i32 = 116;
+    pub const CODE_UNSUPPORTED_CAPABILITY: i32 = 117;
+    pub const CODE_HISTORY_IO: i32 = 118;
+    pub const CODE_UNSUPPORTED_IMAGE_FORMAT: i32 = 119;
 
-    /// The variant's stable numeric code (ADR-0003). These numbers are part
-    /// of the FFI contract the panel branches on — a cancellation is shown
-    /// as nothing at all, a missing key as a link into Settings — so
+    /// The variant's stable numeric code (ADR-0003 §4). These numbers are
+    /// part of the FFI contract the panel branches on — a cancellation is
+    /// shown as nothing at all, a missing key as a link into Settings — so
     /// existing numbers must never be renumbered, only appended to.
+    ///
+    /// They live in **100–199**, this crate's range: a code says which
+    /// failure it is on its own, without the reader also having to know
+    /// which QObject produced it.
     pub fn code(&self) -> i32 {
         match self {
             ChatError::NoProviderConfigured => Self::CODE_NO_PROVIDER_CONFIGURED,
@@ -424,27 +428,29 @@ mod tests {
 
     #[test]
     fn error_codes_are_stable_because_the_panel_branches_on_them() {
-        // These numbers are the FFI contract (ADR-0003): the panel treats
-        // 12 as "the user pressed Stop, say nothing" and 3 as "offer the
-        // Settings page". Renumbering any of them is a breaking change;
-        // new variants append.
+        // These numbers are the FFI contract (ADR-0003 §4): the panel
+        // treats 111 as "the user pressed Stop, say nothing" and 102 as
+        // "offer the Settings page". Renumbering any of them is a breaking
+        // change; new variants append. They were 1–20 until the seam grew a
+        // seventh error type and a bare 1 stopped meaning anything on its
+        // own; 100–199 is this crate's range.
         assert_eq!(ChatError::CODE_OK, 0);
-        assert_eq!(ChatError::NoProviderConfigured.code(), 1);
-        assert_eq!(ChatError::UnknownProvider(String::new()).code(), 2);
+        assert_eq!(ChatError::NoProviderConfigured.code(), 100);
+        assert_eq!(ChatError::UnknownProvider(String::new()).code(), 101);
         assert_eq!(
             ChatError::MissingApiKey {
                 provider: String::new(),
                 env_var: String::new()
             }
             .code(),
-            3
+            102
         );
         assert_eq!(
             ChatError::MissingBaseUrl {
                 provider: String::new()
             }
             .code(),
-            4
+            103
         );
         assert_eq!(
             ChatError::Unauthorized {
@@ -452,7 +458,7 @@ mod tests {
                 detail: String::new()
             }
             .code(),
-            5
+            104
         );
         assert_eq!(
             ChatError::Forbidden {
@@ -460,7 +466,7 @@ mod tests {
                 detail: String::new()
             }
             .code(),
-            6
+            105
         );
         assert_eq!(
             ChatError::RateLimited {
@@ -469,7 +475,7 @@ mod tests {
                 detail: String::new()
             }
             .code(),
-            7
+            106
         );
         assert_eq!(
             ChatError::PayloadTooLarge {
@@ -477,7 +483,7 @@ mod tests {
                 detail: String::new()
             }
             .code(),
-            8
+            107
         );
         assert_eq!(
             ChatError::ServerError {
@@ -486,30 +492,30 @@ mod tests {
                 detail: String::new()
             }
             .code(),
-            9
+            108
         );
         assert_eq!(
             ChatError::Transport {
                 detail: String::new()
             }
             .code(),
-            10
+            109
         );
         assert_eq!(
             ChatError::MalformedResponse {
                 detail: String::new()
             }
             .code(),
-            11
+            110
         );
-        assert_eq!(ChatError::Cancelled.code(), 12);
+        assert_eq!(ChatError::Cancelled.code(), 111);
         assert_eq!(
             ChatError::RunCeilingExceeded {
                 limit: RunLimit::Steps,
                 ceiling: 0
             }
             .code(),
-            13
+            112
         );
         assert_eq!(
             ChatError::ToolDenied {
@@ -517,7 +523,7 @@ mod tests {
                 reason: String::new()
             }
             .code(),
-            14
+            113
         );
         assert_eq!(
             ChatError::ToolFailed {
@@ -525,29 +531,74 @@ mod tests {
                 detail: String::new()
             }
             .code(),
-            15
+            114
         );
-        assert_eq!(ChatError::PathOutsideProject(PathBuf::new()).code(), 16);
-        assert_eq!(ChatError::SecretShapedFile(PathBuf::new()).code(), 17);
+        assert_eq!(ChatError::PathOutsideProject(PathBuf::new()).code(), 115);
+        assert_eq!(ChatError::SecretShapedFile(PathBuf::new()).code(), 116);
         assert_eq!(
             ChatError::UnsupportedCapability {
                 provider: String::new(),
                 capability: Capability::Images
             }
             .code(),
-            18
+            117
         );
         assert_eq!(
             ChatError::HistoryIo {
                 detail: String::new()
             }
             .code(),
-            19
+            118
         );
         assert_eq!(
             ChatError::UnsupportedImageFormat(PathBuf::new()).code(),
-            20,
+            119,
             "a new variant appends; it never takes a number already in use"
+        );
+    }
+
+    #[test]
+    fn every_code_is_unique_and_inside_this_crates_range() {
+        // ADR-0003 §4 gives `ai-chat-core` 100–199. The gate exists so the
+        // next variant cannot silently take a number another crate owns —
+        // which is exactly what happened while every error type counted
+        // from 1.
+        let codes = [
+            ChatError::CODE_NO_PROVIDER_CONFIGURED,
+            ChatError::CODE_UNKNOWN_PROVIDER,
+            ChatError::CODE_MISSING_API_KEY,
+            ChatError::CODE_MISSING_BASE_URL,
+            ChatError::CODE_UNAUTHORIZED,
+            ChatError::CODE_FORBIDDEN,
+            ChatError::CODE_RATE_LIMITED,
+            ChatError::CODE_PAYLOAD_TOO_LARGE,
+            ChatError::CODE_SERVER_ERROR,
+            ChatError::CODE_TRANSPORT,
+            ChatError::CODE_MALFORMED_RESPONSE,
+            ChatError::CODE_CANCELLED,
+            ChatError::CODE_RUN_CEILING_EXCEEDED,
+            ChatError::CODE_TOOL_DENIED,
+            ChatError::CODE_TOOL_FAILED,
+            ChatError::CODE_PATH_OUTSIDE_PROJECT,
+            ChatError::CODE_SECRET_SHAPED_FILE,
+            ChatError::CODE_UNSUPPORTED_CAPABILITY,
+            ChatError::CODE_HISTORY_IO,
+            ChatError::CODE_UNSUPPORTED_IMAGE_FORMAT,
+        ];
+        for code in codes {
+            assert!(
+                (100..=199).contains(&code),
+                "{code} is outside ai-chat-core's 100–199 range (ADR-0003 §4)"
+            );
+        }
+        let mut sorted = codes.to_vec();
+        sorted.sort_unstable();
+        let mut unique = sorted.clone();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            codes.len(),
+            "two variants share a code: {sorted:?}"
         );
     }
 

@@ -40,6 +40,7 @@ use cxx_qt::{CxxQtThread, Threading};
 use cxx_qt_lib::QString;
 use run_core::RunConfigExt;
 
+use crate::bridge::errors;
 use crate::bridge::ffi;
 
 mod editor;
@@ -498,7 +499,7 @@ impl ffi::RunService {
         let config_id = config_id.to_string();
         let Some(root) = current_project_root() else {
             return ffi::FfiResult {
-                code: 1,
+                code: errors::CODE_NO_PROJECT,
                 message: QString::from("no project is open"),
             };
         };
@@ -508,7 +509,7 @@ impl ffi::RunService {
             .unwrap_or_default();
         let Some(config) = configs.into_iter().find(|c| c.id == config_id) else {
             return ffi::FfiResult {
-                code: 1,
+                code: errors::CODE_UNKNOWN_RUN_CONFIG,
                 message: QString::from("unknown run configuration"),
             };
         };
@@ -598,7 +599,7 @@ impl ffi::RunService {
             Some(state) => state.config_id.clone(),
             None => {
                 return ffi::FfiResult {
-                    code: 1,
+                    code: errors::CODE_UNKNOWN_CONSOLE,
                     message: QString::from("unknown console"),
                 }
             }

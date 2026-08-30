@@ -7,6 +7,7 @@ use std::cell::RefCell;
 
 use cxx_qt_lib::QString;
 
+use crate::bridge::errors;
 use crate::bridge::ffi::{self, FfiResult};
 
 use super::{current_project_root, env_from_string, to_ffi_run_config};
@@ -107,7 +108,7 @@ impl ffi::RunConfigEditor {
                     config.name.as_str()
                 };
                 return FfiResult {
-                    code: 1,
+                    code: errors::CODE_EMPTY_PROGRAM,
                     message: QString::from(format!("\"{label}\" has no program to run").as_str()),
                 };
             }
@@ -122,7 +123,7 @@ impl ffi::RunConfigEditor {
         }
         let Some(root) = current_project_root() else {
             return FfiResult {
-                code: 1,
+                code: errors::CODE_NO_PROJECT,
                 message: QString::from("no project is open"),
             };
         };
@@ -135,7 +136,7 @@ impl ffi::RunConfigEditor {
                 FfiResult::default()
             }
             Err(err) => FfiResult {
-                code: 1,
+                code: errors::CODE_SETTINGS_IO,
                 message: QString::from(err.to_string().as_str()),
             },
         }

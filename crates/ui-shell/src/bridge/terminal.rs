@@ -6,6 +6,7 @@ use std::rc::Rc;
 use cxx_qt::Threading;
 use cxx_qt_lib::QString;
 
+use crate::bridge::errors;
 use crate::bridge::ffi::{self, FfiResult};
 
 /// Resolve which shell to spawn (Task F3). Only Linux is in scope for this
@@ -145,7 +146,7 @@ impl ffi::TerminalSupervisor {
     pub fn start(self: Pin<&mut Self>, session_id: u64, rows: u32, cols: u32) -> FfiResult {
         let Some(entry) = self.handles(session_id) else {
             return FfiResult {
-                code: 1,
+                code: errors::CODE_TERMINAL,
                 message: QString::from("unknown terminal session"),
             };
         };
@@ -156,7 +157,7 @@ impl ffi::TerminalSupervisor {
             Ok(session) => session,
             Err(err) => {
                 return FfiResult {
-                    code: 1,
+                    code: errors::CODE_TERMINAL,
                     message: QString::from(err.to_string().as_str()),
                 }
             }
@@ -167,7 +168,7 @@ impl ffi::TerminalSupervisor {
         // deadlocks an interactive shell).
         let Some(mut reader) = session.take_reader() else {
             return FfiResult {
-                code: 1,
+                code: errors::CODE_TERMINAL,
                 message: QString::from("PTY read half unavailable"),
             };
         };

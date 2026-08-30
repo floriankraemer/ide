@@ -546,6 +546,20 @@ mod ffi {
         Untracked,
     }
 
+    /// The two `vcs_core::VcsError` codes the view has to *act* on rather
+    /// than merely display: an unmerged branch offers a force-delete, and
+    /// dubious ownership offers to mark the folder safe.
+    ///
+    /// They are exported as an enum so `vcs_menu.cpp` names them instead of
+    /// writing `705` and `710`, which is the C++ half of ADR-0003 §4's rule
+    /// that no call site spells a code out. The numbers here are checked
+    /// against `vcs-core`'s own constants by a test in `bridge::errors`, so
+    /// the two cannot drift apart silently.
+    enum FfiVcsErrorCode {
+        UnmergedBranch = 705,
+        DubiousOwnership = 710,
+    }
+
     /// One path `VcsService::changedFiles` reports: `vcs_core::FileStatus`
     /// plus the untracked pile folded in as `unstaged: Untracked`, so the
     /// view reads one list rather than three.

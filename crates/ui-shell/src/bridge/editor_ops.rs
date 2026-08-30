@@ -40,6 +40,8 @@ use std::rc::Rc;
 
 use cxx_qt_lib::QString;
 
+use crate::bridge::errors;
+
 use editor_core::line_ops;
 use editor_core::offsets::{line_of, line_range, line_starts, Utf16Cursor};
 use editor_core::selection::{Caret, SelectionError, SelectionSet};
@@ -114,25 +116,24 @@ impl Default for EditorOpsRust {
     }
 }
 
-/// A refusal the view has to show. Code `1` is the convention every other
-/// adapter in this crate uses for "this specific operation said no"; the
-/// per-subsystem code ranges are F0-19's job, not this task's.
+/// A refusal the view has to show, with the adapter's own code (ADR-0003 §4,
+/// range 1000–1099): nothing here belongs to a domain crate, and nothing
+/// branches on *which* refusal it was — the message says it in full.
 fn refused(message: &str) -> FfiResult {
-    FfiResult {
-        code: 1,
-        message: QString::from(message),
-    }
+    errors::failure(errors::CODE_REFUSED, message)
 }
 
 fn ok() -> FfiResult {
-    FfiResult {
-        code: 0,
-        message: QString::default(),
-    }
+    FfiResult::default()
 }
 
+/// A selection refusal keeps `editor-core`'s own code (900–999) rather than
+/// being flattened into the adapter's: the rule that said no lives there.
 fn to_ffi_selection_error(error: SelectionError) -> FfiResult {
-    refused(&error.to_string())
+    FfiResult {
+        code: error.code(),
+        message: QString::from(error.to_string().as_str()),
+    }
 }
 
 /// Byte offsets to flat document UTF-16 positions, in one forward pass.

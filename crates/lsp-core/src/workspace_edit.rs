@@ -74,6 +74,27 @@ pub enum EditError {
     StaleVersion { uri: String },
 }
 
+impl EditError {
+    pub const CODE_RESOURCE_OPERATION: i32 = 620;
+    pub const CODE_MALFORMED: i32 = 621;
+    pub const CODE_OVERLAPPING_EDITS: i32 = 622;
+    pub const CODE_RANGE_OUT_OF_BOUNDS: i32 = 623;
+    pub const CODE_STALE_VERSION: i32 = 624;
+
+    /// The variant's stable numeric code (ADR-0003 §4). Shares `lsp-core`'s
+    /// 600–699 range with [`crate::manager::LspError`], which holds 600–607;
+    /// these start at 620 so the two can each grow without meeting.
+    pub fn code(&self) -> i32 {
+        match self {
+            EditError::ResourceOperation(_) => Self::CODE_RESOURCE_OPERATION,
+            EditError::Malformed => Self::CODE_MALFORMED,
+            EditError::OverlappingEdits => Self::CODE_OVERLAPPING_EDITS,
+            EditError::RangeOutOfBounds => Self::CODE_RANGE_OUT_OF_BOUNDS,
+            EditError::StaleVersion { .. } => Self::CODE_STALE_VERSION,
+        }
+    }
+}
+
 impl std::fmt::Display for EditError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

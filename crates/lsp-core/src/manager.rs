@@ -194,6 +194,37 @@ pub enum LspError {
     Protocol(String),
 }
 
+impl LspError {
+    pub const CODE_NO_SERVER: i32 = 600;
+    pub const CODE_NOT_RUNNING: i32 = 601;
+    pub const CODE_SPAWN: i32 = 602;
+    pub const CODE_IO: i32 = 603;
+    pub const CODE_RESPONSE: i32 = 604;
+    pub const CODE_TIMEOUT: i32 = 605;
+    pub const CODE_DISCONNECTED: i32 = 606;
+    pub const CODE_PROTOCOL: i32 = 607;
+
+    /// The variant's stable numeric code (ADR-0003 §4: 600–699 is
+    /// `lsp-core`'s range, shared with [`crate::workspace_edit::EditError`]).
+    /// Append-only.
+    ///
+    /// Note that [`LspError::Response`] carries the *server's* JSON-RPC
+    /// code, which is a different numbering entirely and stays in the
+    /// message; this code says only "the server answered with an error".
+    pub fn code(&self) -> i32 {
+        match self {
+            LspError::NoServer(_) => Self::CODE_NO_SERVER,
+            LspError::NotRunning(_) => Self::CODE_NOT_RUNNING,
+            LspError::Spawn { .. } => Self::CODE_SPAWN,
+            LspError::Io(_) => Self::CODE_IO,
+            LspError::Response { .. } => Self::CODE_RESPONSE,
+            LspError::Timeout { .. } => Self::CODE_TIMEOUT,
+            LspError::Disconnected { .. } => Self::CODE_DISCONNECTED,
+            LspError::Protocol(_) => Self::CODE_PROTOCOL,
+        }
+    }
+}
+
 impl fmt::Display for LspError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {

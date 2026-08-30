@@ -13,6 +13,7 @@ use crate::bridge::ai::agent::{
     to_ffi_tool_call, ApprovalGate,
 };
 use crate::bridge::convert::{load_settings, symbol_kind_word, to_ffi_edits};
+use crate::bridge::errors;
 use crate::bridge::ffi::{self, FfiResult};
 use crate::bridge::registry::{index_slot, shared_session, SharedDiagnostics};
 use ai_chat_core::agent::Decision;
@@ -535,7 +536,7 @@ impl ffi::AiChat {
         match text {
             Ok(text) => self.accept(Attachment::File { path, text }),
             Err(error) => FfiResult {
-                code: 1,
+                code: errors::CODE_ATTACHMENT_IO,
                 message: QString::from(error.to_string().as_str()),
             },
         }
@@ -584,7 +585,7 @@ impl ffi::AiChat {
         }
 
         FfiResult {
-            code: 0,
+            code: errors::CODE_OK,
             message: QString::from(summary.as_str()),
         }
     }
@@ -595,7 +596,7 @@ impl ffi::AiChat {
             Ok(bytes) => bytes,
             Err(error) => {
                 return FfiResult {
-                    code: 1,
+                    code: errors::CODE_ATTACHMENT_IO,
                     message: QString::from(error.to_string().as_str()),
                 }
             }
@@ -630,7 +631,7 @@ impl ffi::AiChat {
         };
         let Ok(content) = content else {
             return FfiResult {
-                code: 1,
+                code: ChatError::CODE_TOOL_FAILED,
                 message: QString::from(
                     ChatError::ToolFailed {
                         tool: "find_definitions".to_string(),

@@ -40,6 +40,7 @@ pub mod ai;
 pub mod convert;
 pub mod editor;
 pub mod editor_ops;
+pub mod errors;
 pub mod ffi;
 pub mod icons;
 pub mod language;
