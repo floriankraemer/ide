@@ -44,7 +44,12 @@ baseline() {
 	# two sort-order methods themselves live in app-core/src/tree_sort.rs.
 	# Raised from 1570 by 2 lines for the preview module declaration and its
 	# doc comment; PreviewService itself lives in app-core/src/preview.rs.
-	crates/app-core/src/lib.rs) echo 1572 ;;           # no split planned; ratcheted so it cannot grow
+	# Raised from 1572 by 22 lines for TabKind::Diff/TabContent::Diff and the
+	# diff_tab module declaration — the enum variants and match arms that
+	# must live beside TabKind/TabContent themselves (F3-14). DiffContent,
+	# AppSession's open_diff_tab/diff_labels/diff_texts/diff_hunks and their
+	# tests all went to app-core/src/diff_tab.rs rather than in here.
+	crates/app-core/src/lib.rs) echo 1594 ;;           # no split planned; ratcheted so it cannot grow
 	esac
 }
 

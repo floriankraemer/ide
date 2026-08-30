@@ -2,8 +2,10 @@
 
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
+#include <QPoint>
 #include <QString>
 #include <QWidget>
+#include <functional>
 
 class QLabel;
 class QListWidget;
@@ -22,7 +24,18 @@ namespace ui_shell {
 class FileHistoryPanel : public QWidget
 {
 public:
-    explicit FileHistoryPanel(VcsService *vcsService, QWidget *parent);
+    // `compareRevisions` is F3-14's entry point into `EditorTabs`, reached
+    // by callback rather than a dependency on editor_tabs.h (the same shape
+    // `ProjectTreeActions::compareFiles` uses): path, left revision + label,
+    // right revision + label. An empty revision string means "the live
+    // working text", which `EditorTabs::openCompareRevisions` already
+    // treats specially.
+    FileHistoryPanel(
+      VcsService *vcsService,
+      std::function<void(const QString &, const QString &, const QString &, const QString &,
+                          const QString &)>
+        compareRevisions,
+      QWidget *parent);
 
     // Which file to show history for — asks `VcsService::fileHistory`
     // immediately; empty clears the list (no file, or an unsaved buffer).
@@ -30,8 +43,12 @@ public:
 
 private:
     void onHistoryReady(const QString &path, const ::rust::Vec<FfiLogEntry> &entries);
+    void showContextMenu(const QPoint &pos);
 
     VcsService *vcsService_;
+    std::function<void(const QString &, const QString &, const QString &, const QString &,
+                        const QString &)>
+      compareRevisions_;
     QString currentPath_;
     QLabel *titleLabel_ = nullptr;
     QListWidget *list_ = nullptr;

@@ -90,9 +90,11 @@ void markChangesRow(QTreeWidget *tree, QTreeWidgetItem *row, const QString &path
 
 } // namespace
 
-ChangesPanel::ChangesPanel(VcsService *vcsService, QWidget *parent)
+ChangesPanel::ChangesPanel(VcsService *vcsService, std::function<void(const QString &)> showDiff,
+                            QWidget *parent)
   : QWidget(parent)
   , vcsService_(vcsService)
+  , showDiff_(std::move(showDiff))
 {
     tree_ = new QTreeWidget(this);
     tree_->setColumnCount(2);
@@ -100,6 +102,14 @@ ChangesPanel::ChangesPanel(VcsService *vcsService, QWidget *parent)
     tree_->header()->setSectionResizeMode(0, QHeaderView::Stretch);
     tree_->header()->setSectionResizeMode(1, QHeaderView::ResizeToContents);
     tree_->setUniformRowHeights(true);
+    connect(tree_, &QTreeWidget::itemDoubleClicked, this, [this](QTreeWidgetItem *item, int) {
+        // Only a file row carries a path (kPathRole) — a group header
+        // ("Staged"/"Unstaged"/"Untracked") double-click does nothing.
+        const QString path = item->data(0, kPathRole).toString();
+        if (!path.isEmpty()) {
+            showDiff_(path);
+        }
+    });
 
     messageEdit_ = new QPlainTextEdit(this);
     messageEdit_->setPlaceholderText(tr("Commit message"));

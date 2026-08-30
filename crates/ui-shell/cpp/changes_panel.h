@@ -4,6 +4,7 @@
 
 #include <QString>
 #include <QWidget>
+#include <functional>
 
 class QLabel;
 class QPlainTextEdit;
@@ -33,7 +34,14 @@ namespace ui_shell {
 class ChangesPanel : public QWidget
 {
 public:
-    explicit ChangesPanel(VcsService *vcsService, QWidget *parent);
+    // `showDiff` is F3-14's entry point into `EditorTabs`' editable diff
+    // window, reached by callback rather than a dependency on
+    // editor_tabs.h — same shape `ProjectTreeActions::openFile` uses.
+    // Double-clicking a changed file's row calls it instead of the old
+    // count-only behaviour this dock never actually had (there was no
+    // per-file diff action here before F3-14).
+    ChangesPanel(VcsService *vcsService, std::function<void(const QString &)> showDiff,
+                  QWidget *parent);
 
 protected:
     void showEvent(QShowEvent *event) override;
@@ -45,6 +53,7 @@ private:
     void refreshEmptyState();
 
     VcsService *vcsService_;
+    std::function<void(const QString &)> showDiff_;
     QTreeWidget *tree_ = nullptr;
     QPlainTextEdit *messageEdit_ = nullptr;
     QPushButton *commitButton_ = nullptr;

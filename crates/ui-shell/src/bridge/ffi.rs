@@ -1277,6 +1277,74 @@ mod ffi {
         #[cxx_name = "tabIsModified"]
         fn tab_is_modified(self: &DocumentManager, tab_id: u64) -> bool;
 
+        /// Open a read-only `TabKind::Diff` tab comparing two already-read
+        /// texts (F3-14) — used by File History's "compare revisions" and
+        /// the Project Tree's "Compare with…", neither of which has a live
+        /// `Document` on either side. Returns the new tab's id and emits
+        /// `tabOpened` like `openFile` does.
+        #[qinvokable]
+        #[cxx_name = "openDiffTab"]
+        fn open_diff_tab(
+            self: Pin<&mut DocumentManager>,
+            path: &QString,
+            left_label: &QString,
+            right_label: &QString,
+            left_text: &QString,
+            right_text: &QString,
+        ) -> u64;
+
+        /// The left/right side labels a diff tab was opened with (e.g. two
+        /// revision short-ids, or two file names). Empty for any other tab.
+        #[qinvokable]
+        #[cxx_name = "diffLeftLabel"]
+        fn diff_left_label(self: &DocumentManager, tab_id: u64) -> QString;
+        #[qinvokable]
+        #[cxx_name = "diffRightLabel"]
+        fn diff_right_label(self: &DocumentManager, tab_id: u64) -> QString;
+
+        /// The two texts a diff tab is comparing, for `DiffView`'s two
+        /// panes. Empty for any other tab.
+        #[qinvokable]
+        #[cxx_name = "diffLeftText"]
+        fn diff_left_text(self: &DocumentManager, tab_id: u64) -> QString;
+        #[qinvokable]
+        #[cxx_name = "diffRightText"]
+        fn diff_right_text(self: &DocumentManager, tab_id: u64) -> QString;
+
+        /// The line hunks between a diff tab's two texts, computed once when
+        /// it opened (F3-14). Empty for any other tab.
+        #[qinvokable]
+        #[cxx_name = "diffHunks"]
+        fn diff_hunks(self: &DocumentManager, tab_id: u64) -> Vec<FfiHunk>;
+
+        /// Intra-line spans for a diff tab's hunks, `DiffView`'s
+        /// `ExtraSelection`s (mirrors `pendingFileSpans`). Empty for any
+        /// other tab.
+        #[qinvokable]
+        #[cxx_name = "diffSpans"]
+        fn diff_spans(self: &DocumentManager, tab_id: u64) -> Vec<FfiInlineSpan>;
+
+        /// Diff two arbitrary texts directly — no tab, no `AppSession`
+        /// state — for `DiffViewPage`'s "ignore whitespace" toggle, which
+        /// needs a second hunk set for the same two texts a diff is already
+        /// open on.
+        #[qinvokable]
+        #[cxx_name = "diffHunksBetween"]
+        fn diff_hunks_between(
+            self: &DocumentManager,
+            left_text: &QString,
+            right_text: &QString,
+            ignore_whitespace: bool,
+        ) -> Vec<FfiHunk>;
+        #[qinvokable]
+        #[cxx_name = "diffSpansBetween"]
+        fn diff_spans_between(
+            self: &DocumentManager,
+            left_text: &QString,
+            right_text: &QString,
+            ignore_whitespace: bool,
+        ) -> Vec<FfiInlineSpan>;
+
         /// Handle a filesystem-watcher event for `path` (relayed via
         /// `ProjectTreeModel::filesChangedExternally`, already running on
         /// the Qt thread by the time this is called — plain signal/slot,
@@ -4470,6 +4538,21 @@ mod ffi {
         #[qinvokable]
         fn push(self: Pin<&mut VcsService>, remote: &QString, branch: &QString, set_upstream: bool);
 
+        /// Ask for `path`'s blob at `revision` (a commit id, tag, branch
+        /// name, or `"HEAD"`) — File History's "compare with revision"
+        /// (F3-14), which needs a blob from *some* commit, not just `HEAD`
+        /// the way `requestHunks`/`headText` do. Answers via `blobReady`.
+        #[qinvokable]
+        #[cxx_name = "requestBlobAt"]
+        fn request_blob_at(self: Pin<&mut VcsService>, path: &QString, revision: &QString);
+
+        /// The blob `requestBlobAt(path, revision)` last found, or empty
+        /// before an answer arrives, when the path has no version at that
+        /// revision, or when `revision` doesn't resolve.
+        #[qinvokable]
+        #[cxx_name = "blobAt"]
+        fn blob_at(self: &VcsService, path: &QString, revision: &QString) -> QString;
+
         /// Commits that touched `path`, newest first; answers via
         /// `historyReady`.
         #[qinvokable]
@@ -4502,6 +4585,12 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "branchChanged"]
         fn branch_changed(self: Pin<&mut VcsService>);
+
+        /// `blobAt(path, revision)` has a fresh answer for this
+        /// `(path, revision)` pair.
+        #[qsignal]
+        #[cxx_name = "blobReady"]
+        fn blob_ready(self: Pin<&mut VcsService>, path: QString, revision: QString);
 
         /// A `vcs-core` operation failed — the code/message pair to show
         /// verbatim (ADR-0003).

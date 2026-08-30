@@ -21,9 +21,10 @@
 //! surprise. Past it, say so — a gutter that quietly shows no markers on a
 //! large file is indistinguishable from one that thinks nothing changed.
 
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
-use imara_diff::{Algorithm, Diff, InternedInput};
+use imara_diff::{Algorithm, Diff, InternedInput, TokenSource};
 
 /// Texts above this are not diffed. Matches the highlighting ceiling in
 /// `syntax-core`, so a file that is too big to colour is also too big to
@@ -80,13 +81,35 @@ pub enum DiffError {
 
 /// Line-level hunks between `before` and `after`.
 pub fn diff_lines(before: &str, after: &str) -> Result<Vec<Hunk>, DiffError> {
+    diff_lines_opts(before, after, false)
+}
+
+/// Line-level hunks, optionally treating two lines that differ only in
+/// whitespace as unchanged (the diff viewer's "ignore whitespace" toggle).
+///
+/// Line *ranges* never depend on this: only which lines compare equal does,
+/// so the same [`build_hunks`] maps a computed [`imara_diff::Diff`] to
+/// [`Hunk`]s regardless of which [`TokenSource`] produced it.
+pub fn diff_lines_opts(
+    before: &str,
+    after: &str,
+    ignore_whitespace: bool,
+) -> Result<Vec<Hunk>, DiffError> {
     if before.len() > MAX_DIFF_BYTES || after.len() > MAX_DIFF_BYTES {
         return Err(DiffError::TooLarge);
     }
-    let input = InternedInput::new(before, after);
-    let diff = Diff::compute(Algorithm::Histogram, &input);
-    Ok(diff
-        .hunks()
+    let diff = if ignore_whitespace {
+        let input = InternedInput::new(ws_insensitive_lines(before), ws_insensitive_lines(after));
+        Diff::compute(Algorithm::Histogram, &input)
+    } else {
+        let input = InternedInput::new(before, after);
+        Diff::compute(Algorithm::Histogram, &input)
+    };
+    Ok(build_hunks(&diff))
+}
+
+fn build_hunks(diff: &Diff) -> Vec<Hunk> {
+    diff.hunks()
         .map(|h| {
             let old = h.before.start as usize..h.before.end as usize;
             let new = h.after.start as usize..h.after.end as usize;
@@ -97,7 +120,54 @@ pub fn diff_lines(before: &str, after: &str) -> Result<Vec<Hunk>, DiffError> {
             };
             Hunk { old, new, kind }
         })
-        .collect())
+        .collect()
+}
+
+/// A line, compared and hashed by its whitespace-collapsed content rather
+/// than its exact bytes — the token type behind [`ws_insensitive_lines`].
+/// Line ranges in a [`Hunk`] are token *indices*, not content, so swapping
+/// equality for this type is the entire "ignore whitespace" feature.
+#[derive(Clone, Copy)]
+struct WsLine<'a>(&'a str);
+
+impl PartialEq for WsLine<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.split_whitespace().eq(other.0.split_whitespace())
+    }
+}
+
+impl Eq for WsLine<'_> {}
+
+impl Hash for WsLine<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        for word in self.0.split_whitespace() {
+            word.hash(state);
+        }
+        // A separator between words so "ab" "c" and "a" "bc" don't collide.
+        0u8.hash(state);
+    }
+}
+
+struct WsInsensitiveLines<'a>(imara_diff::sources::Lines<'a>);
+
+fn ws_insensitive_lines(text: &str) -> WsInsensitiveLines<'_> {
+    WsInsensitiveLines(imara_diff::sources::lines(text))
+}
+
+impl<'a> TokenSource for WsInsensitiveLines<'a> {
+    type Token = WsLine<'a>;
+    type Tokenizer = std::iter::Map<
+        <imara_diff::sources::Lines<'a> as TokenSource>::Tokenizer,
+        fn(&'a str) -> WsLine<'a>,
+    >;
+
+    fn tokenize(&self) -> Self::Tokenizer {
+        self.0.tokenize().map(WsLine)
+    }
+
+    fn estimate_tokens(&self) -> u32 {
+        self.0.estimate_tokens()
+    }
 }
 
 /// Intra-line spans for a modified hunk, by word.
@@ -349,6 +419,27 @@ mod tests {
     #[test]
     fn a_whitespace_only_change_is_still_a_change() {
         assert_eq!(kinds("a\n", "a \n"), vec![HunkKind::Modified]);
+    }
+
+    #[test]
+    fn ignoring_whitespace_collapses_a_whitespace_only_edit() {
+        assert!(
+            diff_lines_opts("a\n", "a \n", true).unwrap().is_empty(),
+            "a trailing-space-only edit must vanish with ignore_whitespace"
+        );
+        assert!(
+            diff_lines_opts("  a\tb  \n", "a b\n", true)
+                .unwrap()
+                .is_empty(),
+            "reflowed inner whitespace must still compare equal"
+        );
+    }
+
+    #[test]
+    fn ignoring_whitespace_still_reports_a_real_content_change() {
+        let hunks = diff_lines_opts("a\n", "a b\n", true).unwrap();
+        assert_eq!(hunks.len(), 1);
+        assert_eq!(hunks[0].kind, HunkKind::Modified);
     }
 
     #[test]

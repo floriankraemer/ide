@@ -1,6 +1,8 @@
 #include "editor_tabs.h"
 
 #include "code_editor.h"
+#include "diff_view.h"
+#include "diff_view_page.h"
 #include "e2e_mark.h"
 #include "find_bar.h"
 #include "hex_viewer.h"
@@ -663,7 +665,11 @@ bool EditorTabs::saveTab(QTabWidget *group, int index)
     if (!editor) {
         return false;
     }
-    const quint64 tabId = tabIdAt(group, index);
+    return saveEditor(tabIdAt(group, index), codeEditor, editor);
+}
+
+bool EditorTabs::saveEditor(quint64 tabId, CodeEditor *codeEditor, QPlainTextEdit *editor)
+{
     // F1-11: trim, final newline and line-ending normalisation, applied
     // *before* the file is read for writing — so they are one undo entry,
     // separate from whatever the user's last edit was, and the caret lands
@@ -823,11 +829,41 @@ void EditorTabs::addHexTab(QTabWidget *group, quint64 tabId, const QString &titl
     markTab("tab_added", tabId, group, group->indexOf(viewer), title);
 }
 
+void EditorTabs::addDiffTab(QTabWidget *group, quint64 tabId, const QString &title)
+{
+    const QString path = docManager_->tabPath(tabId);
+    auto *diffView = new DiffView(docManager_->diffLeftText(tabId), docManager_->diffRightText(tabId),
+                                    docManager_->diffHunks(tabId), docManager_->diffSpans(tabId), path);
+    auto *page = new DiffViewPage(diffView, docManager_->diffLeftLabel(tabId),
+                                    docManager_->diffRightLabel(tabId), group);
+    page->setProperty("tabId", QVariant::fromValue(tabId));
+    page->onIgnoreWhitespaceToggled = [this, diffView, tabId](bool ignore) {
+        const QString left = docManager_->diffLeftText(tabId);
+        const QString right = docManager_->diffRightText(tabId);
+        diffView->setHunks(docManager_->diffHunksBetween(left, right, ignore),
+                             docManager_->diffSpansBetween(left, right, ignore));
+    };
+    group->addTab(page, title);
+    renderTabText(group, group->indexOf(page), title, false);
+    markTab("tab_added", tabId, group, group->indexOf(page), title);
+}
+
 void EditorTabs::onTabClosed(quint64 tabId)
 {
     // F1-13: drop the carets and the expand/shrink stack this tab
     // accumulated, or the map grows for the life of the process.
     editorOps_->forgetTab(tabId);
+
+    // The tab's own page is a placeholder while its editor lives in a
+    // floating diff window (F3-14) — the file is going away regardless of
+    // whether its diff was ever closed, so the window (and the editor still
+    // inside it) closes with it rather than leaking a window over a tab
+    // that no longer exists.
+    if (const auto it = diffWindows_.constFind(tabId); it != diffWindows_.constEnd()) {
+        delete it->window;
+        diffWindows_.remove(tabId);
+    }
+
     const TabLoc loc = locate(tabId);
     if (!loc.group) {
         return;

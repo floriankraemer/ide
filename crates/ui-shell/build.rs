@@ -342,6 +342,11 @@ fn main() {
         // runs moc on it.
         .cpp_file("cpp/diff_view.h")
         .cpp_file("cpp/diff_view.cpp")
+        // F3-14: the toolbar chrome around `DiffView`. Declares Q_OBJECT
+        // (for the ignore-whitespace checkbox's signal/slot), so its header
+        // is listed too.
+        .cpp_file("cpp/diff_view_page.h")
+        .cpp_file("cpp/diff_view_page.cpp")
         .cpp_file("cpp/search_everywhere_dialog.cpp")
         .cpp_file("cpp/splash_screen.cpp")
         .cpp_file("cpp/theme.cpp")
