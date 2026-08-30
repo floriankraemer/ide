@@ -17,6 +17,11 @@ use std::time::{Duration, Instant};
 use editor_core::{BinaryFile, Document, HexRow};
 use project_model::{FileOpError, OpenFolderError, Project, ProjectSession};
 
+use diff_tab::DiffContent;
+
+/// Read-only `TabKind::Diff` tabs: `DiffContent` and the `AppSession`
+/// methods that open one and read it back (F3-14).
+mod diff_tab;
 /// File operations a workspace edit asks for (F2; its ADR is unwritten).
 pub mod file_ops;
 /// Where plugins and icon packs are joined (ADR-0026, ADR-0027).
@@ -182,6 +187,10 @@ pub enum TabKind {
     Text,
     /// A read-only hex view of a file whose bytes aren't text.
     Binary,
+    /// A read-only comparison of two texts with no live `Document` on either
+    /// side; see `diff_tab`'s module doc for why the working-tree-vs-`HEAD`
+    /// diff is deliberately not this kind.
+    Diff,
 }
 
 impl TabKind {
@@ -189,11 +198,13 @@ impl TabKind {
     /// [`AppError::code`]: append only, never renumber.
     pub const CODE_TEXT: i32 = 0;
     pub const CODE_BINARY: i32 = 1;
+    pub const CODE_DIFF: i32 = 2;
 
     pub fn code(self) -> i32 {
         match self {
             TabKind::Text => Self::CODE_TEXT,
             TabKind::Binary => Self::CODE_BINARY,
+            TabKind::Diff => Self::CODE_DIFF,
         }
     }
 }
@@ -205,6 +216,7 @@ impl TabKind {
 enum TabContent {
     Text(Document),
     Binary(BinaryFile),
+    Diff(DiffContent),
 }
 
 impl TabContent {
@@ -212,6 +224,7 @@ impl TabContent {
         match self {
             TabContent::Text(_) => TabKind::Text,
             TabContent::Binary(_) => TabKind::Binary,
+            TabContent::Diff(_) => TabKind::Diff,
         }
     }
 
@@ -219,13 +232,18 @@ impl TabContent {
         match self {
             TabContent::Text(doc) => doc.path(),
             TabContent::Binary(file) => file.path(),
+            TabContent::Diff(diff) => &diff.path,
         }
     }
 
+    // A diff tab (two already-read texts, not a file handle) is never
+    // retargeted, deleted-flagged or dirty: `set_path`/`mark_deleted` below
+    // are no-ops for it and `is_deleted` always answers `false`.
     fn set_path(&mut self, path: PathBuf) {
         match self {
             TabContent::Text(doc) => doc.set_path(path),
             TabContent::Binary(file) => file.set_path(path),
+            TabContent::Diff(_) => {}
         }
     }
 
@@ -233,6 +251,7 @@ impl TabContent {
         match self {
             TabContent::Text(doc) => doc.title(),
             TabContent::Binary(file) => file.title(),
+            TabContent::Diff(diff) => diff.title(),
         }
     }
 
@@ -240,6 +259,7 @@ impl TabContent {
         match self {
             TabContent::Text(doc) => doc.is_deleted(),
             TabContent::Binary(file) => file.is_deleted(),
+            TabContent::Diff(_) => false,
         }
     }
 
@@ -247,6 +267,7 @@ impl TabContent {
         match self {
             TabContent::Text(doc) => doc.mark_deleted(),
             TabContent::Binary(file) => file.mark_deleted(),
+            TabContent::Diff(_) => {}
         }
     }
 }
@@ -627,7 +648,7 @@ impl AppSession {
     pub fn tab_is_dirty(&self, id: TabId) -> Option<bool> {
         match self.entry(id).map(|e| &e.content) {
             Some(TabContent::Text(doc)) => Some(doc.is_dirty()),
-            Some(TabContent::Binary(_)) => Some(false),
+            Some(TabContent::Binary(_)) | Some(TabContent::Diff(_)) => Some(false),
             None => None,
         }
     }
@@ -884,6 +905,7 @@ impl AppSession {
         match self.entry_mut(id).map(|e| &mut e.content) {
             Some(TabContent::Text(doc)) => Ok(doc),
             Some(TabContent::Binary(file)) => Err(AppError::NotATextTab(file.path().to_path_buf())),
+            Some(TabContent::Diff(diff)) => Err(AppError::NotATextTab(diff.path.clone())),
             None => Err(AppError::NoSuchTab),
         }
     }

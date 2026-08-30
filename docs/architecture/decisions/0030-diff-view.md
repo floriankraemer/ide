@@ -60,6 +60,16 @@ A diff opened as its own tab (`vcs.showDiff` against a repository) needs the `vc
 Building `TabKind::Diff`/`diff_labels(TabId)` now would ship a tested path with no real caller — exactly the "no half-finished implementations" pattern this repo's history has already been burned by once (see the git log around `b839b53`/`6c787c8`).
 It is picked back up once the Git backend lands and an action can actually produce a diff to show.
 
+### 5. F3-14 follow-up: two mechanisms, not one, once the Git backend existed
+
+Once `vcs-core` (ADR-0031) shipped, F3-14 turned out to need a decision this ADR's §4 hadn't anticipated: `vcs.showDiff`'s working-tree-vs-`HEAD` diff and File History's/Project Tree's revision/arbitrary-file comparisons don't have the same shape.
+
+The working-tree case has a live `Document` — the tab already open for that file — and the whole point of an editable diff pane is that typing in it is typing in that same buffer, so undo, save and every LSP feature keep working exactly as they did before diff mode. A payload-carrying `TabKind::Diff { left_label, right_label }` (or any `TabKind::Diff` at all, fieldless or not) would have forced a choice between a second `Document` for the same file — a second, competing owner of its dirty/undo state, the exact thing ADR-0003 exists to prevent — or faking editability over a static text copy that saves go nowhere from. Neither is acceptable, so this case stays a plain `TabKind::Text` tab: `vcs.showDiff` toggles the view around it into a diff *layout* (`DiffView`'s new external-right-pane constructor reparents the tab's real `CodeEditor` in as the right pane) rather than opening a different kind of tab. Because a `QWidget` can only be in one place, the tab's own page shows a placeholder ("Show Diff Window") for as long as the diff window is open — `EditorTabs` tracks this per `TabId` (`diffWindows_`) and restores the editor to its tab, undisturbed, when the window closes (or immediately, with no restore, if the tab itself closes first).
+
+File History's "compare revisions" and Project Tree's "Compare with…" have no live `Document` on either side — a historical blob or an arbitrary second file is not something anyone is editing through this IDE. This is exactly the tab this ADR's §4 originally described: a fieldless `TabKind::Diff`, `AppSession::open_diff_tab` carrying both already-read texts plus their precomputed hunks in a new `DiffContent`/`TabContent::Diff` (split into `app-core/src/diff_tab.rs` once `lib.rs` hit its file-size ceiling), and labels/hunks/texts read back via `diff_labels`/`diff_hunks`/`diff_texts` accessors — the same "getter, not a payload struct" shape `pendingFileHunks`/`pendingFileSpans` already established. `vcs_core::Repository::blob_at` (generalizing `head_blob` to any revision) is what lets File History's "Compare with Working Tree"/"Compare Selected Revisions" and the gutter's own `headText` share one blob-reading path.
+
+`DiffView` itself grew independently of this split: syntax highlighting (wiring the `fileName` parameter that was threaded through but unused since F3-13), curved connectors between the two ribbons, collapsible unchanged regions (the same block-hiding technique `CodeEditor`'s code folding uses, duplicated in miniature since `DiffView`'s panes aren't `CodeEditor`s), and an ignore-whitespace toggle (`editor_core::diff::diff_lines_opts`, a custom `imara_diff::TokenSource` comparing lines by whitespace-collapsed content) — all consumed by both mechanisms through a shared `DiffViewPage` toolbar wrapper.
+
 ## Consequences
 
 - The refactor preview, the AI chat's per-block Apply, and Replace in Files all show a real before/after diff — hunks, intra-line highlighting, F7 navigation — instead of a truncated snippet or a bare count.
@@ -67,7 +77,7 @@ It is picked back up once the Git backend lands and an action can actually produ
   No cycle: `editor-core` is domain-layer and does not depend back on `lsp-core`.
 - `index-core/src/lib.rs`, already at its ratcheted file-size ceiling, gained a sibling module (`replace_preview.rs`) rather than growing further — `replace_in_files`, `preview_replacements` and the splice helper they share moved there together, shrinking the ceiling rather than raising it.
 - `previewText` (the truncated-first-line renderer) stays: it is still the fallback label for a resource-operation row (create/rename/delete has no text diff to show) and the AI panel's non-diff contexts, not dead code.
-- The Git gutter, the Changes dock, and diff-as-a-tab all consume the same `DiffView`/`editor_core::diff` once F3's Git backend exists — no second diff component to build or keep in sync.
+- The Git gutter, the Changes dock, and diff-as-a-tab all consume the same `DiffView`/`editor_core::diff`, as this ADR's §4 anticipated — no second diff component was ever built, including once the Git backend and F3-14 (§5) actually landed.
 
 ## Alternatives rejected
 

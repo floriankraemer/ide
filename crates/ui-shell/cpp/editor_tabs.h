@@ -3,6 +3,7 @@
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include <QFont>
+#include <QHash>
 #include <QJsonObject>
 #include <QList>
 #include <QObject>
@@ -37,6 +38,8 @@ void wireVcsService(VcsService *vcsService, ProjectTreeModel *treeModel, EditorT
 
 // app_core::TabKind's stable code for a binary tab (ADR-0020).
 constexpr int kTabKindBinary = 1;
+// app_core::TabKind's stable code for a read-only diff tab (F3-14).
+constexpr int kTabKindDiff = 2;
 
 // Humble view for the editor area (ADR-0002): owns the QTabWidget <->
 // DocumentManager wiring, decides nothing. Tabs are identified by the
@@ -431,6 +434,28 @@ public:
     // hunks requested for it).
     void showDiffAgainstHead();
 
+    // F3-14: the Changes dock's double-click entry point — opens `path`
+    // (focusing it if already open) and immediately shows its editable
+    // diff window, the same one `vcs.showDiff` opens for the active tab.
+    void showDiffForPath(const QString &path);
+
+    // F3-14: Project Tree's "Compare with…" — a read-only `TabKind::Diff`
+    // tab over two arbitrary files' current on-disk contents, no Git
+    // involved. Shows an error dialog and opens nothing if either file
+    // can't be read.
+    void openCompareFiles(const QString &leftPath, const QString &rightPath);
+
+    // F3-14: File History's "Compare with Working Tree" / "Compare Selected
+    // Revisions" — a read-only `TabKind::Diff` tab over `path` at two
+    // revisions. An empty revision string means the live working text (the
+    // open buffer if `path` is open, the file on disk otherwise), which is
+    // what "Compare with Working Tree" needs and a revision id never is.
+    void openCompareRevisions(const QString &path,
+                                const QString &leftRevision,
+                                const QString &leftLabel,
+                                const QString &rightRevision,
+                                const QString &rightLabel);
+
     // F3-19: vcs.rollbackHunk — reverts whichever cached hunk contains the
     // caret's line, the keyboard equivalent of the gutter popup's Revert.
     void rollbackHunkAtCaret();
@@ -509,6 +534,12 @@ private:
     // whether the save succeeded.
     bool saveTab(QTabWidget *group, int index);
 
+    // The save logic `saveTab(group, index)` runs, factored out so the
+    // editable diff window (F3-14) — whose editor briefly isn't any group's
+    // page widget — can save through the same path Ctrl+S normally does,
+    // rather than a second copy of the tidy/write/refresh sequence.
+    bool saveEditor(quint64 tabId, CodeEditor *codeEditor, QPlainTextEdit *editor);
+
     // Save/Discard/Cancel prompt for a tab with unsaved changes (US-3/US-4).
     // Returns true if the tab is now safe to close. Dirtiness is read from
     // the session — Rust owns that flag (ADR-0003).
@@ -542,6 +573,12 @@ private:
     void markPaneCount();
 
     void addHexTab(QTabWidget *group, quint64 tabId, const QString &title);
+
+    // Builds the page for a read-only diff tab (F3-14): a `DiffViewPage`
+    // over the two texts `DocumentManager::openDiffTab` stored for `tabId`.
+    // Like `addHexTab`, `currentEditor()` is `nullptr` for this page — there
+    // is no live document, by design (see `TabKind::Diff`'s doc comment).
+    void addDiffTab(QTabWidget *group, quint64 tabId, const QString &title);
 
     // F2-10: the caret-settle debounce fired, or Alt+Return asked directly
     // (`explicitRequest`). Remembers which editor and document position the
@@ -591,6 +628,27 @@ private:
     // hunk (Revert / Show Diff / Stage File).
     void onChangeMarkerClicked(CodeEditor *editor, int hunkIndex, const QPoint &globalPos);
 
+    // F3-14: the editable half of "vcs.showDiff". A `QPlainTextEdit`/
+    // `CodeEditor` widget can only be in one place at a time, and the
+    // working-tree-vs-HEAD diff deliberately keeps the tab's *real*
+    // `CodeEditor` — not a copy — as the diff's right pane, so undo/save/LSP
+    // stay on the one true `Document` (ADR-0003). That means the editor is
+    // physically reparented out of its tab for as long as the diff window
+    // is open: this method removes it from `group`, drops a placeholder in
+    // its place (a `Show Diff Window` button, since the tab still exists
+    // and can still be closed, renamed by a file rename, etc.), and shows a
+    // floating, non-modal window built around it. Re-opening an
+    // already-open diff for the same tab raises the existing window instead
+    // of reparenting a second time. Closing the window restores the editor
+    // to its original tab and index.
+    void openEditableDiffWindow(quint64 tabId, CodeEditor *editor, const QString &path);
+
+    // Undoes `openEditableDiffWindow`: pulls the editor back out of the
+    // (about to close) diff window and puts it back as `tabId`'s page,
+    // wherever that tab now sits (a split/reorder may have moved it while
+    // the diff window was open). No-op if `tabId` isn't currently diffing.
+    void restoreEditorFromDiffWindow(quint64 tabId);
+
     // Public for the same reason onBufferEditedExternally is: an agent's
     // tool can open a tab (AiChat::toolOpenedTab), and that relay lives in
     // buildMainWindow beside MCP's.
@@ -628,6 +686,17 @@ private:
     quint64 vcsRevision_ = 0;
     // F3-18: vcs.annotate's state, applied to whichever editor is active.
     bool annotateEnabled_ = false;
+
+    // F3-14: which tabs currently have their `CodeEditor` reparented into a
+    // floating editable diff window (see `openEditableDiffWindow`), and what
+    // to restore. Absent from this map is the overwhelmingly common case —
+    // a tab not being diffed right now.
+    struct DiffWindowState
+    {
+        QWidget *window = nullptr;      // Top-level, WA_DeleteOnClose.
+        QWidget *placeholder = nullptr; // Sits in the tab meanwhile.
+    };
+    QHash<quint64, DiffWindowState> diffWindows_;
     // F1-13/F1-15: carets and the language-aware editing operations, for
     // every editor this class opens. Owned here rather than passed in
     // because nothing outside the editor surface has anything to ask it.

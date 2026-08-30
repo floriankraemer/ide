@@ -223,12 +223,21 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     docks->hide(QStringLiteral("preview"));
 
     // F3-17/18: both start hidden; vcs_menu.cpp reveals each in turn.
-    auto *changesPanel = new ChangesPanel(vcsService, dockManager);
+    auto *changesPanel = new ChangesPanel(
+      vcsService, [editorTabs](const QString &path) { editorTabs->showDiffForPath(path); },
+      dockManager);
     auto *changesDock = new ads::CDockWidget(dockManager, QObject::tr("Changes"));
     changesDock->setWidget(changesPanel);
     docks->registerDock(QStringLiteral("changes"), changesDock, ads::CenterDockWidgetArea, rightArea);
     docks->hide(QStringLiteral("changes"));
-    auto *fileHistoryPanel = new FileHistoryPanel(vcsService, dockManager);
+    auto *fileHistoryPanel = new FileHistoryPanel(
+      vcsService,
+      [editorTabs](const QString &path, const QString &leftRevision, const QString &leftLabel,
+                    const QString &rightRevision, const QString &rightLabel) {
+          editorTabs->openCompareRevisions(path, leftRevision, leftLabel, rightRevision,
+                                             rightLabel);
+      },
+      dockManager);
     auto *fileHistoryDock = new ads::CDockWidget(dockManager, QObject::tr("File History"));
     fileHistoryDock->setWidget(fileHistoryPanel);
     docks->registerDock(QStringLiteral("fileHistory"), fileHistoryDock, ads::CenterDockWidgetArea,
@@ -465,7 +474,10 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                                        [editorTabs](const QString &path) {
                                            editorTabs->openFile(path);
                                        },
-                                       [editorTabs]() { return editorTabs->currentPath(); }});
+                                       [editorTabs]() { return editorTabs->currentPath(); },
+                                       [editorTabs](const QString &left, const QString &right) {
+                                           editorTabs->openCompareFiles(left, right);
+                                       }});
 
     return CentralWidgets{editorTabs,       dockManager,      docks,
                            treeView,         searchResultsPanel, classViewPanel,

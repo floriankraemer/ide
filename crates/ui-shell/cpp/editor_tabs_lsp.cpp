@@ -487,6 +487,10 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
         addHexTab(group, tabId, title);
         return;
     }
+    if (docManager_->tabKind(tabId) == kTabKindDiff) {
+        addDiffTab(group, tabId, title);
+        return;
+    }
     auto *editor = new CodeEditor(group);
     editor->setProperty("tabId", QVariant::fromValue(tabId));
     editor->setPlainText(docManager_->tabContent(tabId));

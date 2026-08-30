@@ -54,6 +54,11 @@ pub struct VcsServiceRust {
     is_repository: Cell<bool>,
     status: RefCell<vcs_core::RepoStatus>,
     hunks: RefCell<HashMap<String, CachedHunks>>,
+    /// `requestBlobAt`'s answers, keyed by `(path, revision)` — a diff tab
+    /// comparing two revisions asks for both sides of the same path, so a
+    /// single-path cache like `hunks`' would have one answer overwrite the
+    /// other.
+    blobs: RefCell<HashMap<(String, String), String>>,
     branches: RefCell<Vec<String>>,
     current_branch: RefCell<String>,
     /// The project root `openProject` was last called with. Kept so
@@ -72,6 +77,7 @@ impl Default for VcsServiceRust {
             status: RefCell::default(),
             project_root: RefCell::default(),
             hunks: RefCell::default(),
+            blobs: RefCell::default(),
             branches: RefCell::default(),
             current_branch: RefCell::default(),
         }
@@ -106,6 +112,7 @@ impl ffi::VcsService {
         // stop path to keep in sync, same shutdown `LanguageService` uses.
         self.jobs.borrow_mut().take();
         self.hunks.borrow_mut().clear();
+        self.blobs.borrow_mut().clear();
         self.branches.borrow_mut().clear();
         self.current_branch.borrow_mut().clear();
         *self.status.borrow_mut() = vcs_core::RepoStatus::default();
@@ -270,6 +277,51 @@ impl ffi::VcsService {
     pub fn head_text(&self, path: &QString) -> QString {
         match self.hunks.borrow().get(&path.to_string()) {
             Some(cached) => QString::from(cached.before_text.as_str()),
+            None => QString::default(),
+        }
+    }
+
+    pub fn request_blob_at(mut self: Pin<&mut Self>, path: &QString, revision: &QString) {
+        let path = path.to_string();
+        let revision = revision.to_string();
+        let qt_thread = self.as_mut().qt_thread();
+        let job_path = path.clone();
+        let job_revision = revision.clone();
+        self.as_ref().push_job(move |worker: &VcsWorker| {
+            // Same absolute-vs-repository-relative fix `requestHunks` already
+            // needs (`job_path` is a tab's own path via `tabPath`).
+            let absolute = Path::new(&job_path);
+            let relative = match worker.repo.work_dir() {
+                Some(root) => absolute.strip_prefix(&root).unwrap_or(absolute),
+                None => absolute,
+            };
+            let outcome = worker.repo.blob_at(&job_revision, relative);
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| match outcome {
+                Ok(text) => {
+                    service.blobs.borrow_mut().insert(
+                        (job_path.clone(), job_revision.clone()),
+                        text.unwrap_or_default(),
+                    );
+                    service.as_mut().blob_ready(
+                        QString::from(job_path.as_str()),
+                        QString::from(job_revision.as_str()),
+                    );
+                }
+                Err(err) => {
+                    let result = to_ffi_result(&err);
+                    service.as_mut().vcs_failed(result);
+                }
+            });
+        });
+    }
+
+    pub fn blob_at(&self, path: &QString, revision: &QString) -> QString {
+        match self
+            .blobs
+            .borrow()
+            .get(&(path.to_string(), revision.to_string()))
+        {
+            Some(text) => QString::from(text.as_str()),
             None => QString::default(),
         }
     }

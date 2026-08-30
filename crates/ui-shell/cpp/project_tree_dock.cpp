@@ -13,6 +13,7 @@
 
 #include <QAbstractItemModel>
 #include <QAction>
+#include <QFileDialog>
 #include <QFileInfo>
 #include <QHBoxLayout>
 #include <QIcon>
@@ -263,12 +264,16 @@ void wireProjectTree(QTreeView *treeView,
           QAction *newFolderAction = menu.addAction(QObject::tr("New Folder"));
           QAction *renameAction = nullptr;
           QAction *deleteAction = nullptr;
+          QAction *compareAction = nullptr;
           QAction *addToChatAction = nullptr;
           QAction *addToNewChatAction = nullptr;
           if (hasItem) {
               menu.addSeparator();
               renameAction = menu.addAction(QObject::tr("Rename"));
               deleteAction = menu.addAction(QObject::tr("Delete"));
+              if (!itemIsDir) {
+                  compareAction = menu.addAction(QObject::tr("Compare with…"));
+              }
               // A folder attaches its contents, which is why the two entries
               // read the same for a file and a folder: what differs is the
               // rule `ai_chat_core::expand_folder` applies, not the gesture.
@@ -333,6 +338,12 @@ void wireProjectTree(QTreeView *treeView,
               const auto result = treeModel->deletePath(itemPath);
               if (result.code != 0) {
                   QMessageBox::critical(window, QObject::tr("Cannot delete"), result.message);
+              }
+          } else if (chosen == compareAction) {
+              const QString otherPath = QFileDialog::getOpenFileName(
+                window, QObject::tr("Compare \"%1\" With…").arg(QFileInfo(itemPath).fileName()));
+              if (!otherPath.isEmpty()) {
+                  actions.compareFiles(itemPath, otherPath);
               }
           } else if (chosen == addToChatAction || chosen == addToNewChatAction) {
               if (chosen == addToNewChatAction) {

@@ -2,15 +2,51 @@
 
 #include "code_editor.h"
 #include "diff_view.h"
+#include "diff_view_page.h"
 #include "e2e_mark.h"
 #include "vcs_gutter.h"
 
-#include <QDialog>
+#include <QCloseEvent>
+#include <QFile>
+#include <QFileInfo>
+#include <QHBoxLayout>
+#include <QKeySequence>
+#include <QLabel>
 #include <QMessageBox>
+#include <QPushButton>
+#include <QShortcut>
+#include <QTabWidget>
 #include <QVBoxLayout>
 #include <QVector>
 
 namespace ui_shell {
+
+namespace {
+
+// The floating window `openEditableDiffWindow` shows. `closeEvent` (not
+// `destroyed`, and not `WA_DeleteOnClose` alone) is what runs `onClosing`:
+// `QObject::destroyed` fires only once `~QWidget` has already torn down its
+// children, by which point the real `CodeEditor` this window borrowed would
+// already be gone. Deferring the actual delete to `deleteLater()` keeps
+// this safe to close from within its own event handling.
+class DiffWindow : public QWidget
+{
+public:
+    using QWidget::QWidget;
+    std::function<void()> onClosing;
+
+protected:
+    void closeEvent(QCloseEvent *event) override
+    {
+        if (onClosing) {
+            onClosing();
+        }
+        QWidget::closeEvent(event);
+        deleteLater();
+    }
+};
+
+} // namespace
 
 namespace {
 
@@ -156,16 +192,209 @@ void EditorTabs::showDiffAgainstHead()
     if (path.isEmpty()) {
         return;
     }
+    openEditableDiffWindow(currentTabId(), editor, path);
+}
+
+void EditorTabs::showDiffForPath(const QString &path)
+{
+    if (!vcsService_) {
+        return;
+    }
+    openFile(path);
+    CodeEditor *editor = editorForPath(path);
+    if (!editor) {
+        // A binary file, or something `openFile` couldn't open at all —
+        // either way, no editable diff to show.
+        return;
+    }
+    openEditableDiffWindow(editor->property("tabId").toULongLong(), editor, path);
+}
+
+void EditorTabs::openEditableDiffWindow(quint64 tabId, CodeEditor *editor, const QString &path)
+{
+    if (const auto it = diffWindows_.constFind(tabId); it != diffWindows_.constEnd()) {
+        it->window->show();
+        it->window->raise();
+        it->window->activateWindow();
+        return;
+    }
+    if (!vcsService_) {
+        return;
+    }
+    const TabLoc loc = locate(tabId);
+    if (!loc.group) {
+        return;
+    }
+    const QString title = loc.group->tabText(loc.index);
     const QString headText = vcsService_->headText(path);
-    auto *dialog = new QDialog(window_);
-    dialog->setWindowTitle(tr("Diff — %1").arg(path));
-    dialog->setAttribute(Qt::WA_DeleteOnClose);
-    auto *layout = new QVBoxLayout(dialog);
-    auto *diff = new DiffView(headText, editor->toPlainText(), vcsService_->hunks(path),
-                               ::rust::Vec<FfiInlineSpan>(), QString(), dialog);
-    layout->addWidget(diff);
-    dialog->resize(900, 600);
-    dialog->show();
+
+    loc.group->removeTab(loc.index);
+
+    // A placeholder, not a blank page: the tab still exists (it can be
+    // renamed by a file rename, closed, dragged into a split) while its
+    // editor is off in the diff window, and a blank page reads as a bug
+    // rather than "look elsewhere".
+    auto *placeholder = new QWidget(loc.group);
+    placeholder->setProperty("tabId", QVariant::fromValue(tabId));
+    auto *placeholderLayout = new QVBoxLayout(placeholder);
+    placeholderLayout->addStretch(1);
+    auto *label = new QLabel(tr("This file's diff is open in a separate window."), placeholder);
+    label->setAlignment(Qt::AlignCenter);
+    placeholderLayout->addWidget(label);
+    auto *showButton = new QPushButton(tr("Show Diff Window"), placeholder);
+    connect(showButton, &QPushButton::clicked, this, [this, tabId] {
+        if (const auto it = diffWindows_.constFind(tabId); it != diffWindows_.constEnd()) {
+            it->window->show();
+            it->window->raise();
+            it->window->activateWindow();
+        }
+    });
+    auto *buttonRow = new QHBoxLayout;
+    buttonRow->addStretch(1);
+    buttonRow->addWidget(showButton);
+    buttonRow->addStretch(1);
+    placeholderLayout->addLayout(buttonRow);
+    placeholderLayout->addStretch(1);
+    loc.group->insertTab(loc.index, placeholder, title);
+    loc.group->setCurrentIndex(loc.index);
+
+    auto *diffView =
+      new DiffView(headText, editor, vcsService_->hunks(path), ::rust::Vec<FfiInlineSpan>(), path);
+    auto *page = new DiffViewPage(diffView, tr("HEAD"), tr("Working Tree"));
+    page->onIgnoreWhitespaceToggled = [this, diffView, headText, editor](bool ignore) {
+        const QString workingText = editor->toPlainText();
+        diffView->setHunks(docManager_->diffHunksBetween(headText, workingText, ignore),
+                             docManager_->diffSpansBetween(headText, workingText, ignore));
+    };
+
+    auto *window = new DiffWindow(nullptr, Qt::Window);
+    window->setWindowTitle(tr("Diff — %1").arg(path));
+    auto *layout = new QVBoxLayout(window);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->addWidget(page);
+    window->resize(1100, 750);
+    window->onClosing = [this, tabId] { restoreEditorFromDiffWindow(tabId); };
+
+    auto *saveShortcut = new QShortcut(QKeySequence::Save, window);
+    connect(saveShortcut, &QShortcut::activated, this,
+            [this, tabId, editor] { saveEditor(tabId, editor, editor); });
+
+    diffWindows_.insert(tabId, DiffWindowState{window, placeholder});
+    window->show();
+}
+
+void EditorTabs::restoreEditorFromDiffWindow(quint64 tabId)
+{
+    const auto it = diffWindows_.find(tabId);
+    if (it == diffWindows_.end()) {
+        return;
+    }
+    DiffWindowState state = it.value();
+    diffWindows_.erase(it);
+
+    auto *page = state.window->findChild<DiffViewPage *>();
+    QPlainTextEdit *editor = page ? page->diffView()->releaseRightPane() : nullptr;
+    if (!editor) {
+        return;
+    }
+
+    const TabLoc loc = locate(tabId);
+    if (!loc.group) {
+        // The tab is gone by some other path than `onTabClosed` (which
+        // handles its own teardown without going through this method at
+        // all) — nothing to put the editor back into, so it goes with it.
+        delete editor;
+        return;
+    }
+    const QString title = loc.group->tabText(loc.index);
+    loc.group->removeTab(loc.index);
+    delete state.placeholder;
+    loc.group->insertTab(loc.index, editor, title);
+    loc.group->setCurrentIndex(loc.index);
+    editor->setFocus();
+}
+
+void EditorTabs::openCompareFiles(const QString &leftPath, const QString &rightPath)
+{
+    QFile left(leftPath);
+    QFile right(rightPath);
+    if (!left.open(QIODevice::ReadOnly) || !right.open(QIODevice::ReadOnly)) {
+        QMessageBox::critical(window_, tr("Cannot compare files"),
+                                tr("One of the selected files could not be read."));
+        return;
+    }
+    const QString leftText = QString::fromUtf8(left.readAll());
+    const QString rightText = QString::fromUtf8(right.readAll());
+    const quint64 tabId =
+      docManager_->openDiffTab(leftPath, QFileInfo(leftPath).fileName(),
+                                 QFileInfo(rightPath).fileName(), leftText, rightText);
+    focusTab(tabId);
+}
+
+void EditorTabs::openCompareRevisions(const QString &path,
+                                       const QString &leftRevision,
+                                       const QString &leftLabel,
+                                       const QString &rightRevision,
+                                       const QString &rightLabel)
+{
+    if (!vcsService_) {
+        return;
+    }
+    // An empty revision means "the live working text" — the open buffer if
+    // there is one (so an unsaved edit is what gets compared, matching
+    // what the user actually sees), the file on disk otherwise.
+    auto textAt = [this, &path](const QString &revision) -> QString {
+        if (!revision.isEmpty()) {
+            return vcsService_->blobAt(path, revision);
+        }
+        if (CodeEditor *editor = editorForPath(path)) {
+            return editor->toPlainText();
+        }
+        QFile file(path);
+        return file.open(QIODevice::ReadOnly) ? QString::fromUtf8(file.readAll()) : QString();
+    };
+    // `blobAt` answers from a worker-thread cache filled by `requestBlobAt`
+    // — ask for both sides, wait for `blobReady` to say the cache has them,
+    // then build the tab. A revision the caller already resolved from a
+    // real log entry, so no "still loading" state is needed beyond this.
+    auto build = [this, path, leftRevision, leftLabel, rightRevision, rightLabel, textAt]() {
+        const QString leftText = textAt(leftRevision);
+        const QString rightText = textAt(rightRevision);
+        const quint64 tabId =
+          docManager_->openDiffTab(path, leftLabel, rightLabel, leftText, rightText);
+        focusTab(tabId);
+    };
+    const bool leftNeedsFetch = !leftRevision.isEmpty();
+    const bool rightNeedsFetch = !rightRevision.isEmpty();
+    if (!leftNeedsFetch && !rightNeedsFetch) {
+        build();
+        return;
+    }
+    auto pending = std::make_shared<int>((leftNeedsFetch ? 1 : 0) + (rightNeedsFetch ? 1 : 0));
+    auto connection = std::make_shared<QMetaObject::Connection>();
+    *connection = connect(
+      vcsService_, &VcsService::blobReady, this,
+      [this, connection, pending, build, path, leftRevision,
+       rightRevision](const QString &readyPath, const QString &readyRevision) {
+          // Filtered by the exact (path, revision) pair this call asked
+          // for — `blobReady` is process-wide, and an unrelated "compare
+          // revisions" started while this one is still fetching must not
+          // be counted against it.
+          if (readyPath != path
+              || (readyRevision != leftRevision && readyRevision != rightRevision)) {
+              return;
+          }
+          if (--(*pending) <= 0) {
+              QObject::disconnect(*connection);
+              build();
+          }
+      });
+    if (leftNeedsFetch) {
+        vcsService_->requestBlobAt(path, leftRevision);
+    }
+    if (rightNeedsFetch) {
+        vcsService_->requestBlobAt(path, rightRevision);
+    }
 }
 
 void EditorTabs::rollbackHunkAtCaret()
@@ -277,18 +506,7 @@ void EditorTabs::onChangeMarkerClicked(CodeEditor *editor, int hunkIndex, const 
         // staging belongs to F3-17's Changes dock.
         vcsService_->stageFile(path);
     };
-    actions.showDiff = [this, editor, path]() {
-        auto *dialog = new QDialog(window_);
-        dialog->setWindowTitle(tr("Diff — %1").arg(path));
-        dialog->setAttribute(Qt::WA_DeleteOnClose);
-        auto *layout = new QVBoxLayout(dialog);
-        const QString headText = vcsService_->headText(path);
-        auto *diff = new DiffView(headText, editor->toPlainText(), vcsService_->hunks(path),
-                                   ::rust::Vec<FfiInlineSpan>(), QString(), dialog);
-        layout->addWidget(diff);
-        dialog->resize(900, 600);
-        dialog->show();
-    };
+    actions.showDiff = [this, editor, tabId, path]() { openEditableDiffWindow(tabId, editor, path); };
 
     showHunkPopup(window_, globalPos, actions);
 }

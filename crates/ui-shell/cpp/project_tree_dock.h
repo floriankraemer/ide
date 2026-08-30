@@ -44,6 +44,9 @@ struct ProjectTreeActions
     // button — same reasoning as `openFile`: EditorTabs' job, reached
     // through a callback rather than a dependency on editor_tabs.h.
     std::function<QString()> currentEditorPath;
+    // F3-14: "Compare with…" — opens a read-only diff tab over two files'
+    // current contents, no Git involved. Same callback shape as `openFile`.
+    std::function<void(const QString &, const QString &)> compareFiles;
 };
 
 // The tree view plus the toolbar's locate action, which the active-tab-

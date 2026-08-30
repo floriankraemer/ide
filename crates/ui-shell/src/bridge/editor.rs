@@ -256,6 +256,105 @@ impl ffi::DocumentManager {
             .unwrap_or(false)
     }
 
+    pub fn open_diff_tab(
+        mut self: Pin<&mut Self>,
+        path: &QString,
+        left_label: &QString,
+        right_label: &QString,
+        left_text: &QString,
+        right_text: &QString,
+    ) -> u64 {
+        let id = self.session.borrow_mut().open_diff_tab(
+            std::path::PathBuf::from(path.to_string()),
+            left_label.to_string(),
+            right_label.to_string(),
+            left_text.to_string(),
+            right_text.to_string(),
+        );
+        let title = self.session.borrow().tab_title(id).unwrap_or_default();
+        self.as_mut()
+            .tab_opened(id.raw(), QString::from(title.as_str()));
+        id.raw()
+    }
+
+    pub fn diff_left_label(&self, tab_id: u64) -> QString {
+        self.session
+            .borrow()
+            .diff_labels(TabId::from_raw(tab_id))
+            .map(|(left, _)| QString::from(left))
+            .unwrap_or_default()
+    }
+
+    pub fn diff_right_label(&self, tab_id: u64) -> QString {
+        self.session
+            .borrow()
+            .diff_labels(TabId::from_raw(tab_id))
+            .map(|(_, right)| QString::from(right))
+            .unwrap_or_default()
+    }
+
+    pub fn diff_hunks(&self, tab_id: u64) -> Vec<ffi::FfiHunk> {
+        crate::bridge::convert::to_ffi_hunks(
+            &self.session.borrow().diff_hunks(TabId::from_raw(tab_id)),
+        )
+    }
+
+    pub fn diff_spans(&self, tab_id: u64) -> Vec<ffi::FfiInlineSpan> {
+        let session = self.session.borrow();
+        match session.diff_texts(TabId::from_raw(tab_id)) {
+            Some((left, right)) => crate::bridge::convert::to_ffi_inline_spans(
+                left,
+                right,
+                &session.diff_hunks(TabId::from_raw(tab_id)),
+            ),
+            None => Vec::new(),
+        }
+    }
+
+    pub fn diff_left_text(&self, tab_id: u64) -> QString {
+        self.session
+            .borrow()
+            .diff_texts(TabId::from_raw(tab_id))
+            .map(|(left, _)| QString::from(left))
+            .unwrap_or_default()
+    }
+
+    pub fn diff_right_text(&self, tab_id: u64) -> QString {
+        self.session
+            .borrow()
+            .diff_texts(TabId::from_raw(tab_id))
+            .map(|(_, right)| QString::from(right))
+            .unwrap_or_default()
+    }
+
+    pub fn diff_hunks_between(
+        &self,
+        left_text: &QString,
+        right_text: &QString,
+        ignore_whitespace: bool,
+    ) -> Vec<ffi::FfiHunk> {
+        let hunks = editor_core::diff::diff_lines_opts(
+            &left_text.to_string(),
+            &right_text.to_string(),
+            ignore_whitespace,
+        )
+        .unwrap_or_default();
+        crate::bridge::convert::to_ffi_hunks(&hunks)
+    }
+
+    pub fn diff_spans_between(
+        &self,
+        left_text: &QString,
+        right_text: &QString,
+        ignore_whitespace: bool,
+    ) -> Vec<ffi::FfiInlineSpan> {
+        let left = left_text.to_string();
+        let right = right_text.to_string();
+        let hunks = editor_core::diff::diff_lines_opts(&left, &right, ignore_whitespace)
+            .unwrap_or_default();
+        crate::bridge::convert::to_ffi_inline_spans(&left, &right, &hunks)
+    }
+
     pub fn tab_kind(&self, tab_id: u64) -> i32 {
         self.session
             .borrow()

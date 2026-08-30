@@ -29,6 +29,38 @@ impl Repository {
             .inner
             .find_tree(tree_id)
             .map_err(|e| VcsError::Read(e.to_string()))?;
+        Self::blob_in_tree(&tree, relative_path)
+    }
+
+    /// A blob at an arbitrary revision — a commit id, a tag, a branch name,
+    /// or anything else `git rev-parse` understands — used by "compare with
+    /// revision" (File History), where [`head_blob`](Self::head_blob) only
+    /// ever answers for `HEAD`.
+    ///
+    /// `None` covers both "the revision doesn't exist" being surfaced by the
+    /// caller some other way (they picked it from a real log entry) and the
+    /// ordinary "this path didn't exist yet at that revision" case
+    /// [`head_blob`](Self::head_blob) already treats the same way.
+    pub fn blob_at(
+        &self,
+        revision: &str,
+        relative_path: &Path,
+    ) -> Result<Option<String>, VcsError> {
+        let tree = self
+            .inner
+            .rev_parse_single(revision)
+            .map_err(|e| VcsError::Read(e.to_string()))?
+            .object()
+            .map_err(|e| VcsError::Read(e.to_string()))?
+            .peel_to_tree()
+            .map_err(|e| VcsError::Read(e.to_string()))?;
+        Ok(Self::blob_in_tree(&tree, relative_path)?.map(|(_, text)| text))
+    }
+
+    fn blob_in_tree(
+        tree: &gix::Tree<'_>,
+        relative_path: &Path,
+    ) -> Result<Option<(String, String)>, VcsError> {
         let Some(entry) = tree
             .lookup_entry_by_path(relative_path)
             .map_err(|e| VcsError::Read(e.to_string()))?
@@ -184,6 +216,54 @@ mod tests {
             .unwrap();
         assert_ne!(result.head_oid, NO_HEAD_BLOB);
         assert_eq!(result.hunks.len(), 1);
+    }
+
+    #[test]
+    fn blob_at_reads_an_older_revision_by_commit_id() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "--quiet"]);
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(dir.path(), &["add", "a.txt"]);
+        git(dir.path(), &["commit", "-m", "first"]);
+        let first_commit = String::from_utf8(
+            Command::new("git")
+                .args(["rev-parse", "HEAD"])
+                .current_dir(dir.path())
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_string();
+
+        std::fs::write(dir.path().join("a.txt"), "one\ntwo\n").unwrap();
+        git(dir.path(), &["commit", "-am", "second"]);
+
+        let repo = open(dir.path());
+        assert_eq!(
+            repo.blob_at(&first_commit, Path::new("a.txt")).unwrap(),
+            Some("one\n".to_string())
+        );
+        assert_eq!(
+            repo.blob_at("HEAD", Path::new("a.txt")).unwrap(),
+            Some("one\ntwo\n".to_string())
+        );
+    }
+
+    #[test]
+    fn blob_at_a_path_absent_from_that_revision_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "--quiet"]);
+        std::fs::write(dir.path().join("a.txt"), "one\n").unwrap();
+        git(dir.path(), &["add", "a.txt"]);
+        git(dir.path(), &["commit", "-m", "first"]);
+
+        let repo = open(dir.path());
+        assert_eq!(
+            repo.blob_at("HEAD", Path::new("missing.txt")).unwrap(),
+            None
+        );
     }
 
     #[test]
