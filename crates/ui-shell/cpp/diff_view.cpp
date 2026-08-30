@@ -237,6 +237,13 @@ void DiffView::init(const QString &leftText,
     leftEdit_->setReadOnly(true);
     leftEdit_->setFont(font);
     leftEdit_->setLineWrapMode(QPlainTextEdit::NoWrap);
+    // Read-only and created first, so it would otherwise be the widget a
+    // freshly shown top-level window (the editable diff window,
+    // `EditorTabs::openEditableDiffWindow`) hands default keyboard focus to
+    // — `ClickFocus` excludes it from that assignment (and from Tab
+    // traversal) while a click can still put the caret there to read or
+    // select text.
+    leftEdit_->setFocusPolicy(Qt::ClickFocus);
 
     if (!fileName.isEmpty()) {
         new SyntaxHighlighter(leftEdit_->document(), fileName);
@@ -278,6 +285,13 @@ void DiffView::init(const QString &leftText,
     rightRowLayout->setSpacing(0);
     rightRowLayout->addWidget(rightRibbon_);
     rightRowLayout->addWidget(rightEdit_, 1);
+    // The external-right-pane constructor's `rightEdit_` was very likely
+    // just `QTabWidget::removeTab()`'d out of its old page — which hides
+    // it — before being handed here; a layout reparenting a widget does not
+    // undo an explicit hide, so without this it would sit in the new
+    // window, correctly parented, permanently invisible (and permanently
+    // unfocusable — Qt refuses focus to a hidden widget).
+    rightEdit_->show();
 
     auto *splitter = new QSplitter(this);
     splitter->addWidget(leftRow);

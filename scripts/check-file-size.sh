@@ -36,6 +36,15 @@ baseline() {
 	crates/syntax-core/src/lib.rs) echo 2572 ;;        # no split planned; ratcheted so it cannot grow
 	crates/mcp-server/src/lib.rs) echo 1836 ;;         # no split planned; ratcheted so it cannot grow
 	crates/ai-chat-core/src/context.rs) echo 1608 ;;   # no split planned; ratcheted so it cannot grow
+	# First hit at 1642 lines (F3-14's two new flows). A flat list of
+	# independent #[test] flows sharing one set of fixture helpers
+	# (fixture/git_fixture/wait_for_index/...) — the reusable harness
+	# itself already lives in crates/e2e, per this file's own module doc.
+	# Splitting the flows into several files would need those helpers
+	# promoted to a `tests/support/` module shared across test binaries; a
+	# real refactor, not something to do as a side effect of adding two
+	# tests. Revisit if this keeps growing.
+	crates/app/tests/e2e.rs) echo 1642 ;;
 	# Raised from 1553 by 16 lines for the ResourceOp error variant, its FFI
 	# code and the file_ops module declaration — the parts that must live
 	# beside AppError. The operation itself, its 12 tests and its Display

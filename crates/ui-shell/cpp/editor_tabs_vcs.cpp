@@ -34,6 +34,16 @@ class DiffWindow : public QWidget
 public:
     using QWidget::QWidget;
     std::function<void()> onClosing;
+    // Which child gets keyboard focus once this window actually activates —
+    // set once, right after construction. A brand-new top-level reassigns
+    // focus to the first focusable widget in tab order as part of *becoming*
+    // active (confirmed against a real run under Xvfb: neither a `setFocus()`
+    // called before `show()` nor one queued via `QTimer::singleShot(0, ...)`
+    // survives it, since the real activation is a round trip through the X
+    // server that both can complete before). `changeEvent`'s
+    // `ActivationChange` is delivered exactly when that reassignment has
+    // already happened, so asking again here is what actually sticks.
+    QWidget *focusOnActivate = nullptr;
 
 protected:
     void closeEvent(QCloseEvent *event) override
@@ -43,6 +53,14 @@ protected:
         }
         QWidget::closeEvent(event);
         deleteLater();
+    }
+
+    void changeEvent(QEvent *event) override
+    {
+        QWidget::changeEvent(event);
+        if (event->type() == QEvent::ActivationChange && isActiveWindow() && focusOnActivate) {
+            focusOnActivate->setFocus();
+        }
     }
 };
 
@@ -278,9 +296,20 @@ void EditorTabs::openEditableDiffWindow(quint64 tabId, CodeEditor *editor, const
     auto *saveShortcut = new QShortcut(QKeySequence::Save, window);
     connect(saveShortcut, &QShortcut::activated, this,
             [this, tabId, editor] { saveEditor(tabId, editor, editor); });
+    // Keyboard-only close, matching every other dialog this harness drives
+    // (vcs_menu, search_everywhere): an E2E flow can dismiss this window
+    // without computing a title-bar close-button coordinate.
+    auto *closeShortcut = new QShortcut(QKeySequence(Qt::Key_Escape), window);
+    connect(closeShortcut, &QShortcut::activated, window, &QWidget::close);
+    window->focusOnActivate = editor;
 
     diffWindows_.insert(tabId, DiffWindowState{window, placeholder});
     window->show();
+    window->raise();
+    window->activateWindow();
+    e2eMark(QStringLiteral("{\"ev\":\"diff_window_shown\",\"tab_id\":%1,\"path\":%2}")
+              .arg(tabId)
+              .arg(e2eJson(path)));
 }
 
 void EditorTabs::restoreEditorFromDiffWindow(quint64 tabId)
@@ -312,6 +341,8 @@ void EditorTabs::restoreEditorFromDiffWindow(quint64 tabId)
     loc.group->insertTab(loc.index, editor, title);
     loc.group->setCurrentIndex(loc.index);
     editor->setFocus();
+    e2eMark(
+      QStringLiteral("{\"ev\":\"diff_window_closed\",\"tab_id\":%1}").arg(tabId));
 }
 
 void EditorTabs::openCompareFiles(const QString &leftPath, const QString &rightPath)
