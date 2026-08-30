@@ -236,7 +236,7 @@ mod tests {
     use super::*;
 
     fn languages() -> Vec<(String, String)> {
-        [("rust", "Rust"), ("zig", "Zig"), ("cpp", "C++")]
+        [("rust", "Rust"), ("nim", "Nim"), ("cpp", "C++")]
             .into_iter()
             .map(|(id, name)| (id.to_string(), name.to_string()))
             .collect()
@@ -249,9 +249,9 @@ mod tests {
     #[test]
     fn every_language_gets_a_row_even_without_a_server() {
         let draft = draft();
-        let zig = draft.row("zig").expect("row");
-        assert_eq!(zig.command, "");
-        assert_eq!(zig.status(), ServerRowStatus::NotConfigured);
+        let nim = draft.row("nim").expect("row");
+        assert_eq!(nim.command, "");
+        assert_eq!(nim.status(), ServerRowStatus::NotConfigured);
         // And every catalog server is there too, named after its language.
         assert_eq!(draft.row("rust").expect("row").command, "rust-analyzer");
         assert_eq!(draft.row("rust").expect("row").language_name, "Rust");
@@ -304,18 +304,18 @@ mod tests {
     #[test]
     fn configuring_a_language_with_no_default_persists_all_of_it() {
         let mut draft = draft();
-        draft.set_command("zig", "zls");
-        draft.set_args("zig", "  --enable-debug   --stdio ");
+        draft.set_command("nim", "zls");
+        draft.set_args("nim", "  --enable-debug   --stdio ");
         let overrides = draft.overrides();
         assert_eq!(overrides.len(), 1);
-        assert_eq!(overrides[0].language_id, "zig");
+        assert_eq!(overrides[0].language_id, "nim");
         assert_eq!(overrides[0].command.as_deref(), Some("zls"));
         assert_eq!(
             overrides[0].args,
             Some(vec!["--enable-debug".to_string(), "--stdio".to_string()])
         );
         assert_eq!(
-            draft.row("zig").expect("row").status(),
+            draft.row("nim").expect("row").status(),
             ServerRowStatus::Enabled
         );
     }
@@ -326,22 +326,22 @@ mod tests {
         let mut draft = draft();
         draft.set_command("rust", "/opt/ra");
         draft.set_enabled("go", false);
-        draft.set_command("zig", "zls");
+        draft.set_command("nim", "zls");
         draft.apply_to(&mut settings);
 
         let reloaded = ServerDraft::new(&settings, &languages());
         assert_eq!(reloaded.row("rust").expect("row").command, "/opt/ra");
         assert!(!reloaded.row("go").expect("row").enabled);
-        assert_eq!(reloaded.row("zig").expect("row").command, "zls");
+        assert_eq!(reloaded.row("nim").expect("row").command, "zls");
         assert_eq!(reloaded, draft);
     }
 
     #[test]
     fn clearing_a_command_drops_the_row_from_settings() {
         let mut draft = draft();
-        draft.set_command("zig", "zls");
+        draft.set_command("nim", "zls");
         assert_eq!(draft.overrides().len(), 1);
-        draft.set_command("zig", "");
+        draft.set_command("nim", "");
         assert!(draft.overrides().is_empty());
     }
 
