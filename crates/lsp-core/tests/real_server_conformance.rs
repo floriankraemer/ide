@@ -250,8 +250,26 @@ fn rust_analyzer_matches_the_recorded_expectations() {
     // F0-16: the silent window above is now visible rather than only
     // survivable — rust-analyzer reports it as `$/progress`, and this asserts
     // it against the real server, which is the half a stub cannot prove.
-    let reported: Vec<String> = rx
-        .try_iter()
+    //
+    // Drained into a list rather than filtered straight out of the channel:
+    // `try_iter` takes *every* queued event with it, and rust-analyzer
+    // publishes its diagnostics the moment indexing ends — which is to say,
+    // usually right here. Filtering in place threw that notification away and
+    // left the wait at the bottom of this test blocking for a second one that
+    // never comes. It passed locally, where the notification happened to
+    // arrive later, and failed on a CI runner, where it did not.
+    let drained: Vec<LspEvent> = rx.try_iter().collect();
+    if let Some(LspEvent::ServerFailed { message, .. }) = drained
+        .iter()
+        .find(|e| matches!(e, LspEvent::ServerFailed { .. }))
+    {
+        panic!("server failed while indexing: {message}");
+    }
+    let diagnostics_already_seen = drained
+        .iter()
+        .any(|e| matches!(e, LspEvent::Diagnostics { uri, .. } if uri == &fixture.uri));
+    let reported: Vec<String> = drained
+        .into_iter()
         .filter_map(|e| match e {
             LspEvent::ServerBusy {
                 activity: Some(activity),
@@ -321,11 +339,14 @@ fn rust_analyzer_matches_the_recorded_expectations() {
 
     // Diagnostics arrive unsolicited, so they are drained rather than
     // requested. A clean fixture may legitimately produce an empty array —
-    // what matters is that the notification arrived and parsed.
-    let diagnostics = wait_for(&rx, "diagnostics", Duration::from_secs(30), |e| match e {
-        LspEvent::Diagnostics { uri, .. } if uri == &fixture.uri => Some(true),
-        _ => None,
-    });
+    // what matters is that the notification arrived and parsed. It may have
+    // arrived during the progress drain above, in which case there is nothing
+    // left to wait for and waiting would hang until the timeout.
+    let diagnostics = diagnostics_already_seen
+        || wait_for(&rx, "diagnostics", Duration::from_secs(30), |e| match e {
+            LspEvent::Diagnostics { uri, .. } if uri == &fixture.uri => Some(true),
+            _ => None,
+        });
 
     manager.stop_all();
 
