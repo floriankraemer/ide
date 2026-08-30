@@ -49,7 +49,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F0-15 — LSP conformance harness + expectations | done | harness 2f1d4ec (#77), nightly CI job 557edb8 (#135) |
 | F0-16 — conformance fix: `$/progress` indexing state | done | (#136) — the one defect F0-15 produced; each further one gets its own row |
 | F0-17 — docs: this plan, ADRs, layering, overview | done | 5675b3f (#80) |
-| F0-18 — route every buffer edit through `applyBufferEdits` | todo |  |
+| F0-18 — route every buffer edit through `applyBufferEdits` | done | 6a53c93 (#137) |
 | F0-19 — error-code ranges (ADR-0003 amendment) | todo |  |
 
 ### F1 — Editor ergonomics
@@ -462,7 +462,7 @@ Every task is a single commit that keeps `cargo test --workspace` green and is r
 
 Lanes: `{F0-11→F0-12→F0-4a→F0-4b→F0-5→F0-6→F0-7}` is the critical path — the seed flows are the regression net for the C++ split, so they gate F0-4 rather than depending on F0-7 (an earlier draft had that edge and it made a cycle). Running alongside: `{F0-2→F0-3}`, `{F0-14→F0-15}`, `F0-1`, `F0-1b→F0-8`, `F0-9`. They converge at F0-10 and F0-13.
 
-Two more F0 rows worth their own commits: **F0-18**, route `FindBar::replaceCurrent` (`find_bar.cpp:241`) and `CodeEditor::insertCompletion` (`code_editor.cpp:155`) through `applyBufferEdits` so §5's "every buffer change crosses as `Vec<FfiTextEdit>`" is true rather than aspirational, and fix the latent bug at `main_window.cpp:399`/`:408` where `beginEditBlock`/`endEditBlock` run on two different `textCursor()` **copies** (it works only because Qt's counter is per-`QTextDocument`, and it is the first thing a reviewer of the multi-caret change will stare at). **F0-19**, an ADR-0003 amendment introducing the error-code ranges below, replacing the five hardcoded `code: 1` literals (`bridge.rs:5627, :5638, :7005, :7111, :7129`).
+Two more F0 rows worth their own commits: **F0-18**, route `FindBar::replaceCurrent` (`find_bar.cpp`) and `CodeEditor::insertCompletion` (`code_editor.cpp`) through `applyEditsTo` so §5's "every buffer change crosses as `Vec<FfiTextEdit>`" is true rather than aspirational, and fix the latent bug in `EditorTabs::applyBufferEdits` (`editor_tabs_lsp.cpp`, extracted from `main_window.cpp` since this plan was written) where `beginEditBlock`/`endEditBlock` run on two different `textCursor()` **copies** (it works only because Qt's counter is per-`QTextDocument`, and it is the first thing a reviewer of the multi-caret change will stare at). **F0-19**, an ADR-0003 amendment introducing the error-code ranges below, replacing the five hardcoded `code: 1` literals (`bridge.rs:5627, :5638, :7005, :7111, :7129`).
 
 ### F1 — Editor ergonomics
 

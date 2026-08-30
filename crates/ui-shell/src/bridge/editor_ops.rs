@@ -6,7 +6,7 @@
 //! `editor_core::Document`'s rope is populated when a file is opened and
 //! refreshed only on save, so it is one save behind what the user can see.
 //! Every entry point below therefore takes the *live* buffer text the way
-//! `findMatches` and `replacementsFor` already do, and computes against
+//! `findMatches` and `replacementEdits` already do, and computes against
 //! that. Nothing here reads the rope.
 //!
 //! # Units

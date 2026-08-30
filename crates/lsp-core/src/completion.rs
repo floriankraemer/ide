@@ -420,6 +420,49 @@ impl CompletionTracker {
     }
 }
 
+/// The span accepting a completion replaces, given where the caret is *now*.
+///
+/// `range` is the item's own `textEdit` range when the server named one.
+/// The live caret matters in both shapes:
+///
+/// * with a range, the span runs to whichever comes later, the range's end
+///   or the caret. Characters typed while the request was in flight sit
+///   between the two, and leaving them behind is how an editor turns a
+///   completion of `fo` into `foormat`;
+/// * without one, the `prefix_length` UTF-16 characters before the caret
+///   are the word being completed. A zero prefix is a pure insertion, which
+///   is what a server that offers a snippet at an empty caret means.
+///
+/// The prefix is a run of word characters ([`completion_prefix`]), so it
+/// never crosses a line; a length longer than the caret's own column can
+/// only come from a stale request, and clamps to the line start.
+pub fn accept_range(
+    range: Option<TextRange>,
+    prefix_length: u32,
+    caret_line: u32,
+    caret_character: u32,
+) -> TextRange {
+    match range {
+        Some(range) => {
+            let (end_line, end_character) = std::cmp::max(
+                (range.end_line, range.end_character),
+                (caret_line, caret_character),
+            );
+            TextRange {
+                end_line,
+                end_character,
+                ..range
+            }
+        }
+        None => TextRange {
+            start_line: caret_line,
+            start_character: caret_character.saturating_sub(prefix_length),
+            end_line: caret_line,
+            end_character: caret_character,
+        },
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -427,6 +470,47 @@ mod tests {
 
     fn labels(items: &[CompletionItem]) -> Vec<&str> {
         items.iter().map(|i| i.label.as_str()).collect()
+    }
+
+    fn range(start: (u32, u32), end: (u32, u32)) -> TextRange {
+        TextRange {
+            start_line: start.0,
+            start_character: start.1,
+            end_line: end.0,
+            end_character: end.1,
+        }
+    }
+
+    #[test]
+    fn a_server_named_range_is_taken_as_it_stands_when_the_caret_is_inside_it() {
+        let accepted = accept_range(Some(range((3, 4), (3, 10))), 2, 3, 6);
+        assert_eq!(accepted, range((3, 4), (3, 10)));
+    }
+
+    #[test]
+    fn a_server_named_range_is_stretched_to_a_caret_that_has_moved_past_it() {
+        // Two more characters typed while the request was in flight: they
+        // are part of the word, so the replaced span has to reach them.
+        let accepted = accept_range(Some(range((3, 4), (3, 8))), 6, 3, 10);
+        assert_eq!(accepted, range((3, 4), (3, 10)));
+    }
+
+    #[test]
+    fn without_a_range_the_typed_prefix_before_the_caret_is_replaced() {
+        let accepted = accept_range(None, 3, 7, 12);
+        assert_eq!(accepted, range((7, 9), (7, 12)));
+    }
+
+    #[test]
+    fn an_empty_prefix_and_no_range_is_a_pure_insertion_at_the_caret() {
+        let accepted = accept_range(None, 0, 7, 12);
+        assert_eq!(accepted, range((7, 12), (7, 12)));
+    }
+
+    #[test]
+    fn a_prefix_longer_than_the_column_clamps_to_the_line_start() {
+        let accepted = accept_range(None, 40, 2, 3);
+        assert_eq!(accepted, range((2, 0), (2, 3)));
     }
 
     #[test]

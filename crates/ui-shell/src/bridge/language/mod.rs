@@ -1098,6 +1098,35 @@ impl ffi::LanguageService {
             .collect()
     }
 
+    pub fn completion_edit(
+        &self,
+        item: &ffi::FfiCompletionItem,
+        caret_line: u32,
+        caret_character: u32,
+    ) -> Vec<ffi::FfiTextEdit> {
+        let range = item.has_range.then_some(lsp_core::TextRange {
+            start_line: item.start_line,
+            start_character: item.start_character,
+            end_line: item.end_line,
+            end_character: item.end_character,
+        });
+        let span = lsp_core::completion_accept_range(
+            range,
+            item.prefix_length,
+            caret_line,
+            caret_character,
+        );
+        vec![ffi::FfiTextEdit {
+            path: QString::default(),
+            in_buffer: true,
+            start_line: span.start_line,
+            start_character: span.start_character,
+            end_line: span.end_line,
+            end_character: span.end_character,
+            new_text: item.insert.clone(),
+        }]
+    }
+
     pub fn resolve_definition(mut self: Pin<&mut Self>, path: &QString, line: u32, character: u32) {
         let uri = lsp_core::uri_from_path(&path.to_string());
         let qt_thread = self.as_mut().qt_thread();

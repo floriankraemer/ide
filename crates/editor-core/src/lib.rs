@@ -39,7 +39,10 @@ pub mod line_ops;
 pub mod save_rules;
 pub use save_rules::{detect_line_ending, LineEnding, SaveRules};
 
-pub use search::{find_matches, replacements, Replacement, SearchError, SearchOptions, TextMatch};
+pub use search::{
+    find_matches, replacement_edits, replacements, Replacement, SearchError, SearchOptions,
+    TextMatch,
+};
 
 /// A single open file: a rope-backed buffer, its backing path, and a
 /// dirty flag tracking unsaved edits.

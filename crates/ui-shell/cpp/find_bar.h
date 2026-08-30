@@ -25,7 +25,7 @@ class CodeEditor;
 //
 // Humble view: it decides nothing about what matches. Every span and every
 // replacement string comes from `DocumentManager::findMatches` /
-// `replacementsFor` (i.e. `editor_core::search`); this class only paints,
+// `replacementEdits` (i.e. `editor_core::search`); this class only paints,
 // scrolls, splices, and counts.
 class FindBar : public QWidget
 {
@@ -58,6 +58,11 @@ private:
     void selectMatch(int index);
     void replaceCurrent();
     void replaceAll();
+    // Both of the above: ask for the splice list and hand it to
+    // `EditorTabs::applyEditsTo`, so either gesture is one Ctrl+Z. `index`
+    // is the match to replace, or -1 for all of them; the ordering is
+    // `editor_core::search`'s.
+    void splice(int index);
     void reposition();
     void setPatternValid(bool valid, const QString &message);
 

@@ -41,8 +41,9 @@ pub use code_action::{
     steps as action_steps, ActionStep, CodeActionItem, CommandRef,
 };
 pub use completion::{
-    completion_prefix, filter as filter_completions, kind_name, parse_completion, should_request,
-    strip_snippet, CompletionItem, CompletionList, CompletionTracker, TextRange,
+    accept_range as completion_accept_range, completion_prefix, filter as filter_completions,
+    kind_name, parse_completion, should_request, strip_snippet, CompletionItem, CompletionList,
+    CompletionTracker, TextRange,
 };
 pub use diagnostics::{
     path_from_uri, uri_from_path, DiagnosticCounts, DiagnosticRow, DiagnosticStore, Severity,

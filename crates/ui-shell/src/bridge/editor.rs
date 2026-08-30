@@ -79,35 +79,54 @@ impl ffi::DocumentManager {
         }
     }
 
-    pub fn replacements_for(
+    pub fn replacement_edits(
         mut self: Pin<&mut Self>,
         text: &QString,
         pattern: &QString,
         replacement: &QString,
         is_regex: bool,
         case_sensitive: bool,
-    ) -> Vec<ffi::FfiReplacement> {
+        index: i32,
+    ) -> Vec<ffi::FfiTextEdit> {
+        let text = text.to_string();
         let opts = search_options(is_regex, case_sensitive);
-        match editor_core::replacements(
-            &text.to_string(),
+        let items = editor_core::replacement_edits(
+            &text,
             &pattern.to_string(),
             &replacement.to_string(),
             opts,
-        ) {
-            Ok(items) => items
-                .into_iter()
-                .map(|r| ffi::FfiReplacement {
-                    start: r.start as u32,
-                    end: r.end as u32,
-                    text: QString::from(r.text.as_str()),
-                })
-                .collect(),
+            usize::try_from(index).ok(),
+        );
+        let items = match items {
+            Ok(items) => items,
             Err(err) => {
                 self.as_mut()
                     .find_pattern_invalid(QString::from(err.to_string().as_str()));
-                Vec::new()
+                return Vec::new();
             }
-        }
+        };
+        // Flat UTF-16 offsets in, (line, character) out — the only work this
+        // slot does beyond `editor_core::search`, and the same re-expression
+        // `EditorOps::to_ffi_edits` performs for its own transactions.
+        let starts = editor_core::offsets::utf16_line_starts(&text);
+        items
+            .into_iter()
+            .map(|r| {
+                let (start_line, start_character) =
+                    editor_core::offsets::utf16_position_at(&starts, r.start);
+                let (end_line, end_character) =
+                    editor_core::offsets::utf16_position_at(&starts, r.end);
+                ffi::FfiTextEdit {
+                    path: QString::default(),
+                    in_buffer: true,
+                    start_line,
+                    start_character,
+                    end_line,
+                    end_character,
+                    new_text: QString::from(r.text.as_str()),
+                }
+            })
+            .collect()
     }
 
     pub fn close_tab(mut self: Pin<&mut Self>, tab_id: u64) {

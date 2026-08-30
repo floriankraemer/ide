@@ -282,6 +282,11 @@ signals:
     // is wanted.
     void completionCanceled();
 
+    // F0-18: the user accepted `entry`. What span the insertion replaces is
+    // `lsp_core::completion`'s call, so this widget reports the choice and
+    // lets the splice come back as edits rather than typing the text itself.
+    void completionChosen(const CompletionEntry &entry);
+
     // The right-click menu has been built with Qt's standard entries and is
     // about to be shown: whoever wants to add to it does so now. The menu
     // is owned by this widget and deleted after it closes, so a receiver
@@ -389,8 +394,8 @@ private:
     // The current line up to the caret — what `lsp_core::completion` reads
     // both the typed word and the trigger character out of.
     QString textBeforeCursor() const;
-    // Types `entry`, replacing either the range the server named or the
-    // word the caret is in.
+    // Accepts `entry`: announces the choice on completionChosen() and
+    // dismisses the popup. The insertion itself arrives as a buffer edit.
     void insertCompletion(const CompletionEntry &entry);
     void hideCompletionPopup();
 

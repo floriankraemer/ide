@@ -81,11 +81,11 @@ void spliceEdit(QTextCursor &cursor, const FfiTextEdit &edit)
 
 void EditorTabs::applyBufferEdits(const ::rust::Vec<FfiTextEdit> &edits)
 {
-    // One cursor per file, held open for the whole splice: begin and end
-    // must be the *same* QTextCursor. Two temporaries happen to work
-    // because Qt counts edit blocks on the QTextDocument, but the pairing
-    // is what makes every edit here one Ctrl+Z (ADR-0019, ADR-0023), and
-    // it should not rest on that.
+    // One cursor per file, held open for the whole splice: `beginEditBlock`
+    // and `endEditBlock` run on the *same* QTextCursor, which is what makes
+    // every edit to a file one Ctrl+Z (ADR-0019, ADR-0023). Hence the
+    // insert-then-begin order — beginning on a temporary and storing a copy
+    // of it would leave the two halves on different cursor objects.
     QHash<QString, QTextCursor> cursors;
     for (const FfiTextEdit &edit : edits) {
         if (!edit.in_buffer) {
@@ -97,9 +97,8 @@ void EditorTabs::applyBufferEdits(const ::rust::Vec<FfiTextEdit> &edits)
             if (!editor) {
                 continue;
             }
-            QTextCursor cursor(editor->document());
-            cursor.beginEditBlock();
-            cursors.insert(path, cursor);
+            cursors.insert(path, QTextCursor(editor->document()));
+            cursors[path].beginEditBlock();
         }
         spliceEdit(cursors[path], edit);
     }
@@ -590,6 +589,29 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
             });
     connect(editor, &CodeEditor::completionCanceled, this,
             [this]() { languageService_->cancelCompletion(); });
+    // F0-18: accepting an item is a buffer edit like any other. The widget
+    // says which item and where the caret is; `lsp_core::completion` works
+    // out the span that gets replaced.
+    connect(editor,
+            &CodeEditor::completionChosen,
+            this,
+            [this, editor](const CompletionEntry &entry) {
+                const QPair<quint32, quint32> caret =
+                  lspPosition(editor, editor->textCursor().position());
+                const FfiCompletionItem item{entry.label,
+                                             entry.kind,
+                                             entry.detail,
+                                             entry.documentation,
+                                             entry.insert,
+                                             entry.hasRange,
+                                             static_cast<quint32>(entry.startLine),
+                                             static_cast<quint32>(entry.startCharacter),
+                                             static_cast<quint32>(entry.endLine),
+                                             static_cast<quint32>(entry.endCharacter),
+                                             static_cast<quint32>(entry.prefixLength)};
+                applyEditsTo(editor,
+                             languageService_->completionEdit(item, caret.first, caret.second));
+            });
 
     // F1-15: the multi-caret gestures. The widget reports what happened;
     // every one of these asks `editor_ops` for a transaction and splices
