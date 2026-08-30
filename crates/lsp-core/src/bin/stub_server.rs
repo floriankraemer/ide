@@ -86,7 +86,11 @@ fn main() {
         if message.get("method").is_none() {
             if let Some(id) = message.get("id").and_then(Value::as_i64) {
                 if let Some(tx) = pending.lock().expect("pending lock").remove(&id) {
-                    let _ = tx.send(message.get("result").cloned().unwrap_or(Value::Null));
+                    // The whole message, not just its `result`: a client
+                    // that answers with an *error* is a different thing
+                    // from one that answers `null`, and F0-16's progress
+                    // run has to tell them apart.
+                    let _ = tx.send(message.clone());
                 }
             }
             continue;
@@ -375,6 +379,63 @@ fn main() {
                     &out,
                     json!({"jsonrpc": "2.0", "id": id, "result": "still alive"}),
                 );
+            }
+            // F0-16: the whole sequence a real indexing server sends — a
+            // `window/workDoneProgress/create` request, then begin / report
+            // / end on the token it created, and only then the answer to
+            // this request, so a test that has the answer knows every
+            // notification is already through the client's reader.
+            //
+            // `created` reports whether the client accepted the create.
+            // A client that answers it with "not implemented" is what makes
+            // a real server give up on reporting at all, so that regression
+            // fails here rather than silently reappearing.
+            ("stub/indexingRun", Some(id)) => {
+                let token = "stub-index";
+                // `{"finish": false}` leaves the token open, which is what a
+                // server that dies mid-index leaves behind.
+                let finish = params
+                    .get("finish")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(true);
+                let request_id = next_request_id;
+                next_request_id += 1;
+                let (tx, rx) = channel();
+                pending.lock().expect("pending lock").insert(request_id, tx);
+
+                let out = Arc::clone(&out);
+                let pending = Arc::clone(&pending);
+                thread::spawn(move || {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": request_id,
+                               "method": "window/workDoneProgress/create",
+                               "params": {"token": token}}),
+                    );
+                    let answer = rx.recv_timeout(CLIENT_REPLY_TIMEOUT).unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&request_id);
+                    let created = answer.get("id").is_some() && answer.get("error").is_none();
+
+                    send(
+                        &out,
+                        progress(
+                            token,
+                            json!({"kind": "begin", "title": "Indexing",
+                                               "percentage": 0}),
+                        ),
+                    );
+                    send(
+                        &out,
+                        progress(token, json!({"kind": "report", "percentage": 60})),
+                    );
+                    if finish {
+                        send(&out, progress(token, json!({"kind": "end"})));
+                    }
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "result": {"created": created}}),
+                    );
+                });
             }
             // Ask the client something it does not implement, to check we
             // answer server-to-client requests instead of hanging.
@@ -684,7 +745,7 @@ fn main() {
                     send(
                         &out,
                         json!({"jsonrpc": "2.0", "id": id, "result": {
-                            "clientApplied": answer.get("applied").and_then(Value::as_bool),
+                            "clientApplied": answer.pointer("/result/applied").and_then(Value::as_bool),
                         }}),
                     );
                 });
@@ -699,6 +760,12 @@ fn main() {
         }
         io::stdout().flush().ok();
     }
+}
+
+/// One `$/progress` notification for `token`.
+fn progress(token: &str, value: Value) -> Value {
+    json!({"jsonrpc": "2.0", "method": "$/progress",
+           "params": {"token": token, "value": value}})
 }
 
 /// The `textDocument.uri` of a request, or a stand-in when it has none.

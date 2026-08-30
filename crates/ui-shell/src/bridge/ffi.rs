@@ -3253,6 +3253,28 @@ mod ffi {
         #[cxx_name = "diagnosticsChanged"]
         fn diagnostics_changed(self: Pin<&mut LanguageService>);
 
+        /// F0-16: whether any language server is still working on the
+        /// project, and on what. `initialize` returning is not the same as
+        /// being able to answer — rust-analyzer accepts requests while it
+        /// indexes and answers every one of them with nothing — so the
+        /// status bar says so, the way it already does for the project
+        /// index.
+        ///
+        /// `busy` false means every server is idle and the other fields are
+        /// empty. `has_percent` is false for a server that reports work
+        /// without a percentage, which the view shows as an indeterminate
+        /// bar rather than as 0%.
+        #[qsignal]
+        #[cxx_name = "serverBusyChanged"]
+        fn server_busy_changed(
+            self: Pin<&mut LanguageService>,
+            busy: bool,
+            name: QString,
+            activity: QString,
+            has_percent: bool,
+            percent: u32,
+        );
+
         /// A server started, became ready, died or gave up. Non-modal by
         /// contract: a crashing server must never raise a dialog, because the
         /// restart backoff would make the application unusable.

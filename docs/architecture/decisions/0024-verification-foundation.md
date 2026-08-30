@@ -66,7 +66,8 @@ Without that rule the stub decays into a legacy fixture and the nightly becomes 
 
 - The `main_window.cpp` split becomes reviewable: the marker stream can be captured before and after and diffed, including event order, which is the only check that can catch a `connect()`-ordering change in a mechanical-looking C++ refactor.
 - E2E flows are capped by wall-clock budget rather than ambition. Once the budget is full, adding a flow means deleting one — which forces the question "is this really only testable through the UI?" to be answered by arithmetic instead of discipline.
-- The first conformance run immediately found that `ServerReady` fires when `initialize` returns, while the server cannot answer anything until it has indexed the project. The IDE reports a server as ready and silently answers nothing for the first seconds of every session. That is recorded in `docs/architecture/lsp-conformance.md` and is worth fixing before any feature requests on every caret move.
+- The first conformance run immediately found that `ServerReady` fires when `initialize` returns, while the server cannot answer anything until it has indexed the project.
+That defect is recorded in `docs/architecture/lsp-conformance.md` and was fixed by F0-16, which added `$/progress` handling to `lsp-core` and an indexing state to the status bar.
 - The first E2E run immediately found a real input bug: a shortcut's Shift arming the double-Shift gesture, so `Ctrl+Shift+N` followed by any capital letter reopened Search Everywhere.
 
 Both of those had been shipped and unnoticed. That is the argument for this ADR in one line.

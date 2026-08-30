@@ -114,8 +114,47 @@ UiFontTargets buildStatusBar(QMainWindow *window, AppSettings *appSettings,
                           indexLabel->setVisible(true);
                       });
 
+    // F0-16: the same treatment for a language server that is still
+    // working. `initialize` returning does not mean rust-analyzer can answer
+    // yet — it accepts requests while it indexes and answers every one of
+    // them with nothing — so the same label-plus-bar pair says which server
+    // is busy, in the server's own words, with its percentage when it
+    // reports one. Separate widgets from the index pair above because both
+    // can be running at once.
+    auto *serverLabel = new QLabel(statusBar);
+    auto *serverBar = new QProgressBar(statusBar);
+    serverLabel->setVisible(false);
+    serverBar->setVisible(false);
+    serverBar->setTextVisible(false);
+    serverBar->setFixedWidth(90);
+    QObject::connect(languageService, &LanguageService::serverBusyChanged, window,
+                      [serverLabel, serverBar](bool busy, const QString &name,
+                                               const QString &activity, bool hasPercent,
+                                               quint32 percent) {
+                          serverLabel->setVisible(busy);
+                          serverBar->setVisible(busy);
+                          if (!busy) {
+                              return;
+                          }
+                          // Sized here rather than at build time so a
+                          // changed UI font scale is picked up without this
+                          // bar joining `UiFontTargets` — it is only ever
+                          // visible for a few seconds at a time.
+                          serverBar->setFixedHeight(serverBar->fontMetrics().height());
+                          serverLabel->setText(QObject::tr("%1: %2...").arg(name, activity));
+                          // No percentage is not 0%: an indeterminate bar
+                          // says "working, length unknown" where an empty
+                          // one would claim no progress has been made.
+                          serverBar->setRange(0, hasPercent ? 100 : 0);
+                          if (hasPercent) {
+                              serverBar->setValue(static_cast<int>(percent));
+                          }
+                      });
+
     statusBar->addPermanentWidget(indexLabel);
     statusBar->addPermanentWidget(indexBar);
+    statusBar->addPermanentWidget(serverLabel);
+    statusBar->addPermanentWidget(serverBar);
     statusBar->addPermanentWidget(problemsButton);
     statusBar->addPermanentWidget(branchButton);
     statusBar->addPermanentWidget(languageLabel);
