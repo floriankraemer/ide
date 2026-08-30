@@ -2922,6 +2922,25 @@ mod ffi {
             text_before_cursor: &QString,
         ) -> Vec<FfiCompletionItem>;
 
+        /// The splice list for accepting `item` — the row `completionItems`
+        /// handed over, passed straight back — with the caret where the
+        /// user has it now.
+        ///
+        /// Which span the insertion replaces is a rule, not arithmetic the
+        /// view may do: it depends on whether the server named a range, and
+        /// on characters typed while the request was in flight, both of
+        /// which `lsp_core::completion` decides. Always one edit, so the
+        /// view splices it through `EditorTabs::applyEditsTo` like every
+        /// other buffer change.
+        #[qinvokable]
+        #[cxx_name = "completionEdit"]
+        fn completion_edit(
+            self: &LanguageService,
+            item: &FfiCompletionItem,
+            caret_line: u32,
+            caret_character: u32,
+        ) -> Vec<FfiTextEdit>;
+
         /// A completion answer arrived and is still current. The view reads
         /// it back with `completionItems`, the same
         /// re-read-what-you-display shape `diagnosticsChanged` uses.

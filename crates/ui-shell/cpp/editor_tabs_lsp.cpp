@@ -589,6 +589,29 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
             });
     connect(editor, &CodeEditor::completionCanceled, this,
             [this]() { languageService_->cancelCompletion(); });
+    // F0-18: accepting an item is a buffer edit like any other. The widget
+    // says which item and where the caret is; `lsp_core::completion` works
+    // out the span that gets replaced.
+    connect(editor,
+            &CodeEditor::completionChosen,
+            this,
+            [this, editor](const CompletionEntry &entry) {
+                const QPair<quint32, quint32> caret =
+                  lspPosition(editor, editor->textCursor().position());
+                const FfiCompletionItem item{entry.label,
+                                             entry.kind,
+                                             entry.detail,
+                                             entry.documentation,
+                                             entry.insert,
+                                             entry.hasRange,
+                                             static_cast<quint32>(entry.startLine),
+                                             static_cast<quint32>(entry.startCharacter),
+                                             static_cast<quint32>(entry.endLine),
+                                             static_cast<quint32>(entry.endCharacter),
+                                             static_cast<quint32>(entry.prefixLength)};
+                applyEditsTo(editor,
+                             languageService_->completionEdit(item, caret.first, caret.second));
+            });
 
     // F1-15: the multi-caret gestures. The widget reports what happened;
     // every one of these asks `editor_ops` for a transaction and splices

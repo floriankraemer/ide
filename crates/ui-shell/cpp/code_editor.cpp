@@ -144,23 +144,10 @@ void CodeEditor::hideCompletionPopup()
 
 void CodeEditor::insertCompletion(const CompletionEntry &entry)
 {
-    QTextCursor cursor = textCursor();
-    const int caret = cursor.position();
-    if (entry.hasRange) {
-        const QTextBlock start = document()->findBlockByNumber(entry.startLine);
-        const QTextBlock end = document()->findBlockByNumber(entry.endLine);
-        if (start.isValid() && end.isValid()) {
-            cursor.setPosition(start.position() + entry.startCharacter);
-            // Never leave characters typed since the request behind the
-            // insertion: the replaced span always runs up to the caret.
-            cursor.setPosition(qMax(end.position() + entry.endCharacter, caret),
-                               QTextCursor::KeepAnchor);
-        }
-    } else if (entry.prefixLength > 0) {
-        cursor.setPosition(qMax(0, caret - entry.prefixLength), QTextCursor::KeepAnchor);
-    }
-    cursor.insertText(entry.insert);
-    setTextCursor(cursor);
+    // By value: `entry` is a reference into completionEntries_, which the
+    // splice that follows can refill before the dismissal below clears it.
+    const CompletionEntry chosen = entry;
+    emit completionChosen(chosen);
     hideCompletionPopup();
 }
 
