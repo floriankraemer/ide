@@ -804,6 +804,13 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     });
 
     QMenu *viewMenu = window->menuBar()->addMenu(QObject::tr("&View"));
+    // Same `aboutToShow`/`aboutToHide` marker every other menu-bar menu
+    // wires (`vcs_menu.cpp`, `run_menu.cpp`) — a `QMenu` popup has no
+    // `windowActivate` event of its own for an E2E flow to wait on.
+    QObject::connect(viewMenu, &QMenu::aboutToShow, viewMenu,
+                      []() { e2eMark("{\"ev\":\"dialog_shown\",\"name\":\"view_menu\"}"); });
+    QObject::connect(viewMenu, &QMenu::aboutToHide, viewMenu,
+                      []() { e2eMark("{\"ev\":\"dialog_closed\",\"name\":\"view_menu\"}"); });
     wireProjectTreeViewAction(viewMenu, central.docks, appSettings, *actions);
     QAction *classViewAction = registerAction(viewMenu, QStringLiteral("view.classView"),
                                                QObject::tr("Class View"), appSettings, *actions);

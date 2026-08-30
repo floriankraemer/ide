@@ -1189,6 +1189,242 @@ fn e2e_stage_and_commit_through_the_changes_dock() {
     assert_eq!(ide.quit(), 0);
 }
 
+/// F3-14 (1/2): `vcs.showDiff` reparents the tab's real `CodeEditor` into a
+/// floating diff window rather than a read-only copy — the one property no
+/// unit test can prove, since it is specifically about the same `QWidget`
+/// (and the same `editor_core::Document` underneath it) surviving a trip
+/// through `EditorTabs::openEditableDiffWindow`/`restoreEditorFromDiffWindow`
+/// with typing, saving and undo all still reaching the one true buffer.
+#[test]
+#[ignore = "E2E: needs an X server; run via `make e2e`"]
+fn e2e_editable_diff_window_reparents_the_real_editor() {
+    const ORIGINAL: &str = "line one\nline two\n";
+    const EDITED_AGAIN: &str = "line one edited\nline two more\n";
+    let name = "e2e_editable_diff_window_reparents_the_real_editor";
+
+    let repo = git_fixture(&[("notes.txt", ORIGINAL)]);
+    let mut ide = Ide::launch(name, APP, repo.path());
+    drop(repo);
+
+    let mcp = ide.mcp();
+    let main_window = ide.window().to_string();
+    ide.wait_for_ev(Mark::start(), "project_opened");
+    wait_for_index(&mcp);
+
+    let tab = open_file(&ide, "notes.txt");
+    let tab_id = tab["tab_id"].as_u64().expect("tab_id");
+
+    // One hunk, entirely in the buffer — same shape
+    // `e2e_hunk_revert_is_one_undo_never_touches_disk` sets up, and for the
+    // same reason: `vcs.showDiff`'s left pane is `HEAD`, so there is
+    // something to diff against.
+    ide.key("ctrl+Home");
+    ide.key("End");
+    let mark = ide.mark();
+    ide.type_text(" edited");
+    ide.wait_for_event(mark, "the tab to go dirty", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == true
+    });
+    ide.wait_for_event(mark, "the gutter to see the edit as a hunk", |e| {
+        e["ev"] == "vcs_hunks_applied" && e["count"].as_u64().unwrap_or(0) > 0
+    });
+    // Not yet saved — `read_buffer` cannot referee unsaved typing (module
+    // doc comment), so the edit is checked once through the save below.
+
+    // vcs.showDiff (Ctrl+Alt+G, keymap.rs) reparents `notes.txt`'s editor
+    // into a new top-level window.
+    let mark = ide.mark();
+    ide.key("ctrl+alt+g");
+    let shown = ide.wait_for_event(mark, "the diff window to open", |e| {
+        e["ev"] == "diff_window_shown" && e["tab_id"].as_u64() == Some(tab_id)
+    });
+    assert_eq!(
+        shown["path"].as_str().map(|p| p.ends_with("notes.txt")),
+        Some(true)
+    );
+    // Bare Xvfb has no window manager to hand the new toplevel focus on its
+    // own — `Ide::wait_for_focus_change` is the same wait every dialog-open
+    // helper in this file already uses for exactly this reason.
+    ide.wait_for_focus_change(&main_window);
+
+    // Type into what is now the diff window's right pane. If this reached a
+    // read-only copy instead of the real editor, xdotool's keystrokes would
+    // land nowhere and the buffer would never change. Ctrl+End then Up+End
+    // rather than plain End: the caret is wherever the first edit above
+    // left it (end of line one), not necessarily the end of the document,
+    // and `ORIGINAL`'s trailing newline puts Ctrl+End on its own empty
+    // final line, one past "line two".
+    ide.key("ctrl+End");
+    ide.key("Up");
+    ide.key("End");
+    let mark = ide.mark();
+    ide.type_text(" more");
+    // The tab is already dirty from the first edit, so `tab_dirty` will not
+    // fire again (it only reports a genuine false/true transition) — the
+    // gutter re-diffing against the buffer is what proves this keystroke
+    // reached the real `Document` rather than landing nowhere.
+    ide.wait_for_event(mark, "the gutter to re-diff the second edit", |e| {
+        e["ev"] == "vcs_hunks_applied"
+    });
+
+    // Ctrl+S inside the diff window is its own local shortcut
+    // (`openEditableDiffWindow`), wired straight to the same `saveEditor`
+    // path the main window's Ctrl+S uses — not the global action, which
+    // would not fire for a tab that is not `activeGroup_`'s current widget
+    // right now.
+    ide.key("ctrl+s");
+    ide.wait_for_event(
+        mark,
+        "the tab to go clean after saving from the diff window",
+        |e| e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false,
+    );
+    ide.sync(&mcp);
+    assert_eq!(
+        buffer(&mcp, tab_id),
+        EDITED_AGAIN,
+        "typing and saving from inside the diff window did not reach the real Document"
+    );
+    assert_eq!(
+        ide.read_project_file("notes.txt"),
+        EDITED_AGAIN,
+        "the save from the diff window did not write the real file"
+    );
+
+    // Escape closes the diff window (its own local shortcut) and restores
+    // the editor to its tab.
+    let mark = ide.mark();
+    ide.key("Escape");
+    ide.wait_for_event(
+        mark,
+        "the diff window to close and hand the editor back",
+        |e| e["ev"] == "diff_window_closed" && e["tab_id"].as_u64() == Some(tab_id),
+    );
+    ide.focus_main();
+
+    // Prove the real `CodeEditor` — not a fresh one — came back: type again
+    // through the ordinary main-window path and see the same tab go dirty.
+    ide.key("End");
+    let mark = ide.mark();
+    ide.type_text("!");
+    ide.wait_for_event(mark, "the restored editor to accept typing", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == true
+    });
+    ide.key("ctrl+z");
+    ide.wait_for_event(mark, "one undo to return to the saved state", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false
+    });
+    ide.sync(&mcp);
+    assert_eq!(
+        buffer(&mcp, tab_id),
+        EDITED_AGAIN,
+        "the restored editor's undo stack was not the same one the diff window edited"
+    );
+
+    assert_eq!(ide.quit(), 0);
+}
+
+/// F3-14 (2/2): File History's "Compare with Working Tree" opens a
+/// read-only `TabKind::Diff` tab with the right hunk count for a real
+/// revision read through `vcs_core::Repository::blob_at` — the property no
+/// unit test can prove, since `blob_at`'s own tests stop at the Rust seam
+/// and never touch the bridge's async request/cache round trip
+/// (`requestBlobAt`/`blobReady`) or `EditorTabs::addDiffTab`.
+#[test]
+#[ignore = "E2E: needs an X server; run via `make e2e`"]
+fn e2e_file_history_compare_with_working_tree_opens_a_diff_tab() {
+    const ORIGINAL: &str = "first draft\n";
+    const EDITED: &str = "first draft, revised\n";
+    let name = "e2e_file_history_compare_with_working_tree_opens_a_diff_tab";
+
+    let repo = git_fixture(&[("draft.txt", ORIGINAL)]);
+    let mut ide = Ide::launch(name, APP, repo.path());
+    drop(repo);
+
+    let mcp = ide.mcp();
+    ide.wait_for_ev(Mark::start(), "project_opened");
+    wait_for_index(&mcp);
+
+    let tab = open_file(&ide, "draft.txt");
+    let tab_id = tab["tab_id"].as_u64().expect("tab_id");
+
+    ide.key("ctrl+Home");
+    ide.key("End");
+    ide.type_text(", revised");
+    let mark = ide.mark();
+    ide.key("ctrl+s");
+    ide.wait_for_event(mark, "the tab to go clean after saving", |e| {
+        e["ev"] == "tab_dirty" && e["tab_id"].as_u64() == Some(tab_id) && e["dirty"] == false
+    });
+    ide.sync(&mcp);
+    assert_eq!(
+        ide.read_project_file("draft.txt"),
+        EDITED,
+        "the fixture's shape changed"
+    );
+
+    // View > File History (no default shortcut, keymap.rs — this walks the
+    // same menu-bar keyboard path `e2e_hunk_revert_is_one_undo_never_
+    // touches_disk` uses for the VCS menu). "File History" is the 13th item
+    // View's own menu adds (Project, Class View, AI Chat, Preview, Problems,
+    // Terminal, Search Everywhere, Go to File, Find Action, Go to Symbol,
+    // Go to Line, Changes, File History) — confirmed against a real run
+    // under Xvfb, not assumed.
+    let mark = ide.mark();
+    ide.key("alt+v");
+    ide.wait_for_event(mark, "the View menu to open", |e| {
+        e["ev"] == "dialog_shown" && e["name"] == "view_menu"
+    });
+    for _ in 0..12 {
+        ide.key("Down");
+    }
+    ide.key("Return");
+    ide.wait_for_event(mark, "the View menu to close", |e| {
+        e["ev"] == "dialog_closed" && e["name"] == "view_menu"
+    });
+
+    // The one commit `git_fixture` made ("initial") is the only row.
+    let row = ide.wait_for_event(mark, "the file's one commit to list", |e| {
+        e["ev"] == "file_history_row"
+    });
+    let (row_x, row_y) = rect_centre(&row["rect"]);
+    ide.click_at(row_x, row_y, 1);
+
+    // The "Menu" key is Qt's other keyboard binding for a widget's context
+    // menu — the same signal a right-click sends
+    // (`customContextMenuRequested`) — so this opens the exact menu
+    // `FileHistoryPanel::showContextMenu` builds without computing a
+    // right-click coordinate. Shift+F10 is the more commonly documented
+    // binding for this, but this app already claims it globally for
+    // `run.run` (keymap.rs), which wins the shortcut and never lets the
+    // list widget see it — confirmed against a real run under Xvfb, not
+    // assumed. Exactly one action exists for a single selected row
+    // ("Compare with Working Tree"). Unlike a menu-bar-triggered `QMenu`
+    // (View, VCS...), a bare `exec()` popup like this one does not
+    // pre-highlight its first action on open (`e2e_split_editor_
+    // persistence`'s own tab-context-menu flow already established this),
+    // so one `Down` is needed before `Return` — confirmed against a real
+    // run under Xvfb, not assumed.
+    ide.key("Menu");
+    ide.key("Down");
+    ide.key("Return");
+
+    let opened = ide.wait_for_event(mark, "a diff tab to open with one hunk", |e| {
+        e["ev"] == "diff_tab_opened"
+    });
+    assert_eq!(
+        opened["hunks"].as_u64(),
+        Some(1),
+        "HEAD vs Working Tree should be exactly one modified hunk"
+    );
+    let diff_tab_id = opened["tab_id"].as_u64().expect("tab_id");
+    assert_ne!(
+        diff_tab_id, tab_id,
+        "the diff tab must be a distinct tab from the file's own"
+    );
+
+    assert_eq!(ide.quit(), 0);
+}
+
 /// F4-15 (1/2): a real process, launched by `run.run`, delivers output
 /// across `RunService`'s per-console reader thread to the console dock's
 /// own widget, and `run.stop` reaches the process cleanly. Batching math,

@@ -183,9 +183,16 @@ impl ffi::VcsService {
         let qt_thread = self.as_mut().qt_thread();
         let signal_path = path.clone();
         self.as_ref().push_job(move |worker: &VcsWorker| {
-            let result = worker
-                .history_cache
-                .file_history(&worker.repo, Path::new(&path));
+            // `path` is the tab's own path (`DocumentManager::tabPath`),
+            // absolute — `Repository::file_history` looks a path up in each
+            // commit's tree, which only ever holds repository-relative
+            // paths, the same fix `requestHunks` already needs.
+            let absolute = Path::new(&path);
+            let relative = match worker.repo.work_dir() {
+                Some(root) => absolute.strip_prefix(&root).unwrap_or(absolute),
+                None => absolute,
+            };
+            let result = worker.history_cache.file_history(&worker.repo, relative);
             let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| match result {
                 Ok(entries) => {
                     let entries: Vec<ffi::FfiLogEntry> =
@@ -207,7 +214,14 @@ impl ffi::VcsService {
         let qt_thread = self.as_mut().qt_thread();
         let signal_path = path.clone();
         self.as_ref().push_job(move |worker: &VcsWorker| {
-            let result = worker.blame_cache.blame(&worker.repo, Path::new(&path));
+            // Same absolute-vs-repository-relative fix `file_history` and
+            // `requestHunks` both need.
+            let absolute = Path::new(&path);
+            let relative = match worker.repo.work_dir() {
+                Some(root) => absolute.strip_prefix(&root).unwrap_or(absolute),
+                None => absolute,
+            };
+            let result = worker.blame_cache.blame(&worker.repo, relative);
             let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| match result {
                 Ok(lines) => {
                     let lines: Vec<ffi::FfiBlameLine> =

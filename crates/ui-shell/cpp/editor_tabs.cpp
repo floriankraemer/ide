@@ -313,6 +313,20 @@ CodeEditor *EditorTabs::editorForPath(const QString &path) const
             }
         }
     }
+    // A tab currently in diff mode (F3-14) has its `CodeEditor` reparented
+    // into a floating window, not sitting as any group's page widget — the
+    // gutter's own hunks/blame updates are path-keyed (`wireVcsService`'s
+    // `hunksChanged`/`blameReady` handlers), so they would otherwise go
+    // silent the moment `vcs.showDiff` opens, exactly the window this path
+    // stays live for.
+    for (const DiffWindowState &state : diffWindows_) {
+        if (auto *page = state.window->findChild<DiffViewPage *>()) {
+            auto *editor = qobject_cast<CodeEditor *>(page->diffView()->rightPane());
+            if (editor && editor->property("lspPath").toString() == path) {
+                return editor;
+            }
+        }
+    }
     return nullptr;
 }
 
@@ -832,8 +846,9 @@ void EditorTabs::addHexTab(QTabWidget *group, quint64 tabId, const QString &titl
 void EditorTabs::addDiffTab(QTabWidget *group, quint64 tabId, const QString &title)
 {
     const QString path = docManager_->tabPath(tabId);
+    const ::rust::Vec<FfiHunk> hunks = docManager_->diffHunks(tabId);
     auto *diffView = new DiffView(docManager_->diffLeftText(tabId), docManager_->diffRightText(tabId),
-                                    docManager_->diffHunks(tabId), docManager_->diffSpans(tabId), path);
+                                    hunks, docManager_->diffSpans(tabId), path);
     auto *page = new DiffViewPage(diffView, docManager_->diffLeftLabel(tabId),
                                     docManager_->diffRightLabel(tabId), group);
     page->setProperty("tabId", QVariant::fromValue(tabId));
@@ -846,6 +861,12 @@ void EditorTabs::addDiffTab(QTabWidget *group, quint64 tabId, const QString &tit
     group->addTab(page, title);
     renderTabText(group, group->indexOf(page), title, false);
     markTab("tab_added", tabId, group, group->indexOf(page), title);
+    // No unit test can prove the FFI round trip landed the right hunk count
+    // in the actual page `DiffView` built — this is the one thing an E2E
+    // flow checks that `AppSession::diff_hunks`'s own unit tests cannot.
+    e2eMark(QStringLiteral("{\"ev\":\"diff_tab_opened\",\"tab_id\":%1,\"hunks\":%2}")
+              .arg(tabId)
+              .arg(hunks.size()));
 }
 
 void EditorTabs::onTabClosed(quint64 tabId)

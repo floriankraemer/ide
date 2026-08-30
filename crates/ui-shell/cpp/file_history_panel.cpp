@@ -1,5 +1,7 @@
 #include "file_history_panel.h"
 
+#include "e2e_mark.h"
+
 #include <QAction>
 #include <QDateTime>
 #include <QLabel>
@@ -69,6 +71,20 @@ void FileHistoryPanel::onHistoryReady(const QString &path, const ::rust::Vec<Ffi
                                      when.toString(Qt::TextDate));
         auto *item = new QListWidgetItem(text, list_);
         item->setData(kCommitIdRole, commitId);
+
+        // Same reasoning as `changes_row`/`markTab`: an E2E flow that has to
+        // click a specific commit's row would otherwise compute its
+        // on-screen position from the list's font metrics and row height.
+        const QRect rect = list_->visualItemRect(item);
+        const QPoint origin =
+          rect.isEmpty() ? QPoint() : list_->viewport()->mapToGlobal(rect.topLeft());
+        e2eMark(QStringLiteral("{\"ev\":\"file_history_row\",\"commit\":%1,"
+                                "\"rect\":[%2,%3,%4,%5]}")
+                  .arg(e2eJson(shortId))
+                  .arg(origin.x())
+                  .arg(origin.y())
+                  .arg(rect.width())
+                  .arg(rect.height()));
     }
 }
 

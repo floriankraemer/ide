@@ -62,6 +62,11 @@ public:
     // destroyed along with it like any other Qt child.
     QPlainTextEdit *releaseRightPane();
 
+    // The right pane, without releasing it — for a caller that needs to
+    // find the editor a diff window is currently borrowing (e.g. routing a
+    // gutter-hunks update to it) without ending the borrow.
+    QPlainTextEdit *rightPane() const { return rightEdit_; }
+
     // Replace the hunks/spans in place — the ignore-whitespace toggle and a
     // live (editable-pane) diff both recompute hunks elsewhere and hand the
     // new set back here rather than rebuilding the whole widget.

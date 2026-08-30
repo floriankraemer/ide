@@ -36,6 +36,16 @@ DiffViewPage::DiffViewPage(DiffView *diffView,
     });
     toolbarLayout->addWidget(ignoreWhitespace);
 
+    // Mouse-only: a fresh top-level window hands keyboard focus to the
+    // first focusable widget in tab order the moment it activates, which
+    // would otherwise steal it from the editable pane every time a diff
+    // window opens (F7/typing would land on a toolbar button instead of
+    // the text underneath it).
+    for (QWidget *button : {static_cast<QWidget *>(prevButton), static_cast<QWidget *>(nextButton),
+                             static_cast<QWidget *>(ignoreWhitespace)}) {
+        button->setFocusPolicy(Qt::NoFocus);
+    }
+
     toolbarLayout->addStretch(1);
     toolbarLayout->addWidget(new QLabel(leftLabel, toolbar));
     toolbarLayout->addWidget(new QLabel(QStringLiteral("↔"), toolbar));
