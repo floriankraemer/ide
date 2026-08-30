@@ -189,6 +189,15 @@ impl ffi::SearchModel {
             }
             *current = index_core::IndexSlot::Building(root.clone());
         }
+        // Read on this thread, before the worker starts: the settings layers
+        // are files, and the resolved answer belongs to the project being
+        // opened rather than to whatever is open when the walk reaches a
+        // directory. Which layer the patterns came from is
+        // `settings_model::scope`'s answer (ADR-0022); all `index-core` gets
+        // is the list.
+        let options = index_core::IndexOptions {
+            excludes: crate::bridge::convert::load_resolved_settings().index_excludes,
+        };
         std::thread::spawn(move || {
             // One cross-thread hop per file would cost more than the file
             // took to index, so the closure reports at most every
@@ -213,7 +222,7 @@ impl ffi::SearchModel {
                     model.as_mut().index_progress(done, total);
                 });
             };
-            match index_core::TextIndex::open_or_build_with_progress(&root, &progress) {
+            match index_core::TextIndex::open_or_build_with_progress(&root, &options, &progress) {
                 Ok(index) => {
                     *slot.write().unwrap() = index_core::IndexSlot::Ready(Box::new(index));
                     let _ = qt_thread.queue(|mut model: Pin<&mut Self>| {

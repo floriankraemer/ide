@@ -21,11 +21,8 @@
 //! configure the project, not the person reading it. Theme, fonts, keymap and
 //! AI providers stay global on purpose.
 //!
-//! Today that means language servers, editing behaviour and run
-//! configurations. Index excludes are still named in the plan but have no
-//! counterpart in [`Settings`] yet, so they are deliberately absent: a key
-//! that parses and then does nothing reads as a working feature and is worse
-//! than no key. They slot in additively as their features land.
+//! That is the four areas ADR-0022 names: language servers, editing
+//! behaviour, run configurations and index excludes.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -104,6 +101,25 @@ pub struct ProjectSettings {
     )]
     pub run_configs: Option<Vec<RunConfigSetting>>,
 
+    /// Gitignore-syntax patterns the project index skips, on top of the
+    /// `.gitignore` rules the walker already honours (ADR-0022's fourth
+    /// project-scoped area).
+    ///
+    /// Project-shaped by construction: which of *this* tree's directories
+    /// are generated output is a property of the project, and a checked-out
+    /// copy should not have to rediscover it.
+    ///
+    /// Sparse like the rest: `None` is "the project says nothing about
+    /// excludes", which is a different answer from `Some(vec![])` — the
+    /// project explicitly excluding nothing, and so overriding a global
+    /// list.
+    #[serde(
+        default,
+        rename = "index_exclude",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub index_excludes: Option<Vec<String>>,
+
     /// Keys this build does not understand, kept verbatim so a round trip
     /// through an older binary does not delete what a newer one wrote.
     ///
@@ -119,6 +135,7 @@ impl ProjectSettings {
         self.language_servers.is_none()
             && self.editing.is_none()
             && self.run_configs.is_none()
+            && self.index_excludes.is_none()
             && self.unknown.is_empty()
     }
 }

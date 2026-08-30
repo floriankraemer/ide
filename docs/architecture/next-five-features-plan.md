@@ -41,7 +41,7 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F0-7 — dock registry and general reconciliation | done | e5b325f |
 | F0-8 — byte-column fix in `moveCursorToLine` | done | febd6c0 (#74) |
 | F0-9 — per-project settings persistence | done | 720d1d9 (#75) |
-| F0-10 — per-project settings rules + dialog | todo |  |
+| F0-10 — per-project settings rules + dialog | done | 1b9b238; index excludes included, so ADR-0022's four areas are all real |
 | F0-11 — E2E harness | done | 1eb5009 (#76) |
 | F0-12 — E2E seed flows | done | 1eb5009 (#76) |
 | F0-13 — E2E in CI | done | 557edb8 (#135) |

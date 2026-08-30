@@ -108,7 +108,7 @@ impl Default for EditorOpsRust {
     fn default() -> Self {
         Self {
             tabs: RefCell::new(HashMap::new()),
-            settings: RefCell::new(crate::bridge::convert::load_settings()),
+            settings: RefCell::new(crate::bridge::convert::load_resolved_settings()),
             session: shared_session(),
         }
     }
@@ -396,7 +396,7 @@ impl ffi::EditorOps {
     /// dialog commits, so a changed tab width takes effect without a
     /// restart.
     pub fn reload_settings(self: Pin<&mut Self>) {
-        *self.settings.borrow_mut() = crate::bridge::convert::load_settings();
+        *self.settings.borrow_mut() = crate::bridge::convert::load_resolved_settings();
     }
 
     /// Alt+Click: one more caret at `position`.

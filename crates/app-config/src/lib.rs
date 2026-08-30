@@ -327,6 +327,16 @@ pub struct Settings {
     /// crate's — see [`editing`].
     #[serde(default)]
     pub editing: EditingSettings,
+    /// Gitignore-syntax patterns the project index skips, on top of the
+    /// `.gitignore` rules its walker already honours.
+    ///
+    /// Global here means "the user's own habitual excludes" — a scratch
+    /// directory they keep in every checkout. The project's own excludes
+    /// live in [`project_settings::ProjectSettings::index_excludes`], and
+    /// which of the two applies is `settings_model::scope`'s answer, not
+    /// this crate's.
+    #[serde(default)]
+    pub index_excludes: Vec<String>,
     /// Stable ids of languages the user turned off. A disabled language is
     /// still *listed* by the Languages page — otherwise it could never be
     /// switched back on — but the registry refuses to resolve it, so its
@@ -809,6 +819,7 @@ mod tests {
             editor_colors: colors,
             recent_projects: vec![PathBuf::from("/home/user/project-a")],
             recent_files: vec![PathBuf::from("/home/user/project-a/src/main.rs")],
+            index_excludes: vec!["scratch/".to_string()],
             window_geometry: WindowGeometry {
                 x: 10,
                 y: 20,

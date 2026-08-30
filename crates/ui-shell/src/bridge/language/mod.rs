@@ -289,7 +289,10 @@ impl ffi::LanguageService {
         self.as_mut()
             .server_busy_changed(false, QString::default(), QString::default(), false, 0);
 
-        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        // The resolved layer, not the global file: a project may name its
+        // own language servers (ADR-0022), and a project that pins a
+        // toolchain-local server is the reason that field is project-scoped.
+        let settings = crate::bridge::convert::load_resolved_settings();
         let overrides: Vec<lsp_core::ServerOverride> = settings
             .language_servers
             .iter()
@@ -384,7 +387,10 @@ impl ffi::LanguageService {
     }
 
     pub fn apply_server_settings(self: Pin<&mut Self>) {
-        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        // The resolved layer, not the global file: a project may name its
+        // own language servers (ADR-0022), and a project that pins a
+        // toolchain-local server is the reason that field is project-scoped.
+        let settings = crate::bridge::convert::load_resolved_settings();
         let overrides: Vec<lsp_core::ServerOverride> = settings
             .language_servers
             .iter()
@@ -793,7 +799,7 @@ impl ffi::LanguageService {
         let Some(language_id) = self.open_docs.borrow().get(&path).cloned() else {
             return;
         };
-        let settings = crate::bridge::convert::load_settings();
+        let settings = crate::bridge::convert::load_resolved_settings();
         let rules = settings_model::editing::resolve_for_language(&settings, &language_id);
         let style = rules.indent_style();
         let options = lsp_core::formatting::FormattingOptions {

@@ -628,6 +628,9 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
     fileMenu->addSeparator();
     QAction *preferencesAction = registerAction(fileMenu, QStringLiteral("file.preferences"),
                                                  QObject::tr("Preferences..."), appSettings, *actions);
+    QAction *projectSettingsAction =
+      registerAction(fileMenu, QStringLiteral("file.projectSettings"),
+                     QObject::tr("Project Settings..."), appSettings, *actions);
     fileMenu->addSeparator();
     QAction *exitAction = registerAction(fileMenu, QStringLiteral("file.exit"),
                                           QObject::tr("Exit"), appSettings, *actions);
@@ -677,7 +680,17 @@ QMainWindow *buildMainWindow(AppSettings *appSettings,
       central.terminalPanel,
     };
     QObject::connect(preferencesAction, &QAction::triggered, window,
-                      [window, settingsContext]() {
+                      [window, settingsContext, appSettings]() {
+                          appSettings->setSettingsScope(QStringLiteral("global"));
+                          showSettingsDialog(window, settingsContext);
+                      });
+    // The same dialog, opened on the project's own layer (ADR-0022). Two
+    // entry points rather than one because "configure this project" and
+    // "configure my editor" are different intentions, and the scope selector
+    // inside the dialog is how you get from one to the other afterwards.
+    QObject::connect(projectSettingsAction, &QAction::triggered, window,
+                      [window, settingsContext, appSettings]() {
+                          appSettings->setSettingsScope(QStringLiteral("project"));
                           showSettingsDialog(window, settingsContext);
                       });
 

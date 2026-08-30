@@ -17,12 +17,103 @@ use crate::bridge::ffi::{
     FfiUiFontScales, FfiWindowGeometry,
 };
 
-/// Rust side of the `AppSettings` QObject: stateless, every call re-reads
-/// or re-writes `settings.toml` directly (mirrors `push_recent_project`).
-#[derive(Default)]
-pub struct AppSettingsRust;
+/// Rust side of the `AppSettings` QObject: every call re-reads or re-writes
+/// `settings.toml` directly (mirrors `push_recent_project`).
+///
+/// The one piece of state is which scope the settings dialog is currently
+/// showing (F0-10). It is dialog session state, not domain state — nothing
+/// persists it, and closing the dialog leaves it where it was — and it lives
+/// on the one object every page already has a pointer to, so the scope
+/// selector and the origin badges cannot disagree about which layer is being
+/// looked at.
+pub struct AppSettingsRust {
+    scope: RefCell<settings_model::Scope>,
+}
+
+impl Default for AppSettingsRust {
+    /// Global until the user says otherwise: a project cannot configure the
+    /// person, so the person's own layer is the one that opens.
+    fn default() -> Self {
+        Self {
+            scope: RefCell::new(settings_model::Scope::Global),
+        }
+    }
+}
+
+/// The scope names crossing the seam. Strings rather than a shared enum
+/// because the C++ side only ever passes back what it was handed, and a
+/// second FFI enum for two values is more seam than the feature needs.
+const SCOPE_GLOBAL: &str = "global";
+const SCOPE_PROJECT: &str = "project";
+
+fn scope_from_name(name: &str) -> settings_model::Scope {
+    match name {
+        SCOPE_PROJECT => settings_model::Scope::Project,
+        // Anything unrecognised is the global layer, which is the answer
+        // that can never write into a file the project shares.
+        _ => settings_model::Scope::Global,
+    }
+}
+
+fn scope_name(scope: settings_model::Scope) -> &'static str {
+    match scope {
+        settings_model::Scope::Project => SCOPE_PROJECT,
+        _ => SCOPE_GLOBAL,
+    }
+}
 
 impl ffi::AppSettings {
+    /// Which layer the settings dialog is editing: `"global"` or
+    /// `"project"`.
+    pub fn settings_scope(&self) -> QString {
+        QString::from(scope_name(*self.scope.borrow()))
+    }
+
+    /// Switch the layer the dialog edits. Emits `settingsScopeChanged` so
+    /// every open page reloads its draft from the layer now selected.
+    pub fn set_settings_scope(self: Pin<&mut Self>, scope: &QString) {
+        let next = scope_from_name(&scope.to_string());
+        if *self.scope.borrow() == next {
+            return;
+        }
+        *self.scope.borrow_mut() = next;
+        self.settings_scope_changed();
+    }
+
+    /// Whether the open project has a settings file of its own — what the
+    /// scope selector needs to say "this project overrides nothing yet"
+    /// rather than pretending the file is there.
+    pub fn has_project_settings(&self) -> bool {
+        !crate::bridge::convert::load_project_settings().is_empty()
+    }
+
+    /// Whether a project is open at all — the difference between "this
+    /// project overrides nothing yet" and "there is no project to override
+    /// anything".
+    pub fn is_project_open(&self) -> bool {
+        crate::bridge::convert::current_project_root().is_some()
+    }
+
+    /// Where the effective value of one scoped field comes from, as the word
+    /// the badge shows: "from project", "from global" or "default".
+    ///
+    /// The answer is `settings_model::scope`'s and the view never re-derives
+    /// it (ADR-0022) — a badge computed separately from the value is a badge
+    /// that eventually lies.
+    pub fn field_origin(&self, field_id: &QString) -> QString {
+        let Some(field) = settings_model::ScopedField::from_id(&field_id.to_string()) else {
+            // Not an overridable setting at all, so its value can only have
+            // come from the global layer or a default.
+            return QString::from(settings_model::Scope::Global.label());
+        };
+        let origin = settings_model::origin(
+            field,
+            &crate::bridge::convert::load_settings(),
+            &crate::bridge::convert::load_project_settings(),
+        );
+        QString::from(origin.label())
+    }
+
     pub fn recent_projects(&self) -> QStringList {
         let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
         settings
@@ -666,6 +757,8 @@ pub struct LanguageServerEditorRust {
     /// What was saved when the page opened, so the page can tell a row it
     /// has edited from one it has not without diffing widgets.
     saved: RefCell<Option<settings_model::ServerDraft>>,
+    /// The layer this draft came from and will be written back to (F0-10).
+    scope: RefCell<settings_model::Scope>,
 }
 
 /// Every language a row could be about: the editor's own languages that a
@@ -686,8 +779,24 @@ fn server_page_languages() -> Vec<(String, String)> {
 }
 
 impl ffi::LanguageServerEditor {
-    pub fn begin_edit(&self) {
-        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+    /// Load the draft from `scope` — `"global"` or `"project"`.
+    ///
+    /// A project's server block is the same shape as the global one on
+    /// purpose (ADR-0022), so the same draft type reads both: the project's
+    /// list is lifted into an otherwise-default `Settings` and lowered back
+    /// out on commit.
+    pub fn begin_edit(&self, scope: &QString) {
+        let scope = scope_from_name(&scope.to_string());
+        *self.scope.borrow_mut() = scope;
+        let settings = match scope {
+            settings_model::Scope::Project => app_config::Settings {
+                language_servers: crate::bridge::convert::load_project_settings()
+                    .language_servers
+                    .unwrap_or_default(),
+                ..app_config::Settings::default()
+            },
+            _ => app_config::load(&app_core::resolve_config_dir()).unwrap_or_default(),
+        };
         let draft = settings_model::ServerDraft::new(&settings, &server_page_languages());
         *self.saved.borrow_mut() = Some(draft.clone());
         *self.draft.borrow_mut() = Some(draft);
@@ -750,6 +859,16 @@ impl ffi::LanguageServerEditor {
         let Some(draft) = self.draft.borrow().clone() else {
             return;
         };
+        if *self.scope.borrow() == settings_model::Scope::Project {
+            let mut lowered = app_config::Settings::default();
+            draft.apply_to(&mut lowered);
+            let servers = lowered.language_servers.clone();
+            let _ = commit_to_project(move |project| {
+                project.language_servers = Some(servers);
+            });
+            *self.saved.borrow_mut() = Some(draft);
+            return;
+        }
         let config_dir = app_core::resolve_config_dir();
         let Ok(mut settings) = app_config::load(&config_dir) else {
             return;
@@ -1088,11 +1207,33 @@ fn to_ffi_editing_problem(problem: &settings_model::editing::EditingProblem) -> 
 #[derive(Default)]
 pub struct EditingEditorRust {
     draft: RefCell<Option<settings_model::editing::EditingDraft>>,
+    /// Which layer this draft was loaded from, and therefore the one
+    /// `commit` writes back to. Held rather than re-read on commit so a
+    /// scope switch mid-dialog cannot save one layer's draft into the other.
+    scope: RefCell<settings_model::Scope>,
 }
 
 impl ffi::EditingEditor {
-    pub fn begin_edit(&self) {
-        let settings = load_settings();
+    /// Load the draft from `scope` — `"global"` or `"project"`. Called again
+    /// whenever the scope selector changes, which discards the draft that
+    /// belonged to the other layer, exactly as Cancel would.
+    pub fn begin_edit(&self, scope: &QString) {
+        let scope = scope_from_name(&scope.to_string());
+        *self.scope.borrow_mut() = scope;
+        // The project layer holds a bare `[editing]` section, and
+        // `EditingDraft` speaks `Settings`, so the section is lifted into an
+        // otherwise-default `Settings` to be edited and lowered back out on
+        // commit. Cheaper than a second draft type that would have to be
+        // kept in step with the first one forever.
+        let settings = match scope {
+            settings_model::Scope::Project => app_config::Settings {
+                editing: crate::bridge::convert::load_project_settings()
+                    .editing
+                    .unwrap_or_default(),
+                ..app_config::Settings::default()
+            },
+            _ => load_settings(),
+        };
         *self.draft.borrow_mut() = Some(settings_model::editing::EditingDraft::from_settings(
             &settings,
         ));
@@ -1173,6 +1314,17 @@ impl ffi::EditingEditor {
                 message: QString::from("Fix the highlighted editing settings first."),
             };
         }
+        if *self.scope.borrow() == settings_model::Scope::Project {
+            return commit_to_project(|project| {
+                let mut section = app_config::Settings::default();
+                draft.apply_to(&mut section);
+                // An override that says nothing is removed rather than
+                // written as an empty section: `.ide/settings.toml` is
+                // reviewed by people, and a section that overrides nothing
+                // reads as one that does.
+                project.editing = Some(section.editing);
+            });
+        }
         let config_dir = app_core::resolve_config_dir();
         match app_config::update(&config_dir, |settings| draft.apply_to(settings)) {
             Ok(()) => FfiResult::default(),
@@ -1181,5 +1333,31 @@ impl ffi::EditingEditor {
                 message: QString::from(error.to_string().as_str()),
             },
         }
+    }
+}
+
+/// Write one project-scoped change into `<project>/.ide/settings.toml`.
+///
+/// Goes through `app_config::project_settings::update`, which brings the
+/// atomic write, the refusal to save over a file it could not read, and the
+/// unknown-key round trip with it (ADR-0022 §5, §6) — none of which the
+/// adapter should be re-implementing.
+fn commit_to_project(
+    edit: impl FnOnce(&mut app_config::project_settings::ProjectSettings),
+) -> FfiResult {
+    let Some(root) = crate::bridge::convert::current_project_root() else {
+        return FfiResult {
+            code: 1,
+            message: QString::from(
+                "Open a project before editing its settings — project settings live in the project.",
+            ),
+        };
+    };
+    match app_config::project_settings::update(&root, edit) {
+        Ok(()) => FfiResult::default(),
+        Err(error) => FfiResult {
+            code: 1,
+            message: QString::from(error.to_string().as_str()),
+        },
     }
 }
