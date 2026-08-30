@@ -115,7 +115,7 @@ Renumbered to match §4's Task breakdown, which this table had drifted from (an 
 | F3-12c — bridge: staging + commit | done | 5105dee |
 | F3-12d — bridge: branches, remotes, history | done | 5105dee |
 | F3-13 — view: `DiffView` | done | 03f89fa |
-| F3-14 — view: `TabKind::Diff` + `diff_labels`, and the JetBrains-style diff viewer pass (curved connectors, collapsible unchanged regions, syntax highlighting, ignore-whitespace, an editable working-tree-vs-HEAD diff window) — split into an in-place diff *mode* for the editable case and a real `TabKind::Diff` tab for read-only comparisons; see ADR-0030's follow-up note | done | (pending commit) |
+| F3-14 — view: `TabKind::Diff` + `diff_labels`, and the JetBrains-style diff viewer pass (curved connectors, collapsible unchanged regions, syntax highlighting, ignore-whitespace, an editable working-tree-vs-HEAD diff window) — split into an in-place diff *mode* for the editable case and a real `TabKind::Diff` tab for read-only comparisons; see ADR-0030's follow-up note | done | 8f91028 |
 | F3-15 — retrofit: refactor preview, project-wide replace preview and AI apply render through `DiffView` | done | fcb917e, 27d3a88 |
 | F3-16 — view: `vcs_gutter` | done | d09bc5c |
 | F3-17 — view: `changes_panel` | done | fe4a5fb |
