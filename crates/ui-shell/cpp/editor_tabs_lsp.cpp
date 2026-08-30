@@ -81,11 +81,11 @@ void spliceEdit(QTextCursor &cursor, const FfiTextEdit &edit)
 
 void EditorTabs::applyBufferEdits(const ::rust::Vec<FfiTextEdit> &edits)
 {
-    // One cursor per file, held open for the whole splice: begin and end
-    // must be the *same* QTextCursor. Two temporaries happen to work
-    // because Qt counts edit blocks on the QTextDocument, but the pairing
-    // is what makes every edit here one Ctrl+Z (ADR-0019, ADR-0023), and
-    // it should not rest on that.
+    // One cursor per file, held open for the whole splice: `beginEditBlock`
+    // and `endEditBlock` run on the *same* QTextCursor, which is what makes
+    // every edit to a file one Ctrl+Z (ADR-0019, ADR-0023). Hence the
+    // insert-then-begin order — beginning on a temporary and storing a copy
+    // of it would leave the two halves on different cursor objects.
     QHash<QString, QTextCursor> cursors;
     for (const FfiTextEdit &edit : edits) {
         if (!edit.in_buffer) {
@@ -97,9 +97,8 @@ void EditorTabs::applyBufferEdits(const ::rust::Vec<FfiTextEdit> &edits)
             if (!editor) {
                 continue;
             }
-            QTextCursor cursor(editor->document());
-            cursor.beginEditBlock();
-            cursors.insert(path, cursor);
+            cursors.insert(path, QTextCursor(editor->document()));
+            cursors[path].beginEditBlock();
         }
         spliceEdit(cursors[path], edit);
     }
