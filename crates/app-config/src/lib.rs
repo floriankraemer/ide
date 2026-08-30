@@ -25,6 +25,10 @@ pub mod syntax_colors;
 /// Per-project settings layered over the global file (ADR-0022).
 pub mod project_settings;
 
+/// Machine-local VCS preferences, layered under `.ide/local/` rather than
+/// the committed project settings file.
+pub mod vcs_local_settings;
+
 pub use editing::EditingSettings;
 pub use keymap::{action, ActionDef, Binding, Keymap, ACTIONS};
 pub use syntax_colors::{LanguageScopeStyles, ScopeStyle, ScopeStyles};

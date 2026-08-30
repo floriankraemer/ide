@@ -125,6 +125,9 @@ fn run_internal(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if let Some(path) = dubious_ownership_path(&stderr) {
+            return Err(VcsError::DubiousOwnership { path });
+        }
         return Err(VcsError::GitFailed {
             command: command_str,
             stderr,
@@ -132,6 +135,28 @@ fn run_internal(
     }
 
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// Extract the repository path from git's own "dubious ownership" message,
+/// e.g.:
+/// ```text
+/// fatal: detected dubious ownership in repository at '/wsl.localhost/Ubuntu/home/florian/projects/ide'
+/// ```
+/// `git` always wraps the path in quotes here (single on Unix, and it has
+/// used double quotes on some Windows builds), so this looks for the marker
+/// phrase and takes whatever is between the quote character that follows it.
+/// Returns `None` for any stderr that doesn't match — the caller falls back
+/// to the generic [`VcsError::GitFailed`].
+fn dubious_ownership_path(stderr: &str) -> Option<std::path::PathBuf> {
+    const MARKER: &str = "detected dubious ownership in repository at ";
+    let after_marker = &stderr[stderr.find(MARKER)? + MARKER.len()..];
+    let quote = after_marker.chars().next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let rest = &after_marker[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    Some(std::path::PathBuf::from(&rest[..end]))
 }
 
 fn display_command(args: &[&str]) -> String {
@@ -292,6 +317,29 @@ mod tests {
             argv::push("origin", "main", true),
             vec!["push", "-u", "origin", "main"]
         );
+    }
+
+    // -----------------------------------------------------------------
+    // dubious-ownership stderr parsing — no git binary needed.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn dubious_ownership_path_extracts_the_quoted_path() {
+        let stderr = "fatal: detected dubious ownership in repository at \
+            '/wsl.localhost/Ubuntu/home/florian/projects/ide'\n\
+            To add an exception for this directory, call:\n\n\
+            \tgit config --global --add safe.directory /wsl.localhost/Ubuntu/home/florian/projects/ide";
+        assert_eq!(
+            dubious_ownership_path(stderr),
+            Some(std::path::PathBuf::from(
+                "/wsl.localhost/Ubuntu/home/florian/projects/ide"
+            ))
+        );
+    }
+
+    #[test]
+    fn dubious_ownership_path_is_none_for_unrelated_stderr() {
+        assert_eq!(dubious_ownership_path("fatal: not a git repository"), None);
     }
 
     // -----------------------------------------------------------------

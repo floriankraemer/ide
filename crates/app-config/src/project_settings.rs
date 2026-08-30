@@ -125,12 +125,15 @@ impl ProjectSettings {
 
 /// `<project_root>/.ide`, verified to stay inside the project.
 ///
-/// Both load and save go through here. A `.ide` that resolves outside the
-/// project — most obviously a symlink pointing elsewhere — is refused rather
-/// than followed: reading it would disclose a file the project has no claim
-/// to, and writing it would let a checked-out repository scribble outside its
-/// own directory.
-fn project_dir(project_root: &Path) -> Result<PathBuf, ConfigError> {
+/// Both load and save go through here — as does `vcs_local_settings`, which
+/// keeps its own file under this same directory and relies on this same
+/// symlink check rather than repeating it.
+///
+/// A `.ide` that resolves outside the project — most obviously a symlink
+/// pointing elsewhere — is refused rather than followed: reading it would
+/// disclose a file the project has no claim to, and writing it would let a
+/// checked-out repository scribble outside its own directory.
+pub(crate) fn project_dir(project_root: &Path) -> Result<PathBuf, ConfigError> {
     let dir = project_root.join(PROJECT_DIR);
     // Nothing there yet is fine — it cannot escape anywhere.
     if !dir.exists() {

@@ -5,6 +5,7 @@
 #include <QString>
 #include <QWidget>
 
+class QLabel;
 class QPlainTextEdit;
 class QPushButton;
 class QShowEvent;
@@ -41,6 +42,7 @@ private:
     void refresh();
     void onItemChanged(QTreeWidgetItem *item, int column);
     void doCommit(bool amend, bool push);
+    void refreshEmptyState();
 
     VcsService *vcsService_;
     QTreeWidget *tree_ = nullptr;
@@ -48,6 +50,15 @@ private:
     QPushButton *commitButton_ = nullptr;
     QPushButton *commitAndPushButton_ = nullptr;
     QPushButton *amendButton_ = nullptr;
+    QWidget *repoWidgets_ = nullptr;
+    // Shown instead of `repoWidgets_` when `!vcsService_->isRepository()`:
+    // no tree, no commit box, just a label and an "Initialize Git
+    // Repository" button (plus a "Not now" link the first time it is
+    // asked) — see `refreshEmptyState`.
+    QWidget *emptyState_ = nullptr;
+    QLabel *emptyStateLabel_ = nullptr;
+    QPushButton *initButton_ = nullptr;
+    QPushButton *notNowButton_ = nullptr;
     // Set while refresh() repopulates the tree, so the checkbox toggles it
     // performs don't loop back into stageFile/unstageFile calls.
     bool populating_ = false;

@@ -4316,6 +4316,35 @@ mod ffi {
         #[cxx_name = "isRepository"]
         fn is_repository(self: &VcsService) -> bool;
 
+        /// `git config --global --add safe.directory <path>` for the
+        /// current project root, the fix for a `VcsError::DubiousOwnership`
+        /// failure (code 710) — offered by the "Trust This Folder" button
+        /// on that dialog. Re-runs `openProject` on success.
+        #[qinvokable]
+        #[cxx_name = "trustDirectory"]
+        fn trust_directory(self: Pin<&mut VcsService>) -> FfiResult;
+
+        /// `git init` in the current project root, then re-runs
+        /// `openProject` so discovery finds the repository just created.
+        /// What the Changes dock's "Initialize Git Repository" button
+        /// calls.
+        #[qinvokable]
+        #[cxx_name = "initRepository"]
+        fn init_repository(self: Pin<&mut VcsService>) -> FfiResult;
+
+        /// Whether this machine already declined to initialize a Git
+        /// repository for the current project root — drives which of the
+        /// two Changes-dock empty-state wordings is shown.
+        #[qinvokable]
+        #[cxx_name = "declinedGitInit"]
+        fn declined_git_init(self: &VcsService) -> bool;
+
+        /// Record this machine's answer to the "Initialize Git Repository" /
+        /// "Not now" choice for the current project root.
+        #[qinvokable]
+        #[cxx_name = "setDeclinedGitInit"]
+        fn set_declined_git_init(self: &VcsService, declined: bool);
+
         /// Re-read `HEAD`/index/worktree status on the worker thread;
         /// answers via `statusChanged`.
         #[qinvokable]

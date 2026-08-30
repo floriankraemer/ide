@@ -56,6 +56,12 @@ pub struct VcsServiceRust {
     hunks: RefCell<HashMap<String, CachedHunks>>,
     branches: RefCell<Vec<String>>,
     current_branch: RefCell<String>,
+    /// The project root `openProject` was last called with. Kept so
+    /// `trustDirectory`/`initRepository` — both of which have to happen
+    /// before a worker exists, since discovery either failed or found no
+    /// repository yet — can re-run `openProject` on success without the
+    /// view having to remember and re-pass the path it already gave once.
+    project_root: RefCell<String>,
 }
 
 impl Default for VcsServiceRust {
@@ -64,6 +70,7 @@ impl Default for VcsServiceRust {
             jobs: RefCell::default(),
             is_repository: Cell::new(false),
             status: RefCell::default(),
+            project_root: RefCell::default(),
             hunks: RefCell::default(),
             branches: RefCell::default(),
             current_branch: RefCell::default(),
@@ -103,6 +110,7 @@ impl ffi::VcsService {
         self.current_branch.borrow_mut().clear();
         *self.status.borrow_mut() = vcs_core::RepoStatus::default();
         self.is_repository.set(false);
+        *self.project_root.borrow_mut() = root.clone();
 
         if root.is_empty() {
             self.as_mut().repository_changed();
@@ -285,6 +293,73 @@ impl ffi::VcsService {
             end_character: 0,
             new_text: QString::from(edit.new_text.as_str()),
         }]
+    }
+
+    /// `git config --global --add safe.directory <path>` for the current
+    /// project root — the fix for a `VcsError::DubiousOwnership` failure.
+    /// Takes no path from the caller: the root is already known from
+    /// `openProject`, so the view need not carry it around (or parse it back
+    /// out of an error message) just to hand it back here. Run
+    /// synchronously rather than on the worker: there is no worker yet
+    /// (discovery failed before one could start), and a local `--global`
+    /// config write is no heavier than the plain filesystem calls
+    /// `ProjectTreeModel::open_folder` already makes on this same thread.
+    /// On success, re-runs `openProject` so discovery — which failed the
+    /// first time for exactly this reason — runs again.
+    pub fn trust_directory(mut self: Pin<&mut Self>) -> ffi::FfiResult {
+        let root = self.project_root.borrow().clone();
+        match vcs_core::cli::run(
+            Path::new(&root),
+            &["config", "--global", "--add", "safe.directory", &root],
+        ) {
+            Ok(_) => {
+                self.as_mut().open_project(&QString::from(root.as_str()));
+                ffi::FfiResult::default()
+            }
+            Err(err) => to_ffi_result(&err),
+        }
+    }
+
+    /// `git init` in the current project root, then re-run `openProject` so
+    /// discovery finds the repository that now exists and `isRepository()`/
+    /// `repositoryChanged` update. Takes no path from the caller, for the
+    /// same reason `trustDirectory` doesn't: the root is already known.
+    pub fn init_repository(mut self: Pin<&mut Self>) -> ffi::FfiResult {
+        let root = self.project_root.borrow().clone();
+        match vcs_core::Repository::init(Path::new(&root)) {
+            Ok(_) => {
+                self.as_mut().open_project(&QString::from(root.as_str()));
+                ffi::FfiResult::default()
+            }
+            Err(err) => to_ffi_result(&err),
+        }
+    }
+
+    /// Whether this machine already said "not now" to initializing a Git
+    /// repository for the current project root. `false` both when nothing
+    /// was ever recorded and when the local-state file can't be read — a
+    /// stale or corrupt preference file is not worth surfacing to the user
+    /// through what is only a placeholder label's wording.
+    pub fn declined_git_init(&self) -> bool {
+        let root = self.project_root.borrow();
+        if root.is_empty() {
+            return false;
+        }
+        app_config::vcs_local_settings::load(Path::new(root.as_str()))
+            .map(|settings| settings.declined_git_init.unwrap_or(false))
+            .unwrap_or(false)
+    }
+
+    /// Record this machine's answer to the "Initialize Git Repository" /
+    /// "Not now" choice for the current project root.
+    pub fn set_declined_git_init(&self, declined: bool) {
+        let root = self.project_root.borrow();
+        if root.is_empty() {
+            return;
+        }
+        let _ = app_config::vcs_local_settings::update(Path::new(root.as_str()), |settings| {
+            settings.declined_git_init = Some(declined);
+        });
     }
 
     /// Queue work for the worker thread. Returns false when there is no

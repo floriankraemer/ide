@@ -15,6 +15,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QPushButton>
 #include <QStatusBar>
 #include <QStringList>
 #include <QToolButton>
@@ -134,8 +135,32 @@ void buildVcsMenu(QMainWindow *window, VcsService *vcsService, AppSettings *appS
     // first surface broad enough that it should stop being silent. Code 705
     // (`VcsError::UnmergedBranch`) is excluded: the branch-delete flow above
     // shows its own actionable dialog for that one.
-    QObject::connect(vcsService, &VcsService::vcsFailed, window, [window](FfiResult error) {
+    QObject::connect(vcsService, &VcsService::vcsFailed, window, [window, vcsService](FfiResult error) {
         if (error.code == 705) {
+            return;
+        }
+        // vcs_core::VcsError::CODE_DUBIOUS_OWNERSHIP (error.rs): git refuses
+        // to touch this project root because its ownership looks dubious to
+        // it (common on WSL `//wsl.localhost/...` paths and networked
+        // drives). The path is already embedded in `error.message`, which
+        // `vcs_core::VcsError::DubiousOwnership`'s `Display` impl formats as
+        // "Git doesn't trust the ownership of <path>" — reused as-is here
+        // rather than re-parsing the path back out of it.
+        if (error.code == 710) {
+            QMessageBox box(window);
+            box.setWindowTitle(QObject::tr("Git"));
+            box.setIcon(QMessageBox::Warning);
+            box.setText(error.message);
+            box.setInformativeText(
+              QObject::tr("This can happen on WSL or networked drives. Mark it as safe to continue."));
+            QPushButton *trustButton =
+              box.addButton(QObject::tr("Trust This Folder"), QMessageBox::AcceptRole);
+            box.addButton(QMessageBox::Cancel);
+            box.setDefaultButton(QMessageBox::Cancel);
+            box.exec();
+            if (box.clickedButton() == trustButton) {
+                vcsService->trustDirectory();
+            }
             return;
         }
         QMessageBox::warning(window, QObject::tr("Git"), error.message);
