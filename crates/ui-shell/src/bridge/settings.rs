@@ -1347,18 +1347,13 @@ fn commit_to_project(
     edit: impl FnOnce(&mut app_config::project_settings::ProjectSettings),
 ) -> FfiResult {
     let Some(root) = crate::bridge::convert::current_project_root() else {
-        return FfiResult {
-            code: 1,
-            message: QString::from(
-                "Open a project before editing its settings — project settings live in the project.",
-            ),
-        };
+        return errors::failure(
+            errors::CODE_NO_PROJECT,
+            "Open a project before editing its settings — project settings live in the project.",
+        );
     };
     match app_config::project_settings::update(&root, edit) {
         Ok(()) => FfiResult::default(),
-        Err(error) => FfiResult {
-            code: 1,
-            message: QString::from(error.to_string().as_str()),
-        },
+        Err(error) => errors::failure(errors::CODE_SETTINGS_IO, error.to_string()),
     }
 }
