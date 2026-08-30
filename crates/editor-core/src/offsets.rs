@@ -134,6 +134,29 @@ pub fn line_range(text: &str, starts: &[usize], line: usize) -> std::ops::Range<
     start..end
 }
 
+/// UTF-16 offset of the start of every line: the code-unit twin of
+/// [`line_starts`], for callers whose offsets already count UTF-16 units
+/// rather than bytes — which every [`crate::search`] match does.
+pub fn utf16_line_starts(text: &str) -> Vec<usize> {
+    let mut starts = Vec::with_capacity(16);
+    starts.push(0);
+    let mut units = 0usize;
+    for ch in text.chars() {
+        units += ch.len_utf16();
+        if ch == '\n' {
+            starts.push(units);
+        }
+    }
+    starts
+}
+
+/// A flat UTF-16 document offset as the protocol's (0-based line, UTF-16
+/// character), given `starts` from [`utf16_line_starts`] for the same text.
+pub fn utf16_position_at(starts: &[usize], offset: usize) -> (u32, u32) {
+    let line = line_of(starts, offset);
+    (line as u32, (offset - starts[line]) as u32)
+}
+
 /// Snaps `byte` down to the nearest char boundary, clamping to `text.len()`.
 pub fn clamp_to_boundary(text: &str, byte: usize) -> usize {
     if byte >= text.len() {
@@ -151,6 +174,23 @@ mod tests {
     use super::*;
 
     const MIXED: &str = "aé中🙂b";
+
+    #[test]
+    fn utf16_line_starts_counts_code_units_not_bytes() {
+        // "é" and "中" are one UTF-16 unit each, "🙂" is two.
+        assert_eq!(utf16_line_starts("aé\n中🙂\nb"), vec![0, 3, 7]);
+    }
+
+    #[test]
+    fn utf16_position_at_splits_a_flat_offset_into_line_and_character() {
+        let text = "ab\n🙂cd";
+        let starts = utf16_line_starts(text);
+        assert_eq!(utf16_position_at(&starts, 0), (0, 0));
+        assert_eq!(utf16_position_at(&starts, 2), (0, 2));
+        assert_eq!(utf16_position_at(&starts, 3), (1, 0));
+        // Past the surrogate pair: two code units in, on the second line.
+        assert_eq!(utf16_position_at(&starts, 5), (1, 2));
+    }
 
     #[test]
     fn ascii_offsets_are_unchanged() {

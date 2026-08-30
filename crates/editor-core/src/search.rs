@@ -126,6 +126,36 @@ pub fn replacements(
     Ok(out)
 }
 
+/// The replacements one Replace or Replace All gesture splices, in the
+/// order the view must apply them: **descending**.
+///
+/// Descending is load-bearing. The view re-resolves every span against the
+/// document as it splices, so an ascending list would have each replacement
+/// after the first land at an offset its predecessor already moved.
+///
+/// `only` names a single match by its position in document order — the
+/// Replace-this-one gesture, whose index is the one the match counter
+/// shows; `None` takes every match. An index past the end selects nothing,
+/// which is what a stale counter should produce rather than a panic.
+pub fn replacement_edits(
+    hay: &str,
+    pattern: &str,
+    replacement: &str,
+    opts: SearchOptions,
+    only: Option<usize>,
+) -> Result<Vec<Replacement>, SearchError> {
+    let mut items = replacements(hay, pattern, replacement, opts)?;
+    if let Some(index) = only {
+        items = if index < items.len() {
+            vec![items.remove(index)]
+        } else {
+            Vec::new()
+        };
+    }
+    items.reverse();
+    Ok(items)
+}
+
 /// Rewrites `$1` into `${1}` so a numbered group reference followed by
 /// word characters expands the way every other editor's replace box does.
 /// `regex`'s own `expand` would otherwise read `$1_new` as a reference to a
@@ -183,6 +213,38 @@ mod tests {
             regex,
             case_sensitive,
         }
+    }
+
+    #[test]
+    fn replacement_edits_come_back_descending() {
+        let edits = replacement_edits("a a a", "a", "bb", opts(false, true), None).unwrap();
+        let starts: Vec<usize> = edits.iter().map(|r| r.start).collect();
+        assert_eq!(starts, vec![4, 2, 0]);
+    }
+
+    #[test]
+    fn replacement_edits_can_select_one_match_by_document_order() {
+        let edits = replacement_edits("a a a", "a", "bb", opts(false, true), Some(1)).unwrap();
+        assert_eq!(
+            edits,
+            vec![Replacement {
+                start: 2,
+                end: 3,
+                text: "bb".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn replacement_edits_select_nothing_past_the_last_match() {
+        let edits = replacement_edits("a a", "a", "b", opts(false, true), Some(7)).unwrap();
+        assert!(edits.is_empty());
+    }
+
+    #[test]
+    fn replacement_edits_of_a_pattern_that_matches_nothing_are_empty() {
+        let edits = replacement_edits("abc", "zzz", "b", opts(false, true), None).unwrap();
+        assert!(edits.is_empty());
     }
 
     #[test]

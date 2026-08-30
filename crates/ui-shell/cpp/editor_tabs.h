@@ -164,7 +164,9 @@ public:
 
     // F1-15: the same splice into one known editor, for the edits that are
     // about the buffer the user is typing in and therefore name no file.
-    void applyEditsTo(QPlainTextEdit *editor, const ::rust::Vec<FfiTextEdit> &edits);
+    // Static because it touches nothing but the editor it is handed —
+    // `FindBar` splices its replacements through it too (F0-18).
+    static void applyEditsTo(QPlainTextEdit *editor, const ::rust::Vec<FfiTextEdit> &edits);
 
     // RF12: where the pointer last dwelled, so the index leg of hover can
     // be started from outside this class when the server declines.

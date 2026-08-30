@@ -1,6 +1,7 @@
 #include "find_bar.h"
 
 #include "code_editor.h"
+#include "editor_tabs.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include <QCheckBox>
@@ -220,53 +221,34 @@ void FindBar::selectMatch(int index)
     editor_->setMatchSelections(matches_, index);
 }
 
+void FindBar::splice(int index)
+{
+    const rust::Vec<FfiTextEdit> edits = documents_->replacementEdits(editor_->toPlainText(),
+                                                                     queryEdit_->text(),
+                                                                     replaceEdit_->text(),
+                                                                     regexCheck_->isChecked(),
+                                                                     caseCheck_->isChecked(),
+                                                                     index);
+    if (edits.empty()) {
+        return;
+    }
+    applying_ = true;
+    EditorTabs::applyEditsTo(editor_, edits);
+    applying_ = false;
+    refresh();
+}
+
 void FindBar::replaceCurrent()
 {
     if (matches_.isEmpty() || current_ < 0) {
         return;
     }
-    const rust::Vec<FfiReplacement> items = documents_->replacementsFor(editor_->toPlainText(),
-                                                                       queryEdit_->text(),
-                                                                       replaceEdit_->text(),
-                                                                       regexCheck_->isChecked(),
-                                                                       caseCheck_->isChecked());
-    if (current_ >= static_cast<int>(items.size())) {
-        return;
-    }
-    const FfiReplacement &item = items[static_cast<size_t>(current_)];
-    QTextCursor cursor = editor_->textCursor();
-    cursor.setPosition(static_cast<int>(item.start));
-    cursor.setPosition(static_cast<int>(item.end), QTextCursor::KeepAnchor);
-    applying_ = true;
-    cursor.insertText(item.text);
-    applying_ = false;
-    refresh();
+    splice(current_);
 }
 
 void FindBar::replaceAll()
 {
-    const rust::Vec<FfiReplacement> items = documents_->replacementsFor(editor_->toPlainText(),
-                                                                       queryEdit_->text(),
-                                                                       replaceEdit_->text(),
-                                                                       regexCheck_->isChecked(),
-                                                                       caseCheck_->isChecked());
-    if (items.empty()) {
-        return;
-    }
-    QTextCursor cursor = editor_->textCursor();
-    applying_ = true;
-    // One edit block = one Ctrl+Z for the whole operation; back to front so
-    // each span keeps the offset it was reported with.
-    cursor.beginEditBlock();
-    for (size_t i = items.size(); i > 0; --i) {
-        const FfiReplacement &item = items[i - 1];
-        cursor.setPosition(static_cast<int>(item.start));
-        cursor.setPosition(static_cast<int>(item.end), QTextCursor::KeepAnchor);
-        cursor.insertText(item.text);
-    }
-    cursor.endEditBlock();
-    applying_ = false;
-    refresh();
+    splice(-1);
 }
 
 void FindBar::setPatternValid(bool valid, const QString &message)

@@ -167,15 +167,6 @@ mod ffi {
         end: u32,
     }
 
-    /// One find match plus the text that replaces it. `text` is already
-    /// capture-expanded (`$1`) by `editor_core::search` — the view only
-    /// splices it in, it never composes replacement text itself.
-    struct FfiReplacement {
-        start: u32,
-        end: u32,
-        text: QString,
-    }
-
     /// One project-wide replace target, addressed exactly like the
     /// `searchMatchFound` payload it came from: 1-based `line`, byte offsets
     /// within that line.
@@ -1124,20 +1115,28 @@ mod ffi {
             case_sensitive: bool,
         ) -> Vec<FfiTextMatch>;
 
-        /// The same matches as `findMatches`, each carrying the text that
-        /// replaces it. The view applies the spans it wants (one, or all
-        /// in reverse order inside a single edit block) — deciding *what*
-        /// the replacement text is stays here.
+        /// The splice list for one Replace or Replace All gesture:
+        /// `findMatches`' matches, each carrying its already
+        /// capture-expanded (`$1`) replacement text, **descending** so the
+        /// view can hand the whole thing to `EditorTabs::applyEditsTo`
+        /// unmodified.
+        ///
+        /// A non-negative `index` selects the single match at that position
+        /// in document order — Replace-this-one, whose index is the one the
+        /// match counter shows. A negative `index` takes every match.
+        /// Which spans those are, what replaces them, and what order they
+        /// apply in are all `editor_core::search`'s call.
         #[qinvokable]
-        #[cxx_name = "replacementsFor"]
-        fn replacements_for(
+        #[cxx_name = "replacementEdits"]
+        fn replacement_edits(
             self: Pin<&mut DocumentManager>,
             text: &QString,
             pattern: &QString,
             replacement: &QString,
             is_regex: bool,
             case_sensitive: bool,
-        ) -> Vec<FfiReplacement>;
+            index: i32,
+        ) -> Vec<FfiTextEdit>;
 
         /// Open `path` as a new tab, or focus its existing tab if already
         /// open (US-3: focus-not-duplicate). The session enforces the
@@ -2512,7 +2511,7 @@ mod ffi {
         /// text.** `editor_core::Document`'s rope is refreshed only on
         /// save, so it is one save behind what the user sees; the live text
         /// is the widget's, and it is passed in. This is the same stateless
-        /// shape `findMatches` and `replacementsFor` already have.
+        /// shape `findMatches` and `replacementEdits` already have.
         ///
         /// Positions in and out are flat document UTF-16 offsets; edits come
         /// back as `FfiTextEdit`s in the protocol's line/character units so
