@@ -44,9 +44,9 @@ Task ids are stable; titles may change. `blocked on X` means the task cannot sta
 | F0-10 — per-project settings rules + dialog | todo |  |
 | F0-11 — E2E harness | done | 1eb5009 (#76) |
 | F0-12 — E2E seed flows | done | 1eb5009 (#76) |
-| F0-13 — E2E in CI | todo |  |
+| F0-13 — E2E in CI | done | 557edb8 (#135) |
 | F0-14 — `lsp-conformance` image stage | done | 2f1d4ec (#77) |
-| F0-15 — LSP conformance harness + expectations | done | 2f1d4ec (#77) |
+| F0-15 — LSP conformance harness + expectations | done | harness 2f1d4ec (#77), nightly CI job 557edb8 (#135) |
 | F0-16 — conformance fixes | todo | one row per defect once F0-15 lands |
 | F0-17 — docs: this plan, ADRs, layering, overview | done | 5675b3f (#80) |
 | F0-18 — route every buffer edit through `applyBufferEdits` | todo |  |
@@ -456,7 +456,7 @@ Every task is a single commit that keeps `cargo test --workspace` green and is r
 | F0-12 | E2E seed flows (4): open→edit→save; Search Everywhere→jump; rename with preview; split-editor persistence across restart | F0-11 |
 | F0-13 | E2E in CI, uploading `target/e2e-artifacts/**` on failure | F0-12 |
 | F0-14 | `linux-lsp` image stage with **rust-analyzer only**, version-pinned; `make lsp-conformance`. rust-analyzer alone finds the position-encoding class (§8's own "highest-value assertion") and the `codeAction` shape F2 depends on; pyright and clangd are added in F2, when their divergence is what is actually being tested | — |
-| F0-15 | LSP conformance harness + expectations TOML + `docs/architecture/lsp-conformance.md`; manual/nightly CI job | F0-14 |
+| F0-15 | LSP conformance harness + expectations TOML + `docs/architecture/lsp-conformance.md`; nightly CI job | F0-14 |
 | F0-16 | Conformance fixes — one commit per defect. **Unbounded by nature**: F0-15 produces the list, and each entry becomes its own Progress row rather than hiding behind this one | F0-15 |
 | F0-17 | Docs: ADR-0022/0024/0025, this plan, `layering.md`, `overview.md`, `docs/README.md`; stale `lib.rs` doc comments and `settings-model`'s wrong ADR citation fixed in the same pass | all F0 |
 
@@ -815,21 +815,33 @@ Runs **nightly on `main` plus `workflow_dispatch`**, not per-PR (a 4–6 minute 
 
 ### CI
 
-Reorder so the cheapest failure comes first. **The layering gate currently runs last** (`.github/workflows/ci.yml:78`) despite being `cargo tree | grep` with no compilation — a free win available today, before any of F0–F4. Also: `layering.md` lists 14 `cargo tree` checks and CI runs 3; bring CI to parity.
+Two workflows, both running inside the same `docker/Dockerfile` stages developers use locally, so CI cannot drift from the dev environment.
+`.github/workflows/builder-image.yml` is a reusable `workflow_call` that builds and pushes one stage to GHCR, tagged by `hashFiles('docker/Dockerfile')` with a `type=gha` layer cache; both workflows call it rather than duplicating the build.
+
+`ci.yml` runs per push to `main` and per pull request, cheapest-failure-first:
 
 | # | Gate | Budget |
 |---|---|---|
 | 1 | `cargo fmt --all --check` | 10s |
-| 2 | Layering gate, all 14 crates | 20s |
-| 3 | Harness hygiene: no `sleep` outside `harness.rs`; no undocumented `#[ignore]`; the `ui-shell` size ratchet | 5s |
+| 2 | Layering gate, all 14 crates (Qt) plus 4 (tokio) — at parity with `layering.md` | 20s |
+| 3 | `scripts/check-file-size.sh` | 5s |
 | 4 | `cargo clippy --workspace --all-targets -- -D warnings` | 4–6 min |
 | 5 | `xvfb-run -a cargo test --workspace` | 5–7 min |
-| 6 | `make e2e` | ≤ 10 min |
-| 7 | `verify-split` + FFI snapshot (conditional on the diff touching the seam files) | 30s |
 
-Steps 1–3 belong in a separate `quick` job that step 4's job `needs:`, so a formatting failure does not cost a container pull. E2E gets `timeout-minutes: 15` and **never `continue-on-error: true`** — a non-blocking gate is a gate nobody fixes.
+`nightly.yml` runs on a 03:00 UTC cron and on `workflow_dispatch`, with two independent jobs:
 
-Nightly: `lsp-conformance`; the index benches with a checked-in baseline, failing only on a >3× regression (they are currently `#[ignore]`d and "manual", i.e. never run); E2E in release mode (a different timing profile catches races that only appear when things are fast); the Windows cross-build; `cargo audit`.
+| Job | Image stage | Command | Timeout |
+|---|---|---|---|
+| `e2e` | `linux-builder` | `make e2e-ci` | 30 min |
+| `lsp-conformance` | `lsp-conformance` | `make lsp-conformance-ci` | 20 min |
+
+Both are blocking within their workflow — **never `continue-on-error: true`**, because a non-blocking gate is a gate nobody fixes.
+On failure the `e2e` job uploads `target/e2e-artifacts/**` (`actions/upload-artifact@v4`, `if: failure()`): the per-test `events.jsonl` plus the stdout, stderr and screenshot the harness dumps on panic, which is the only evidence of a failure nobody can reproduce locally.
+
+The `*-ci` make targets are the inner half of `make e2e` and `make lsp-conformance`: the outer targets are just the `docker run` wrapper, so the command line exists in exactly one place and CI runs literally what a developer runs.
+E2E stays nightly rather than per-PR by decision — it drives a real Qt binary under Xvfb and the pull-request gate is already 10+ minutes.
+
+Still nightly-shaped and not yet wired: the index benches with a checked-in baseline failing only on a >3× regression, E2E in release mode (a different timing profile catches races that only appear when things are fast), the Windows cross-build, and `cargo audit`.
 
 ### What is deliberately not tested
 

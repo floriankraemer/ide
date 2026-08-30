@@ -12,8 +12,8 @@ DOCKER_MOUNTS = -v "$(CURDIR)":/workspace -w /workspace \
 	-v ide-sccache:/sccache
 RUN_LINUX = $(DOCKER) run --rm $(DOCKER_MOUNTS) $(LINUX_IMAGE)
 
-.PHONY: help all test lint e2e e2e-repeat build build-linux build-windows linux-image shell clean \
-	lsp-image lsp-conformance
+.PHONY: help all test lint e2e e2e-ci e2e-repeat build build-linux build-windows linux-image shell clean \
+	lsp-image lsp-conformance lsp-conformance-ci
 
 .DEFAULT_GOAL := help
 
@@ -37,8 +37,14 @@ lsp-image: ## Build the lsp-conformance image (linux-builder + rust-analyzer)
 	$(DOCKER) build --target lsp-conformance -t $(LSP_IMAGE) -f $(DOCKERFILE) .
 
 lsp-conformance: lsp-image ## Check the LSP client against a real rust-analyzer
-	$(DOCKER) run --rm $(DOCKER_MOUNTS) $(LSP_IMAGE) \
-		cargo test -p lsp-core --test real_server_conformance -- --ignored --nocapture
+	$(DOCKER) run --rm -e CONFORMANCE_BLESS $(DOCKER_MOUNTS) $(LSP_IMAGE) \
+		$(MAKE) lsp-conformance-ci
+
+# Inner target: the command line itself, with no Docker wrapper, so CI (which
+# is already inside the lsp-conformance image) and `make lsp-conformance` run
+# exactly the same thing.
+lsp-conformance-ci: ## Inner half of `lsp-conformance` — run inside the image
+	cargo test -p lsp-core --test real_server_conformance -- --ignored --nocapture
 
 lint: linux-image ## Run clippy + rustfmt + file-size checks in Docker
 	$(RUN_LINUX) cargo clippy --workspace --all-targets -- -D warnings
@@ -52,8 +58,15 @@ lint: linux-image ## Run clippy + rustfmt + file-size checks in Docker
 E2E_XVFB = xvfb-run -a --server-args="-screen 0 1600x1200x24"
 
 e2e: linux-image ## Run the E2E flows under Xvfb (ignored by `make test`)
-	$(RUN_LINUX) sh -c 'cargo build -p app && cargo build --bin stub_server -p lsp-core && \
-		$(E2E_XVFB) cargo test -p app --test e2e -- --ignored --test-threads=1 --nocapture'
+	$(RUN_LINUX) $(MAKE) e2e-ci
+
+# Inner target: the command line itself, with no Docker wrapper, so CI (which
+# is already inside the linux-builder image) and `make e2e` run exactly the
+# same thing.
+e2e-ci: ## Inner half of `e2e` — run inside the builder image
+	cargo build -p app
+	cargo build --bin stub_server -p lsp-core
+	$(E2E_XVFB) cargo test -p app --test e2e -- --ignored --test-threads=1 --nocapture
 
 # Burn-in: `make e2e-repeat TEST=e2e_open_project_edit_save N=20`. A flake is
 # a P1 bug in the product or the harness, so this exists to find one before
