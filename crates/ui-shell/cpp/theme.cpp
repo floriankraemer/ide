@@ -55,11 +55,11 @@ QString tabStyleSheet(const TabColors &colors)
     // Two of them exist to fix what the default style does:
     //   * Qt reserves a whole close-indicator width between the label and the
     //     [x] and leaves nothing between the [x] and the tab's edge. Here the
-    //     close button carries its own 2px gap to the label and the tab's
-    //     right padding is what separates it from the edge. That rule stays
-    //     margins-only on purpose: give the subcontrol a size, a background
-    //     or a border and QStyleSheetStyle stops asking the platform style
-    //     for the [x] glyph and draws an empty box instead.
+    //     close button's margins claw back most of that reserved gap on the
+    //     left (-3px) and push it off the tab's edge on the right (5px).
+    //     That rule stays margins-only on purpose: give the subcontrol a size,
+    //     a background or a border and QStyleSheetStyle stops asking the
+    //     platform style for the [x] glyph and draws an empty box instead.
     //   * the top marker is reserved on every tab, selected or not, so
     //     selecting one shifts no label by a pixel.
     const QString paneBorder = colors.paneBorder.isValid()
@@ -98,7 +98,7 @@ QTabBar::tab:hover:!selected {
 
 QTabBar::close-button {
     subcontrol-position: right;
-    margin-left: 2px;
+    margin: 0px 5px 0px -3px;
 }
 )")
         .arg(colors.pane.name(), paneBorder, colors.bar.name(), colors.tab.name(),
