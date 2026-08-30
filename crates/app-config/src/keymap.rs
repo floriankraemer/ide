@@ -52,6 +52,15 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "Ctrl+,",
     },
     ActionDef {
+        id: "file.projectSettings",
+        label: "Project Settings...",
+        category: "File",
+        // No default: `Ctrl+,` belongs to the settings dialog itself, and a
+        // second shortcut for the same dialog opened on a different tab is
+        // not worth one of the remaining free combinations (ADR-0022).
+        default_shortcut: "",
+    },
+    ActionDef {
         id: "file.exit",
         label: "Exit",
         category: "File",

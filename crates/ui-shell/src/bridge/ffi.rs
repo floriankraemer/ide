@@ -1769,6 +1769,58 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "reloadLanguages"]
         fn reload_languages(self: &AppSettings) -> QStringList;
+
+        /// Which settings layer the dialog is editing: `"global"` or
+        /// `"project"` (F0-10, ADR-0022).
+        #[qinvokable]
+        #[cxx_name = "settingsScope"]
+        fn settings_scope(self: &AppSettings) -> QString;
+
+        /// Switch the layer the dialog edits, emitting `settingsScopeChanged`
+        /// so every open page reloads its draft from the new layer. An
+        /// unrecognised name selects the global layer, which is the answer
+        /// that cannot write into a file the whole project shares.
+        #[qinvokable]
+        #[cxx_name = "setSettingsScope"]
+        fn set_settings_scope(self: Pin<&mut AppSettings>, scope: &QString);
+
+        /// Whether the open project overrides anything at all — what the
+        /// scope selector needs to say so, rather than showing an empty
+        /// Project tab that looks broken.
+        #[qinvokable]
+        #[cxx_name = "hasProjectSettings"]
+        fn has_project_settings(self: &AppSettings) -> bool;
+
+        /// Whether a project is open at all. Distinct from
+        /// `hasProjectSettings`: a freshly opened project has no `.ide`
+        /// file yet and can still be given one, while with no project open
+        /// there is nowhere for project settings to live and the scope
+        /// selector says so instead of offering a choice that cannot be
+        /// saved.
+        #[qinvokable]
+        #[cxx_name = "isProjectOpen"]
+        fn is_project_open(self: &AppSettings) -> bool;
+
+        /// Where one scoped field's effective value comes from, as the word
+        /// the badge shows: "from project", "from global" or "default".
+        /// `field_id` is a `settings_model::ScopedField` id — `"editing"`,
+        /// `"languageServers"`, `"runConfigs"`, `"indexExcludes"`.
+        ///
+        /// The view displays this and never re-derives it (ADR-0022): a
+        /// badge computed apart from the value it labels eventually lies.
+        #[qinvokable]
+        #[cxx_name = "fieldOrigin"]
+        fn field_origin(self: &AppSettings, field_id: &QString) -> QString;
+    }
+
+    unsafe extern "RustQt" {
+        /// The scope selector changed which layer is being edited. Every
+        /// open settings page reloads its draft from the layer now selected;
+        /// a page that ignored this would show one layer's values and save
+        /// them into the other.
+        #[qsignal]
+        #[cxx_name = "settingsScopeChanged"]
+        fn settings_scope_changed(self: Pin<&mut AppSettings>);
     }
 
     extern "RustQt" {
@@ -3666,7 +3718,7 @@ mod ffi {
         /// Re-read the settings and build one row per language.
         #[qinvokable]
         #[cxx_name = "beginEdit"]
-        fn begin_edit(self: &LanguageServerEditor);
+        fn begin_edit(self: &LanguageServerEditor, scope: &QString);
 
         /// Every row, sorted by language name and stable while the page is
         /// open, so a live status change never moves one.
@@ -3748,7 +3800,7 @@ mod ffi {
         /// Re-read the settings and start a fresh draft from them.
         #[qinvokable]
         #[cxx_name = "beginEdit"]
-        fn begin_edit(self: &EditingEditor);
+        fn begin_edit(self: &EditingEditor, scope: &QString);
 
         /// The global section, as the page's top row.
         #[qinvokable]

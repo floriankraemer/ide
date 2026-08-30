@@ -32,7 +32,7 @@
 //! `move` into the worker thread's closure below, not asserted separately.
 
 use std::cell::RefCell;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::mpsc::Sender;
 
@@ -229,10 +229,7 @@ pub struct RunServiceRust {
 /// call that needs it — the same handle `ProjectTreeModel`/`DocumentManager`
 /// already share (`crate::bridge::registry`).
 fn current_project_root() -> Option<PathBuf> {
-    crate::bridge::registry::shared_session()
-        .borrow()
-        .root_path()
-        .map(Path::to_path_buf)
+    crate::bridge::convert::current_project_root()
 }
 
 /// `err`, as the typed code + message that crosses the FFI seam (ADR-0003).

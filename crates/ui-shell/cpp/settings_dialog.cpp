@@ -14,13 +14,16 @@
 #include "syntax_colors_page.h"
 #include "terminal_sessions_panel.h"
 
+#include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QFont>
 #include <QHBoxLayout>
+#include <QLabel>
 #include <QListWidget>
 #include <QObject>
 #include <QStackedWidget>
+#include <QStandardItemModel>
 #include <QString>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -46,8 +49,12 @@ void showSettingsDialog(QWidget *parent, const SettingsContext &context)
     auto *categoryList = new QListWidget(&dialog);
     categoryList->addItem(QObject::tr("Appearance"));
     categoryList->addItem(QObject::tr("Editor"));
-    categoryList->addItem(QObject::tr("Syntax Colors"));
+    // Editing before Syntax Colors, matching the order the widgets are
+    // added to the stack below. They disagreed until F0-10: the list said
+    // Syntax Colors fourth and the stack put Editing there, so picking one
+    // showed the other.
     categoryList->addItem(QObject::tr("Editing"));
+    categoryList->addItem(QObject::tr("Syntax Colors"));
     categoryList->addItem(QObject::tr("Keymap"));
     categoryList->addItem(QObject::tr("Languages"));
     categoryList->addItem(QObject::tr("Language Servers"));
@@ -62,6 +69,27 @@ void showSettingsDialog(QWidget *parent, const SettingsContext &context)
       categoryList->fontMetrics().horizontalAdvance(QObject::tr("Language Servers")) + 40);
 
     auto *pages = new QStackedWidget(&dialog);
+
+    // A page whose settings a project may override carries a badge saying
+    // which layer the values it shows came from. The badge is per *area*,
+    // not per field, because that is the granularity a project overrides at
+    // (`settings_model::scope::ScopedField`) — a per-widget badge would be
+    // claiming a precision the file format does not have.
+    //
+    // Wrapped here rather than inside each `buildXPage` so the pages stay
+    // ignorant of scope: they edit whatever draft they were handed, and the
+    // dialog is what knows there are two layers.
+    auto scopedPage = [&dialog, appSettings](const QString &fieldId, QWidget *page) {
+        auto *wrapper = new QWidget(&dialog);
+        auto *layout = new QVBoxLayout(wrapper);
+        layout->setContentsMargins(0, 0, 0, 0);
+        auto *badge = new QLabel(
+          QObject::tr("Showing: %1").arg(appSettings->fieldOrigin(fieldId)), wrapper);
+        badge->setEnabled(false);
+        layout->addWidget(badge);
+        layout->addWidget(page, 1);
+        return wrapper;
+    };
 
     // Every cached icon behind the tree, dropped: called by the Appearance
     // page when either theme changes, and by the Plugins page when a plugin
@@ -91,8 +119,9 @@ void showSettingsDialog(QWidget *parent, const SettingsContext &context)
     // Editing commits on OK, like Keymap and Language Servers: the tab
     // width a user is halfway through typing is not a setting worth
     // applying keystroke by keystroke.
-    context.editingEditor->beginEdit();
-    pages->addWidget(buildEditingPage(&dialog, context.editingEditor));
+    context.editingEditor->beginEdit(appSettings->settingsScope());
+    const int editingIndex = pages->addWidget(
+      scopedPage(QStringLiteral("editing"), buildEditingPage(&dialog, context.editingEditor)));
 
     // Syntax Colors follows Appearance rather than Keymap: it applies live,
     // so the user sees the colour in the open editor while picking it, and
@@ -123,9 +152,10 @@ void showSettingsDialog(QWidget *parent, const SettingsContext &context)
     // Language Servers commits on OK, like Keymap and MCP: starting and
     // stopping a server on every keystroke in a command field is not a
     // preview.
-    context.languageServerEditor->beginEdit();
-    pages->addWidget(
-      buildLanguageServersPage(&dialog, context.languageServerEditor, context.languageService));
+    context.languageServerEditor->beginEdit(appSettings->settingsScope());
+    const int languageServersIndex = pages->addWidget(scopedPage(
+      QStringLiteral("languageServers"),
+      buildLanguageServersPage(&dialog, context.languageServerEditor, context.languageService)));
 
     // AI Providers sits next to Language Servers — both configure an
     // external process the IDE talks to — and commits on OK for the same
@@ -168,7 +198,77 @@ void showSettingsDialog(QWidget *parent, const SettingsContext &context)
     bodyLayout->addWidget(categoryList);
     bodyLayout->addWidget(pages, 1);
 
+    // The scope selector: which layer the project-scoped pages edit
+    // (ADR-0022). It sits above every page rather than on each one, because
+    // it is one choice about the whole dialog, and a per-page selector would
+    // let two pages disagree about which file is being written.
+    auto *scopeRow = new QHBoxLayout();
+    auto *scopeLabel = new QLabel(QObject::tr("Editing settings for:"), &dialog);
+    auto *scopeBox = new QComboBox(&dialog);
+    scopeBox->addItem(QObject::tr("All projects (global)"), QStringLiteral("global"));
+    scopeBox->addItem(QObject::tr("This project"), QStringLiteral("project"));
+    auto *scopeHint = new QLabel(&dialog);
+    scopeHint->setEnabled(false);
+
+    const bool projectOpen = appSettings->isProjectOpen();
+    if (!projectOpen) {
+        // Not hidden: the choice exists, there is just nowhere to put the
+        // answer yet, and saying so is more useful than a control that
+        // silently is not there.
+        auto *model = qobject_cast<QStandardItemModel *>(scopeBox->model());
+        if (model != nullptr && model->item(1) != nullptr) {
+            model->item(1)->setEnabled(false);
+        }
+        scopeHint->setText(QObject::tr("Open a project to give it settings of its own."));
+    } else if (!appSettings->hasProjectSettings()) {
+        scopeHint->setText(QObject::tr("This project overrides nothing yet."));
+    }
+    scopeBox->setCurrentIndex(appSettings->settingsScope() == QStringLiteral("project") ? 1 : 0);
+    scopeRow->addWidget(scopeLabel);
+    scopeRow->addWidget(scopeBox);
+    scopeRow->addWidget(scopeHint, 1);
+
+    // Switching scope reloads the two pages that have a per-project layer.
+    // Rebuilding them is what keeps the widgets and the draft in step: the
+    // pages read their rows from the Rust draft when they are built, so a
+    // page left standing after `beginEdit` would show one layer's values and
+    // save them into the other.
+    QObject::connect(
+      scopeBox, &QComboBox::currentIndexChanged, &dialog,
+      [&dialog, appSettings, pages, editingIndex, languageServersIndex, scopeHint,
+       scopeBox, scopedPage, editingEditor = context.editingEditor,
+       languageServerEditor = context.languageServerEditor,
+       languageService = context.languageService]() {
+          const QString scope = scopeBox->currentData().toString();
+          appSettings->setSettingsScope(scope);
+          scopeHint->setText(appSettings->hasProjectSettings()
+                               ? QString()
+                               : QObject::tr("This project overrides nothing yet."));
+
+          const int current = pages->currentIndex();
+
+          editingEditor->beginEdit(scope);
+          QWidget *staleEditing = pages->widget(editingIndex);
+          pages->insertWidget(
+            editingIndex,
+            scopedPage(QStringLiteral("editing"), buildEditingPage(&dialog, editingEditor)));
+          pages->removeWidget(staleEditing);
+          staleEditing->deleteLater();
+
+          languageServerEditor->beginEdit(scope);
+          QWidget *staleServers = pages->widget(languageServersIndex);
+          pages->insertWidget(
+            languageServersIndex,
+            scopedPage(QStringLiteral("languageServers"),
+                       buildLanguageServersPage(&dialog, languageServerEditor, languageService)));
+          pages->removeWidget(staleServers);
+          staleServers->deleteLater();
+
+          pages->setCurrentIndex(current);
+      });
+
     auto *mainLayout = new QVBoxLayout(&dialog);
+    mainLayout->addLayout(scopeRow);
     mainLayout->addLayout(bodyLayout);
     mainLayout->addWidget(buttons);
 

@@ -71,6 +71,8 @@ use tantivy::tokenizer::NgramTokenizer;
 // F3-15: kept in its own file rather than grown into this one, which is
 // grandfathered at a ratcheted line-count ceiling (`scripts/check-file-size.sh`)
 // that may only shrink.
+pub mod excludes;
+pub mod lifecycle;
 mod replace_preview;
 pub use replace_preview::FileDiffPreview;
 use tantivy::{doc, Index, IndexReader, IndexWriter, Term};
@@ -674,78 +676,10 @@ fn line_and_col_from(starts: &[usize], offset: usize) -> (usize, usize) {
     (line, offset - starts[line - 1])
 }
 
-/// How far an index build has got.
-///
-/// `total` is the number of files this pass has to read — files whose stamp
-/// already matched are not counted, so a warm open with nothing to do reports
-/// `0/0` once and finishes. `done` never exceeds `total` and the last report
-/// of a pass always has `done == total`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IndexProgress {
-    pub done: usize,
-    pub total: usize,
-}
-
-/// The progress callback for callers that do not want one.
-fn no_progress(_: IndexProgress) {}
-
-/// Where one project's index is in its lifecycle. Opening a project starts
-/// a build that takes seconds to minutes on a real repository, so "there is
-/// no index to query" is four different situations to a user — no project,
-/// still building, ready, or a build that failed — and only one of them is
-/// "no project is open". Keeping them apart is what stops a query fired
-/// right after Open Folder from claiming no folder is open.
-#[derive(Default)]
-pub enum IndexSlot {
-    /// No project has been opened in this session yet.
-    #[default]
-    NoProject,
-    /// A project is open and its index is being built or brought up to date.
-    /// Carries the root being built so a second `open` for the same project
-    /// can be recognised as a duplicate rather than started twice (two
-    /// `IndexWriter`s on one directory is exactly the `LockBusy` failure
-    /// this state exists to prevent).
-    Building(PathBuf),
-    /// Ready to answer queries.
-    Ready(Box<TextIndex>),
-    /// A project is open but its index could not be built.
-    Failed(String),
-}
-
-impl IndexSlot {
-    /// The index, if it can answer a query right now.
-    pub fn ready(&self) -> Option<&TextIndex> {
-        match self {
-            IndexSlot::Ready(index) => Some(index),
-            _ => None,
-        }
-    }
-
-    /// Mutable access for the incremental single-file updates the
-    /// filesystem watcher drives.
-    pub fn ready_mut(&mut self) -> Option<&mut TextIndex> {
-        match self {
-            IndexSlot::Ready(index) => Some(index),
-            _ => None,
-        }
-    }
-
-    /// Why a query cannot run right now, phrased for the user; `None` when
-    /// the index is ready. This is the whole rule the UI layer needs — the
-    /// bridge only forwards the string it gets here.
-    pub fn unavailable_reason(&self) -> Option<String> {
-        match self {
-            IndexSlot::Ready(_) => None,
-            IndexSlot::NoProject => Some("No project is open yet.".to_string()),
-            IndexSlot::Building(_) => {
-                Some("The project index is still being built — try again in a moment.".to_string())
-            }
-            IndexSlot::Failed(message) => {
-                Some(format!("The project index could not be built: {message}"))
-            }
-        }
-    }
-}
+use excludes::exclude_overrides;
+pub use excludes::IndexOptions;
+use lifecycle::no_progress;
+pub use lifecycle::{IndexProgress, IndexSlot};
 
 /// How much this rename knows about one of the sites it found.
 ///
@@ -1138,6 +1072,9 @@ pub struct TextIndex {
     /// filesystem that cannot take an advisory lock, so it cannot be
     /// re-derived from the root without probing for a lock all over again.
     index_dir: PathBuf,
+    /// What this index skips beyond `.gitignore`, kept so the incremental
+    /// pass applies the same rules the build did.
+    options: IndexOptions,
     index: Index,
     writer: IndexWriter,
     reader: IndexReader,
@@ -1152,13 +1089,14 @@ impl TextIndex {
     /// entries excluded unless explicitly un-ignored). Any existing index
     /// directory is replaced.
     pub fn build(project_root: &Path) -> Result<Self, IndexError> {
-        Self::build_with_progress(project_root, &no_progress)
+        Self::build_with_progress(project_root, &IndexOptions::default(), &no_progress)
     }
 
     /// [`build`](Self::build), reporting how far along it is. See
     /// [`IndexProgress`].
     pub fn build_with_progress(
         project_root: &Path,
+        options: &IndexOptions,
         progress: &(dyn Fn(IndexProgress) + Sync),
     ) -> Result<Self, IndexError> {
         let index_dir = index_dir_for(project_root);
@@ -1183,6 +1121,7 @@ impl TextIndex {
         let mut this = Self {
             root: project_root.to_path_buf(),
             index_dir: index_dir.clone(),
+            options: options.clone(),
             index,
             writer,
             reader,
@@ -1202,16 +1141,17 @@ impl TextIndex {
     /// This is what a project open should call: an unchanged repository costs
     /// one directory walk plus a `stat` per file, not a full re-index.
     pub fn open_or_build(project_root: &Path) -> Result<Self, IndexError> {
-        Self::open_or_build_with_progress(project_root, &no_progress)
+        Self::open_or_build_with_progress(project_root, &IndexOptions::default(), &no_progress)
     }
 
     /// [`open_or_build`](Self::open_or_build), reporting how far along it is.
     /// See [`IndexProgress`].
     pub fn open_or_build_with_progress(
         project_root: &Path,
+        options: &IndexOptions,
         progress: &(dyn Fn(IndexProgress) + Sync),
     ) -> Result<Self, IndexError> {
-        match Self::open_existing(project_root) {
+        match Self::open_existing(project_root, options) {
             Ok(mut index) => {
                 let sidecar = read_stamps(&index.index_dir);
                 let stamps = match sidecar {
@@ -1232,11 +1172,11 @@ impl TextIndex {
             // writer that holds the lock and leave two writers disagreeing
             // about `meta.json`.
             Err(err @ IndexError::Locked(_)) => Err(err),
-            Err(_) => Self::build_with_progress(project_root, progress),
+            Err(_) => Self::build_with_progress(project_root, options, progress),
         }
     }
 
-    fn open_existing(project_root: &Path) -> Result<Self, IndexError> {
+    fn open_existing(project_root: &Path, options: &IndexOptions) -> Result<Self, IndexError> {
         let index_dir = index_dir_for(project_root);
         // The (mtime, size) stamps only detect changed *files*. When the
         // extraction itself changes — a locals.scm learns a node kind it
@@ -1267,6 +1207,7 @@ impl TextIndex {
         Ok(Self {
             root: project_root.to_path_buf(),
             index_dir: index_dir.clone(),
+            options: options.clone(),
             index,
             writer,
             reader,
@@ -1331,7 +1272,11 @@ impl TextIndex {
         let mut unchanged: Vec<(PathBuf, String, FileStamp)> = Vec::new();
         let mut stale: Vec<(PathBuf, String, FileStamp)> = Vec::new();
 
-        for entry in ignore::WalkBuilder::new(&self.root).build() {
+        let mut walker = ignore::WalkBuilder::new(&self.root);
+        if let Some(overrides) = exclude_overrides(&self.root, &self.options.excludes) {
+            walker.overrides(overrides);
+        }
+        for entry in walker.build() {
             let Ok(entry) = entry else { continue };
             let path = entry.path();
             if path.starts_with(&index_dir) {
@@ -3001,9 +2946,13 @@ mod tests {
             write(dir.path(), &format!("src/f{i}.rs"), "fn f() {}\n");
         }
         let seen = std::sync::Mutex::new(Vec::new());
-        let index = TextIndex::build_with_progress(dir.path(), &|p: IndexProgress| {
-            seen.lock().unwrap().push((p.done, p.total));
-        })
+        let index = TextIndex::build_with_progress(
+            dir.path(),
+            &IndexOptions::default(),
+            &|p: IndexProgress| {
+                seen.lock().unwrap().push((p.done, p.total));
+            },
+        )
         .unwrap();
         drop(index);
 

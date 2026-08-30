@@ -402,6 +402,42 @@ pub(crate) fn load_settings() -> app_config::Settings {
     app_config::load(&app_core::resolve_config_dir()).unwrap_or_default()
 }
 
+/// The root of the open project, if there is one.
+///
+/// Shared rather than private to one feature module because three of them
+/// now need it — the run configurations, the project settings layer and the
+/// index's excludes — and they must all agree on which project is open.
+pub(crate) fn current_project_root() -> Option<std::path::PathBuf> {
+    crate::bridge::registry::shared_session()
+        .borrow()
+        .root_path()
+        .map(std::path::Path::to_path_buf)
+}
+
+/// The open project's own settings layer, or an empty one when no project is
+/// open or its file could not be read.
+///
+/// A malformed project file resolves to "overrides nothing" *here*, at the
+/// adapter, rather than in `app-config`, which reports the error properly
+/// (ADR-0022 §6). The settings dialog is the surface that shows that error;
+/// a keystroke asking for its tab width is not.
+pub(crate) fn load_project_settings() -> app_config::project_settings::ProjectSettings {
+    current_project_root()
+        .and_then(|root| app_config::project_settings::load(&root).ok())
+        .unwrap_or_default()
+}
+
+/// The settings actually in force: the global layer with the open project's
+/// overrides applied (ADR-0022).
+///
+/// Every consumer of a project-scoped setting reads *this*, never
+/// [`load_settings`] — that one is still correct for the person-shaped
+/// settings a project may not touch (theme, fonts, keymap, AI providers),
+/// and for the pages that edit the global file itself.
+pub(crate) fn load_resolved_settings() -> app_config::Settings {
+    settings_model::scope::resolve(&load_settings(), &load_project_settings())
+}
+
 /// `editor_core::diff::Hunk`s as `DiffView`'s change ribbon reads them
 /// (F3-13). Shared by the refactor-preview and Replace-in-Files diff
 /// panels — both hand `editor_core` hunks to the same widget.
