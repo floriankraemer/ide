@@ -22,6 +22,9 @@ fn config(command: &str, args: &[&str]) -> ServerConfig {
         command: command.into(),
         args: args.iter().map(|a| a.to_string()).collect(),
         enabled: true,
+        settings_section: None,
+        settings: serde_json::Value::Null,
+        source: lsp_core::catalog::ServerSource::Builtin,
     }
 }
 

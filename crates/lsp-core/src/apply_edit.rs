@@ -1,7 +1,7 @@
 //! The inbound half of refactoring: `workspace/applyEdit`, the one request a
 //! language server makes of *us*.
 //!
-//! It exists because several servers — jdtls, omnisharp and intelephense
+//! It exists because several servers — jdtls, csharp-ls and intelephense
 //! among them — do not answer an Extract with an edit. They answer with a
 //! command, and when that command is executed they turn around and ask the
 //! client to apply the edit they computed. Without this the whole

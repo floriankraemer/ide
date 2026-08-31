@@ -19,7 +19,7 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `mcp-server` | `index-core`, `editor-core` (+ std, serde, serde_json, tokio, axum) | **No** |
 | `pty-core` | (std, portable-pty) | **No** |
 | `terminal-core` | (std, alacritty_terminal) | **No** |
-| `lsp-core` | `editor-core` (+ std, lsp-types, serde, serde_json); `syntax-core` as a **dev**-dependency only, ADR-0018 | **No** |
+| `lsp-core` | `editor-core` (+ std, lsp-types, serde, serde_json); `syntax-core` as a **dev**-dependency only, ADR-0018. Stays free of `plugin-api`/`plugin-host`: `catalog::PluginServer` is a plain data type `lsp-core` defines for itself, and `ui-shell`/`settings-model` (which already depend on `plugin-host`) map `LanguageServerContribution` onto it at the call site. | **No** |
 | `index-core` | `syntax-core`, `editor-core` (+ std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore, rayon, nucleo-matcher, fs4, dirs) | **No** |
 | `plugin-api` | (std, serde, toml) — a leaf on purpose, see [ADR-0026](decisions/0026-plugin-host.md) | **No** |
 | `plugin-host` | `plugin-api` (+ std, wasmtime) — discovery, the registry and the built-ins ([ADR-0026](decisions/0026-plugin-host.md)), plus the sandboxed wasm tier ([ADR-0028](decisions/0028-wasm-plugin-tier.md)); `icon-theme` as a **dev**-dependency only, to check the vendored Material pack through the real load path | **No** |

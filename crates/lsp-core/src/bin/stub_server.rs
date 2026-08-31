@@ -697,7 +697,7 @@ fn main() {
             }
             // RF3: the command-driven refactoring shape. `stub.applyEdit`
             // asks the client to apply an edit and blocks on the answer
-            // before completing, which is exactly what jdtls, omnisharp and
+            // before completing, which is exactly what jdtls, csharp-ls and
             // intelephense do for Extract — and the reason the client may
             // not answer server requests on its read thread.
             ("workspace/executeCommand", Some(id)) => {

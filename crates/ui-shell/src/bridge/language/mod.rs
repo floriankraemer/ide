@@ -14,6 +14,31 @@ use crate::bridge::registry::SharedDiagnostics;
 /// file-size ceiling, the way `ai/agent.rs` splits out of `ai/chat.rs`.
 mod lsp_surface;
 
+/// Every `language-servers` contribution from the live plugin registry,
+/// translated into `lsp_core::PluginServer`.
+///
+/// `lsp-core` stays free of the plugin stack (`docs/architecture/
+/// layering.md`), so this mapping — not a `From` impl in either crate —
+/// is where `LanguageServerContribution` becomes the plain data
+/// `resolve_servers` understands. `ui-shell` already depends on
+/// `plugin-host` for icon themes (`bridge/icons.rs`), so this is the same
+/// pattern, not a new dependency.
+fn plugin_servers() -> Vec<lsp_core::PluginServer> {
+    let registry = plugin_host::registry();
+    registry
+        .language_servers()
+        .map(|(plugin, server)| lsp_core::PluginServer {
+            plugin_id: plugin.id().to_string(),
+            language_id: server.language_id.clone(),
+            name: server.name.clone(),
+            command: server.command.clone(),
+            args: server.args.clone(),
+            settings_section: server.settings_section.clone(),
+            settings: serde_json::to_value(&server.settings).unwrap_or(serde_json::Value::Null),
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Language servers (Task L2)
 // ---------------------------------------------------------------------------
@@ -304,7 +329,7 @@ impl ffi::LanguageService {
                 enabled: entry.enabled,
             })
             .collect();
-        *self.configs.borrow_mut() = lsp_core::resolve_servers(&overrides);
+        *self.configs.borrow_mut() = lsp_core::resolve_servers(&overrides, &plugin_servers());
 
         let (manager, events) = lsp_core::LspManager::new(lsp_core::uri_from_path(&root));
         let (jobs, rx) = std::sync::mpsc::channel::<LspJob>();
@@ -402,7 +427,7 @@ impl ffi::LanguageService {
                 enabled: entry.enabled,
             })
             .collect();
-        let resolved = lsp_core::resolve_servers(&overrides);
+        let resolved = lsp_core::resolve_servers(&overrides, &plugin_servers());
 
         // Which running servers the new settings no longer describe: the
         // comparison is between two resolved configurations, so "changed" is

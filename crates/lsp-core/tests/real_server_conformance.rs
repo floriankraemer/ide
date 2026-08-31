@@ -98,6 +98,9 @@ fn config() -> ServerConfig {
         command: "rust-analyzer".into(),
         args: Vec::new(),
         enabled: true,
+        settings_section: None,
+        settings: serde_json::Value::Null,
+        source: lsp_core::catalog::ServerSource::Builtin,
     }
 }
 
