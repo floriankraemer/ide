@@ -13,6 +13,7 @@ pub mod apply_edit;
 pub mod catalog;
 pub mod code_action;
 pub mod completion;
+pub mod configuration;
 pub mod diagnostics;
 pub mod diff_preview;
 pub mod document_highlight;
@@ -47,6 +48,7 @@ pub use completion::{
     kind_name, parse_completion, should_request, strip_snippet, CompletionItem, CompletionList,
     CompletionTracker, TextRange,
 };
+pub use configuration::resolve as resolve_configuration;
 pub use diagnostics::{
     path_from_uri, uri_from_path, DiagnosticCounts, DiagnosticRow, DiagnosticStore, Severity,
 };

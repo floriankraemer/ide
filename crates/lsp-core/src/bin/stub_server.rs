@@ -40,6 +40,11 @@
 //! followed by a `client/unregisterCapability` for the same id — the
 //! sequence csharp-ls actually runs, since it declares most of its
 //! capabilities dynamically rather than in `initialize`.
+//!
+//! C6 added `stub/configurationRun`, which sends a `workspace/configuration`
+//! request for two sections — one the test's server was configured under
+//! and one it was not — the way csharp-ls pulls its settings after
+//! `initialized`.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Stdout, Write};
@@ -535,6 +540,42 @@ fn main() {
                             "registered": registered,
                             "unregistered": unregistered,
                         }}),
+                    );
+                });
+            }
+            // C6: pull configuration for two sections — `"csharp"`, which a
+            // test's `ServerConfig` is configured under, and `"other"`,
+            // which nothing is — so both the matched and null-fallback
+            // paths of `workspace/configuration` are exercised through the
+            // real reader thread. Answered only once the pull's reply is
+            // back, so a test holding the answer knows the round trip
+            // already completed.
+            ("stub/configurationRun", Some(id)) => {
+                let request_id = next_request_id;
+                next_request_id += 1;
+
+                let (tx, rx) = channel();
+                pending.lock().expect("pending lock").insert(request_id, tx);
+
+                let out = Arc::clone(&out);
+                let pending = Arc::clone(&pending);
+                thread::spawn(move || {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": request_id,
+                               "method": "workspace/configuration", "params": {
+                            "items": [
+                                {"scopeUri": Value::Null, "section": "csharp"},
+                                {"scopeUri": Value::Null, "section": "other"},
+                            ],
+                        }}),
+                    );
+                    let answer = rx.recv_timeout(CLIENT_REPLY_TIMEOUT).unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&request_id);
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id,
+                               "result": answer.get("result").cloned().unwrap_or(Value::Null)}),
                     );
                 });
             }

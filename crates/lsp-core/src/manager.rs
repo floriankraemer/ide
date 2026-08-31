@@ -27,6 +27,7 @@ use crate::code_action::{
     filter_by_kind, needs_unfiltered_retry, parse_code_actions, CodeActionItem, CommandRef,
 };
 use crate::completion::{parse_completion, parse_trigger_characters, CompletionList};
+use crate::configuration;
 use crate::document_highlight::{parse_document_highlights, DocumentHighlight};
 use crate::formatting::{parse_formatting, FormattingOptions, FormattingOutcome};
 use crate::framing::{read_message, write_message};
@@ -284,6 +285,14 @@ struct Server {
     /// protocol keys it. Per server, like `progress`, because a
     /// registration id is only unique within one server's session.
     registrations: Registrations,
+    /// C6: the `workspace/configuration` section this server pulls its
+    /// settings from, from the `ServerConfig` it was launched with. Fixed
+    /// for the server's lifetime — changing it means relaunching with a
+    /// different config, same as `command`/`args`.
+    settings_section: Option<String>,
+    /// C6: the settings blob answered for `settings_section`, mutable via
+    /// [`LspManager::update_settings`] without a relaunch.
+    settings: Mutex<Value>,
 }
 
 impl Server {
@@ -396,6 +405,8 @@ impl LspManager {
             progress: Mutex::new(ProgressTracker::default()),
             sessions: Arc::clone(&self.sessions),
             registrations: Registrations::default(),
+            settings_section: cfg.settings_section.clone(),
+            settings: Mutex::new(cfg.settings.clone()),
         });
 
         let (ready_tx, ready_rx) = channel();
@@ -987,6 +998,24 @@ impl LspManager {
             .is_some_and(|server| server.registrations.method_registered(method))
     }
 
+    /// C6: update the settings a running server pulls via
+    /// `workspace/configuration` and tell it to re-pull them.
+    ///
+    /// The notification's `settings` is deliberately `null`, not `settings`
+    /// itself — that is what tells a client-supports-pull server (csharp-ls
+    /// included) to re-issue `workspace/configuration` rather than treat the
+    /// notification as the new value pushed inline.
+    pub fn update_settings(&self, language_id: &str, settings: Value) -> Result<(), LspError> {
+        let server = self
+            .server(language_id)
+            .ok_or_else(|| LspError::NoServer(language_id.to_string()))?;
+        *server.settings.lock().unwrap() = settings;
+        server.notify(
+            "workspace/didChangeConfiguration",
+            json!({"settings": Value::Null}),
+        )
+    }
+
     /// Shut one server down: `shutdown`, `exit`, then kill if it lingers.
     pub fn stop(&self, language_id: &str) {
         let server = self.servers.lock().unwrap().remove(language_id);
@@ -1350,10 +1379,34 @@ fn dispatch(server: &Arc<Server>, language_id: &str, message: Value, events: &Se
             server.registrations.unregister(&ids);
             let _ = server.send(&json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}));
         }
+        // C6: csharp-ls pulls its settings rather than taking them pushed,
+        // so it sends this right after `initialized` (and again after
+        // `workspace/didChangeConfiguration`). A pure lookup against this
+        // server's own configured section — nothing to decide, nothing to
+        // block on — so it is answered inline here, same reasoning as
+        // `window/workDoneProgress/create` and `client/registerCapability`
+        // above. Answers are returned in request order, `null` for any
+        // section this client has no opinion on (ADR-0016: single-root, so
+        // `scopeUri` is ignorable).
+        (Some("workspace/configuration"), Some(id)) => {
+            let items = message
+                .get("params")
+                .and_then(|p| p.get("items"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let settings = server.settings.lock().unwrap().clone();
+            let result: Vec<Value> = items
+                .iter()
+                .map(|item| {
+                    let section = item.get("section").and_then(Value::as_str).unwrap_or("");
+                    configuration::resolve(server.settings_section.as_deref(), &settings, section)
+                })
+                .collect();
+            let _ = server.send(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
+        }
         // Every other server-to-client request. The server blocks until it
         // gets an answer, so answer honestly rather than not at all.
-        // ponytail: a real handler (workspace/configuration) lands with the
-        // feature that needs it (C6).
         (Some(method), Some(id)) => {
             let _ = server.send(&json!({
                 "jsonrpc": "2.0",
@@ -1541,6 +1594,10 @@ fn client_capabilities() -> Value {
                 "dynamicRegistration": true,
                 "relativePatternSupport": false,
             },
+            // C6: we answer `workspace/configuration`, which is how
+            // csharp-ls (and any server that pulls rather than takes pushed
+            // settings) gets its config at all.
+            "configuration": true,
         },
         // F0-16: without this a server has no permission to open a progress
         // token, and rust-analyzer stays silent while it indexes — which is

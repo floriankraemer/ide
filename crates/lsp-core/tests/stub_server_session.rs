@@ -39,6 +39,16 @@ fn dying_stub_config() -> ServerConfig {
     config("env", &["STUB_LSP_DIE_ON_DIDOPEN=1", STUB])
 }
 
+/// C6: a stub configured with a `workspace/configuration` section and
+/// starting settings, the way the `csharp` plugin's `ServerConfig` is.
+fn stub_config_with_settings() -> ServerConfig {
+    ServerConfig {
+        settings_section: Some("csharp".into()),
+        settings: json!({"analyzersEnabled": true}),
+        ..stub_config()
+    }
+}
+
 /// Drain events until one matches, or fail. Non-matching events are skipped:
 /// a server may legitimately emit log notifications we don't care about.
 fn wait_for<T>(
@@ -1506,4 +1516,68 @@ fn did_change_watched_files_filters_and_batches_through_the_real_registration() 
     );
 
     manager.stop(LANG);
+}
+
+/// C6: `workspace/configuration` answers the pulled section with the
+/// server's configured settings, and any other section with `null` — the
+/// full round trip through the real reader thread and `dispatch`, not just
+/// `configuration::resolve` in isolation.
+#[test]
+fn workspace_configuration_answers_the_configured_section_and_nulls_the_rest() {
+    let (manager, _rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_settings())
+        .expect("stub starts");
+
+    let answer = manager
+        .request(LANG, "stub/configurationRun", json!({}))
+        .expect("the stub's configuration pull does not deadlock us");
+    let items = answer.as_array().expect("array reply, one per item");
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        items[0],
+        json!({"analyzersEnabled": true}),
+        "the configured section"
+    );
+    assert_eq!(
+        items[1],
+        serde_json::Value::Null,
+        "a section this client has no opinion on"
+    );
+
+    manager.stop(LANG);
+}
+
+/// C6: `update_settings` replaces the stored settings and sends
+/// `workspace/didChangeConfiguration` with `{"settings": null}` — telling a
+/// pull-based server to re-fetch rather than pushing the value inline — so a
+/// pull issued afterwards sees the new settings.
+#[test]
+fn update_settings_changes_what_the_next_pull_answers() {
+    let (manager, _rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_settings())
+        .expect("stub starts");
+
+    manager
+        .update_settings(LANG, json!({"analyzersEnabled": false}))
+        .expect("the server is running");
+
+    let answer = manager
+        .request(LANG, "stub/configurationRun", json!({}))
+        .expect("pull after the settings change");
+    assert_eq!(answer[0], json!({"analyzersEnabled": false}));
+
+    manager.stop(LANG);
+}
+
+/// C6: a language with no running server is reported the same way every
+/// other per-language method reports it, not a silent no-op.
+#[test]
+fn update_settings_on_a_server_that_is_not_running_is_an_error() {
+    let (manager, _rx) = LspManager::new("file:///workspace");
+    assert!(matches!(
+        manager.update_settings(LANG, json!({})),
+        Err(LspError::NoServer(_))
+    ));
 }
