@@ -21,12 +21,17 @@ globset = "0.4"
 # `project-model` itself — `lsp-core` stays free of the domain crate, and
 # picks up only the wire-format enum it maps from.
 notify = "6"
+# C9: `semantic_tokens::overlay` merges a server's semantic-token spans onto
+# `syntax_core::HighlightSpan`s, and the scope a token type/modifier maps to
+# is resolved through `syntax_core::Scope`'s own dotted fallback walk rather
+# than a second copy of it — see ADR-0035. This is a normal, not dev-only,
+# dependency now: ADR-0018 kept `syntax-core` dev-only because *which
+# language a file is* must have one source of truth, but combining two
+# already-classified span lists is a different question than that one, and
+# reintroduces no duplication.
+syntax-core = { path = "../syntax-core" }
 
 [dev-dependencies]
-# Tests only: the regression guard that every catalog language stays
-# visible to the server lookup (issue #20). No normal-graph edge — see
-# docs/architecture/decisions/0018-single-source-language-detection.md.
-syntax-core = { path = "../syntax-core" }
 # Conformance suite only: a temp cargo project for a real server to index,
 # and the expectations file it asserts against.
 tempfile = "3"

@@ -827,6 +827,31 @@ mod ffi {
         /// shape nor the precedence rules. Build once per (theme,
         /// language) — it is pure data afterwards.
         fn palette(self: &SyntaxHighlighterHandle, theme: &str) -> Vec<FfiScopeStyle>;
+
+        /// C9: overlays `semantic` — `LanguageService::semanticTokenSpans`'s
+        /// answer for this same document, already mapped onto
+        /// `syntax_core`'s taxonomy and converted to byte offsets — onto
+        /// the tree-sitter spans this handle produced at its last
+        /// `set_text`/`apply_edit`. `lsp_core::semantic_tokens::overlay`
+        /// decides the merge (semantic spans win where they cover; the
+        /// tree-sitter colouring underneath still shows through
+        /// everywhere else, per F0-16); this only carries its inputs and
+        /// answer across the seam.
+        ///
+        /// TODO(C9-followup): nothing in `cpp/syntax_highlighter.cpp` calls
+        /// this yet. `LanguageService::requestSemanticTokens`/
+        /// `semanticTokenSpans`/`semanticTokensReady` (see `ffi.rs`'s
+        /// `LanguageService` block) are wired and reachable end to end from
+        /// document open through to a fetchable merged-span answer; only
+        /// the second call site — `SyntaxHighlighter` re-running
+        /// `highlightBlock` with the overlaid spans once
+        /// `semanticTokensReady` fires — is left for follow-up, the same
+        /// allowance C9's plan gives when full C++ rendering wiring is not
+        /// worth the risk of an unfamiliar-file change under one task.
+        fn overlay_semantic_tokens(
+            self: &SyntaxHighlighterHandle,
+            semantic: Vec<FfiHighlightSpan>,
+        ) -> Vec<FfiHighlightSpan>;
     }
 
     unsafe extern "C++Qt" {
@@ -3259,6 +3284,33 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "inlayHints"]
         fn inlay_hints(self: &LanguageService) -> Vec<FfiInlayHint>;
+
+        /// C9 — fire-and-forget `textDocument/semanticTokens/full` for
+        /// `path`'s whole document, gated on
+        /// `LspManager::semantic_tokens_legend` (checked at call time, so
+        /// this also covers a server that registered the capability
+        /// dynamically after this method's first no-op call — see
+        /// `request_semantic_tokens`'s own doc comment). A server with no
+        /// legend yet, or with nothing to say, leaves the previous answer
+        /// (if any) in place rather than clearing it: never let "waiting
+        /// for the server" mean "no colour at all" (F0-16). Answers on
+        /// `semanticTokensReady`.
+        #[qinvokable]
+        #[cxx_name = "requestSemanticTokens"]
+        fn request_semantic_tokens(self: Pin<&mut LanguageService>, path: &QString, text: &QString);
+
+        #[qsignal]
+        #[cxx_name = "semanticTokensReady"]
+        fn semantic_tokens_ready(self: Pin<&mut LanguageService>, path: QString);
+
+        /// The last decoded-and-mapped semantic-token spans for `path`,
+        /// already in `syntax_core::HighlightSpan`'s byte-offset/scope-id
+        /// shape — the same shape `SyntaxHighlighterHandle::overlay_semantic_tokens`
+        /// takes as its `semantic` argument. Empty before the first answer,
+        /// or for a document nothing has ever requested tokens for.
+        #[qinvokable]
+        #[cxx_name = "semanticTokenSpans"]
+        fn semantic_token_spans(self: &LanguageService, path: &QString) -> Vec<FfiHighlightSpan>;
 
         /// RF8 — rename the symbol at a position.
         ///

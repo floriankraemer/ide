@@ -33,7 +33,12 @@ exempt() {
 baseline() {
 	case "$1" in
 	crates/index-core/src/lib.rs) echo 3995 ;;         # ratcheted down: replace_in_files/preview_replacements moved to replace_preview.rs (F3-15)
-	crates/syntax-core/src/lib.rs) echo 2572 ;;        # no split planned; ratcheted so it cannot grow
+	# Raised from 2572 by 10 lines for `Scope::from_id` (C9) — the inverse of
+	# `Scope::id`, needed to rebuild a `Scope` from the raw id a
+	# `FfiHighlightSpan` carries back across the seam when overlaying
+	# semantic-token spans onto tree-sitter ones (`ui-shell`'s
+	# `overlay_semantic_tokens`). No split planned otherwise.
+	crates/syntax-core/src/lib.rs) echo 2582 ;;
 	crates/mcp-server/src/lib.rs) echo 1836 ;;         # no split planned; ratcheted so it cannot grow
 	crates/ai-chat-core/src/context.rs) echo 1608 ;;   # no split planned; ratcheted so it cannot grow
 	# Raised from 1553 by 16 lines for the ResourceOp error variant, its FFI

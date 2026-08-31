@@ -40,6 +40,7 @@ use crate::navigation::{parse_definition, DefinitionTarget};
 use crate::progress::{ProgressTracker, ServerActivity};
 use crate::registration::{Registration, Registrations};
 use crate::rename::{parse_prepare_rename, PrepareRename};
+use crate::semantic_tokens::{self, SemanticTokensLegend};
 use crate::signature_help::{
     parse_signature_help, parse_signature_triggers, SignatureHelp, SignatureTriggers,
 };
@@ -94,6 +95,12 @@ pub const INLAY_HINT_TIMEOUT: Duration = Duration::from_secs(5);
 /// [`REFACTOR_TIMEOUT`]; *applying* the action they then choose still is,
 /// because by then they have committed to waiting.
 pub const INTENTION_TIMEOUT: Duration = Duration::from_secs(5);
+/// C9: `textDocument/semanticTokens/full` re-analyses the whole open
+/// document, not a viewport or a keystroke, so this is generous like
+/// [`FORMATTING_TIMEOUT`] rather than short like hover or completion — but
+/// it is still fired in the background on document open, never blocking
+/// typing, so a slow answer costs nothing but a delayed repaint.
+pub const SEMANTIC_TOKENS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Delay before the first respawn attempt; doubles per consecutive failure.
 const RESTART_BACKOFF_INITIAL: Duration = Duration::from_millis(200);
 /// Ceiling for the exponential backoff.
@@ -302,6 +309,15 @@ struct Server {
     /// C6: the settings blob answered for `settings_section`, mutable via
     /// [`LspManager::update_settings`] without a relaunch.
     settings: Mutex<Value>,
+    /// C9: this server's semantic-tokens legend, if it offers the request at
+    /// all — set from `initialize`'s static `semanticTokensProvider`
+    /// capability at connect time, or from a dynamic
+    /// `client/registerCapability` registration if one arrives later
+    /// (csharp-ls's path; see `dispatch`'s `client/registerCapability` arm).
+    /// `None` means "not known to support it yet", checked generically by
+    /// [`LspManager::semantic_tokens_legend`] rather than gating on one path
+    /// or the other.
+    semantic_tokens_legend: Mutex<Option<SemanticTokensLegend>>,
 }
 
 impl Server {
@@ -416,6 +432,7 @@ impl LspManager {
             registrations: Registrations::default(),
             settings_section: cfg.settings_section.clone(),
             settings: Mutex::new(cfg.settings.clone()),
+            semantic_tokens_legend: Mutex::new(None),
         });
 
         let (ready_tx, ready_rx) = channel();
@@ -1021,6 +1038,43 @@ impl LspManager {
         Ok(parse_inlay_hints(&result))
     }
 
+    /// `textDocument/semanticTokens/full` for a whole open document, raw —
+    /// decoding the response and mapping it onto `syntax_core`'s taxonomy is
+    /// `crate::semantic_tokens`'s job, not this method's, the same
+    /// convention [`Self::resolve_completion_item`] and
+    /// [`Self::execute_command`] follow for a server's raw JSON.
+    ///
+    /// Whether it is worth calling at all is
+    /// [`Self::semantic_tokens_legend`]'s answer, not this method's — C9
+    /// only ever sends the full request, never
+    /// `textDocument/semanticTokens/full/delta`, so there is no `previous_result_id`
+    /// parameter to thread through yet.
+    pub fn semantic_tokens(&self, language_id: &str, uri: &str) -> Result<Value, LspError> {
+        self.request_with_timeout(
+            language_id,
+            "textDocument/semanticTokens/full",
+            json!({"textDocument": {"uri": uri}}),
+            SEMANTIC_TOKENS_TIMEOUT,
+        )
+    }
+
+    /// This server's semantic-tokens legend, if it has told us about one —
+    /// via `initialize`'s static capability (set at connect time, `connect`
+    /// below) or a dynamic `client/registerCapability` registration
+    /// (`dispatch`'s `client/registerCapability` arm) — whichever arrived.
+    /// `None` for a server that has done neither yet, which is this
+    /// method's answer to "is `semantic_tokens` worth calling right now" —
+    /// checked generically across both paths rather than the caller having
+    /// to know which one a given server uses (C9's plan explicitly calls
+    /// out that csharp-ls's path is unconfirmed, so both are handled).
+    pub fn semantic_tokens_legend(&self, language_id: &str) -> Option<SemanticTokensLegend> {
+        self.server(language_id)?
+            .semantic_tokens_legend
+            .lock()
+            .unwrap()
+            .clone()
+    }
+
     /// The version last sent for a document, if it is open.
     pub fn document_version(&self, uri: &str) -> Option<i32> {
         self.documents.lock().unwrap().get(uri).map(|d| d.version)
@@ -1280,6 +1334,13 @@ fn connect(
             // What the server can do is read here, once, and published with
             // `ServerReady` — nothing else ever sees the raw result.
             let result = message.get("result").unwrap_or(&Value::Null);
+            // C9: read once, here, same as the other capabilities above —
+            // but stored on `server` rather than threaded through the
+            // return tuple, because a server may instead only tell us via a
+            // *later* `client/registerCapability` (`dispatch` sets the same
+            // field), and `semantic_tokens_legend` needs to answer
+            // correctly either way.
+            *server.semantic_tokens_legend.lock().unwrap() = semantic_tokens::parse_legend(result);
             break (
                 parse_trigger_characters(result),
                 parse_signature_triggers(result),
@@ -1408,6 +1469,20 @@ fn dispatch(server: &Arc<Server>, language_id: &str, message: Value, events: &Se
                 .cloned()
                 .and_then(|v| serde_json::from_value::<Vec<Registration>>(v).ok())
                 .unwrap_or_default();
+            // C9: csharp-ls's suspected path — a server that declares
+            // `textDocument/semanticTokens` dynamically rather than in
+            // `initialize`'s static result carries the same
+            // `SemanticTokensOptions` shape in its `registerOptions`
+            // (`semantic_tokens::parse_provider` reads either). The last
+            // registration for the method wins, matching `Registrations::register`'s
+            // own "replacing a reused id is the safer read" reasoning.
+            if let Some(legend) = registrations
+                .iter()
+                .filter(|r| r.method == "textDocument/semanticTokens")
+                .find_map(|r| semantic_tokens::parse_provider(&r.register_options))
+            {
+                *server.semantic_tokens_legend.lock().unwrap() = Some(legend);
+            }
             server.registrations.register(registrations);
             let _ = server.send(&json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}));
         }
@@ -1622,6 +1697,24 @@ fn client_capabilities() -> Value {
             // The `InlayHintLabelPart[]` label form needs no capability and
             // is parsed regardless.
             "inlayHint": {"dynamicRegistration": false},
+            // C9: `dynamicRegistration: true` — unlike every other entry in
+            // this block — because csharp-ls is believed to declare this
+            // one dynamically rather than statically (see
+            // `semantic_tokens` module docs); `formats: ["relative"]` is
+            // the only encoding LSP 3.17 defines, so it is the only value
+            // that could go here. `tokenTypes`/`tokenModifiers` are the
+            // full LSP standard vocabulary this client's mapping
+            // understands (`semantic_tokens::base_scope_name`); a server is
+            // free to define fewer, and any it defines that this list omits
+            // still decodes correctly; `requests.full: true` and no `range`
+            // entry is what makes only the whole-document request offered.
+            "semanticTokens": {
+                "dynamicRegistration": true,
+                "requests": {"full": true},
+                "tokenTypes": crate::semantic_tokens::STANDARD_TOKEN_TYPES,
+                "tokenModifiers": crate::semantic_tokens::STANDARD_TOKEN_MODIFIERS,
+                "formats": ["relative"],
+            },
         },
         "workspace": {
             // RF5: we answer `workspace/applyEdit`, which is how the

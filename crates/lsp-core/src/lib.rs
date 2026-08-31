@@ -27,6 +27,7 @@ pub mod navigation;
 pub mod progress;
 pub mod registration;
 pub mod rename;
+pub mod semantic_tokens;
 pub mod signature_help;
 pub mod tracker;
 pub mod watched_files;
@@ -66,7 +67,8 @@ pub use intentions::{
 };
 pub use manager::{
     LspError, LspEvent, LspManager, DEFAULT_REQUEST_TIMEOUT, DOCUMENT_HIGHLIGHT_TIMEOUT,
-    INLAY_HINT_TIMEOUT, INTENTION_TIMEOUT, REFACTOR_TIMEOUT, SIGNATURE_HELP_TIMEOUT,
+    INLAY_HINT_TIMEOUT, INTENTION_TIMEOUT, REFACTOR_TIMEOUT, SEMANTIC_TOKENS_TIMEOUT,
+    SIGNATURE_HELP_TIMEOUT,
 };
 pub use navigation::{definition_outcome, parse_definition, DefinitionOutcome, DefinitionTarget};
 pub use progress::{ProgressTracker, ServerActivity};
@@ -74,6 +76,12 @@ pub use registration::{Registration, Registrations, Watcher};
 pub use rename::{
     parse_prepare_rename, prepare_outcome, rename_outcome, PrepareOutcome, PrepareRename,
     RenameOutcome,
+};
+pub use semantic_tokens::{
+    overlay as overlay_semantic_tokens, parse_full_response as parse_semantic_tokens_full,
+    parse_legend as parse_semantic_tokens_legend, scope_for as semantic_token_scope,
+    MappedSpan as MappedSemanticSpan, SemanticToken, SemanticTokensLegend,
+    STANDARD_TOKEN_MODIFIERS, STANDARD_TOKEN_TYPES,
 };
 pub use signature_help::{
     call_site_at, parse_signature_help, parse_signature_triggers,

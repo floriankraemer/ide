@@ -58,6 +58,15 @@
 //! csharp-ls; a `label` of `"stub/silence"` gets no reply at all, the same
 //! never-answer affordance `stub/silence` is elsewhere, so the client's own
 //! timeout path is reachable for this method too.
+//!
+//! C9 added `textDocument/semanticTokens/full`, answered with canned
+//! delta-encoded tokens covering the same-line-multiple-tokens and
+//! line-advance decoding cases, plus two ways to advertise the capability:
+//! `STUB_LSP_SEMANTIC_TOKENS_STATIC` puts `semanticTokensProvider` in
+//! `initialize`'s result the way rust-analyzer does, and
+//! `stub/semanticTokensRegisterRun` sends a `client/registerCapability`
+//! for it instead — the path csharp-ls is believed to use, so a client that
+//! only reads the static capability never sees it.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Stdout, Write};
@@ -75,6 +84,28 @@ const DIE_ON_DIDOPEN: &str = "STUB_LSP_DIE_ON_DIDOPEN";
 /// C7: set to `1` to advertise `completionProvider.resolveProvider: true`
 /// in `initialize`'s result.
 const COMPLETION_RESOLVE: &str = "STUB_LSP_COMPLETION_RESOLVE";
+/// C9: set to `1` to advertise `semanticTokensProvider` statically in
+/// `initialize`'s result, the way rust-analyzer does. Unset, a test instead
+/// reaches `stub/semanticTokensRegisterRun` for the dynamic-registration
+/// path csharp-ls is believed to use.
+const SEMANTIC_TOKENS_STATIC: &str = "STUB_LSP_SEMANTIC_TOKENS_STATIC";
+/// C9: the legend both the static and dynamic paths advertise — the LSP
+/// standard vocabulary, same order `lsp_core::semantic_tokens::STANDARD_TOKEN_TYPES`/
+/// `STANDARD_TOKEN_MODIFIERS` define, so a test can index into it by name.
+fn semantic_tokens_legend() -> Value {
+    json!({
+        "tokenTypes": [
+            "namespace", "type", "class", "enum", "interface", "struct", "typeParameter",
+            "parameter", "variable", "property", "enumMember", "event", "function", "method",
+            "macro", "keyword", "modifier", "comment", "string", "number", "regexp", "operator",
+            "decorator",
+        ],
+        "tokenModifiers": [
+            "declaration", "definition", "readonly", "static", "deprecated", "abstract",
+            "async", "modification", "documentation", "defaultLibrary",
+        ],
+    })
+}
 
 type Out = Arc<Mutex<Stdout>>;
 
@@ -108,6 +139,7 @@ fn main() {
     let mut input = BufReader::new(io::stdin());
     let die_on_didopen = std::env::var(DIE_ON_DIDOPEN).is_ok_and(|v| v == "1");
     let completion_resolve = std::env::var(COMPLETION_RESOLVE).is_ok_and(|v| v == "1");
+    let semantic_tokens_static = std::env::var(SEMANTIC_TOKENS_STATIC).is_ok_and(|v| v == "1");
 
     while let Some(body) = read_message(&mut input).expect("read from stdin") {
         let message: Value = match serde_json::from_slice(&body) {
@@ -145,22 +177,29 @@ fn main() {
                 if completion_resolve {
                     completion_provider["resolveProvider"] = json!(true);
                 }
+                let mut capabilities = json!({
+                    "textDocumentSync": 1,
+                    "completionProvider": completion_provider,
+                    // F2: the pair every language agrees on, plus
+                    // the closing paren as a retrigger so the nested
+                    // -call case is reachable offline.
+                    "signatureHelpProvider": {
+                        "triggerCharacters": ["(", ","],
+                        "retriggerCharacters": [")"],
+                    },
+                    "documentHighlightProvider": true,
+                    "inlayHintProvider": true,
+                });
+                if semantic_tokens_static {
+                    capabilities["semanticTokensProvider"] = json!({
+                        "legend": semantic_tokens_legend(),
+                        "full": true,
+                    });
+                }
                 send(
                     &out,
                     json!({"jsonrpc": "2.0", "id": id, "result": {
-                        "capabilities": {
-                            "textDocumentSync": 1,
-                            "completionProvider": completion_provider,
-                            // F2: the pair every language agrees on, plus
-                            // the closing paren as a retrigger so the nested
-                            // -call case is reachable offline.
-                            "signatureHelpProvider": {
-                                "triggerCharacters": ["(", ","],
-                                "retriggerCharacters": [")"],
-                            },
-                            "documentHighlightProvider": true,
-                            "inlayHintProvider": true,
-                        },
+                        "capabilities": capabilities,
                         "serverInfo": {"name": "stub_server", "version": "0.1.0"},
                     }}),
                 )
@@ -421,6 +460,74 @@ fn main() {
                     ])
                 };
                 send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // C9: canned tokens covering the delta-decoding cases that
+            // matter — same-line multiple tokens and a line advance —
+            // against the legend `semantic_tokens_legend()` advertises:
+            // (line 0, char 0, len 3, type "type" idx 1) then
+            // (line 0, char +4, len 6, type "function" idx 12, modifier
+            // "defaultLibrary" bit 9) then (line 1, char 0, len 4, type
+            // "keyword" idx 15). `uri == "file:///stub/empty.rs"` answers
+            // `null`, so a server with nothing to say for a document is
+            // reachable too.
+            ("textDocument/semanticTokens/full", Some(id)) => {
+                let uri = params
+                    .pointer("/textDocument/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let result = if uri.ends_with("empty.rs") {
+                    Value::Null
+                } else {
+                    json!({"resultId": "1", "data": [
+                        0, 0, 3, 1, 0,
+                        0, 4, 6, 12, 1 << 9,
+                        1, 0, 4, 15, 0,
+                    ]})
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // C9: the dynamic-registration path a client must also handle —
+            // csharp-ls is believed to declare `textDocument/semanticTokens`
+            // this way rather than in `initialize`'s static result. Answers
+            // once the registration round-trips, the same shape
+            // `stub/registerCapabilityRun` uses.
+            ("stub/semanticTokensRegisterRun", Some(id)) => {
+                let register_id = next_request_id;
+                next_request_id += 1;
+                let (register_tx, register_rx) = channel();
+                pending
+                    .lock()
+                    .expect("pending lock")
+                    .insert(register_id, register_tx);
+
+                let out = Arc::clone(&out);
+                let pending = Arc::clone(&pending);
+                thread::spawn(move || {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": register_id,
+                               "method": "client/registerCapability", "params": {
+                            "registrations": [{
+                                "id": "stub-semantic-tokens",
+                                "method": "textDocument/semanticTokens",
+                                "registerOptions": {
+                                    "legend": semantic_tokens_legend(),
+                                    "full": true,
+                                },
+                            }],
+                        }}),
+                    );
+                    let register_answer = register_rx
+                        .recv_timeout(CLIENT_REPLY_TIMEOUT)
+                        .unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&register_id);
+                    let registered = register_answer.get("id").is_some()
+                        && register_answer.get("error").is_none();
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "result": {"registered": registered}}),
+                    );
+                });
             }
             // F2: a request that is simply never answered, so the client's
             // timeout and its `$/cancelRequest` are reachable offline. No

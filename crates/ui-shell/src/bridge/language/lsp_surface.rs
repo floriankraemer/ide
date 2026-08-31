@@ -242,6 +242,100 @@ impl ffi::LanguageService {
             .map(to_ffi_inlay_hint)
             .collect()
     }
+
+    /// C9 — fire-and-forget `textDocument/semanticTokens/full` for `path`'s
+    /// whole document. Gated on `LspManager::semantic_tokens_legend`
+    /// *inside* the worker job rather than here, so a server that only
+    /// registers the capability dynamically (`client/registerCapability`,
+    /// after `ServerReady` already fired) is still reachable on the next
+    /// call — there is no snapshot of "supported" taken at `ServerReady`
+    /// time to go stale.
+    ///
+    /// Every early return in the job — no legend yet, the request errored,
+    /// the server answered with nothing to say — leaves whatever spans are
+    /// already stored for `path` untouched rather than clearing them: F0-16
+    /// again, a server still starting or still indexing must never turn
+    /// already-coloured text blank.
+    pub fn request_semantic_tokens(mut self: Pin<&mut Self>, path: &QString, text: &QString) {
+        let path = path.to_string();
+        let Some(language_id) = self.open_docs.borrow().get(&path).cloned() else {
+            return;
+        };
+        let uri = lsp_core::uri_from_path(&path);
+        let text = text.to_string();
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            let Some(legend) = manager.semantic_tokens_legend(&language_id) else {
+                return;
+            };
+            let Ok(result) = manager.semantic_tokens(&language_id, &uri) else {
+                return;
+            };
+            let Some((_result_id, tokens)) = lsp_core::parse_semantic_tokens_full(&result) else {
+                return;
+            };
+            let spans = mapped_semantic_spans(&legend, &tokens, &text);
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                service
+                    .semantic_tokens
+                    .borrow_mut()
+                    .insert(path.clone(), spans);
+                service
+                    .as_mut()
+                    .semantic_tokens_ready(QString::from(path.as_str()));
+            });
+        });
+    }
+
+    /// The last decoded-and-mapped semantic-token spans for `path`, in
+    /// `FfiHighlightSpan`'s byte-offset/scope-id shape —
+    /// `SyntaxHighlighterHandle::overlay_semantic_tokens`'s `semantic`
+    /// argument. Empty before the first answer.
+    pub fn semantic_token_spans(&self, path: &QString) -> Vec<ffi::FfiHighlightSpan> {
+        self.semantic_tokens
+            .borrow()
+            .get(&path.to_string())
+            .map(|spans| {
+                spans
+                    .iter()
+                    .map(|s| ffi::FfiHighlightSpan {
+                        start: s.start,
+                        end: s.end,
+                        scope: s.scope.id(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+}
+
+/// Decodes each token to its byte-range/scope shape: `token.line`/
+/// `start_char` are UTF-16 (the protocol's own encoding), converted to a
+/// byte offset via `editor_core::offsets` — the same conversion every other
+/// LSP-position-carrying value in this crate reuses, not a second one. A
+/// token whose type this build's taxonomy cannot place at all
+/// (`semantic_token_scope` returning `None`) is dropped, same as an
+/// unrecognized tree-sitter capture.
+fn mapped_semantic_spans(
+    legend: &lsp_core::SemanticTokensLegend,
+    tokens: &[lsp_core::SemanticToken],
+    text: &str,
+) -> Vec<lsp_core::MappedSemanticSpan> {
+    let utf16_starts = editor_core::offsets::utf16_line_starts(text);
+    tokens
+        .iter()
+        .filter_map(|token| {
+            let scope = lsp_core::semantic_token_scope(legend, token)?;
+            let line_start = *utf16_starts.get(token.line as usize)?;
+            let utf16_start = line_start + token.start_char as usize;
+            let utf16_end = utf16_start + token.length as usize;
+            Some(lsp_core::MappedSemanticSpan {
+                start: editor_core::offsets::byte_offset(text, utf16_start),
+                end: editor_core::offsets::byte_offset(text, utf16_end),
+                scope,
+            })
+        })
+        .collect()
 }
 
 fn to_ffi_intention(intention: &lsp_core::Intention) -> ffi::FfiIntention {

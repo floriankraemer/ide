@@ -145,6 +145,12 @@ pub struct LanguageServiceRust {
     pub(crate) highlights_tracker: RefCell<lsp_core::RequestTracker>,
     pub(crate) inlay_hints: RefCell<Vec<lsp_core::InlayHint>>,
     pub(crate) inlay_hints_tracker: RefCell<lsp_core::RequestTracker>,
+    /// C9: the last decoded-and-mapped semantic-token spans per open
+    /// document path, fire-and-forget refreshed by `request_semantic_tokens`
+    /// — see that method's doc comment for why an unsupported/failed/empty
+    /// answer leaves a path's entry untouched rather than clearing it.
+    pub(crate) semantic_tokens:
+        RefCell<std::collections::HashMap<String, Vec<lsp_core::MappedSemanticSpan>>>,
     /// The refactoring waiting to be applied, if any: what it changes, what
     /// to call it, and — when it came from the server asking us — the gate
     /// that server is blocked on.
@@ -197,6 +203,7 @@ impl Default for LanguageServiceRust {
             highlights_tracker: RefCell::default(),
             inlay_hints: RefCell::default(),
             inlay_hints_tracker: RefCell::default(),
+            semantic_tokens: RefCell::default(),
             pending: RefCell::default(),
             edits: RefCell::default(),
             busy: RefCell::default(),
@@ -408,24 +415,31 @@ impl ffi::LanguageService {
     }
 
     pub fn document_opened(mut self: Pin<&mut Self>, path: &QString, text: &QString) {
-        let path = path.to_string();
-        let Some(config) = self.config_for_path(&path) else {
+        let path_str = path.to_string();
+        let Some(config) = self.config_for_path(&path_str) else {
             return;
         };
         let language_id = config.language_id.clone();
-        let uri = lsp_core::uri_from_path(&path);
-        let text = text.to_string();
+        let uri = lsp_core::uri_from_path(&path_str);
+        let text_str = text.to_string();
         self.open_docs
             .borrow_mut()
-            .insert(path, language_id.clone());
+            .insert(path_str, language_id.clone());
 
         if self.started.borrow_mut().insert(language_id.clone()) {
             self.as_mut().start_server(config);
         }
         let language = language_id.clone();
-        self.push_job(move |manager| {
-            let _ = manager.did_open(&uri, &language, &text);
+        self.as_mut().push_job(move |manager| {
+            let _ = manager.did_open(&uri, &language, &text_str);
         });
+        // C9: fire-and-forget — a server whose semantic-tokens capability
+        // is not yet known (still starting, or registers it dynamically
+        // after `initialized`) simply gets a no-op from this call; nothing
+        // here retries. `SyntaxHighlighter` re-requesting on its own next
+        // revision-change hook is the second call site
+        // `overlay_semantic_tokens`'s TODO leaves for follow-up.
+        self.as_mut().request_semantic_tokens(path, text);
     }
 
     pub fn document_changed(self: Pin<&mut Self>, path: &QString, text: &QString) {
