@@ -34,6 +34,7 @@ use crate::inlay_hint::{line_range, parse_inlay_hints, InlayHint};
 use crate::intentions::{assemble, Intention, ORGANIZE_IMPORTS};
 use crate::navigation::{parse_definition, DefinitionTarget};
 use crate::progress::{ProgressTracker, ServerActivity};
+use crate::registration::{Registration, Registrations};
 use crate::rename::{parse_prepare_rename, PrepareRename};
 use crate::signature_help::{
     parse_signature_help, parse_signature_triggers, SignatureHelp, SignatureTriggers,
@@ -276,6 +277,11 @@ struct Server {
     /// `dispatch` to decide whether an inbound `workspace/applyEdit` was
     /// asked for. Shared with the manager, not owned here.
     sessions: Arc<RefactorSessions>,
+    /// C4: what this server has asked us to watch for it via
+    /// `client/registerCapability`, keyed by registration id like the
+    /// protocol keys it. Per server, like `progress`, because a
+    /// registration id is only unique within one server's session.
+    registrations: Registrations,
 }
 
 impl Server {
@@ -387,6 +393,7 @@ impl LspManager {
             stopping: AtomicBool::new(false),
             progress: Mutex::new(ProgressTracker::default()),
             sessions: Arc::clone(&self.sessions),
+            registrations: Registrations::default(),
         });
 
         let (ready_tx, ready_rx) = channel();
@@ -925,6 +932,14 @@ impl LspManager {
         self.documents.lock().unwrap().get(uri).map(|d| d.version)
     }
 
+    /// Whether the running server has dynamically registered `method` via
+    /// `client/registerCapability`. `false` for a server that is not
+    /// running at all, same as "it never registered anything".
+    pub fn method_registered(&self, language_id: &str, method: &str) -> bool {
+        self.server(language_id)
+            .is_some_and(|server| server.registrations.method_registered(method))
+    }
+
     /// Shut one server down: `shutdown`, `exit`, then kill if it lingers.
     pub fn stop(&self, language_id: &str) {
         let server = self.servers.lock().unwrap().remove(language_id);
@@ -1251,10 +1266,47 @@ fn dispatch(server: &Arc<Server>, language_id: &str, message: Value, events: &Se
         (Some("window/workDoneProgress/create"), Some(id)) => {
             let _ = server.send(&json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}));
         }
+        // C4: csharp-ls (and any server that leans on dynamic registration
+        // rather than declaring capabilities in `initialize`) sends this
+        // right after `initialized`. There is nothing to decide — this
+        // client always accepts a registration, same reasoning as
+        // `window/workDoneProgress/create` above — and no blocking work, so
+        // it is answered inline here rather than dispatched elsewhere.
+        // Malformed params (missing/wrong-shaped fields) are treated as an
+        // empty registration list rather than crashing this reader thread;
+        // refusing a registration the server would only retry is worse than
+        // ignoring one this client could not parse.
+        (Some("client/registerCapability"), Some(id)) => {
+            let registrations = message
+                .get("params")
+                .and_then(|p| p.get("registrations"))
+                .cloned()
+                .and_then(|v| serde_json::from_value::<Vec<Registration>>(v).ok())
+                .unwrap_or_default();
+            server.registrations.register(registrations);
+            let _ = server.send(&json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}));
+        }
+        // The spec really does spell this "unregisterations".
+        (Some("client/unregisterCapability"), Some(id)) => {
+            let ids: Vec<String> = message
+                .get("params")
+                .and_then(|p| p.get("unregisterations"))
+                .and_then(Value::as_array)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter_map(|e| e.get("id").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            server.registrations.unregister(&ids);
+            let _ = server.send(&json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}));
+        }
         // Every other server-to-client request. The server blocks until it
         // gets an answer, so answer honestly rather than not at all.
-        // ponytail: a real handler (workspace/configuration, registerCapability)
-        // lands with the features that need it.
+        // ponytail: a real handler (workspace/configuration) lands with the
+        // feature that needs it (C6).
         (Some(method), Some(id)) => {
             let _ = server.send(&json!({
                 "jsonrpc": "2.0",
@@ -1431,6 +1483,16 @@ fn client_capabilities() -> Value {
                 // We apply all of an edit or none of it.
                 "failureHandling": "abort",
                 "normalizesLineEndings": false,
+            },
+            // C4: the one capability this client dynamically registers for
+            // — csharp-ls and others declare their watched-file globs this
+            // way rather than up front. `relativePatternSupport: false`
+            // because `Registrations::watchers` hands `globPattern` on
+            // untouched to C5, which does not yet resolve a `RelativePattern`
+            // against a base URI.
+            "didChangeWatchedFiles": {
+                "dynamicRegistration": true,
+                "relativePatternSupport": false,
             },
         },
         // F0-16: without this a server has no permission to open a progress

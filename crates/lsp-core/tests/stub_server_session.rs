@@ -1364,3 +1364,64 @@ fn work_done_progress_is_advertised() {
 
     manager.stop(LANG);
 }
+
+// ---------------------------------------------------------------------------
+// C4: `client/registerCapability` / `client/unregisterCapability`
+// ---------------------------------------------------------------------------
+
+/// csharp-ls declares most of its capabilities via dynamic registration
+/// rather than up front, so a client that cannot answer
+/// `client/registerCapability` never sees them. This drives the stub through
+/// the real register-then-unregister sequence on the actual reader thread
+/// and checks the registry on the other side of it, not just the unit-level
+/// `Registrations` struct.
+#[test]
+fn register_capability_then_unregister_round_trips_through_the_reader_thread() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    assert!(
+        !manager.method_registered(LANG, "workspace/didChangeWatchedFiles"),
+        "nothing has registered yet",
+    );
+
+    // The stub pauses between its register and unregister requests, wide
+    // enough that the test thread can observe the registration actually
+    // land — through the real reader thread, not a direct call into
+    // `Registrations` — before it is taken away again.
+    let outcome = thread::scope(|scope| {
+        let run = scope.spawn(|| {
+            manager
+                .request(LANG, "stub/registerCapabilityRun", json!({"pause_ms": 200}))
+                .expect("the stub runs its register/unregister sequence")
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline
+            && !manager.method_registered(LANG, "workspace/didChangeWatchedFiles")
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            manager.method_registered(LANG, "workspace/didChangeWatchedFiles"),
+            "a client that answers client/registerCapability with \"not \
+             implemented\" is what makes csharp-ls never see its own \
+             capabilities",
+        );
+
+        run.join().expect("stub run thread did not panic")
+    });
+
+    assert_eq!(outcome["registered"], true);
+    assert_eq!(outcome["unregistered"], true);
+    assert!(
+        !manager.method_registered(LANG, "workspace/didChangeWatchedFiles"),
+        "client/unregisterCapability must remove the registration again",
+    );
+
+    manager.stop(LANG);
+}

@@ -34,6 +34,12 @@
 //! on line 900. A `codeAction` request at line 5 answers with a resource
 //! operation ahead of its text edits (F2-3), for the one thing none of the
 //! above exercises: creating a file as part of an edit.
+//!
+//! C4 added `stub/registerCapabilityRun`, which sends a
+//! `client/registerCapability` for `workspace/didChangeWatchedFiles`
+//! followed by a `client/unregisterCapability` for the same id — the
+//! sequence csharp-ls actually runs, since it declares most of its
+//! capabilities dynamically rather than in `initialize`.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Stdout, Write};
@@ -434,6 +440,82 @@ fn main() {
                     send(
                         &out,
                         json!({"jsonrpc": "2.0", "id": id, "result": {"created": created}}),
+                    );
+                });
+            }
+            // C4: the sequence csharp-ls actually runs — register
+            // `workspace/didChangeWatchedFiles` right after `initialized`,
+            // then later unregister the same id. Answered only once both
+            // requests have gone out and come back, so a test holding the
+            // answer knows the whole round trip already went through the
+            // client's reader thread.
+            ("stub/registerCapabilityRun", Some(id)) => {
+                let register_id = next_request_id;
+                let unregister_id = next_request_id + 1;
+                next_request_id += 2;
+
+                let (register_tx, register_rx) = channel();
+                let (unregister_tx, unregister_rx) = channel();
+                pending
+                    .lock()
+                    .expect("pending lock")
+                    .insert(register_id, register_tx);
+                pending
+                    .lock()
+                    .expect("pending lock")
+                    .insert(unregister_id, unregister_tx);
+
+                let out = Arc::clone(&out);
+                let pending = Arc::clone(&pending);
+                let params = params.clone();
+                thread::spawn(move || {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": register_id,
+                               "method": "client/registerCapability", "params": {
+                            "registrations": [{
+                                "id": "stub-watch",
+                                "method": "workspace/didChangeWatchedFiles",
+                                "registerOptions": {"watchers": [
+                                    {"globPattern": "**/*.rs", "kind": 7},
+                                ]},
+                            }],
+                        }}),
+                    );
+                    let register_answer = register_rx
+                        .recv_timeout(CLIENT_REPLY_TIMEOUT)
+                        .unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&register_id);
+                    let registered = register_answer.get("id").is_some()
+                        && register_answer.get("error").is_none();
+
+                    // A test hunting for the window in which the
+                    // registration is live gets to choose how wide it is.
+                    let pause_ms = params.get("pause_ms").and_then(Value::as_u64).unwrap_or(0);
+                    thread::sleep(Duration::from_millis(pause_ms));
+
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": unregister_id,
+                               "method": "client/unregisterCapability", "params": {
+                            "unregisterations": [
+                                {"id": "stub-watch", "method": "workspace/didChangeWatchedFiles"},
+                            ],
+                        }}),
+                    );
+                    let unregister_answer = unregister_rx
+                        .recv_timeout(CLIENT_REPLY_TIMEOUT)
+                        .unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&unregister_id);
+                    let unregistered = unregister_answer.get("id").is_some()
+                        && unregister_answer.get("error").is_none();
+
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "result": {
+                            "registered": registered,
+                            "unregistered": unregistered,
+                        }}),
                     );
                 });
             }

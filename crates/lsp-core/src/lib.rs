@@ -24,6 +24,7 @@ pub mod intentions;
 pub mod manager;
 pub mod navigation;
 pub mod progress;
+pub mod registration;
 pub mod rename;
 pub mod signature_help;
 pub mod tracker;
@@ -64,6 +65,7 @@ pub use manager::{
 };
 pub use navigation::{definition_outcome, parse_definition, DefinitionOutcome, DefinitionTarget};
 pub use progress::{ProgressTracker, ServerActivity};
+pub use registration::{Registration, Registrations, Watcher};
 pub use rename::{
     parse_prepare_rename, prepare_outcome, rename_outcome, PrepareOutcome, PrepareRename,
     RenameOutcome,
