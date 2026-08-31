@@ -583,15 +583,32 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
                         static_cast<int>(item.end_line),
                         static_cast<int>(item.end_character),
                         static_cast<int>(item.prefix_length),
+                        item.resolve_data,
                     });
                 }
                 editor->showCompletions(entries);
             });
-    connect(editor, &CodeEditor::completionCanceled, this,
-            [this]() { languageService_->cancelCompletion(); });
-    // F0-18: accepting an item is a buffer edit like any other. The widget
-    // says which item and where the caret is; `lsp_core::completion` works
-    // out the span that gets replaced.
+    connect(editor, &CodeEditor::completionCanceled, this, [this]() {
+        languageService_->cancelCompletion();
+        // C7: a documentation preview for the popup that just closed is no
+        // longer wanted either.
+        languageService_->cancelCompletionPreview();
+    });
+    // C7: the popup's selection moved — ask for a resolved preview of the
+    // newly highlighted row.
+    connect(editor,
+            &CodeEditor::completionPreviewRequested,
+            this,
+            [this](const QString &resolveData) {
+                languageService_->resolveCompletionPreview(resolveData);
+            });
+    // F0-18/C7: accepting an item is a buffer edit like any other. The
+    // widget says which item and where the caret is; `lsp_core::completion`
+    // works out the span that gets replaced, and — when the server offers
+    // `completionItem/resolve` — merges in whatever `additionalTextEdits`
+    // resolving it adds (the `using` an unimported type brings with it).
+    // The splice arrives on completionEditReady rather than as a return
+    // value, since the resolve round trip means it is never immediate.
     connect(editor,
             &CodeEditor::completionChosen,
             this,
@@ -608,9 +625,9 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
                                              static_cast<quint32>(entry.startCharacter),
                                              static_cast<quint32>(entry.endLine),
                                              static_cast<quint32>(entry.endCharacter),
-                                             static_cast<quint32>(entry.prefixLength)};
-                applyEditsTo(editor,
-                             languageService_->completionEdit(item, caret.first, caret.second));
+                                             static_cast<quint32>(entry.prefixLength),
+                                             entry.resolveData};
+                languageService_->acceptCompletion(item, caret.first, caret.second);
             });
 
     // F1-15: the multi-caret gestures. The widget reports what happened;

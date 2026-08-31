@@ -46,6 +46,12 @@ pub struct CompletionItem {
     /// means "replace whatever word the caret is in", which is the caller's
     /// business, not the protocol's.
     pub range: Option<TextRange>,
+    /// The item exactly as the server sent it, kept so it can be sent back
+    /// verbatim in a later `completionItem/resolve` request (C7) — the
+    /// protocol's own contract for that request is "the item you gave me,
+    /// possibly narrowed by `resolveSupport`", not a reconstruction from the
+    /// reduced fields above.
+    pub raw: Value,
 }
 
 impl CompletionItem {
@@ -138,6 +144,7 @@ fn item(value: &Value) -> Option<CompletionItem> {
             .map(str::to_string),
         insert,
         range: edit.and_then(edit_range),
+        raw: value.clone(),
     })
 }
 
@@ -213,6 +220,17 @@ pub fn parse_trigger_characters(init_result: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Whether the server offers `completionItem/resolve`
+/// (`completionProvider.resolveProvider` in the `initialize` result) — C7.
+/// A server that says no is never asked: the second round trip is only
+/// worth its latency when there is something on the other end of it.
+pub fn parse_resolve_provider(init_result: &Value) -> bool {
+    init_result
+        .pointer("/capabilities/completionProvider/resolveProvider")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
 }
 
 /// Whether to ask the server for completions after this keystroke.
@@ -460,6 +478,77 @@ pub fn accept_range(
             end_line: caret_line,
             end_character: caret_character,
         },
+    }
+}
+
+/// The completion's own insertion, as a [`crate::workspace_edit::TextEdit`] —
+/// the shape it has to be in to merge with a resolved item's
+/// `additionalTextEdits` into one application
+/// ([`crate::workspace_edit::descending`]/[`crate::workspace_edit::apply_to_text`]),
+/// rather than two separate splices a user would have to undo separately.
+pub fn own_edit(range: TextRange, insert: &str) -> crate::workspace_edit::TextEdit {
+    crate::workspace_edit::TextEdit {
+        start_line: range.start_line,
+        start_character: range.start_character,
+        end_line: range.end_line,
+        end_character: range.end_character,
+        new_text: insert.to_string(),
+    }
+}
+
+/// `additionalTextEdits` from a resolved completion item
+/// (`completionItem/resolve`) — the `using` an unimported type's completion
+/// brings with it, in csharp-ls. Shaped exactly like a formatting reply's
+/// `TextEdit[]`, so the same per-edit parser reads it
+/// ([`crate::formatting::text_edit`]) rather than a second one; a malformed
+/// entry drops the whole array, matching `workspace_edit`'s all-or-nothing
+/// rule — half an import applied is worse than none.
+pub fn additional_text_edits(resolved: &Value) -> Vec<crate::workspace_edit::TextEdit> {
+    let Some(array) = resolved
+        .get("additionalTextEdits")
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut edits = Vec::with_capacity(array.len());
+    for item in array {
+        match crate::formatting::text_edit(item) {
+            Some(edit) => edits.push(edit),
+            None => return Vec::new(),
+        }
+    }
+    edits
+}
+
+/// Decides whether a completion-item preview resolution (documentation and
+/// detail, requested as the popup's selection moves) is still the one the
+/// user is looking at.
+///
+/// Same shape as [`crate::hover::HoverTracker`] and for the same reason: the
+/// request is speculative and keystroke-driven, so an answer for a row the
+/// selection has already left is discarded rather than shown under the
+/// wrong item. Cancelling the in-flight request over the wire, rather than
+/// just discarding a late answer, is [`crate::manager::LspManager::request`]'s
+/// own timeout-triggered `$/cancelRequest` — there is no second cancellation
+/// mechanism to invent here.
+#[derive(Debug, Default)]
+pub struct CompletionResolveTracker(crate::RequestTracker);
+
+impl CompletionResolveTracker {
+    /// Start a preview resolution, invalidating any still in flight.
+    pub fn begin(&mut self) -> u64 {
+        self.0.begin()
+    }
+
+    /// The selection moved or the popup closed: nothing in flight is wanted
+    /// any more.
+    pub fn cancel(&mut self) {
+        self.0.cancel();
+    }
+
+    /// Is this response still the current one?
+    pub fn accept(&self, token: u64) -> bool {
+        self.0.accept(token)
     }
 }
 

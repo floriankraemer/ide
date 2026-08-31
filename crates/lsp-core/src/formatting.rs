@@ -141,7 +141,12 @@ fn capability_enabled(capabilities: &Value, key: &str) -> bool {
 /// One `TextEdit` from a formatting reply. Shaped exactly like
 /// `workspace_edit`'s, deliberately: the two paths produce the same type so
 /// the same ordering, overlap and staleness rules apply to both.
-fn text_edit(value: &Value) -> Option<TextEdit> {
+///
+/// `pub(crate)` rather than private: `completion::additional_text_edits`
+/// (C7) reads the exact same `TextEdit` shape out of a resolved completion
+/// item's `additionalTextEdits`, and reusing this parser there is the point
+/// — not a second copy of it.
+pub(crate) fn text_edit(value: &Value) -> Option<TextEdit> {
     let range = value.get("range")?;
     let start = range.get("start")?;
     let end = range.get("end")?;

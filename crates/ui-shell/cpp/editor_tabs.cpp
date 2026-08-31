@@ -174,6 +174,34 @@ EditorTabs::EditorTabs(DocumentManager *docManager, LanguageService *languageSer
         }
     });
 
+    // C7: the splice for the last acceptCompletion — the item's own edit,
+    // merged with a resolved `additionalTextEdits` when there was one to
+    // merge — spliced through the same one-edit-block path every other
+    // buffer change uses.
+    connect(languageService_,
+            &LanguageService::completionEditReady,
+            this,
+            [this](const ::rust::Vec<FfiTextEdit> &edits) {
+                auto *editor = qobject_cast<CodeEditor *>(
+                    activeGroup_ ? activeGroup_->currentWidget() : nullptr);
+                if (editor) {
+                    applyEditsTo(editor, edits);
+                }
+            });
+
+    // C7: a completion-item preview resolution landed for the popup's
+    // currently highlighted row.
+    connect(languageService_,
+            &LanguageService::completionPreviewReady,
+            this,
+            [this](const QString &detail, const QString &documentation) {
+                auto *editor = qobject_cast<CodeEditor *>(
+                    activeGroup_ ? activeGroup_->currentWidget() : nullptr);
+                if (editor) {
+                    editor->updateCompletionPreview(detail, documentation);
+                }
+            });
+
     // F2-10/F2-11: every answer landed. Only a still-current one is ever
     // signalled (`lsp_core::RequestTracker`), so each of these only has to
     // decide where to put it — never whether it is still wanted.

@@ -145,6 +145,10 @@ struct CompletionEntry
     // what gets replaced when `hasRange` is false. Derived from the same
     // text the request was made about, in `lsp_core::completion`.
     int prefixLength;
+    // C7: the server's own item, as opaque JSON text, carried only so it can
+    // be handed back for `completionItem/resolve` on accept or on preview.
+    // This widget never reads it.
+    QString resolveData;
 };
 
 // Line-number gutter (Qt's classic Code Editor Example pattern). Q_OBJECT is
@@ -218,6 +222,13 @@ public:
     // arrives and after every keystroke the popup survives.
     void refreshCompletions();
 
+    // C7: a preview resolution for the currently highlighted row landed —
+    // replace its tooltip with the resolved detail/documentation. A blank
+    // `detail` and `documentation` (server had nothing further to say, or
+    // never offered resolve at all) leaves the row's initial tooltip as it
+    // was, painted from the unresolved item in showCompletions().
+    void updateCompletionPreview(const QString &detail, const QString &documentation);
+
     // S2: explicit override for the current-line band, "#rrggbb" or empty
     // for "derive it from the editor palette" (the same empty-means-theme
     // contract the editor background/foreground overrides use).
@@ -281,6 +292,12 @@ signals:
     // L5: the popup closed, or the caret left the word — nothing in flight
     // is wanted.
     void completionCanceled();
+
+    // C7: the popup's selection moved to `resolveData`'s item — ask for its
+    // documentation/detail via `completionItem/resolve`, when the server
+    // offers it at all (that check, and cancelling a stale request, are
+    // `LanguageService::resolveCompletionPreview`'s job, not this widget's).
+    void completionPreviewRequested(const QString &resolveData);
 
     // F0-18: the user accepted `entry`. What span the insertion replaces is
     // `lsp_core::completion`'s call, so this widget reports the choice and

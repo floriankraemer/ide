@@ -86,6 +86,19 @@ CodeEditor::CodeEditor(QWidget *parent)
                     insertCompletion(completionEntries_.at(entry));
                 }
             });
+    // C7: the popup's selection moved — ask for a resolved preview of the
+    // newly highlighted row. Whether the server offers resolve at all, and
+    // dropping a stale answer, are `LanguageService`'s decisions; this only
+    // reports the gesture, same as `completionRequested` does for a keystroke.
+    connect(completer_,
+            qOverload<const QModelIndex &>(&QCompleter::highlighted),
+            this,
+            [this](const QModelIndex &index) {
+                const int entry = index.data(kEntryIndexRole).toInt();
+                if (entry >= 0 && entry < completionEntries_.size()) {
+                    emit completionPreviewRequested(completionEntries_.at(entry).resolveData);
+                }
+            });
 
     updateLineNumberAreaWidth(0);
     highlightCurrentLine();
@@ -125,6 +138,36 @@ void CodeEditor::showCompletions(const QVector<CompletionEntry> &items)
     anchor.setWidth(popup->sizeHintForColumn(0) + popup->verticalScrollBar()->sizeHint().width()
                     + kPopupWidthPadding);
     completer_->complete(anchor);
+}
+
+void CodeEditor::updateCompletionPreview(const QString &detail, const QString &documentation)
+{
+    if (detail.isEmpty() && documentation.isEmpty()) {
+        return;
+    }
+    const QModelIndex current = completer_->popup()->currentIndex();
+    const int entry = current.data(kEntryIndexRole).toInt();
+    if (!current.isValid() || entry < 0 || entry >= completionEntries_.size()) {
+        return;
+    }
+    // `entry` is the row's index into `completionEntries_`, which is also
+    // its row index in `completionModel_` — rows are appended in that same
+    // order in showCompletions() — so this is correct even if the popup
+    // shows the completer's own (possibly reordered) proxy model.
+    QStandardItem *row = completionModel_->item(entry);
+    if (!row) {
+        return;
+    }
+    const CompletionEntry &original = completionEntries_.at(entry);
+    QStringList tooltip;
+    for (const QString &part :
+         {original.kind, detail.isEmpty() ? original.detail : detail,
+          documentation.isEmpty() ? original.documentation : documentation}) {
+        if (!part.isEmpty()) {
+            tooltip << part;
+        }
+    }
+    row->setToolTip(tooltip.join(QStringLiteral("\n")));
 }
 
 void CodeEditor::refreshCompletions()

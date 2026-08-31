@@ -410,6 +410,10 @@ mod ffi {
         /// How many UTF-16 characters before the caret the typed word
         /// occupies — what the view replaces when `has_range` is false.
         prefix_length: u32,
+        /// C7: the server's own item, as JSON text — opaque here, carried
+        /// only so `acceptCompletion`/`resolveCompletionPreview` can hand it
+        /// back for `completionItem/resolve`. The view never reads it.
+        resolve_data: QString,
     }
 
     /// One caret, as flat document positions in UTF-16 code units — the
@@ -3007,24 +3011,66 @@ mod ffi {
             text_before_cursor: &QString,
         ) -> Vec<FfiCompletionItem>;
 
-        /// The splice list for accepting `item` — the row `completionItems`
-        /// handed over, passed straight back — with the caret where the
-        /// user has it now.
+        /// Accept `item` — the row `completionItems` handed over, passed
+        /// straight back — with the caret where the user has it now.
         ///
         /// Which span the insertion replaces is a rule, not arithmetic the
         /// view may do: it depends on whether the server named a range, and
         /// on characters typed while the request was in flight, both of
-        /// which `lsp_core::completion` decides. Always one edit, so the
-        /// view splices it through `EditorTabs::applyEditsTo` like every
-        /// other buffer change.
+        /// which `lsp_core::completion` decides. C7: when the server offers
+        /// `completionItem/resolve`, this also asks for it and merges
+        /// whatever `additionalTextEdits` comes back — the `using` an
+        /// unimported type's completion brings with it — into the same
+        /// splice, bounded by the crate's default request timeout so an
+        /// accept can never hang. Answers on `completionEditReady`, never
+        /// synchronously, because the resolve round trip may be in it.
         #[qinvokable]
-        #[cxx_name = "completionEdit"]
-        fn completion_edit(
-            self: &LanguageService,
+        #[cxx_name = "acceptCompletion"]
+        fn accept_completion(
+            self: Pin<&mut LanguageService>,
             item: &FfiCompletionItem,
             caret_line: u32,
             caret_character: u32,
-        ) -> Vec<FfiTextEdit>;
+        );
+
+        /// The splice list for the last `acceptCompletion`, ready for
+        /// `EditorTabs::applyEditsTo` like every other buffer change — one
+        /// edit block, so accepting an import along with the item it
+        /// belongs to is one Ctrl+Z.
+        #[qsignal]
+        #[cxx_name = "completionEditReady"]
+        fn completion_edit_ready(self: Pin<&mut LanguageService>, edits: Vec<FfiTextEdit>);
+
+        /// C7 — as the popup's selection moves, ask the server to fill in
+        /// documentation and detail for `resolve_data` (opaque; from the
+        /// row's own `FfiCompletionItem`). A server that never advertised
+        /// `completionItem/resolve`, or a `resolve_data` that carries none,
+        /// is a silent no-op — the initial list's own fields are shown as
+        /// they are. Cancelling a stale request is
+        /// `resolveCompletionPreview`'s own re-request-invalidates-the-last-one
+        /// rule (`lsp_core::CompletionResolveTracker`), the same shape
+        /// `hoverAt`/`cancelHover` already use; a server round trip that
+        /// outlives its usefulness is left to time out on its own rather
+        /// than cancelled a second way.
+        #[qinvokable]
+        #[cxx_name = "resolveCompletionPreview"]
+        fn resolve_completion_preview(self: Pin<&mut LanguageService>, resolve_data: &QString);
+
+        /// The selection moved again, or the popup closed: whatever preview
+        /// resolution is in flight is no longer wanted.
+        #[qinvokable]
+        #[cxx_name = "cancelCompletionPreview"]
+        fn cancel_completion_preview(self: Pin<&mut LanguageService>);
+
+        /// A preview resolution arrived and is still current — replace the
+        /// row's shown detail/documentation with these.
+        #[qsignal]
+        #[cxx_name = "completionPreviewReady"]
+        fn completion_preview_ready(
+            self: Pin<&mut LanguageService>,
+            detail: QString,
+            documentation: QString,
+        );
 
         /// A completion answer arrived and is still current. The view reads
         /// it back with `completionItems`, the same

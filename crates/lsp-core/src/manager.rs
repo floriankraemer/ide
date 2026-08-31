@@ -26,7 +26,9 @@ use crate::catalog::ServerConfig;
 use crate::code_action::{
     filter_by_kind, needs_unfiltered_retry, parse_code_actions, CodeActionItem, CommandRef,
 };
-use crate::completion::{parse_completion, parse_trigger_characters, CompletionList};
+use crate::completion::{
+    parse_completion, parse_resolve_provider, parse_trigger_characters, CompletionList,
+};
 use crate::configuration;
 use crate::document_highlight::{parse_document_highlights, DocumentHighlight};
 use crate::formatting::{parse_formatting, FormattingOptions, FormattingOutcome};
@@ -121,6 +123,13 @@ pub enum LspEvent {
         /// characters trigger and retrigger it — from the same `initialize`
         /// result, read once for the same reason `trigger_characters` is.
         signature_triggers: SignatureTriggers,
+        /// C7: whether this server offers `completionItem/resolve`
+        /// (`completionProvider.resolveProvider`), from the same
+        /// `initialize` result — kept so an accept or a preview knows
+        /// whether the second round trip is worth making at all, rather
+        /// than sending it to every server and reading `MethodNotFound`
+        /// back one keystroke at a time.
+        completion_resolve_supported: bool,
     },
     /// The server's stdout hit EOF or errored, i.e. it died. A respawn follows
     /// after `retry_in` unless the restart budget is used up.
@@ -849,6 +858,33 @@ impl LspManager {
         Ok(parse_completion(&result))
     }
 
+    /// `completionItem/resolve`: ask the server to fill in what it left out
+    /// of the initial list — most importantly `additionalTextEdits`, the
+    /// `using` an unimported type's completion brings with it (C7).
+    ///
+    /// `item` is sent back exactly as the server gave it
+    /// ([`CompletionItem::raw`]); the protocol's own contract for this
+    /// request is "the item you handed me", not a reconstruction from the
+    /// reduced fields the rest of this client works with.
+    ///
+    /// Whether it is worth calling at all — [`LspEvent::ServerReady::completion_resolve_supported`]
+    /// — is the caller's decision, not this method's: a server that never
+    /// advertised `resolveProvider` is never asked, so this sends the
+    /// request unconditionally on the assumption that check already
+    /// happened.
+    pub fn resolve_completion_item(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Value, LspError> {
+        self.request_with_timeout(
+            language_id,
+            "completionItem/resolve",
+            item.clone(),
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+    }
+
     /// `textDocument/formatting` for a whole open document.
     ///
     /// A server that does not implement formatting answers with
@@ -1104,7 +1140,12 @@ fn spawn_supervisor(
 
         loop {
             match connect(&server, &cfg, &root_uri) {
-                Ok((stdout, trigger_characters, signature_triggers)) => {
+                Ok((
+                    stdout,
+                    trigger_characters,
+                    signature_triggers,
+                    completion_resolve_supported,
+                )) => {
                     if let Some(tx) = ready.take() {
                         let _ = tx.send(Ok(()));
                     }
@@ -1113,6 +1154,7 @@ fn spawn_supervisor(
                         restarts,
                         trigger_characters,
                         signature_triggers,
+                        completion_resolve_supported,
                     });
                     let started = Instant::now();
                     read_loop(&server, &cfg.language_id, stdout, &events);
@@ -1186,6 +1228,7 @@ fn connect(
         BufReader<std::process::ChildStdout>,
         Vec<String>,
         SignatureTriggers,
+        bool,
     ),
     LspError,
 > {
@@ -1223,7 +1266,7 @@ fn connect(
         &serde_json::to_vec(&init).map_err(io::Error::from)?,
     )?;
 
-    let (trigger_characters, signature_triggers) = loop {
+    let (trigger_characters, signature_triggers, completion_resolve_supported) = loop {
         let Some(body) = read_message(&mut stdout)? else {
             return Err(LspError::Disconnected {
                 method: "initialize".into(),
@@ -1240,6 +1283,7 @@ fn connect(
             break (
                 parse_trigger_characters(result),
                 parse_signature_triggers(result),
+                parse_resolve_provider(result),
             );
         }
         // Anything else before the response (log messages, server requests)
@@ -1254,7 +1298,12 @@ fn connect(
     stdin.flush()?;
 
     *server.conn.lock().unwrap() = Some(Conn { stdin, child });
-    Ok((stdout, trigger_characters, signature_triggers))
+    Ok((
+        stdout,
+        trigger_characters,
+        signature_triggers,
+        completion_resolve_supported,
+    ))
 }
 
 /// Read and dispatch until the server's stdout ends (i.e. it died).
@@ -1513,6 +1562,14 @@ fn client_capabilities() -> Value {
                 "completionItem": {
                     "snippetSupport": false,
                     "documentationFormat": ["plaintext", "markdown"],
+                    // C7: which fields are worth a `completionItem/resolve`
+                    // round trip for — `additionalTextEdits` is the `using`
+                    // csharp-ls adds for an unimported type; `documentation`
+                    // and `detail` are the two fields most servers only
+                    // fill in on resolve, to keep the initial list cheap.
+                    "resolveSupport": {
+                        "properties": ["documentation", "detail", "additionalTextEdits"],
+                    },
                 },
                 "contextSupport": false,
             },

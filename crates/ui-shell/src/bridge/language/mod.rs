@@ -110,6 +110,19 @@ pub struct LanguageServiceRust {
     /// Trigger characters per language, as each server advertised them in
     /// its `initialize` result (`LspEvent::ServerReady`).
     triggers: RefCell<std::collections::HashMap<String, Vec<String>>>,
+    /// C7: whether each language's server offers `completionItem/resolve`,
+    /// from the same `initialize` result, stored the same way trigger
+    /// characters are — a per-language flag the accept path and the preview
+    /// path both gate on, rather than sending the request to a server that
+    /// never advertised it.
+    completion_resolve_supported: RefCell<std::collections::HashMap<String, bool>>,
+    /// C7: the language of the last `completionAt`, so an accept or a
+    /// preview resolution — neither of which is handed a path — knows which
+    /// server to ask. Set alongside `completion`/`completions`.
+    completion_language: RefCell<Option<String>>,
+    /// C7: which completion-item preview resolution (documentation/detail as
+    /// the popup's selection moves) is still the current one.
+    completion_resolve: RefCell<lsp_core::CompletionResolveTracker>,
     /// RF8: the offers of the last `codeActionsAt`, plus the language they
     /// came from — resolving or executing one has to go back to that server.
     actions: RefCell<Vec<lsp_core::CodeActionItem>>,
@@ -169,6 +182,9 @@ impl Default for LanguageServiceRust {
             completion: RefCell::default(),
             completions: RefCell::default(),
             triggers: RefCell::default(),
+            completion_resolve_supported: RefCell::default(),
+            completion_language: RefCell::default(),
+            completion_resolve: RefCell::default(),
             actions: RefCell::default(),
             actions_language: RefCell::default(),
             intentions: RefCell::default(),
@@ -310,6 +326,12 @@ fn to_ffi_completion(item: lsp_core::CompletionItem, prefix_length: u32) -> ffi:
         end_line: 0,
         end_character: 0,
     });
+    // C7: the item exactly as the server sent it, carried through the FFI
+    // boundary as JSON text because `completionItem/resolve` needs it back
+    // verbatim and cxx-qt structs cannot hold an arbitrary `serde_json::Value`.
+    // Whether it is worth sending anywhere is `completion_resolve_supported`'s
+    // decision, not this translation's.
+    let resolve_data = serde_json::to_string(&item.raw).unwrap_or_default();
     ffi::FfiCompletionItem {
         label: QString::from(item.label.as_str()),
         kind: QString::from(lsp_core::kind_name(item.kind)),
@@ -322,6 +344,7 @@ fn to_ffi_completion(item: lsp_core::CompletionItem, prefix_length: u32) -> ffi:
         end_line: range.end_line,
         end_character: range.end_character,
         prefix_length,
+        resolve_data: QString::from(resolve_data.as_str()),
     }
 }
 
@@ -1178,6 +1201,7 @@ impl ffi::LanguageService {
         }
 
         let uri = lsp_core::uri_from_path(&path);
+        *self.completion_language.borrow_mut() = Some(language_id.clone());
         let token = self
             .completion
             .borrow_mut()
@@ -1219,12 +1243,23 @@ impl ffi::LanguageService {
             .collect()
     }
 
-    pub fn completion_edit(
-        &self,
+    /// Accept `item`: the splice that types it, plus — when the server
+    /// supports `completionItem/resolve` (C7) — whatever
+    /// `additionalTextEdits` resolving it adds, merged into the same
+    /// application so one Ctrl+Z undoes both.
+    ///
+    /// Answers on `completionEditReady`, never synchronously: the server may
+    /// have to be asked, and `push_job` only ever answers off the Qt thread.
+    /// A server with nothing to resolve, or one that times out
+    /// ([`lsp_core::DEFAULT_REQUEST_TIMEOUT`]), still gets its answer — the
+    /// item's own edit alone — because an accept must never be left half
+    /// finished.
+    pub fn accept_completion(
+        mut self: Pin<&mut Self>,
         item: &ffi::FfiCompletionItem,
         caret_line: u32,
         caret_character: u32,
-    ) -> Vec<ffi::FfiTextEdit> {
+    ) {
         let range = item.has_range.then_some(lsp_core::TextRange {
             start_line: item.start_line,
             start_character: item.start_character,
@@ -1237,15 +1272,114 @@ impl ffi::LanguageService {
             caret_line,
             caret_character,
         );
-        vec![ffi::FfiTextEdit {
-            path: QString::default(),
-            in_buffer: true,
-            start_line: span.start_line,
-            start_character: span.start_character,
-            end_line: span.end_line,
-            end_character: span.end_character,
-            new_text: item.insert.clone(),
-        }]
+        let own_edit = lsp_core::completion_own_edit(span, &item.insert.to_string());
+
+        let language_id = self.completion_language.borrow().clone();
+        let resolvable = language_id.as_deref().is_some_and(|lang| {
+            self.completion_resolve_supported
+                .borrow()
+                .get(lang)
+                .copied()
+                .unwrap_or(false)
+        });
+        let raw: Option<serde_json::Value> = resolvable
+            .then(|| serde_json::from_str(&item.resolve_data.to_string()).ok())
+            .flatten();
+
+        let Some((language_id, raw)) = language_id.zip(raw) else {
+            self.as_mut().emit_completion_edit(vec![own_edit]);
+            return;
+        };
+
+        let fallback = own_edit.clone();
+        let qt_thread = self.as_mut().qt_thread();
+        let queued = self.push_job(move |manager| {
+            let additional = manager
+                .resolve_completion_item(&language_id, &raw)
+                .map(|resolved| lsp_core::completion_additional_edits(&resolved))
+                .unwrap_or_default();
+            let mut edits = additional;
+            edits.push(own_edit);
+            let edits = lsp_core::descending(edits);
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                service.as_mut().emit_completion_edit(edits);
+            });
+        });
+        if !queued {
+            self.as_mut().emit_completion_edit(vec![fallback]);
+        }
+    }
+
+    /// [`lsp_core::TextEdit`]s, translated to the FFI shape and sent on
+    /// `completionEditReady` — the one place that signal is emitted, so
+    /// every path out of `accept_completion` produces exactly one answer.
+    fn emit_completion_edit(mut self: Pin<&mut Self>, edits: Vec<lsp_core::TextEdit>) {
+        let edits = edits
+            .into_iter()
+            .map(|edit| ffi::FfiTextEdit {
+                path: QString::default(),
+                in_buffer: true,
+                start_line: edit.start_line,
+                start_character: edit.start_character,
+                end_line: edit.end_line,
+                end_character: edit.end_character,
+                new_text: QString::from(edit.new_text.as_str()),
+            })
+            .collect();
+        self.as_mut().completion_edit_ready(edits);
+    }
+
+    /// C7 — the popup's selection moved to `resolve_data`'s item: ask the
+    /// server to fill in documentation and detail, when it offers
+    /// `completionItem/resolve` at all. A superseded or too-late answer
+    /// produces no signal, `lsp_core::CompletionResolveTracker`'s rule —
+    /// the same shape `hover_at` uses for the pointer.
+    pub fn resolve_completion_preview(mut self: Pin<&mut Self>, resolve_data: &QString) {
+        let language_id = self.completion_language.borrow().clone();
+        let resolvable = language_id.as_deref().is_some_and(|lang| {
+            self.completion_resolve_supported
+                .borrow()
+                .get(lang)
+                .copied()
+                .unwrap_or(false)
+        });
+        let raw: Option<serde_json::Value> = resolvable
+            .then(|| serde_json::from_str(&resolve_data.to_string()).ok())
+            .flatten();
+        let Some((language_id, raw)) = language_id.zip(raw) else {
+            return;
+        };
+
+        let token = self.completion_resolve.borrow_mut().begin();
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            let Ok(resolved) = manager.resolve_completion_item(&language_id, &raw) else {
+                return;
+            };
+            // Reuses `parse_completion`'s own field extraction rather than a
+            // second reader for the same `CompletionItem` shape — a resolved
+            // item answers with the same fields a list entry does.
+            let Some(item) = lsp_core::parse_completion(&serde_json::json!([resolved]))
+                .items
+                .into_iter()
+                .next()
+            else {
+                return;
+            };
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                if !service.completion_resolve.borrow().accept(token) {
+                    return;
+                }
+                service.as_mut().completion_preview_ready(
+                    QString::from(item.detail.as_str()),
+                    QString::from(item.documentation.as_str()),
+                );
+            });
+        });
+    }
+
+    pub fn cancel_completion_preview(self: Pin<&mut Self>) {
+        self.completion_resolve.borrow_mut().cancel();
     }
 
     pub fn resolve_definition(mut self: Pin<&mut Self>, path: &QString, line: u32, character: u32) {
@@ -1362,6 +1496,7 @@ impl ffi::LanguageService {
                 language_id,
                 trigger_characters,
                 signature_triggers,
+                completion_resolve_supported,
                 ..
             } => {
                 let name = name_of(&language_id);
@@ -1371,6 +1506,9 @@ impl ffi::LanguageService {
                 self.signature_triggers
                     .borrow_mut()
                     .insert(language_id.clone(), signature_triggers);
+                self.completion_resolve_supported
+                    .borrow_mut()
+                    .insert(language_id.clone(), completion_resolve_supported);
                 self.as_mut().server_state_changed(
                     QString::from(language_id.as_str()),
                     QString::from(name.as_str()),

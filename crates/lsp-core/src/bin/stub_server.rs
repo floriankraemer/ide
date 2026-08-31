@@ -45,6 +45,19 @@
 //! request for two sections — one the test's server was configured under
 //! and one it was not — the way csharp-ls pulls its settings after
 //! `initialized`.
+//!
+//! C7 added `STUB_LSP_COMPLETION_RESOLVE`, which makes `initialize`
+//! advertise `completionProvider.resolveProvider: true` (unset, the default,
+//! advertises the provider with no `resolveProvider` at all — a server that
+//! never offers the second round trip). `completionItem/resolve` itself is
+//! always answered regardless of the flag — the flag only controls what a
+//! test can observe was *advertised*, matching real servers that answer a
+//! request whether or not a client bothered to check the capability first.
+//! The reply echoes the item back with an `additionalTextEdits` entry added,
+//! simulating the `using` an unimported type's completion brings with it in
+//! csharp-ls; a `label` of `"stub/silence"` gets no reply at all, the same
+//! never-answer affordance `stub/silence` is elsewhere, so the client's own
+//! timeout path is reachable for this method too.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Stdout, Write};
@@ -59,6 +72,9 @@ use serde_json::{json, Value};
 /// Set to `1` to exit(1) right after answering the first `textDocument/didOpen`,
 /// so respawn and backoff can be exercised.
 const DIE_ON_DIDOPEN: &str = "STUB_LSP_DIE_ON_DIDOPEN";
+/// C7: set to `1` to advertise `completionProvider.resolveProvider: true`
+/// in `initialize`'s result.
+const COMPLETION_RESOLVE: &str = "STUB_LSP_COMPLETION_RESOLVE";
 
 type Out = Arc<Mutex<Stdout>>;
 
@@ -91,6 +107,7 @@ fn main() {
     let mut next_request_id = 9100i64;
     let mut input = BufReader::new(io::stdin());
     let die_on_didopen = std::env::var(DIE_ON_DIDOPEN).is_ok_and(|v| v == "1");
+    let completion_resolve = std::env::var(COMPLETION_RESOLVE).is_ok_and(|v| v == "1");
 
     while let Some(body) = read_message(&mut input).expect("read from stdin") {
         let message: Value = match serde_json::from_slice(&body) {
@@ -120,14 +137,20 @@ fn main() {
             ("initialize", Some(id)) => {
                 *client_capabilities.lock().expect("capabilities lock") =
                     params.get("capabilities").cloned().unwrap_or(Value::Null);
+                let mut completion_provider = json!({
+                    // L5: the same pair rust-analyzer advertises, so `.` and
+                    // (twice over) `::` are covered.
+                    "triggerCharacters": [".", ":"],
+                });
+                if completion_resolve {
+                    completion_provider["resolveProvider"] = json!(true);
+                }
                 send(
                     &out,
                     json!({"jsonrpc": "2.0", "id": id, "result": {
                         "capabilities": {
                             "textDocumentSync": 1,
-                            // L5: the same pair rust-analyzer advertises, so
-                            // `.` and (twice over) `::` are covered.
-                            "completionProvider": {"triggerCharacters": [".", ":"]},
+                            "completionProvider": completion_provider,
                             // F2: the pair every language agrees on, plus
                             // the closing paren as a retrigger so the nested
                             // -call case is reachable offline.
@@ -286,6 +309,28 @@ fn main() {
                     _ => Value::Null,
                 };
                 send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // C7: echo the item back with `additionalTextEdits` added — the
+            // `using` an unimported type's completion brings with it,
+            // csharp-ls's reason for this request existing at all. A label
+            // of `"stub/silence"` gets no reply, so the client's own
+            // timeout/`$/cancelRequest` path is reachable for this method.
+            ("completionItem/resolve", Some(id)) => {
+                if params.get("label").and_then(Value::as_str) == Some("stub/silence") {
+                    continue;
+                }
+                let mut item = params.clone();
+                if let Value::Object(map) = &mut item {
+                    map.insert(
+                        "additionalTextEdits".into(),
+                        json!([{
+                            "newText": "using System.Collections.Generic;\n",
+                            "range": {"start": {"line": 0, "character": 0},
+                                      "end": {"line": 0, "character": 0}},
+                        }]),
+                    );
+                }
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": item}));
             }
             // F2-5: one signature-help shape per requested line —
             // line 0 -> offset parameter labels, line 1 -> substring labels,

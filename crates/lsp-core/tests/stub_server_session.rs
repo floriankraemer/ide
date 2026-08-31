@@ -49,6 +49,12 @@ fn stub_config_with_settings() -> ServerConfig {
     }
 }
 
+/// C7: the stub advertises `completionProvider.resolveProvider: true`, the
+/// way csharp-ls does.
+fn stub_config_with_completion_resolve() -> ServerConfig {
+    config("env", &["STUB_LSP_COMPLETION_RESOLVE=1", STUB])
+}
+
 /// Drain events until one matches, or fail. Non-matching events are skipped:
 /// a server may legitimately emit log notifications we don't care about.
 fn wait_for<T>(
@@ -1580,4 +1586,115 @@ fn update_settings_on_a_server_that_is_not_running_is_an_error() {
         manager.update_settings(LANG, json!({})),
         Err(LspError::NoServer(_))
     ));
+}
+
+// ---------------------------------------------------------------------------
+// C7: completionItem/resolve
+// ---------------------------------------------------------------------------
+
+/// A server that never advertises `completionProvider.resolveProvider`
+/// reports `completion_resolve_supported: false` on `ServerReady` — the flag
+/// that gates every caller from spending the round trip on a server that
+/// cannot answer it.
+#[test]
+fn server_ready_reports_no_resolve_support_when_not_advertised() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    let supported = wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady {
+            completion_resolve_supported,
+            ..
+        } => Some(*completion_resolve_supported),
+        _ => None,
+    });
+    assert!(!supported);
+    manager.stop(LANG);
+}
+
+/// The same event reports `true` for a server that advertises
+/// `completionProvider.resolveProvider: true`, the way csharp-ls does.
+#[test]
+fn server_ready_reports_resolve_support_when_advertised() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_completion_resolve())
+        .expect("stub starts");
+    let supported = wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady {
+            completion_resolve_supported,
+            ..
+        } => Some(*completion_resolve_supported),
+        _ => None,
+    });
+    assert!(supported);
+    manager.stop(LANG);
+}
+
+/// `resolve_completion_item` round-trips the item through the reader thread
+/// and returns whatever the server added — here, the `additionalTextEdits`
+/// that simulate a `using` insertion.
+#[test]
+fn resolve_completion_item_returns_the_resolved_item() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_completion_resolve())
+        .expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    let item = json!({"label": "List", "kind": 7});
+    let resolved = manager
+        .resolve_completion_item(LANG, &item)
+        .expect("the stub answers completionItem/resolve");
+    assert_eq!(resolved["label"], "List");
+    assert_eq!(
+        resolved["additionalTextEdits"][0]["newText"],
+        "using System.Collections.Generic;\n"
+    );
+
+    manager.stop(LANG);
+}
+
+/// A `completionItem/resolve` that never answers is bounded by the same
+/// timeout/`$/cancelRequest` path every other request uses — proven here
+/// through `request_with_timeout` directly (with a short deadline, rather
+/// than `resolve_completion_item`'s own [`lsp_core::DEFAULT_REQUEST_TIMEOUT`],
+/// so the test does not have to wait ten seconds) since `resolve_completion_item`
+/// is a thin wrapper with no logic of its own to test separately — see its
+/// source in `manager.rs`. The accept-path fallback this unblocks — apply the
+/// unresolved item's own edit rather than hang — is exercised at the
+/// `ui-shell` layer, in `crates/ui-shell/src/bridge/language/mod.rs`.
+#[test]
+fn a_resolve_that_never_answers_times_out_and_is_cancelled() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_completion_resolve())
+        .expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    let item = json!({"label": "stub/silence"});
+    let result = manager.request_with_timeout(
+        LANG,
+        "completionItem/resolve",
+        item,
+        Duration::from_millis(200),
+    );
+    assert!(matches!(
+        result,
+        Err(LspError::Timeout { method }) if method == "completionItem/resolve"
+    ));
+
+    // The server is still alive and answering: the request was cancelled,
+    // not the connection torn down.
+    let echoed = manager
+        .request(LANG, "stub/echo", json!({"tag": "after-resolve-timeout"}))
+        .expect("the server is still usable after a cancelled resolve");
+    assert_eq!(echoed["tag"], "after-resolve-timeout");
+
+    manager.stop(LANG);
 }
