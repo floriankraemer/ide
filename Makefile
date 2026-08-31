@@ -33,18 +33,21 @@ test: linux-image ## Run cargo nextest + doctests in Docker
 # The conformance suite runs against a REAL language server, so it is opt-in:
 # it needs its own image, takes minutes, and can go red because upstream
 # changed rather than because we did. Nightly and on demand, never per-PR.
-lsp-image: ## Build the lsp-conformance image (linux-builder + rust-analyzer)
+lsp-image: ## Build the lsp-conformance image (linux-builder + rust-analyzer + .NET SDK/csharp-ls)
 	$(DOCKER) build --target lsp-conformance -t $(LSP_IMAGE) -f $(DOCKERFILE) .
 
-lsp-conformance: lsp-image ## Check the LSP client against a real rust-analyzer
+lsp-conformance: lsp-image ## Check the LSP client against real rust-analyzer + csharp-ls servers
 	$(DOCKER) run --rm -e CONFORMANCE_BLESS $(DOCKER_MOUNTS) $(LSP_IMAGE) \
 		$(MAKE) lsp-conformance-ci
 
 # Inner target: the command line itself, with no Docker wrapper, so CI (which
 # is already inside the lsp-conformance image) and `make lsp-conformance` run
-# exactly the same thing.
+# exactly the same thing. Both suites, rust-analyzer's and csharp-ls's, run
+# from this one invocation — they are separate #[ignore]d test binaries, not
+# a separate target, per the plan's "beside rust-analyzer".
 lsp-conformance-ci: ## Inner half of `lsp-conformance` — run inside the image
 	cargo test -p lsp-core --test real_server_conformance -- --ignored --nocapture
+	cargo test -p lsp-core --test csharp_conformance -- --ignored --nocapture
 
 lint: linux-image ## Run clippy + rustfmt + file-size checks in Docker
 	$(RUN_LINUX) cargo clippy --workspace --all-targets -- -D warnings

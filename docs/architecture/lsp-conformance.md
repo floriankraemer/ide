@@ -12,7 +12,7 @@ This suite closes that gap.
 make lsp-conformance
 ```
 
-It builds the `lsp-conformance` Docker stage (`linux-builder` plus a pinned `rust-analyzer`) and runs `crates/lsp-core/tests/real_server_conformance.rs`.
+It builds the `lsp-conformance` Docker stage (`linux-builder` plus pinned `rust-analyzer` and `csharp-ls` binaries) and runs `crates/lsp-core/tests/real_server_conformance.rs` and `crates/lsp-core/tests/csharp_conformance.rs`.
 The tests are `#[ignore]`d, so `cargo test --workspace` and every per-PR CI run are unaffected.
 
 ## The report is executable
@@ -46,6 +46,22 @@ pyright and clangd disagree with rust-analyzer in useful ways — a Node runtime
 The version is **pinned**.
 An unpinned language server turns a conformance suite into a random number generator, and "upstream changed its `codeAction` shape" arriving as a red build on an unrelated pull request is how the suite stops being trusted.
 Bumping the pin is a deliberate commit.
+
+## Why csharp-ls crossed the bar
+
+"For now" above meant: add a second server only when a feature actually depends on the divergence, not up front.
+C# is the first feature that did.
+
+The C# language-servers work taught this client two protocol behaviors no server had ever exercised for real: dynamic capability registration (`client/registerCapability`, answered by the stub since it was built) and pulled configuration (`workspace/configuration`, likewise stub-only).
+Both were built and tested entirely against `stub_server`, which answers the way the client's author assumed a server would.
+csharp-ls is the first real server this client talks to that actually uses both paths — it declares most of its capabilities dynamically after `initialized` rather than statically in the `initialize` result, and it pulls its settings rather than accepting a push.
+That is exactly the shared-misunderstanding risk this suite exists to catch, so it earned its own conformance target: `crates/lsp-core/tests/csharp_conformance.rs`, in the same `lsp-conformance` Docker stage and the same `make lsp-conformance` run as rust-analyzer's suite.
+
+It covers only what depended on that divergence — the `initialize`/`ServerReady` handshake, that csharp-ls registers at least one method dynamically, `textDocument/completion` and, where advertised, `completionItem/resolve` (the `using`-insertion round trip), and `textDocument/hover` at a position after the fixture's multi-byte characters.
+It does not attempt everything csharp-ls can do; semantic tokens, code lens, and call/type hierarchy are separate features with their own conformance work when they land.
+
+Both the .NET SDK and csharp-ls itself are **pinned**, for the same reason rust-analyzer's version is.
+The pinned csharp-ls release ships a `net10.0`-targeted global-tool payload, which is why the stage installs the .NET 10 SDK rather than 8 — an older SDK cannot select that tool's `DotnetToolSettings.xml` and fails with a misleading error rather than a clear "wrong TFM".
 
 ## What the first run found — and how it was fixed
 

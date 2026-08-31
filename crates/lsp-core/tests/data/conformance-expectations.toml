@@ -33,3 +33,38 @@ diagnostics = true
 code_action = true
 rename = true
 prepare_rename = true
+
+# What a real csharp-ls actually does, as observed by
+# `crates/lsp-core/tests/csharp_conformance.rs`.
+#
+# csharp-ls earned a second conformance suite (see
+# docs/architecture/lsp-conformance.md's amended "Why rust-analyzer only, for
+# now" section) because the C# language-servers plan built client support for
+# a path no real server had ever exercised: dynamic capability registration
+# (client/registerCapability) and pulled configuration
+# (workspace/configuration). This section covers only what that plan's C4,
+# C6 and C7 tasks added — not everything csharp-ls can do.
+[csharp-ls]
+version = "0.27.0"
+
+# ServerReady fired and the fixture's first request got a real answer.
+initialize = true
+
+# csharp-ls declares its capabilities through dynamic registration
+# (client/registerCapability) after `initialized` rather than statically in
+# the `initialize` result — this is the C4 path, now proven against a real
+# server rather than only the stub.
+register_capability = true
+
+# completion on `Add(` after the fixture's emoji/CJK/é — the UTF-16 point of
+# the whole suite — returned a non-empty list.
+completion = true
+
+# csharp-ls advertises `completionProvider.resolveProvider: true` (Roslyn
+# needs the resolve round trip to add the `using` for an unimported type),
+# and `completionItem/resolve` on the first returned item succeeded — C7,
+# proven against a real server.
+completion_resolve_supported = true
+completion_resolve = true
+
+hover = true
