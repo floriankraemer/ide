@@ -11,6 +11,16 @@ editor-core = { path = "../editor-core" }
 lsp-types = "0.97"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# C5: glob-matching for `workspace/didChangeWatchedFiles` registrations
+# (`watched_files::WatchedFiles`). Already in the dependency tree
+# transitively via `ignore` in other crates; declared directly here since
+# this is the first crate that calls into it.
+globset = "0.4"
+# C5: `FileChangeKind::from(notify::EventKind)` reuses
+# `project_model::watcher`'s event classification without depending on
+# `project-model` itself — `lsp-core` stays free of the domain crate, and
+# picks up only the wire-format enum it maps from.
+notify = "6"
 
 [dev-dependencies]
 # Tests only: the regression guard that every catalog language stays

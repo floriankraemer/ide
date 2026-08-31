@@ -298,6 +298,10 @@ impl ffi::ProjectTreeModel {
             .borrow_mut()
             .start_watcher(move |kind, changed_path| {
                 let structural = project_model::is_structural_change(&kind);
+                // C5: the same event, mapped onto LSP's `FileChangeType` for
+                // `LanguageService::watchedFileChanged` — computed here,
+                // once, rather than in every listener.
+                let watched_kind = lsp_core::watched_files::FileChangeKind::from(kind) as i32;
                 let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
                     if structural {
                         let rebuilt = model.session.borrow_mut().rebuild_tree().is_ok();
@@ -309,6 +313,9 @@ impl ffi::ProjectTreeModel {
                         }
                     }
                     let path = QString::from(changed_path.to_string_lossy().as_ref());
+                    model
+                        .as_mut()
+                        .watched_file_changed(path.clone(), watched_kind);
                     model.as_mut().files_changed_externally(path);
                 });
             });

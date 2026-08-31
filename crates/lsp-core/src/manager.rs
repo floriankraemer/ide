@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -39,6 +40,7 @@ use crate::rename::{parse_prepare_rename, PrepareRename};
 use crate::signature_help::{
     parse_signature_help, parse_signature_triggers, SignatureHelp, SignatureTriggers,
 };
+use crate::watched_files::{FileChangeKind, WatchedFiles};
 use crate::workspace_edit::{parse_workspace_edit, DocumentEdits};
 
 /// How long a request waits for its response before it is cancelled.
@@ -529,6 +531,51 @@ impl LspManager {
             &language_id,
             "textDocument/didClose",
             json!({"textDocument": {"uri": uri}}),
+        )
+    }
+
+    /// Tell a server about filesystem changes it asked to watch
+    /// (`client/registerCapability` → `workspace/didChangeWatchedFiles`,
+    /// C4/C5), off `project_model::ProjectWatcher` rather than a second
+    /// watcher of this client's own. `changes` is filtered down to what
+    /// this server's current registrations actually cover and sent as one
+    /// batched notification — LSP's `changes` param is already an array,
+    /// so this is one notification per call, not one per file. A server
+    /// with no matching registration, or no server running for
+    /// `language_id` at all, gets nothing: this never wakes a server that
+    /// asked for no watches.
+    pub fn did_change_watched_files(
+        &self,
+        language_id: &str,
+        changes: &[(PathBuf, FileChangeKind)],
+    ) -> Result<(), LspError> {
+        let Some(server) = self.server(language_id) else {
+            return Ok(());
+        };
+        // Registration is rare (once per server session, typically), so
+        // recompiling on every call — rather than caching the compiled
+        // `GlobSet` on `Server` and invalidating it on register/unregister
+        // — is the simpler correct choice here.
+        let watched = WatchedFiles::compile(&server.registrations.watchers());
+        if watched.is_empty() {
+            return Ok(());
+        }
+        let interesting: Vec<Value> = changes
+            .iter()
+            .filter(|(path, kind)| watched.interested(path, *kind))
+            .map(|(path, kind)| {
+                json!({
+                    "uri": crate::diagnostics::uri_from_path(&path.to_string_lossy()),
+                    "type": *kind as u8,
+                })
+            })
+            .collect();
+        if interesting.is_empty() {
+            return Ok(());
+        }
+        server.notify(
+            "workspace/didChangeWatchedFiles",
+            json!({"changes": interesting}),
         )
     }
 

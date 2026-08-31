@@ -1425,3 +1425,85 @@ fn register_capability_then_unregister_round_trips_through_the_reader_thread() {
 
     manager.stop(LANG);
 }
+
+/// C5: while the stub's `**/*.rs` watcher (`stub/registerCapabilityRun`) is
+/// live, `did_change_watched_files` must filter out the non-matching path,
+/// batch the matching ones into one notification, and send nothing at all
+/// once the registration is gone again.
+#[test]
+fn did_change_watched_files_filters_and_batches_through_the_real_registration() {
+    use lsp_core::watched_files::FileChangeKind;
+    use std::path::PathBuf;
+
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    thread::scope(|scope| {
+        let run = scope.spawn(|| {
+            manager
+                .request(LANG, "stub/registerCapabilityRun", json!({"pause_ms": 300}))
+                .expect("the stub runs its register/unregister sequence")
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline
+            && !manager.method_registered(LANG, "workspace/didChangeWatchedFiles")
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(manager.method_registered(LANG, "workspace/didChangeWatchedFiles"));
+
+        manager
+            .did_change_watched_files(
+                LANG,
+                &[
+                    (
+                        PathBuf::from("/workspace/src/a.rs"),
+                        FileChangeKind::Changed,
+                    ),
+                    (
+                        PathBuf::from("/workspace/README.md"),
+                        FileChangeKind::Changed,
+                    ),
+                ],
+            )
+            .expect("filtering and sending must not error");
+
+        run.join().expect("stub run thread did not panic");
+    });
+
+    let sent = manager
+        .request(LANG, "stub/lastWatchedFilesChange", json!({}))
+        .expect("stub answers");
+    let changes = sent["changes"].as_array().expect("changes array");
+    assert_eq!(changes.len(), 1, "only the .rs path matches **/*.rs");
+    assert_eq!(changes[0]["uri"], "file:///workspace/src/a.rs");
+    assert_eq!(changes[0]["type"], FileChangeKind::Changed as u8);
+
+    // The registration is gone again after the stub's unregister — sending
+    // must now be a no-op rather than waking a server that asked for
+    // nothing.
+    assert!(!manager.method_registered(LANG, "workspace/didChangeWatchedFiles"));
+    manager
+        .did_change_watched_files(
+            LANG,
+            &[(
+                PathBuf::from("/workspace/src/b.rs"),
+                FileChangeKind::Created,
+            )],
+        )
+        .expect("no-op send must not error");
+    let after_unregister = manager
+        .request(LANG, "stub/lastWatchedFilesChange", json!({}))
+        .expect("stub answers");
+    assert_eq!(
+        after_unregister, sent,
+        "no new notification should have been sent once nothing is registered",
+    );
+
+    manager.stop(LANG);
+}

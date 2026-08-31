@@ -77,6 +77,11 @@ fn main() {
     // What the client said it can do, kept so a test can assert the
     // advertisement end to end rather than against a private function.
     let client_capabilities: Arc<Mutex<Value>> = Arc::new(Mutex::new(Value::Null));
+    // C5: the last `workspace/didChangeWatchedFiles` notification this
+    // server was sent, so a test can assert what actually crossed the wire
+    // rather than only that `LspManager::did_change_watched_files` returned
+    // `Ok`.
+    let last_watched_files_change: Arc<Mutex<Value>> = Arc::new(Mutex::new(Value::Null));
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let mut next_request_id = 9100i64;
     let mut input = BufReader::new(io::stdin());
@@ -145,6 +150,20 @@ fn main() {
                 );
             }
             ("initialized", _) => {}
+            ("workspace/didChangeWatchedFiles", _) => {
+                *last_watched_files_change
+                    .lock()
+                    .expect("watched files lock") = params;
+            }
+            // What the client last sent via `workspace/didChangeWatchedFiles`,
+            // so a test can assert its `changes` array end to end.
+            ("stub/lastWatchedFilesChange", Some(id)) => {
+                let change = last_watched_files_change
+                    .lock()
+                    .expect("watched files lock")
+                    .clone();
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": change}));
+            }
             ("shutdown", Some(id)) => {
                 send(&out, json!({"jsonrpc": "2.0", "id": id, "result": null}))
             }

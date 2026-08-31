@@ -1033,6 +1033,16 @@ mod ffi {
         #[cxx_name = "filesChangedExternally"]
         fn files_changed_externally(self: Pin<&mut ProjectTreeModel>, path: QString);
 
+        /// C5: the same filesystem-watcher event as `filesChangedExternally`,
+        /// plus the LSP `FileChangeType` it maps onto (1=created, 2=changed,
+        /// 3=deleted). `main_window.cpp` connects this to
+        /// `LanguageService::watchedFileChanged`, which is the only consumer
+        /// — the reload/keep-prompt path stays on `filesChangedExternally`
+        /// and does not need the kind.
+        #[qsignal]
+        #[cxx_name = "watchedFileChanged"]
+        fn watched_file_changed(self: Pin<&mut ProjectTreeModel>, path: QString, kind: i32);
+
         /// Emitted when a tree mutation (rename/delete) changed an open
         /// tab's title as a side effect (US-2b) — the tab strip updates its
         /// label in response, preserving the unsaved-changes indicator.
@@ -2823,6 +2833,15 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "documentClosed"]
         fn document_closed(self: Pin<&mut LanguageService>, path: &QString);
+
+        /// C5: `ProjectTreeModel::watchedFileChanged` — a file on disk
+        /// changed under the project root. Buffered and coalesced (a `git
+        /// checkout` fires thousands of these) before reaching any server as
+        /// one batched `workspace/didChangeWatchedFiles`. `kind` is the LSP
+        /// `FileChangeType` (1=created, 2=changed, 3=deleted).
+        #[qinvokable]
+        #[cxx_name = "watchedFileChanged"]
+        fn watched_file_changed(self: Pin<&mut LanguageService>, path: &QString, kind: i32);
 
         /// L6 — the `[[language_server]]` settings were committed: re-read
         /// them and stop every server whose configuration changed or was

@@ -1,6 +1,7 @@
 use core::pin::Pin;
-use std::cell::RefCell;
-use std::path::Path;
+use std::cell::{Cell, RefCell};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use cxx_qt::Threading;
 use cxx_qt_lib::QString;
@@ -52,6 +53,26 @@ fn plugin_servers() -> Vec<lsp_core::PluginServer> {
 /// queued while the server is still starting is still delivered after the
 /// `didOpen` that preceded it.
 type LspJob = Box<dyn FnOnce(&lsp_core::LspManager) + Send>;
+
+/// C5: how long a burst of filesystem-watcher events is allowed to run
+/// before it is flushed as one batched `workspace/didChangeWatchedFiles`.
+/// 200ms is comfortably inside the 150-300ms window a debounce needs to
+/// absorb a `git checkout`'s event storm without making a server wait
+/// noticeably longer than a human notices.
+const WATCHED_FILES_DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// LSP's `FileChangeType` wire values, as sent over `watchedFileChanged`
+/// (the Qt signal can't carry `lsp_core::watched_files::FileChangeKind`
+/// itself, only primitives).
+fn wire_to_file_change_kind(kind: i32) -> Option<lsp_core::watched_files::FileChangeKind> {
+    use lsp_core::watched_files::FileChangeKind;
+    match kind {
+        1 => Some(FileChangeKind::Created),
+        2 => Some(FileChangeKind::Changed),
+        3 => Some(FileChangeKind::Deleted),
+        _ => None,
+    }
+}
 
 /// Rust side of the `LanguageService` QObject: a handle to the worker, the
 /// resolved server table, and the diagnostics currently published. No rules —
@@ -125,6 +146,14 @@ pub struct LanguageServiceRust {
     /// keying by language id makes which one deterministic rather than
     /// dependent on event arrival order.
     busy: RefCell<std::collections::BTreeMap<String, (String, lsp_core::ServerActivity)>>,
+    /// C5: filesystem changes waiting for the debounce window to lapse
+    /// before becoming one batched `workspace/didChangeWatchedFiles` per
+    /// affected server. See `watched_file_changed`/`flush_watched_changes`.
+    watched_changes: RefCell<Vec<(PathBuf, lsp_core::watched_files::FileChangeKind)>>,
+    /// Whether a flush is already scheduled — sending only one debounce
+    /// timer per burst, however many events land inside its window, is
+    /// what makes this a debounce rather than one timer per event.
+    watch_flush_pending: Cell<bool>,
 }
 
 impl Default for LanguageServiceRust {
@@ -155,6 +184,8 @@ impl Default for LanguageServiceRust {
             pending: RefCell::default(),
             edits: RefCell::default(),
             busy: RefCell::default(),
+            watched_changes: RefCell::default(),
+            watch_flush_pending: Cell::default(),
         }
     }
 }
@@ -409,6 +440,65 @@ impl ffi::LanguageService {
             let _ = manager.did_close(&closed);
         });
         self.as_mut().diagnostics_changed();
+    }
+
+    /// C5: `ProjectTreeModel::watchedFileChanged` — buffer the change and
+    /// make sure exactly one debounce timer is running. `git checkout` in a
+    /// real repo fires thousands of these in a burst; sending one
+    /// `workspace/didChangeWatchedFiles` per event would stall a server
+    /// behind re-analysing between each, so every event inside the
+    /// `WATCHED_FILES_DEBOUNCE` window collapses into the next flush.
+    pub fn watched_file_changed(mut self: Pin<&mut Self>, path: &QString, kind: i32) {
+        let Some(kind) = wire_to_file_change_kind(kind) else {
+            return;
+        };
+        self.watched_changes
+            .borrow_mut()
+            .push((PathBuf::from(path.to_string()), kind));
+
+        if self.watch_flush_pending.replace(true) {
+            return; // A timer is already on its way; this event rides it.
+        }
+        let qt_thread = self.as_mut().qt_thread();
+        std::thread::spawn(move || {
+            std::thread::sleep(WATCHED_FILES_DEBOUNCE);
+            let _ = qt_thread.queue(|service: Pin<&mut Self>| service.flush_watched_changes());
+        });
+    }
+
+    /// Send the buffered changes, one batched notification per server whose
+    /// language they touch, filtered through that server's watchers inside
+    /// `LspManager::did_change_watched_files`. A language with no server
+    /// currently running is dropped here rather than queued and later
+    /// silently ignored by `LspManager::server` — same "no server, nothing
+    /// sent" rule either way, just paid once per flush instead of per file.
+    fn flush_watched_changes(self: Pin<&mut Self>) {
+        self.watch_flush_pending.set(false);
+        let changes = std::mem::take(&mut *self.watched_changes.borrow_mut());
+        if changes.is_empty() {
+            return;
+        }
+        let started = self.started.borrow();
+        let mut by_language: std::collections::HashMap<
+            String,
+            Vec<(PathBuf, lsp_core::watched_files::FileChangeKind)>,
+        > = std::collections::HashMap::new();
+        for (path, kind) in changes {
+            let catalog_id = syntax_core::language_for_path(&path).id();
+            let language_id = lsp_core::lsp_language_id(&catalog_id).to_string();
+            if started.contains(&language_id) {
+                by_language
+                    .entry(language_id)
+                    .or_default()
+                    .push((path, kind));
+            }
+        }
+        drop(started);
+        for (language_id, changes) in by_language {
+            self.push_job(move |manager| {
+                let _ = manager.did_change_watched_files(&language_id, &changes);
+            });
+        }
     }
 
     pub fn apply_server_settings(self: Pin<&mut Self>) {

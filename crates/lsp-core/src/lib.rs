@@ -28,6 +28,7 @@ pub mod registration;
 pub mod rename;
 pub mod signature_help;
 pub mod tracker;
+pub mod watched_files;
 pub mod workspace_edit;
 
 pub use apply_edit::{
