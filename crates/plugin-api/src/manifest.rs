@@ -36,6 +36,7 @@ pub enum ContributionPoint {
     IconThemes,
     Commands,
     Previews,
+    LanguageServers,
 }
 
 impl ContributionPoint {
@@ -45,6 +46,7 @@ impl ContributionPoint {
             Self::IconThemes => "icon-themes",
             Self::Commands => "commands",
             Self::Previews => "previews",
+            Self::LanguageServers => "language-servers",
         }
     }
 }
@@ -93,6 +95,43 @@ pub struct PreviewContribution {
     pub extensions: Vec<String>,
 }
 
+/// One language server a plugin offers.
+///
+/// Unlike [`CommandContribution`], this needs no `[wasm]` component: the
+/// server is a native process the host launches by `command`/`args`, the
+/// same shape `lsp_core::catalog::ServerDef` already has for the built-in
+/// table. What a manifest adds over that table is the two fields a const
+/// `&'static str` slice cannot carry: a settings section a server pulls
+/// over `workspace/configuration`, and the defaults for it.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LanguageServerContribution {
+    /// Stable id, distinct from `language_id` — a language may one day have
+    /// more than one server on offer.
+    pub id: String,
+    /// LSP language id this server serves, e.g. `"csharp"`. The catalog key
+    /// `lsp_core::enabled_server` looks up by.
+    #[serde(rename = "language-id")]
+    pub language_id: String,
+    /// What the Language Servers page shows.
+    pub name: String,
+    /// Executable, looked up on `PATH` — nothing here is installed by the
+    /// host, matching `ServerDef`'s rule.
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// The `workspace/configuration` section this server's settings answer
+    /// under, e.g. `"csharp"`. Absent means the server takes no pulled
+    /// configuration.
+    #[serde(default, rename = "settings-section")]
+    pub settings_section: Option<String>,
+    /// Default settings for `settings_section`, overridable by the user.
+    /// Free-form because each server defines its own shape; sent to the
+    /// server as JSON, never interpreted here.
+    #[serde(default)]
+    pub settings: toml::value::Table,
+}
+
 /// Everything a plugin contributes, by point.
 ///
 /// Deliberately *not* `deny_unknown_fields`: [`API_VERSION`]'s doc comment
@@ -109,6 +148,8 @@ pub struct Contributes {
     pub commands: Vec<CommandContribution>,
     #[serde(default)]
     pub previews: Vec<PreviewContribution>,
+    #[serde(default, rename = "language-servers")]
+    pub language_servers: Vec<LanguageServerContribution>,
     #[serde(flatten)]
     unknown: BTreeMap<String, toml::Value>,
 }
@@ -118,7 +159,10 @@ impl Contributes {
     /// declares no contributions and no component does nothing, but it is
     /// not an error: it is how a plugin is emptied out without deleting it.
     pub fn is_empty(&self) -> bool {
-        self.icon_themes.is_empty() && self.commands.is_empty() && self.previews.is_empty()
+        self.icon_themes.is_empty()
+            && self.commands.is_empty()
+            && self.previews.is_empty()
+            && self.language_servers.is_empty()
     }
 }
 
@@ -242,6 +286,21 @@ impl PluginManifest {
         // renderer table (the built-in Markdown preview is). A component is
         // only how a *third-party* preview renders, so its absence here is
         // never `CommandsWithoutComponent`'s twin.
+
+        for server in &self.contributes.language_servers {
+            check_id("contributes.language-servers.id", &server.id)?;
+            non_empty("contributes.language-servers.language-id", &server.language_id)?;
+            non_empty("contributes.language-servers.name", &server.name)?;
+            non_empty("contributes.language-servers.command", &server.command)?;
+        }
+        check_unique(
+            ContributionPoint::LanguageServers,
+            self.contributes.language_servers.iter().map(|s| s.id.as_str()),
+        )?;
+
+        // A language server needs no `[wasm]` component either: it is a
+        // native process launched by `command`/`args`, the same shape the
+        // built-in catalog table already has.
 
         if let Some(wasm) = &self.wasm {
             check_relative("wasm.component", &wasm.component)?;
@@ -755,5 +814,101 @@ mod tests {
         ))
         .unwrap_err();
         assert!(matches!(err, LoadErrorKind::MalformedManifest(_)), "{err}");
+    }
+
+    #[test]
+    fn a_language_server_contribution_round_trips() {
+        let manifest = PluginManifest::from_toml_str(&with(
+            r#"
+            [[contributes.language-servers]]
+            id = "csharp-ls"
+            language-id = "csharp"
+            name = "csharp-ls"
+            command = "csharp-ls"
+            args = ["--loglevel", "warning"]
+            settings-section = "csharp"
+
+            [contributes.language-servers.settings]
+            analyzersEnabled = true
+            "#,
+        ))
+        .expect("valid");
+        let servers = &manifest.contributes.language_servers;
+        assert_eq!(servers.len(), 1);
+        assert_eq!(servers[0].id, "csharp-ls");
+        assert_eq!(servers[0].language_id, "csharp");
+        assert_eq!(servers[0].name, "csharp-ls");
+        assert_eq!(servers[0].command, "csharp-ls");
+        assert_eq!(servers[0].args, vec!["--loglevel", "warning"]);
+        assert_eq!(servers[0].settings_section.as_deref(), Some("csharp"));
+        assert_eq!(
+            servers[0].settings.get("analyzersEnabled"),
+            Some(&toml::Value::Boolean(true))
+        );
+        assert!(!manifest.contributes.is_empty());
+        assert_eq!(ContributionPoint::LanguageServers.key(), "language-servers");
+    }
+
+    #[test]
+    fn a_language_server_needs_no_wasm_component() {
+        // Unlike `commands`, a language server is a native process the host
+        // launches by `command`/`args` — the same shape `ServerDef` already
+        // has for the built-in catalog table.
+        let manifest = PluginManifest::from_toml_str(&with(
+            r#"
+            [[contributes.language-servers]]
+            id = "csharp-ls"
+            language-id = "csharp"
+            name = "csharp-ls"
+            command = "csharp-ls"
+            "#,
+        ))
+        .expect("valid");
+        assert!(manifest.wasm.is_none());
+    }
+
+    #[test]
+    fn a_language_server_without_a_command_is_rejected() {
+        let err = PluginManifest::from_toml_str(&with(
+            r#"
+            [[contributes.language-servers]]
+            id = "csharp-ls"
+            language-id = "csharp"
+            name = "csharp-ls"
+            command = ""
+            "#,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            LoadErrorKind::EmptyField("contributes.language-servers.command")
+        );
+    }
+
+    #[test]
+    fn duplicate_language_server_ids_in_one_manifest_are_rejected() {
+        let err = PluginManifest::from_toml_str(&with(
+            r#"
+            [[contributes.language-servers]]
+            id = "csharp-ls"
+            language-id = "csharp"
+            name = "csharp-ls"
+            command = "csharp-ls"
+
+            [[contributes.language-servers]]
+            id = "csharp-ls"
+            language-id = "csharp"
+            name = "csharp-ls, again"
+            command = "csharp-ls"
+            "#,
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
+            LoadErrorKind::DuplicateContributionId {
+                point: "language-servers",
+                id: "csharp-ls".to_string(),
+            }
+        );
     }
 }
