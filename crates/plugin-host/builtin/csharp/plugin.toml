@@ -1,0 +1,22 @@
+# Hand-written, like builtin/markdown-preview/plugin.toml: this built-in
+# has no upstream package to import, so there is no generator script to
+# re-run. It contributes a `language-servers` entry rather than a `[wasm]`
+# component — `csharp-ls` is a native process the host launches by
+# `command`/`args`, matching `LanguageServerContribution`'s doc comment.
+id = "csharp"
+name = "C#"
+version = "1.0.0"
+api_version = 1
+license = "MIT"
+description = "C# language support via csharp-ls (Roslyn)."
+
+[[contributes.language-servers]]
+id = "csharp-ls"
+language-id = "csharp"
+name = "csharp-ls"
+command = "csharp-ls"
+args = ["--loglevel", "warning"]
+settings-section = "csharp"
+
+[contributes.language-servers.settings]
+analyzersEnabled = true

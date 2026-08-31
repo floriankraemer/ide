@@ -424,6 +424,69 @@ fn the_markdown_preview_builtin_loads_through_the_real_path() {
 }
 
 #[test]
+fn the_csharp_builtin_loads_through_the_real_path() {
+    let fixture = Fixture::new();
+    let registry = load(fixture.config_dir(), &[builtins::CSHARP], &[]);
+    assert!(registry.errors().is_empty(), "{:?}", registry.errors());
+
+    let plugin = registry.by_id("csharp").expect("the built-in loaded");
+    assert_eq!(plugin.source(), PluginSource::Builtin);
+
+    let servers: Vec<_> = registry.language_servers().collect();
+    assert_eq!(servers.len(), 1);
+    let (owner, contribution) = servers[0];
+    assert_eq!(owner.id(), "csharp");
+    assert_eq!(contribution.id, "csharp-ls");
+    assert_eq!(contribution.language_id, "csharp");
+    assert_eq!(contribution.command, "csharp-ls");
+    assert_eq!(contribution.args, vec!["--loglevel", "warning"]);
+    assert_eq!(contribution.settings_section.as_deref(), Some("csharp"));
+    assert_eq!(
+        contribution
+            .settings
+            .get("analyzersEnabled")
+            .and_then(|value| value.as_bool()),
+        Some(true)
+    );
+}
+
+#[test]
+fn a_language_server_contribution_needs_no_wasm_component_either() {
+    // Same asymmetry as `previews` (M1 vs the built-in Markdown preview):
+    // a native process launched by `command`/`args` is not
+    // `CommandsWithoutComponent`.
+    let fixture = Fixture::new();
+    let registry = load(fixture.config_dir(), &[builtins::CSHARP], &[]);
+    let plugin = registry.by_id("csharp").expect("loaded");
+    assert!(plugin.manifest().wasm.is_none());
+}
+
+#[test]
+fn the_csharp_builtin_survives_the_disabled_plugin_filter() {
+    let fixture = Fixture::new();
+    let registry = load(
+        fixture.config_dir(),
+        &[builtins::CSHARP],
+        &["material-icons".to_string()],
+    );
+    assert!(registry.by_id("csharp").is_some());
+    assert_eq!(registry.language_servers().count(), 1);
+}
+
+#[test]
+fn a_disabled_csharp_builtin_is_filtered_like_any_other() {
+    let fixture = Fixture::new();
+    let registry = load(
+        fixture.config_dir(),
+        &[builtins::CSHARP],
+        &["csharp".to_string()],
+    );
+    assert!(registry.by_id("csharp").is_none());
+    assert_eq!(registry.language_servers().count(), 0);
+    assert!(registry.errors().is_empty());
+}
+
+#[test]
 fn previews_without_a_component_load_and_need_no_wasm_tier() {
     // The whole point of the asymmetry with `commands` (M1): a `previews`
     // contribution with no `[wasm]` section is not `CommandsWithoutComponent`
