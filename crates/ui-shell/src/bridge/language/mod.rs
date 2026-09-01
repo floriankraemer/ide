@@ -156,6 +156,25 @@ pub struct LanguageServiceRust {
     /// same storage shape `semantic_tokens` uses, and for the same reason
     /// (`request_code_lenses`'s own doc comment).
     pub(crate) code_lenses: RefCell<std::collections::HashMap<String, Vec<lsp_core::CodeLensItem>>>,
+    /// C11: the last `prepareCallHierarchy` answer, plus the language it
+    /// came from — `requestIncomingCalls`/`requestOutgoingCalls` index into
+    /// this by position, the same convention `runCodeLens` follows for
+    /// `code_lenses`.
+    pub(crate) call_hierarchy_items: RefCell<Vec<lsp_core::HierarchyItem>>,
+    pub(crate) call_hierarchy_language: RefCell<String>,
+    pub(crate) incoming_calls: RefCell<Vec<lsp_core::IncomingCall>>,
+    pub(crate) outgoing_calls: RefCell<Vec<lsp_core::OutgoingCall>>,
+    /// C11: the type-hierarchy twins of the four fields above.
+    pub(crate) type_hierarchy_items: RefCell<Vec<lsp_core::HierarchyItem>>,
+    pub(crate) type_hierarchy_language: RefCell<String>,
+    pub(crate) supertypes: RefCell<Vec<lsp_core::HierarchyItem>>,
+    pub(crate) subtypes: RefCell<Vec<lsp_core::HierarchyItem>>,
+    /// C11: the project index, shared with `SearchModel`
+    /// (`registry::index_slot`) — the fallback for `supertypes`/`subtypes`
+    /// when no server answers (`lsp_core::hierarchy::type_hierarchy_outcome`),
+    /// built from the same `inh_type`/`inh_supertype` edges
+    /// `SearchModel::find_supertypes`/`find_implementations` already read.
+    pub(crate) index: mcp_server::IndexHandle,
     /// The refactoring waiting to be applied, if any: what it changes, what
     /// to call it, and — when it came from the server asking us — the gate
     /// that server is blocked on.
@@ -210,6 +229,15 @@ impl Default for LanguageServiceRust {
             inlay_hints_tracker: RefCell::default(),
             semantic_tokens: RefCell::default(),
             code_lenses: RefCell::default(),
+            call_hierarchy_items: RefCell::default(),
+            call_hierarchy_language: RefCell::default(),
+            incoming_calls: RefCell::default(),
+            outgoing_calls: RefCell::default(),
+            type_hierarchy_items: RefCell::default(),
+            type_hierarchy_language: RefCell::default(),
+            supertypes: RefCell::default(),
+            subtypes: RefCell::default(),
+            index: crate::bridge::registry::index_slot(),
             pending: RefCell::default(),
             edits: RefCell::default(),
             busy: RefCell::default(),

@@ -767,6 +767,36 @@ mod ffi {
         clickable: bool,
     }
 
+    /// One call-hierarchy or type-hierarchy item (C11), 1:1 with
+    /// `lsp_core::HierarchyItem` — the same shape either feature's item
+    /// takes, since `CallHierarchyItem` and `TypeHierarchyItem` are
+    /// structurally identical on the wire. `kind` is the raw LSP
+    /// `SymbolKind` number, same convention `FfiCompletionItem`'s own
+    /// `kind` follows, so the view picks the icon rather than Rust.
+    struct FfiHierarchyItem {
+        name: QString,
+        detail: QString,
+        path: QString,
+        line: u32,
+        column: u32,
+        kind: u32,
+    }
+
+    /// One `callHierarchy/incomingCalls` entry (C11): who calls the item
+    /// that was asked about, and how many call sites `fromRanges` counted —
+    /// the dock draws one row per caller with that count, not the ranges
+    /// themselves.
+    struct FfiIncomingCall {
+        from: FfiHierarchyItem,
+        call_count: u32,
+    }
+
+    /// The `callHierarchy/outgoingCalls` twin of `FfiIncomingCall`.
+    struct FfiOutgoingCall {
+        to: FfiHierarchyItem,
+        call_count: u32,
+    }
+
     /// How many diagnostics of each severity exist right now, 1:1 with
     /// `lsp_core::DiagnosticCounts` — for the status-bar counter and the
     /// Problems panel's filter buttons.
@@ -3367,6 +3397,121 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "runCodeLens"]
         fn run_code_lens(self: Pin<&mut LanguageService>, path: &QString, index: u32);
+
+        /// C11 — `textDocument/prepareCallHierarchy` at a caret position.
+        /// Gated on `LspManager::call_hierarchy_supported` inside the job,
+        /// same as `requestCodeLenses`. Answers on `callHierarchyReady`; call
+        /// hierarchy has no index fallback at all (`lsp_core::hierarchy`
+        /// module docs), so an unsupported server or empty answer simply
+        /// leaves `callHierarchyItems` empty.
+        ///
+        /// TODO(C11-followup): the Rust+FFI pipeline for call hierarchy and
+        /// type hierarchy below is wired and reachable end to end (see
+        /// `stub_server_session.rs`'s C11 tests for the LSP round trip and
+        /// `lsp_core::hierarchy`'s unit tests for the index-fallback
+        /// precedence); no `cpp/` dock consumes any of it yet. `ClassViewPanel`
+        /// and `FindUsagesPanel` are each a tree over one shape of this same
+        /// data and are the template to extend or sibling from, the same
+        /// allowance C9's semantic-token repaint and C10's lens strip were
+        /// given.
+        #[qinvokable]
+        #[cxx_name = "requestCallHierarchy"]
+        fn request_call_hierarchy(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            line: u32,
+            character: u32,
+        );
+
+        #[qsignal]
+        #[cxx_name = "callHierarchyReady"]
+        fn call_hierarchy_ready(self: Pin<&mut LanguageService>);
+
+        /// The last `prepareCallHierarchy` answer.
+        #[qinvokable]
+        #[cxx_name = "callHierarchyItems"]
+        fn call_hierarchy_items(self: &LanguageService) -> Vec<FfiHierarchyItem>;
+
+        /// `callHierarchy/incomingCalls` for the item at `index` in the last
+        /// `callHierarchyItems` answer. Answers on `incomingCallsReady`.
+        #[qinvokable]
+        #[cxx_name = "requestIncomingCalls"]
+        fn request_incoming_calls(self: Pin<&mut LanguageService>, index: u32);
+
+        #[qsignal]
+        #[cxx_name = "incomingCallsReady"]
+        fn incoming_calls_ready(self: Pin<&mut LanguageService>);
+
+        #[qinvokable]
+        #[cxx_name = "incomingCalls"]
+        fn incoming_calls(self: &LanguageService) -> Vec<FfiIncomingCall>;
+
+        /// `callHierarchy/outgoingCalls` for the item at `index` in the last
+        /// `callHierarchyItems` answer. Answers on `outgoingCallsReady`; an
+        /// empty answer is a real leaf, not a hint to look elsewhere.
+        #[qinvokable]
+        #[cxx_name = "requestOutgoingCalls"]
+        fn request_outgoing_calls(self: Pin<&mut LanguageService>, index: u32);
+
+        #[qsignal]
+        #[cxx_name = "outgoingCallsReady"]
+        fn outgoing_calls_ready(self: Pin<&mut LanguageService>);
+
+        #[qinvokable]
+        #[cxx_name = "outgoingCalls"]
+        fn outgoing_calls(self: &LanguageService) -> Vec<FfiOutgoingCall>;
+
+        /// C11 — `textDocument/prepareTypeHierarchy` at a caret position.
+        /// LSP-only, like `requestCallHierarchy` — the index fallback
+        /// applies one step later, to `requestSupertypes`/`requestSubtypes`,
+        /// once a type name is known.
+        #[qinvokable]
+        #[cxx_name = "requestTypeHierarchy"]
+        fn request_type_hierarchy(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            line: u32,
+            character: u32,
+        );
+
+        #[qsignal]
+        #[cxx_name = "typeHierarchyReady"]
+        fn type_hierarchy_ready(self: Pin<&mut LanguageService>);
+
+        #[qinvokable]
+        #[cxx_name = "typeHierarchyItems"]
+        fn type_hierarchy_items(self: &LanguageService) -> Vec<FfiHierarchyItem>;
+
+        /// `typeHierarchy/supertypes` for the item at `index` in the last
+        /// `typeHierarchyItems` answer — LSP-first, `index-core`'s
+        /// supertype-edge data as the fallback
+        /// (`lsp_core::hierarchy::type_hierarchy_outcome`, ADR-0016's same
+        /// precedence as go-to-definition). Answers on `supertypesReady`.
+        #[qinvokable]
+        #[cxx_name = "requestSupertypes"]
+        fn request_supertypes(self: Pin<&mut LanguageService>, index: u32);
+
+        #[qsignal]
+        #[cxx_name = "supertypesReady"]
+        fn supertypes_ready(self: Pin<&mut LanguageService>);
+
+        #[qinvokable]
+        #[cxx_name = "supertypes"]
+        fn supertypes(self: &LanguageService) -> Vec<FfiHierarchyItem>;
+
+        /// `typeHierarchy/subtypes`, the other direction of the same walk.
+        /// Answers on `subtypesReady`.
+        #[qinvokable]
+        #[cxx_name = "requestSubtypes"]
+        fn request_subtypes(self: Pin<&mut LanguageService>, index: u32);
+
+        #[qsignal]
+        #[cxx_name = "subtypesReady"]
+        fn subtypes_ready(self: Pin<&mut LanguageService>);
+
+        #[qinvokable]
+        #[cxx_name = "subtypes"]
+        fn subtypes(self: &LanguageService) -> Vec<FfiHierarchyItem>;
 
         /// RF8 — rename the symbol at a position.
         ///

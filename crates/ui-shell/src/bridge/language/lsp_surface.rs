@@ -408,6 +408,325 @@ impl ffi::LanguageService {
             }
         });
     }
+
+    // -- C11: call hierarchy ------------------------------------------------
+
+    /// `textDocument/prepareCallHierarchy` at a caret position — the
+    /// starting point `requestIncomingCalls`/`requestOutgoingCalls` index
+    /// into by position. Gated on `LspManager::call_hierarchy_supported`
+    /// inside the job, same reasoning `request_code_lenses` gives. No index
+    /// fallback exists for call hierarchy at all (`lsp_core::hierarchy`
+    /// module docs) — an unsupported server or no answer simply leaves the
+    /// list empty.
+    pub fn request_call_hierarchy(
+        mut self: Pin<&mut Self>,
+        path: &QString,
+        line: u32,
+        character: u32,
+    ) {
+        let path = path.to_string();
+        let Some(language_id) = self.open_docs.borrow().get(&path).cloned() else {
+            return;
+        };
+        let uri = lsp_core::uri_from_path(&path);
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            if !manager.call_hierarchy_supported(&language_id) {
+                return;
+            }
+            let Ok(items) = manager.prepare_call_hierarchy(&language_id, &uri, line, character)
+            else {
+                return;
+            };
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                *service.call_hierarchy_language.borrow_mut() = language_id;
+                *service.call_hierarchy_items.borrow_mut() = items;
+                service.as_mut().call_hierarchy_ready();
+            });
+        });
+    }
+
+    pub fn call_hierarchy_items(&self) -> Vec<ffi::FfiHierarchyItem> {
+        self.call_hierarchy_items
+            .borrow()
+            .iter()
+            .map(to_ffi_hierarchy_item)
+            .collect()
+    }
+
+    /// `callHierarchy/incomingCalls` for the item at `index` in the last
+    /// `callHierarchyItems` answer.
+    pub fn request_incoming_calls(mut self: Pin<&mut Self>, index: u32) {
+        let Some(item) = self
+            .call_hierarchy_items
+            .borrow()
+            .get(index as usize)
+            .cloned()
+        else {
+            return;
+        };
+        let language_id = self.call_hierarchy_language.borrow().clone();
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            let Ok(calls) = manager.incoming_calls(&language_id, &item.raw) else {
+                return;
+            };
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                *service.incoming_calls.borrow_mut() = calls;
+                service.as_mut().incoming_calls_ready();
+            });
+        });
+    }
+
+    pub fn incoming_calls(&self) -> Vec<ffi::FfiIncomingCall> {
+        self.incoming_calls
+            .borrow()
+            .iter()
+            .map(|call| ffi::FfiIncomingCall {
+                from: to_ffi_hierarchy_item(&call.from),
+                call_count: call.from_ranges.len() as u32,
+            })
+            .collect()
+    }
+
+    /// `callHierarchy/outgoingCalls` for the item at `index` in the last
+    /// `callHierarchyItems` answer. An empty answer is the real, final
+    /// answer for a leaf that calls nothing — not a cue to look anywhere
+    /// else (`lsp_core::hierarchy` module docs).
+    pub fn request_outgoing_calls(mut self: Pin<&mut Self>, index: u32) {
+        let Some(item) = self
+            .call_hierarchy_items
+            .borrow()
+            .get(index as usize)
+            .cloned()
+        else {
+            return;
+        };
+        let language_id = self.call_hierarchy_language.borrow().clone();
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            let Ok(calls) = manager.outgoing_calls(&language_id, &item.raw) else {
+                return;
+            };
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                *service.outgoing_calls.borrow_mut() = calls;
+                service.as_mut().outgoing_calls_ready();
+            });
+        });
+    }
+
+    pub fn outgoing_calls(&self) -> Vec<ffi::FfiOutgoingCall> {
+        self.outgoing_calls
+            .borrow()
+            .iter()
+            .map(|call| ffi::FfiOutgoingCall {
+                to: to_ffi_hierarchy_item(&call.to),
+                call_count: call.from_ranges.len() as u32,
+            })
+            .collect()
+    }
+
+    // -- C11: type hierarchy -------------------------------------------------
+
+    /// `textDocument/prepareTypeHierarchy` at a caret position. Like call
+    /// hierarchy's own `requestCallHierarchy`, this step is LSP-only — the
+    /// index has no "what type is under this caret" query of its own to
+    /// fall back to; the fallback exists one step later, for
+    /// `requestSupertypes`/`requestSubtypes`, once a type *name* is known.
+    pub fn request_type_hierarchy(
+        mut self: Pin<&mut Self>,
+        path: &QString,
+        line: u32,
+        character: u32,
+    ) {
+        let path = path.to_string();
+        let Some(language_id) = self.open_docs.borrow().get(&path).cloned() else {
+            return;
+        };
+        let uri = lsp_core::uri_from_path(&path);
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            if !manager.type_hierarchy_supported(&language_id) {
+                return;
+            }
+            let Ok(items) = manager.prepare_type_hierarchy(&language_id, &uri, line, character)
+            else {
+                return;
+            };
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                *service.type_hierarchy_language.borrow_mut() = language_id;
+                *service.type_hierarchy_items.borrow_mut() = items;
+                service.as_mut().type_hierarchy_ready();
+            });
+        });
+    }
+
+    pub fn type_hierarchy_items(&self) -> Vec<ffi::FfiHierarchyItem> {
+        self.type_hierarchy_items
+            .borrow()
+            .iter()
+            .map(to_ffi_hierarchy_item)
+            .collect()
+    }
+
+    /// `typeHierarchy/supertypes` for the item at `index` in the last
+    /// `typeHierarchyItems` answer — LSP-first, `index-core`'s
+    /// supertype-edge data (`inh_type`/`inh_supertype`, the same data
+    /// `SearchModel::find_supertypes` already reads) as the fallback,
+    /// exactly the precedence `lsp_core::hierarchy::type_hierarchy_outcome`
+    /// gives go-to-definition's own `definition_outcome` (ADR-0016).
+    pub fn request_supertypes(self: Pin<&mut Self>, index: u32) {
+        self.request_type_edge(index, true);
+    }
+
+    /// `typeHierarchy/subtypes`, the other direction of the same walk.
+    pub fn request_subtypes(self: Pin<&mut Self>, index: u32) {
+        self.request_type_edge(index, false);
+    }
+
+    fn request_type_edge(mut self: Pin<&mut Self>, index: u32, supertypes: bool) {
+        let Some(item) = self
+            .type_hierarchy_items
+            .borrow()
+            .get(index as usize)
+            .cloned()
+        else {
+            return;
+        };
+        let language_id = self.type_hierarchy_language.borrow().clone();
+        let index_handle = std::sync::Arc::clone(&self.index);
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            let supported = manager.type_hierarchy_supported(&language_id);
+            let response = if supported {
+                Some(if supertypes {
+                    manager.supertypes(&language_id, &item.raw)
+                } else {
+                    manager.subtypes(&language_id, &item.raw)
+                })
+            } else {
+                None
+            };
+            let name = item.name.clone();
+            let fallback = index_fallback(&index_handle, |text_index| {
+                if supertypes {
+                    text_index.find_supertypes(&name)
+                } else {
+                    text_index.find_implementations(&name)
+                }
+            });
+            let outcome = lsp_core::type_hierarchy_outcome(response, fallback);
+            let items = match outcome {
+                lsp_core::TypeHierarchyOutcome::Lsp(items) => items,
+                lsp_core::TypeHierarchyOutcome::Index(items) => items,
+            };
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                if supertypes {
+                    *service.supertypes.borrow_mut() = items;
+                    service.as_mut().supertypes_ready();
+                } else {
+                    *service.subtypes.borrow_mut() = items;
+                    service.as_mut().subtypes_ready();
+                }
+            });
+        });
+    }
+
+    pub fn supertypes(&self) -> Vec<ffi::FfiHierarchyItem> {
+        self.supertypes
+            .borrow()
+            .iter()
+            .map(to_ffi_hierarchy_item)
+            .collect()
+    }
+
+    pub fn subtypes(&self) -> Vec<ffi::FfiHierarchyItem> {
+        self.subtypes
+            .borrow()
+            .iter()
+            .map(to_ffi_hierarchy_item)
+            .collect()
+    }
+}
+
+fn to_ffi_hierarchy_item(item: &lsp_core::HierarchyItem) -> ffi::FfiHierarchyItem {
+    ffi::FfiHierarchyItem {
+        name: QString::from(item.name.as_str()),
+        detail: QString::from(item.detail.as_deref().unwrap_or("")),
+        path: QString::from(
+            lsp_core::path_from_uri(&item.uri)
+                .unwrap_or_else(|| item.uri.clone())
+                .as_str(),
+        ),
+        kind: item.kind,
+        line: item.selection_range.start_line + 1,
+        column: item.selection_range.start_character,
+    }
+}
+
+/// The index-derived fallback for `typeHierarchy/supertypes`/`subtypes`:
+/// `SymbolMatch`, from `index-core`'s `inh_type`/`inh_supertype` edges,
+/// converted to the same `HierarchyItem` shape an LSP answer parses into —
+/// `lsp_core::hierarchy::type_hierarchy_outcome` takes its fallback already
+/// converted rather than depending on `index-core` itself
+/// (`docs/architecture/layering.md`), and this is the one place that join is
+/// made (see `crate::bridge::language::mod` module docs on `index`).
+fn index_fallback(
+    index: &mcp_server::IndexHandle,
+    query: impl FnOnce(
+        &index_core::TextIndex,
+    ) -> Result<Vec<index_core::SymbolMatch>, index_core::IndexError>,
+) -> Vec<lsp_core::HierarchyItem> {
+    let guard = index.read().unwrap();
+    let Some(text_index) = guard.ready() else {
+        return Vec::new();
+    };
+    query(text_index)
+        .unwrap_or_default()
+        .iter()
+        .map(symbol_match_to_hierarchy_item)
+        .collect()
+}
+
+fn symbol_match_to_hierarchy_item(m: &index_core::SymbolMatch) -> lsp_core::HierarchyItem {
+    let uri = lsp_core::uri_from_path(&m.path.to_string_lossy());
+    let line = m.line.saturating_sub(1) as u32;
+    let character = m.col as u32;
+    let range = lsp_core::completion::TextRange {
+        start_line: line,
+        start_character: character,
+        end_line: line,
+        end_character: character,
+    };
+    lsp_core::HierarchyItem {
+        name: m.name.clone(),
+        kind: lsp_symbol_kind(m.kind),
+        detail: m.container.clone(),
+        uri: uri.clone(),
+        range,
+        selection_range: range,
+        data: None,
+        raw: serde_json::json!({"name": m.name, "uri": uri}),
+    }
+}
+
+/// `SymbolKind`, as `index-core` knows it (`syntax_core::SymbolKind`),
+/// mapped onto the LSP protocol's own numbering — the same numbers
+/// [`lsp_core::HierarchyItem::kind`] carries for an LSP-sourced item, so the
+/// view reads one vocabulary regardless of which side answered. Numbers are
+/// the LSP 3.17 `SymbolKind` enum's own values; `None` (an occurrence
+/// `tags.scm` never classified) is shown as a class, the common case for
+/// something a type hierarchy names at all.
+fn lsp_symbol_kind(kind: Option<syntax_core::SymbolKind>) -> u32 {
+    match kind {
+        Some(syntax_core::SymbolKind::Struct) => 23,
+        Some(syntax_core::SymbolKind::Enum) => 10,
+        Some(syntax_core::SymbolKind::Interface) => 11,
+        Some(syntax_core::SymbolKind::Method) => 6,
+        Some(syntax_core::SymbolKind::Function) => 12,
+        Some(syntax_core::SymbolKind::Field) => 8,
+        Some(syntax_core::SymbolKind::Class) | None => 5,
+    }
 }
 
 fn to_ffi_code_lens(lens: &lsp_core::CodeLensItem) -> ffi::FfiCodeLens {

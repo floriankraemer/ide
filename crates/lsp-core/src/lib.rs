@@ -20,6 +20,7 @@ pub mod diff_preview;
 pub mod document_highlight;
 pub mod formatting;
 pub mod framing;
+pub mod hierarchy;
 pub mod hover;
 pub mod inlay_hint;
 pub mod intentions;
@@ -59,6 +60,10 @@ pub use diagnostics::{
 };
 pub use diff_preview::{file_diff, FileDiff};
 pub use document_highlight::{parse_document_highlights, DocumentHighlight, HighlightKind};
+pub use hierarchy::{
+    parse_hierarchy_items, parse_incoming_calls, parse_outgoing_calls, type_hierarchy_outcome,
+    HierarchyItem, IncomingCall, OutgoingCall, TypeHierarchyOutcome,
+};
 pub use hover::{
     hover_outcome, parse_hover, to_tooltip_html, HoverOutcome, HoverText, HoverTracker,
 };

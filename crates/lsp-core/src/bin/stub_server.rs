@@ -74,6 +74,17 @@
 //! the same command `workspace/executeCommand`'s handler already blocks on a
 //! `workspace/applyEdit` answer for — so running a lens exercises the
 //! session gate through the existing path rather than a second one.
+//!
+//! C11 added the call- and type-hierarchy methods —
+//! `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`,
+//! `callHierarchy/outgoingCalls`, `textDocument/prepareTypeHierarchy`,
+//! `typeHierarchy/supertypes` and `typeHierarchy/subtypes` — with the same
+//! static/dynamic split (`STUB_LSP_CALL_HIERARCHY_STATIC`/
+//! `stub/callHierarchyRegisterRun`, and the type-hierarchy twins).
+//! `outgoingCalls` answers an empty array for the item at line 9, so a test
+//! can tell a leaf function's real answer apart from "the server had
+//! nothing"; `supertypes` answers `null` for the item at line 99, the case
+//! `type_hierarchy_outcome`'s index fallback exists for.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Stdout, Write};
@@ -101,6 +112,13 @@ const SEMANTIC_TOKENS_STATIC: &str = "STUB_LSP_SEMANTIC_TOKENS_STATIC";
 /// `stub/codeLensRegisterRun` for the dynamic-registration path csharp-ls is
 /// believed to use — the same static/dynamic split C9 exercises.
 const CODE_LENS_STATIC: &str = "STUB_LSP_CODE_LENS_STATIC";
+/// C11: set to `1` to advertise `callHierarchyProvider` statically in
+/// `initialize`'s result. Unset, a test instead reaches
+/// `stub/callHierarchyRegisterRun` for the dynamic-registration path, the
+/// same static/dynamic split C9/C10 exercise for their own features.
+const CALL_HIERARCHY_STATIC: &str = "STUB_LSP_CALL_HIERARCHY_STATIC";
+/// C11: the type-hierarchy twin of [`CALL_HIERARCHY_STATIC`].
+const TYPE_HIERARCHY_STATIC: &str = "STUB_LSP_TYPE_HIERARCHY_STATIC";
 /// C9: the legend both the static and dynamic paths advertise — the LSP
 /// standard vocabulary, same order `lsp_core::semantic_tokens::STANDARD_TOKEN_TYPES`/
 /// `STANDARD_TOKEN_MODIFIERS` define, so a test can index into it by name.
@@ -153,6 +171,8 @@ fn main() {
     let completion_resolve = std::env::var(COMPLETION_RESOLVE).is_ok_and(|v| v == "1");
     let semantic_tokens_static = std::env::var(SEMANTIC_TOKENS_STATIC).is_ok_and(|v| v == "1");
     let code_lens_static = std::env::var(CODE_LENS_STATIC).is_ok_and(|v| v == "1");
+    let call_hierarchy_static = std::env::var(CALL_HIERARCHY_STATIC).is_ok_and(|v| v == "1");
+    let type_hierarchy_static = std::env::var(TYPE_HIERARCHY_STATIC).is_ok_and(|v| v == "1");
 
     while let Some(body) = read_message(&mut input).expect("read from stdin") {
         let message: Value = match serde_json::from_slice(&body) {
@@ -211,6 +231,12 @@ fn main() {
                 }
                 if code_lens_static {
                     capabilities["codeLensProvider"] = json!({"resolveProvider": true});
+                }
+                if call_hierarchy_static {
+                    capabilities["callHierarchyProvider"] = json!(true);
+                }
+                if type_hierarchy_static {
+                    capabilities["typeHierarchyProvider"] = json!(true);
                 }
                 send(
                     &out,
@@ -599,6 +625,183 @@ fn main() {
                                 "id": "stub-code-lens",
                                 "method": "textDocument/codeLens",
                                 "registerOptions": {"resolveProvider": true},
+                            }],
+                        }}),
+                    );
+                    let register_answer = register_rx
+                        .recv_timeout(CLIENT_REPLY_TIMEOUT)
+                        .unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&register_id);
+                    let registered = register_answer.get("id").is_some()
+                        && register_answer.get("error").is_none();
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "result": {"registered": registered}}),
+                    );
+                });
+            }
+            // C11: line 99 answers `null` — "no call hierarchy here", a
+            // valid answer for a position that is not a callable symbol.
+            // Any other line answers with one item, `DoWork` in
+            // `main.cs`/`main.rs` (whichever `uri` was asked about).
+            ("textDocument/prepareCallHierarchy", Some(id)) => {
+                let uri = params
+                    .pointer("/textDocument/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let line = params
+                    .pointer("/position/line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let result = match line {
+                    99 => Value::Null,
+                    // The leaf function `outgoingCalls` reports as calling
+                    // nothing further — see that handler below.
+                    9 => json!([hierarchy_item(uri, "Helper", 12, 9)]),
+                    _ => json!([hierarchy_item(uri, "DoWork", 12, 3)]),
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // C11: one caller, `Main`, with one call site — `fromRanges` is
+            // never empty here (the empty case is `outgoingCalls`' below,
+            // which is the one that matters for the fallback-vs-real-
+            // answer distinction).
+            ("callHierarchy/incomingCalls", Some(id)) => {
+                let uri = params
+                    .pointer("/item/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let result = json!([{
+                    "from": hierarchy_item(uri, "Main", 12, 9),
+                    "fromRanges": [{"start": {"line": 9, "character": 4},
+                                    "end": {"line": 9, "character": 10}}],
+                }]);
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // C11: `DoWork` (line 3) calls one thing, `Helper`; asking about
+            // `Helper` itself (line 9, `stub/outgoingLeaf`'s target) answers
+            // with an empty array — a leaf function's real, non-fallback
+            // answer, per the plan's own distinction.
+            ("callHierarchy/outgoingCalls", Some(id)) => {
+                let uri = params
+                    .pointer("/item/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let line = params
+                    .pointer("/item/range/start/line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let result = if line == 9 {
+                    json!([])
+                } else {
+                    json!([{
+                        "to": hierarchy_item(uri, "Helper", 12, 9),
+                        "fromRanges": [{"start": {"line": 3, "character": 8},
+                                        "end": {"line": 3, "character": 14}}],
+                    }])
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // C11: the dynamic-registration path for call hierarchy — same
+            // shape as `stub/codeLensRegisterRun`.
+            ("stub/callHierarchyRegisterRun", Some(id)) => {
+                let register_id = next_request_id;
+                next_request_id += 1;
+                let (register_tx, register_rx) = channel();
+                pending
+                    .lock()
+                    .expect("pending lock")
+                    .insert(register_id, register_tx);
+
+                let out = Arc::clone(&out);
+                let pending = Arc::clone(&pending);
+                thread::spawn(move || {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": register_id,
+                               "method": "client/registerCapability", "params": {
+                            "registrations": [{
+                                "id": "stub-call-hierarchy",
+                                "method": "textDocument/prepareCallHierarchy",
+                                "registerOptions": {},
+                            }],
+                        }}),
+                    );
+                    let register_answer = register_rx
+                        .recv_timeout(CLIENT_REPLY_TIMEOUT)
+                        .unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&register_id);
+                    let registered = register_answer.get("id").is_some()
+                        && register_answer.get("error").is_none();
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "result": {"registered": registered}}),
+                    );
+                });
+            }
+            // C11: line 99 answers `null`, same convention as
+            // `prepareCallHierarchy`. Any other line answers with `Circle`.
+            ("textDocument/prepareTypeHierarchy", Some(id)) => {
+                let uri = params
+                    .pointer("/textDocument/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let line = params
+                    .pointer("/position/line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let result = if line == 99 {
+                    Value::Null
+                } else {
+                    json!([hierarchy_item(uri, "Circle", 5, 3)])
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // C11: `Circle`'s one supertype, `Shape` — line 99 answers
+            // `null`, the case `type_hierarchy_outcome`'s index fallback
+            // reaches for.
+            ("typeHierarchy/supertypes", Some(id)) => {
+                let uri = params
+                    .pointer("/item/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let line = params
+                    .pointer("/item/range/start/line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let result = if line == 99 {
+                    Value::Null
+                } else {
+                    json!([hierarchy_item(uri, "Shape", 5, 0)])
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // C11: `Circle`'s subtypes — empty, since the stub gives it none.
+            ("typeHierarchy/subtypes", Some(id)) => {
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": []}));
+            }
+            // C11: the dynamic-registration path for type hierarchy — same
+            // shape as `stub/callHierarchyRegisterRun`.
+            ("stub/typeHierarchyRegisterRun", Some(id)) => {
+                let register_id = next_request_id;
+                next_request_id += 1;
+                let (register_tx, register_rx) = channel();
+                pending
+                    .lock()
+                    .expect("pending lock")
+                    .insert(register_id, register_tx);
+
+                let out = Arc::clone(&out);
+                let pending = Arc::clone(&pending);
+                thread::spawn(move || {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": register_id,
+                               "method": "client/registerCapability", "params": {
+                            "registrations": [{
+                                "id": "stub-type-hierarchy",
+                                "method": "textDocument/prepareTypeHierarchy",
+                                "registerOptions": {},
                             }],
                         }}),
                     );
@@ -1183,6 +1386,20 @@ fn location(uri: &str, line: u64, character: u64) -> Value {
         "start": {"line": line, "character": character},
         "end": {"line": line, "character": character + 4},
     }})
+}
+
+/// C11: a `CallHierarchyItem`/`TypeHierarchyItem` — the two are the same
+/// shape on the wire, so one builder covers both stub features.
+fn hierarchy_item(uri: &str, name: &str, kind: u64, line: u64) -> Value {
+    json!({
+        "name": name,
+        "kind": kind,
+        "uri": uri,
+        "range": {"start": {"line": line, "character": 0},
+                  "end": {"line": line, "character": 10}},
+        "selectionRange": {"start": {"line": line, "character": 4},
+                           "end": {"line": line, "character": 4 + name.len() as u64}},
+    })
 }
 
 /// The one diagnostic this server ever reports, on line 1.

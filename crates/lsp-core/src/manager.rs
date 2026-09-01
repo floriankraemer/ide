@@ -34,6 +34,7 @@ use crate::configuration;
 use crate::document_highlight::{parse_document_highlights, DocumentHighlight};
 use crate::formatting::{parse_formatting, FormattingOptions, FormattingOutcome};
 use crate::framing::{read_message, write_message};
+use crate::hierarchy::{self, HierarchyItem, IncomingCall, OutgoingCall};
 use crate::hover::{parse_hover, HoverText};
 use crate::inlay_hint::{line_range, parse_inlay_hints, InlayHint};
 use crate::intentions::{assemble, Intention, ORGANIZE_IMPORTS};
@@ -107,6 +108,11 @@ pub const SEMANTIC_TOKENS_TIMEOUT: Duration = Duration::from_secs(10);
 /// open rather than blocking typing — so it gets the same generous, non-UI-
 /// blocking deadline as [`SEMANTIC_TOKENS_TIMEOUT`].
 pub const CODE_LENS_TIMEOUT: Duration = Duration::from_secs(10);
+/// C11: call hierarchy and type hierarchy each re-analyse the caret's whole
+/// call/type graph, not a keystroke — an explicit gesture (Ctrl+Alt+H and
+/// friends) the user is waiting on, so this matches [`DEFINITION_TIMEOUT`]
+/// rather than the background-refresh features above.
+pub const HIERARCHY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Delay before the first respawn attempt; doubles per consecutive failure.
 const RESTART_BACKOFF_INITIAL: Duration = Duration::from_millis(200);
 /// Ceiling for the exponential backoff.
@@ -332,6 +338,16 @@ struct Server {
     /// `LspManager::code_lenses_supported` checks `registrations` directly
     /// (see `code_lens::is_offered`'s own doc comment).
     code_lens_supported: Mutex<bool>,
+    /// C11: whether this server statically advertised `callHierarchyProvider`
+    /// in its `initialize` result. Same dual-path convention as
+    /// `code_lens_supported` — the dynamic half needs no mirror field here
+    /// either, since a `CallHierarchyOptions` carries nothing this client
+    /// reads back out; `LspManager::call_hierarchy_supported` checks
+    /// `registrations` directly for that half.
+    call_hierarchy_supported: Mutex<bool>,
+    /// C11: the type-hierarchy twin of `call_hierarchy_supported`, for
+    /// `typeHierarchyProvider`.
+    type_hierarchy_supported: Mutex<bool>,
 }
 
 impl Server {
@@ -448,6 +464,8 @@ impl LspManager {
             settings: Mutex::new(cfg.settings.clone()),
             semantic_tokens_legend: Mutex::new(None),
             code_lens_supported: Mutex::new(false),
+            call_hierarchy_supported: Mutex::new(false),
+            type_hierarchy_supported: Mutex::new(false),
         });
 
         let (ready_tx, ready_rx) = channel();
@@ -844,6 +862,151 @@ impl LspManager {
             lens.clone(),
             DEFAULT_REQUEST_TIMEOUT,
         )
+    }
+
+    /// `textDocument/prepareCallHierarchy`: the call-hierarchy item(s) at a
+    /// position, the starting point `incomingCalls`/`outgoingCalls` walk
+    /// from. Whether it is worth calling at all is
+    /// [`Self::call_hierarchy_supported`]'s answer, not this method's — same
+    /// convention [`Self::code_lenses_supported`] follows.
+    ///
+    /// C11: call hierarchy has no `index-core` fallback (see `crate::hierarchy`
+    /// module docs) — an empty answer here is final, not a signal to fall
+    /// back to anything.
+    pub fn prepare_call_hierarchy(
+        &self,
+        language_id: &str,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<HierarchyItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "textDocument/prepareCallHierarchy",
+            position_params(uri, line, character),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(hierarchy::parse_hierarchy_items(&result))
+    }
+
+    /// Whether this server offers call hierarchy at all — from `initialize`'s
+    /// static `callHierarchyProvider` capability, or a dynamic
+    /// `client/registerCapability` registration for
+    /// `textDocument/prepareCallHierarchy`. `false` for a server that is not
+    /// running.
+    pub fn call_hierarchy_supported(&self, language_id: &str) -> bool {
+        self.server(language_id).is_some_and(|server| {
+            *server.call_hierarchy_supported.lock().unwrap()
+                || server
+                    .registrations
+                    .method_registered("textDocument/prepareCallHierarchy")
+        })
+    }
+
+    /// `callHierarchy/incomingCalls`: everything that calls the item
+    /// `prepare_call_hierarchy` returned. `item` is sent back exactly as the
+    /// server gave it, same convention [`Self::resolve_code_lens`] follows
+    /// for its own `data`-bearing items.
+    pub fn incoming_calls(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Vec<IncomingCall>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "callHierarchy/incomingCalls",
+            json!({"item": item}),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(hierarchy::parse_incoming_calls(&result))
+    }
+
+    /// `callHierarchy/outgoingCalls`: everything the item
+    /// `prepare_call_hierarchy` returned calls. An empty answer here is a
+    /// real leaf function, not a hint to fall back — see the module docs on
+    /// [`crate::hierarchy`].
+    pub fn outgoing_calls(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Vec<OutgoingCall>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "callHierarchy/outgoingCalls",
+            json!({"item": item}),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(hierarchy::parse_outgoing_calls(&result))
+    }
+
+    /// `textDocument/prepareTypeHierarchy`: the type-hierarchy item(s) at a
+    /// position, the starting point `supertypes`/`subtypes` walk from.
+    /// Whether it is worth calling at all is
+    /// [`Self::type_hierarchy_supported`]'s answer.
+    ///
+    /// Unlike call hierarchy, an empty or missing answer here is
+    /// `crate::hierarchy::type_hierarchy_outcome`'s cue to fall back to
+    /// `index-core`'s supertype-edge data — see the module docs.
+    pub fn prepare_type_hierarchy(
+        &self,
+        language_id: &str,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<HierarchyItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "textDocument/prepareTypeHierarchy",
+            position_params(uri, line, character),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(hierarchy::parse_hierarchy_items(&result))
+    }
+
+    /// Whether this server offers type hierarchy at all — from
+    /// `initialize`'s static `typeHierarchyProvider` capability, or a
+    /// dynamic `client/registerCapability` registration for
+    /// `textDocument/prepareTypeHierarchy`. `false` for a server that is not
+    /// running.
+    pub fn type_hierarchy_supported(&self, language_id: &str) -> bool {
+        self.server(language_id).is_some_and(|server| {
+            *server.type_hierarchy_supported.lock().unwrap()
+                || server
+                    .registrations
+                    .method_registered("textDocument/prepareTypeHierarchy")
+        })
+    }
+
+    /// `typeHierarchy/supertypes`: every supertype of the item
+    /// `prepare_type_hierarchy` returned, as the server sees it.
+    pub fn supertypes(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Vec<HierarchyItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "typeHierarchy/supertypes",
+            json!({"item": item}),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(hierarchy::parse_hierarchy_items(&result))
+    }
+
+    /// `typeHierarchy/subtypes`: every subtype of the item
+    /// `prepare_type_hierarchy` returned, as the server sees it.
+    pub fn subtypes(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Vec<HierarchyItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "typeHierarchy/subtypes",
+            json!({"item": item}),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(hierarchy::parse_hierarchy_items(&result))
     }
 
     /// `workspace/executeCommand`: ask the server to carry out a command a
@@ -1404,6 +1567,15 @@ fn connect(
             // csharp-ls may instead only register `textDocument/codeLens`
             // dynamically, which `code_lenses_supported` also checks.
             *server.code_lens_supported.lock().unwrap() = code_lens::is_offered(result);
+            // C11: same read-once-here convention — presence of either
+            // capability is the whole answer, same reasoning
+            // `code_lens::is_offered` gives for its own capability.
+            *server.call_hierarchy_supported.lock().unwrap() = result
+                .pointer("/capabilities/callHierarchyProvider")
+                .is_some();
+            *server.type_hierarchy_supported.lock().unwrap() = result
+                .pointer("/capabilities/typeHierarchyProvider")
+                .is_some();
             break (
                 parse_trigger_characters(result),
                 parse_signature_triggers(result),
@@ -1786,6 +1958,15 @@ fn client_capabilities() -> Value {
             // (`code_lens::CodeLensItem::needs_resolve`), not by a
             // capability this client would advertise.
             "codeLens": {"dynamicRegistration": true},
+            // C11: dynamic, on the same suspicion as `semanticTokens` and
+            // `codeLens` above — csharp-ls is not confirmed to declare
+            // either hierarchy capability statically. Neither carries a
+            // resolve-style sub-capability worth advertising: an item's
+            // `data` always round-trips through `incomingCalls`/
+            // `outgoingCalls`/`supertypes`/`subtypes` verbatim, with no
+            // separate resolve request in the spec.
+            "callHierarchy": {"dynamicRegistration": true},
+            "typeHierarchy": {"dynamicRegistration": true},
         },
         "workspace": {
             // RF5: we answer `workspace/applyEdit`, which is how the
