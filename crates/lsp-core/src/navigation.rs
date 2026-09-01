@@ -57,11 +57,20 @@ fn target(item: &Value) -> Option<DefinitionTarget> {
 /// Who answers a go-to-definition gesture.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefinitionOutcome {
-    /// The language server answered; these targets are the answer.
+    /// The language server answered with one or more `file:` targets;
+    /// these are the answer.
     Lsp(Vec<DefinitionTarget>),
     /// Nobody asked a server, or it had nothing — ADR-0011's name-based
     /// `index_core::resolve_declaration` answers instead.
     Index,
+    /// The server's answer is a non-`file:` URI (C12) — csharp-ls's
+    /// `csharp:/metadata/...` for decompiled/generated framework source,
+    /// when `useMetadataUris` is on. There is no local path to jump to
+    /// directly: the caller must fetch the URI's text first
+    /// ([`crate::manager::LspManager::fetch_metadata`]) and open it as a
+    /// read-only virtual document, or refuse cleanly if that fails — never
+    /// treat the raw URI as a path (ADR-0003 amendment).
+    NeedsMetadataFetch(String),
 }
 
 /// The precedence rule of ADR-0016: a running server's answer wins, and the
@@ -71,11 +80,22 @@ pub enum DefinitionOutcome {
 /// the symbol.
 ///
 /// `None` means no request was made at all.
+///
+/// A server that answers with a non-`file:` URI (C12) is a third case, not a
+/// flavour of "the server answered" — [`DefinitionTarget::path`] falls back
+/// to the raw URI string for any URI `path_from_uri` cannot parse, and
+/// treating that string as a local path is exactly the "every tab is a
+/// file" assumption this function exists to not make.
 pub fn definition_outcome(
     response: Option<Result<Vec<DefinitionTarget>, LspError>>,
 ) -> DefinitionOutcome {
     match response {
-        Some(Ok(targets)) if !targets.is_empty() => DefinitionOutcome::Lsp(targets),
+        Some(Ok(targets)) if !targets.is_empty() => {
+            match targets.iter().find(|t| !t.uri.starts_with("file://")) {
+                Some(non_file) => DefinitionOutcome::NeedsMetadataFetch(non_file.uri.clone()),
+                None => DefinitionOutcome::Lsp(targets),
+            }
+        }
         _ => DefinitionOutcome::Index,
     }
 }
@@ -176,6 +196,42 @@ mod tests {
                 method: "textDocument/definition".into()
             }))),
             DefinitionOutcome::Index
+        );
+    }
+
+    // --- C12: a non-`file:` target -----------------------------------------
+
+    #[test]
+    fn a_csharp_metadata_uri_needs_a_fetch_rather_than_being_treated_as_a_path() {
+        let targets = parse_definition(&location("csharp:/metadata/Projects/x/Console.cs", 10, 4));
+        // `path_from_uri` cannot parse a non-`file:` URI, so `path` falls
+        // back to the raw URI — the exact string a naive caller would be
+        // tempted to open as a local path.
+        assert_eq!(targets[0].path, "csharp:/metadata/Projects/x/Console.cs");
+
+        assert_eq!(
+            definition_outcome(Some(Ok(targets))),
+            DefinitionOutcome::NeedsMetadataFetch(
+                "csharp:/metadata/Projects/x/Console.cs".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn a_mix_of_file_and_metadata_targets_still_needs_a_fetch() {
+        // Rare in practice (go-to-definition usually answers with one
+        // target), but the rule must not silently drop the non-file one by
+        // only inspecting the first target.
+        let mut targets = parse_definition(&location("file:///a/main.rs", 0, 0));
+        targets.extend(parse_definition(&location(
+            "csharp:/metadata/Console.cs",
+            0,
+            0,
+        )));
+
+        assert_eq!(
+            definition_outcome(Some(Ok(targets))),
+            DefinitionOutcome::NeedsMetadataFetch("csharp:/metadata/Console.cs".to_string())
         );
     }
 }

@@ -413,6 +413,25 @@ fn main() {
                 }
                 send(&out, json!({"jsonrpc": "2.0", "id": id, "result": item}));
             }
+            // C12: `csharp/metadata` is not a real LSP method — this stub
+            // proves `LspManager::fetch_metadata`'s request/response shape
+            // against *something*, since it has never been round-tripped
+            // against a real csharp-ls (see that method's doc comment). A
+            // uri containing "missing" answers with no "source" field at
+            // all, exercising the clean-refusal path.
+            ("csharp/metadata", Some(id)) => {
+                let uri = params
+                    .pointer("/textDocument/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let result = if uri.contains("missing") {
+                    json!({})
+                } else {
+                    json!({"source": format!("// decompiled from {uri}\nclass Stub {{}}\n")})
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
             // F2-5: one signature-help shape per requested line —
             // line 0 -> offset parameter labels, line 1 -> substring labels,
             // line 2 -> an overload set whose second signature carries its

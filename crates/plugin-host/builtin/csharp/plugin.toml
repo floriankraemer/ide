@@ -20,3 +20,9 @@ settings-section = "csharp"
 
 [contributes.language-servers.settings]
 analyzersEnabled = true
+# C12: serve decompiled/generated source for framework symbols under
+# csharp:/ URIs, which `navigation.rs`'s `DefinitionOutcome::NeedsMetadataFetch`
+# and `LspManager::fetch_metadata` (`csharp/metadata`) exist to fetch. Off by
+# default in csharp-ls; on here the same way `analyzersEnabled` already
+# opts into a default-off feature this IDE's feature set expects.
+useMetadataUris = true

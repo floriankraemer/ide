@@ -67,6 +67,11 @@ pub const REFACTOR_TIMEOUT: Duration = Duration::from_secs(30);
 /// Go to Definition is an explicit gesture and the user is waiting for it,
 /// but a jump that lands half a minute later is a bug, not a jump.
 pub const DEFINITION_TIMEOUT: Duration = Duration::from_secs(5);
+/// C12: `csharp/metadata` decompiles or reconstructs source for a framework
+/// symbol server-side — real work, and the user is one navigation gesture
+/// past [`DEFINITION_TIMEOUT`] already having decided to wait, so this is
+/// closer to [`FORMATTING_TIMEOUT`] than to a caret-driven request.
+pub const METADATA_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Reformatting a whole file is real work — rustfmt on a large file, or a
 /// formatter that shells out — so this is generous compared with hover or
@@ -685,6 +690,43 @@ impl LspManager {
             DEFINITION_TIMEOUT,
         )?;
         Ok(parse_definition(&result))
+    }
+
+    /// C12: csharp-ls's custom `csharp/metadata` request — fetches the
+    /// decompiled/generated source text a `csharp:/...` definition target
+    /// points at (see [`crate::navigation::DefinitionOutcome::NeedsMetadataFetch`]),
+    /// so it can be opened as a read-only virtual document instead of a
+    /// broken tab.
+    ///
+    /// `language_id` is passed explicitly rather than derived from `uri` via
+    /// `language_of` (as [`LspManager::definition`] does): `uri` here is a
+    /// definition *target* the client has never opened, so it is not in the
+    /// open-documents table `language_of` reads.
+    ///
+    /// This is not a method in the LSP base specification — csharp-ls
+    /// documents it (`Custom Request: csharp/metadata`) but publishes no
+    /// formal schema, so the request/response shape below is a best-effort
+    /// reconstruction from the common `{textDocument: {uri}}` request /
+    /// `{source: string, ...}` response shape other LSP metadata extensions
+    /// (e.g. OmniSharp's own predecessor of this request) use, and is
+    /// **unverified against a real csharp-ls process** — this repo's Docker
+    /// verification budget did not extend to a live decompiled-symbol round
+    /// trip. `stub_server`'s `csharp/metadata` mode exercises the wire
+    /// shape this code expects, not what a real server actually sends.
+    pub fn fetch_metadata(&self, language_id: &str, uri: &str) -> Result<String, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "csharp/metadata",
+            json!({"textDocument": {"uri": uri}}),
+            METADATA_TIMEOUT,
+        )?;
+        result
+            .get("source")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                LspError::Protocol(format!("csharp/metadata for {uri} had no \"source\" field"))
+            })
     }
 
     /// `textDocument/codeAction` for a range of an open document.

@@ -1463,6 +1463,18 @@ impl ffi::LanguageService {
                 self.as_mut().definition_finished();
             }
             lsp_core::DefinitionOutcome::Index => self.as_mut().definition_fallback(),
+            // C12 foundation: the server pointed at decompiled/generated
+            // source (a non-`file:` URI), which this IDE cannot yet fetch
+            // and open as a tab end to end — refuse cleanly rather than
+            // treating the raw URI as a path and building a broken tab from
+            // it (the bug this guard replaces; see navigation.rs's
+            // `DefinitionOutcome::NeedsMetadataFetch` doc comment).
+            lsp_core::DefinitionOutcome::NeedsMetadataFetch(_uri) => {
+                self.as_mut().definition_unavailable(QString::from(
+                    "Go to Definition landed in decompiled framework code, \
+                     which this IDE cannot open yet.",
+                ));
+            }
         }
     }
 

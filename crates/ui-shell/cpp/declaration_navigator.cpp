@@ -53,6 +53,16 @@ DeclarationNavigator::DeclarationNavigator(LanguageService *languageService,
     });
     connect(languageService_, &LanguageService::definitionFallback, this,
             &DeclarationNavigator::askIndex);
+
+    // C12: the server's answer was decompiled/generated source this IDE
+    // cannot open yet (a non-file: URI) — refuse cleanly with a status-bar
+    // message, the same channel "no declaration found" already uses, rather
+    // than leaving whatever candidates_ held or attempting a jump.
+    connect(languageService_, &LanguageService::definitionUnavailable, this,
+            [this](const QString &message) {
+                candidates_.clear();
+                report(message);
+            });
 }
 
 void DeclarationNavigator::resolveAt(int documentPosition)

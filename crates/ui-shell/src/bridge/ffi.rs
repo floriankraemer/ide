@@ -3033,6 +3033,17 @@ mod ffi {
         #[cxx_name = "definitionFallback"]
         fn definition_fallback(self: Pin<&mut LanguageService>);
 
+        /// C12 — emitted instead of the pair above when the server's answer
+        /// is a non-`file:` URI (csharp-ls's `csharp:/metadata/...` for
+        /// decompiled framework code) that this IDE cannot yet open as a
+        /// tab. `message` is shown as-is; this is the clean refusal
+        /// `docs/architecture/decisions/0003-ffi-conventions.md`'s C12
+        /// amendment calls for — never a broken tab built from the raw URI
+        /// treated as a path.
+        #[qsignal]
+        #[cxx_name = "definitionUnavailable"]
+        fn definition_unavailable(self: Pin<&mut LanguageService>, message: QString);
+
         /// L5 — ask the server what could be typed at this position.
         /// `text_before_cursor` is the current line up to the caret, from
         /// which `lsp_core::completion` derives both the word being typed
