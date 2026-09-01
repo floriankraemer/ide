@@ -754,6 +754,19 @@ mod ffi {
         padding_right: bool,
     }
 
+    /// One code lens (C10), reduced to what the strip above/on `line`
+    /// paints: a label, and whether a click does anything yet. A lens that
+    /// still needs `codeLens/resolve` shows its placeholder label but is
+    /// not `clickable` until the click itself triggers the resolve — see
+    /// `LanguageService::runCodeLens`. Which lenses exist and what a click
+    /// means is decided in Rust; the view only draws this and forwards a
+    /// click back by index.
+    struct FfiCodeLens {
+        line: u32,
+        label: QString,
+        clickable: bool,
+    }
+
     /// How many diagnostics of each severity exist right now, 1:1 with
     /// `lsp_core::DiagnosticCounts` — for the status-bar counter and the
     /// Problems panel's filter buttons.
@@ -3311,6 +3324,49 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "semanticTokenSpans"]
         fn semantic_token_spans(self: &LanguageService, path: &QString) -> Vec<FfiHighlightSpan>;
+
+        /// C10 — fire-and-forget `textDocument/codeLens` for `path`'s whole
+        /// document, gated on `LspManager::code_lenses_supported` (checked
+        /// at call time, so this also covers a server that registered the
+        /// capability dynamically after this method's first no-op call —
+        /// see `request_code_lenses`'s own doc comment). Answers on
+        /// `codeLensesReady`.
+        #[qinvokable]
+        #[cxx_name = "requestCodeLenses"]
+        fn request_code_lenses(self: Pin<&mut LanguageService>, path: &QString);
+
+        #[qsignal]
+        #[cxx_name = "codeLensesReady"]
+        fn code_lenses_ready(self: Pin<&mut LanguageService>, path: QString);
+
+        /// The last-fetched lenses for `path`: line, label, clickable —
+        /// what the C++ lens strip needs to draw one row per lens and
+        /// forward a click back by index. Empty before the first answer,
+        /// or for a document nothing has ever requested lenses for.
+        #[qinvokable]
+        #[cxx_name = "codeLenses"]
+        fn code_lenses(self: &LanguageService, path: &QString) -> Vec<FfiCodeLens>;
+
+        /// C10 — run the lens at `index` in the last answer `codeLenses`
+        /// returned for `path`: resolve it if it still needs
+        /// `codeLens/resolve`, then send its command through the existing
+        /// `workspace/executeCommand` path with the refactoring session
+        /// gate held around it, so a `workspace/applyEdit` the command
+        /// provokes is recognised as legitimate. Any resulting edit arrives
+        /// on the usual `refactorReady`/`refactorFailed` refactor-preview
+        /// flow, not a signal of its own.
+        ///
+        /// TODO(C10-followup): nothing in `cpp/editor_tabs_lsp.cpp` calls
+        /// `requestCodeLenses`/`codeLenses`/`runCodeLens` yet. The Rust
+        /// pipeline is wired and reachable end to end from document open
+        /// through fetch, resolve and gated execution (see
+        /// `stub_server_session.rs`'s C10 tests); only the C++ lens strip —
+        /// painting one row per `FfiCodeLens` above/on its line and
+        /// forwarding a click back by index — is left for follow-up, the
+        /// same allowance C9's own repaint call was given.
+        #[qinvokable]
+        #[cxx_name = "runCodeLens"]
+        fn run_code_lens(self: Pin<&mut LanguageService>, path: &QString, index: u32);
 
         /// RF8 — rename the symbol at a position.
         ///

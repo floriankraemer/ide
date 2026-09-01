@@ -139,7 +139,11 @@ fn code_action(value: &Value) -> Option<CodeActionItem> {
     })
 }
 
-fn command_ref(value: &Value) -> Option<CommandRef> {
+/// Parses one `Command`-shaped object into a [`CommandRef`]. `pub(crate)`
+/// because [`crate::code_lens`] carries the same wire shape for a resolved
+/// lens's command and reuses this rather than a parallel parser — a
+/// `Command` is a `Command` regardless of which LSP feature carries it.
+pub(crate) fn command_ref(value: &Value) -> Option<CommandRef> {
     Some(CommandRef {
         title: value
             .get("title")

@@ -67,6 +67,13 @@
 //! `stub/semanticTokensRegisterRun` sends a `client/registerCapability`
 //! for it instead — the path csharp-ls is believed to use, so a client that
 //! only reads the static capability never sees it.
+//!
+//! C10 added `textDocument/codeLens` and `codeLens/resolve`, plus
+//! `STUB_LSP_CODE_LENS_STATIC`/`stub/codeLensRegisterRun` for the same
+//! static/dynamic split. The resolved lens's command is `stub.applyEdit` —
+//! the same command `workspace/executeCommand`'s handler already blocks on a
+//! `workspace/applyEdit` answer for — so running a lens exercises the
+//! session gate through the existing path rather than a second one.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Stdout, Write};
@@ -89,6 +96,11 @@ const COMPLETION_RESOLVE: &str = "STUB_LSP_COMPLETION_RESOLVE";
 /// reaches `stub/semanticTokensRegisterRun` for the dynamic-registration
 /// path csharp-ls is believed to use.
 const SEMANTIC_TOKENS_STATIC: &str = "STUB_LSP_SEMANTIC_TOKENS_STATIC";
+/// C10: set to `1` to advertise `codeLensProvider` statically in
+/// `initialize`'s result. Unset, a test instead reaches
+/// `stub/codeLensRegisterRun` for the dynamic-registration path csharp-ls is
+/// believed to use — the same static/dynamic split C9 exercises.
+const CODE_LENS_STATIC: &str = "STUB_LSP_CODE_LENS_STATIC";
 /// C9: the legend both the static and dynamic paths advertise — the LSP
 /// standard vocabulary, same order `lsp_core::semantic_tokens::STANDARD_TOKEN_TYPES`/
 /// `STANDARD_TOKEN_MODIFIERS` define, so a test can index into it by name.
@@ -140,6 +152,7 @@ fn main() {
     let die_on_didopen = std::env::var(DIE_ON_DIDOPEN).is_ok_and(|v| v == "1");
     let completion_resolve = std::env::var(COMPLETION_RESOLVE).is_ok_and(|v| v == "1");
     let semantic_tokens_static = std::env::var(SEMANTIC_TOKENS_STATIC).is_ok_and(|v| v == "1");
+    let code_lens_static = std::env::var(CODE_LENS_STATIC).is_ok_and(|v| v == "1");
 
     while let Some(body) = read_message(&mut input).expect("read from stdin") {
         let message: Value = match serde_json::from_slice(&body) {
@@ -195,6 +208,9 @@ fn main() {
                         "legend": semantic_tokens_legend(),
                         "full": true,
                     });
+                }
+                if code_lens_static {
+                    capabilities["codeLensProvider"] = json!({"resolveProvider": true});
                 }
                 send(
                     &out,
@@ -514,6 +530,75 @@ fn main() {
                                     "legend": semantic_tokens_legend(),
                                     "full": true,
                                 },
+                            }],
+                        }}),
+                    );
+                    let register_answer = register_rx
+                        .recv_timeout(CLIENT_REPLY_TIMEOUT)
+                        .unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&register_id);
+                    let registered = register_answer.get("id").is_some()
+                        && register_answer.get("error").is_none();
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "result": {"registered": registered}}),
+                    );
+                });
+            }
+            // C10: two lenses — one already carries its `command` (a plain
+            // `workspace/executeCommand`, `stub.plain`, which the generic
+            // handler below answers with `null`), the other only `data`,
+            // csharp-ls's lazy-resolve path, which `codeLens/resolve` below
+            // fills in with `stub.applyEdit` — the same command
+            // `workspace/executeCommand`'s handler already blocks on a
+            // client answer for, so a lens click exercises the applyEdit
+            // gate through the same path a code action's command does,
+            // rather than a second command of its own.
+            ("textDocument/codeLens", Some(id)) => {
+                let result = json!([
+                    {"range": {"start": {"line": 0, "character": 0},
+                               "end": {"line": 0, "character": 3}},
+                     "command": {"title": "1 reference", "command": "stub.plain",
+                                 "arguments": [1]}},
+                    {"range": {"start": {"line": 5, "character": 0},
+                               "end": {"line": 5, "character": 1}},
+                     "data": {"token": "resolve-me"}},
+                ]);
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // The unresolved lens from line 5 above, with its command filled
+            // in. The item comes back whole, same convention
+            // `codeAction/resolve` follows.
+            ("codeLens/resolve", Some(id)) => {
+                let mut lens = params.clone();
+                lens["command"] = json!({"title": "Run", "command": "stub.applyEdit",
+                                          "arguments": ["file:///workspace/main.rs"]});
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": lens}));
+            }
+            // C10: the dynamic-registration path — csharp-ls is believed to
+            // declare `textDocument/codeLens` this way rather than in
+            // `initialize`'s static result. Same shape
+            // `stub/semanticTokensRegisterRun` uses.
+            ("stub/codeLensRegisterRun", Some(id)) => {
+                let register_id = next_request_id;
+                next_request_id += 1;
+                let (register_tx, register_rx) = channel();
+                pending
+                    .lock()
+                    .expect("pending lock")
+                    .insert(register_id, register_tx);
+
+                let out = Arc::clone(&out);
+                let pending = Arc::clone(&pending);
+                thread::spawn(move || {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": register_id,
+                               "method": "client/registerCapability", "params": {
+                            "registrations": [{
+                                "id": "stub-code-lens",
+                                "method": "textDocument/codeLens",
+                                "registerOptions": {"resolveProvider": true},
                             }],
                         }}),
                     );

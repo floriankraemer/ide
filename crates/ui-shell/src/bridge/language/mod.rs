@@ -151,6 +151,11 @@ pub struct LanguageServiceRust {
     /// answer leaves a path's entry untouched rather than clearing it.
     pub(crate) semantic_tokens:
         RefCell<std::collections::HashMap<String, Vec<lsp_core::MappedSemanticSpan>>>,
+    /// C10: the last-fetched `textDocument/codeLens` items per open
+    /// document path, fire-and-forget refreshed by `request_code_lenses` —
+    /// same storage shape `semantic_tokens` uses, and for the same reason
+    /// (`request_code_lenses`'s own doc comment).
+    pub(crate) code_lenses: RefCell<std::collections::HashMap<String, Vec<lsp_core::CodeLensItem>>>,
     /// The refactoring waiting to be applied, if any: what it changes, what
     /// to call it, and — when it came from the server asking us — the gate
     /// that server is blocked on.
@@ -204,6 +209,7 @@ impl Default for LanguageServiceRust {
             inlay_hints: RefCell::default(),
             inlay_hints_tracker: RefCell::default(),
             semantic_tokens: RefCell::default(),
+            code_lenses: RefCell::default(),
             pending: RefCell::default(),
             edits: RefCell::default(),
             busy: RefCell::default(),
@@ -440,6 +446,8 @@ impl ffi::LanguageService {
         // revision-change hook is the second call site
         // `overlay_semantic_tokens`'s TODO leaves for follow-up.
         self.as_mut().request_semantic_tokens(path, text);
+        // C10: same fire-and-forget convention, immediately above.
+        self.as_mut().request_code_lenses(path);
     }
 
     pub fn document_changed(self: Pin<&mut Self>, path: &QString, text: &QString) {

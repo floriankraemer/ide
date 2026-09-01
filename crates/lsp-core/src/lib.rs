@@ -12,6 +12,7 @@
 pub mod apply_edit;
 pub mod catalog;
 pub mod code_action;
+pub mod code_lens;
 pub mod completion;
 pub mod configuration;
 pub mod diagnostics;
@@ -44,6 +45,7 @@ pub use code_action::{
     filter_by_kind, kind_matches, needs_unfiltered_retry, parse_code_actions,
     steps as action_steps, ActionStep, CodeActionItem, CommandRef,
 };
+pub use code_lens::{is_offered as code_lens_offered, parse_code_lenses, CodeLensItem};
 pub use completion::{
     accept_range as completion_accept_range, additional_text_edits as completion_additional_edits,
     completion_prefix, filter as filter_completions, kind_name, own_edit as completion_own_edit,

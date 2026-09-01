@@ -307,6 +307,120 @@ impl ffi::LanguageService {
             })
             .unwrap_or_default()
     }
+
+    /// C10 — fire-and-forget `textDocument/codeLens` for `path`'s whole
+    /// document. Gated on `LspManager::code_lenses_supported` *inside* the
+    /// worker job rather than here, same reasoning
+    /// `request_semantic_tokens` gives: a server that only registers the
+    /// capability dynamically is still reachable on the next call, with no
+    /// snapshot of "supported" taken up front to go stale.
+    ///
+    /// Called once on document open (`document_opened`), the same call site
+    /// `request_semantic_tokens` uses and for the same reason — a whole-
+    /// document request is not something to re-fire per keystroke, and
+    /// there is no existing "expensive request after typing settles"
+    /// debounce in this file to reuse for a second trigger on every edit.
+    pub fn request_code_lenses(mut self: Pin<&mut Self>, path: &QString) {
+        let path = path.to_string();
+        let Some(language_id) = self.open_docs.borrow().get(&path).cloned() else {
+            return;
+        };
+        let uri = lsp_core::uri_from_path(&path);
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            if !manager.code_lenses_supported(&language_id) {
+                return;
+            }
+            let Ok(lenses) = manager.code_lenses(&language_id, &uri) else {
+                return;
+            };
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                service
+                    .code_lenses
+                    .borrow_mut()
+                    .insert(path.clone(), lenses);
+                service
+                    .as_mut()
+                    .code_lenses_ready(QString::from(path.as_str()));
+            });
+        });
+    }
+
+    /// The last-fetched lenses for `path`, reduced to what the view paints:
+    /// a line, a label, and whether a click does anything yet. A lens that
+    /// still needs `codeLens/resolve` (`command` is `None`) shows its
+    /// placeholder rather than nothing — the range is real even before the
+    /// label is — and is not clickable until resolved.
+    pub fn code_lenses(&self, path: &QString) -> Vec<ffi::FfiCodeLens> {
+        self.code_lenses
+            .borrow()
+            .get(&path.to_string())
+            .map(|lenses| lenses.iter().map(to_ffi_code_lens).collect())
+            .unwrap_or_default()
+    }
+
+    /// C10 — run one lens's command by index into the last answer
+    /// `codeLenses` returned for `path`. Resolves first if the lens still
+    /// needs it, then sends the command through the *existing*
+    /// `workspace/executeCommand` path (`LspManager::execute_command`,
+    /// already used by `run_action`'s code-action `Execute` step) — there is
+    /// exactly one command-execution method in this client, not one per
+    /// feature that can name a command.
+    ///
+    /// Wrapped in the same session guard `run_action` holds across its own
+    /// `execute_command` call: a lens click is exactly the user gesture
+    /// `apply_edit::RefactorSessions` exists to recognise, so a command that
+    /// turns around and asks for `workspace/applyEdit` is answered rather
+    /// than refused as unsolicited. Any resulting edit arrives as its own
+    /// `LspEvent::ApplyEdit` and is published from there, same as a code
+    /// action's `Execute` step.
+    pub fn run_code_lens(self: Pin<&mut Self>, path: &QString, index: u32) {
+        let path = path.to_string();
+        let Some(item) = self
+            .code_lenses
+            .borrow()
+            .get(&path)
+            .and_then(|lenses| lenses.get(index as usize))
+            .cloned()
+        else {
+            return;
+        };
+        let Some(language_id) = self.open_docs.borrow().get(&path).cloned() else {
+            return;
+        };
+        self.push_job(move |manager| {
+            let _session = manager.begin_refactor();
+            let resolved = if item.needs_resolve() {
+                manager
+                    .resolve_code_lens(&language_id, &item.raw)
+                    .ok()
+                    .and_then(|resolved| {
+                        lsp_core::parse_code_lenses(&serde_json::json!([resolved]))
+                            .into_iter()
+                            .next()
+                    })
+                    .unwrap_or(item)
+            } else {
+                item
+            };
+            if let Some(command) = resolved.command {
+                let _ = manager.execute_command(&language_id, &command);
+            }
+        });
+    }
+}
+
+fn to_ffi_code_lens(lens: &lsp_core::CodeLensItem) -> ffi::FfiCodeLens {
+    ffi::FfiCodeLens {
+        line: lens.range.start_line,
+        label: QString::from(
+            lens.command
+                .as_ref()
+                .map(|c| c.title.as_str())
+                .unwrap_or("\u{2026}"),
+        ),
+        clickable: lens.command.is_some() || lens.raw.get("data").is_some(),
+    }
 }
 
 /// Decodes each token to its byte-range/scope shape: `token.line`/

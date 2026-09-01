@@ -26,6 +26,7 @@ use crate::catalog::ServerConfig;
 use crate::code_action::{
     filter_by_kind, needs_unfiltered_retry, parse_code_actions, CodeActionItem, CommandRef,
 };
+use crate::code_lens::{self, CodeLensItem};
 use crate::completion::{
     parse_completion, parse_resolve_provider, parse_trigger_characters, CompletionList,
 };
@@ -101,6 +102,11 @@ pub const INTENTION_TIMEOUT: Duration = Duration::from_secs(5);
 /// it is still fired in the background on document open, never blocking
 /// typing, so a slow answer costs nothing but a delayed repaint.
 pub const SEMANTIC_TOKENS_TIMEOUT: Duration = Duration::from_secs(10);
+/// C10: `textDocument/codeLens` re-analyses the whole open document, same as
+/// semantic tokens, and is likewise fired in the background on document
+/// open rather than blocking typing — so it gets the same generous, non-UI-
+/// blocking deadline as [`SEMANTIC_TOKENS_TIMEOUT`].
+pub const CODE_LENS_TIMEOUT: Duration = Duration::from_secs(10);
 /// Delay before the first respawn attempt; doubles per consecutive failure.
 const RESTART_BACKOFF_INITIAL: Duration = Duration::from_millis(200);
 /// Ceiling for the exponential backoff.
@@ -318,6 +324,14 @@ struct Server {
     /// [`LspManager::semantic_tokens_legend`] rather than gating on one path
     /// or the other.
     semantic_tokens_legend: Mutex<Option<SemanticTokensLegend>>,
+    /// C10: whether this server statically advertised `codeLensProvider` in
+    /// its `initialize` result. The dynamic half of the same dual path —
+    /// a `client/registerCapability` for `textDocument/codeLens` — needs no
+    /// mirror of this field: unlike a semantic-tokens legend, a
+    /// `CodeLensOptions` carries nothing this client reads back out, so
+    /// `LspManager::code_lenses_supported` checks `registrations` directly
+    /// (see `code_lens::is_offered`'s own doc comment).
+    code_lens_supported: Mutex<bool>,
 }
 
 impl Server {
@@ -433,6 +447,7 @@ impl LspManager {
             settings_section: cfg.settings_section.clone(),
             settings: Mutex::new(cfg.settings.clone()),
             semantic_tokens_legend: Mutex::new(None),
+            code_lens_supported: Mutex::new(false),
         });
 
         let (ready_tx, ready_rx) = channel();
@@ -788,8 +803,52 @@ impl LspManager {
         Ok(parse_code_actions(&json!([result])))
     }
 
+    /// `textDocument/codeLens` for a whole open document.
+    ///
+    /// Whether it is worth calling at all is
+    /// [`Self::code_lenses_supported`]'s answer, not this method's — same
+    /// convention [`Self::semantic_tokens`] follows for the same reason.
+    pub fn code_lenses(&self, language_id: &str, uri: &str) -> Result<Vec<CodeLensItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "textDocument/codeLens",
+            json!({"textDocument": {"uri": uri}}),
+            CODE_LENS_TIMEOUT,
+        )?;
+        Ok(code_lens::parse_code_lenses(&result))
+    }
+
+    /// Whether this server offers code lenses at all — from `initialize`'s
+    /// static `codeLensProvider` capability, or a dynamic
+    /// `client/registerCapability` registration for `textDocument/codeLens`
+    /// (csharp-ls's suspected path, the same dual path C9 checks for
+    /// semantic tokens). `false` for a server that is not running.
+    pub fn code_lenses_supported(&self, language_id: &str) -> bool {
+        self.server(language_id).is_some_and(|server| {
+            *server.code_lens_supported.lock().unwrap()
+                || server
+                    .registrations
+                    .method_registered("textDocument/codeLens")
+        })
+    }
+
+    /// `codeLens/resolve` for a lens the server sent without a `command`
+    /// (csharp-ls resolves lazily, per the plan). `lens` is sent back
+    /// exactly as the server gave it, same convention
+    /// [`Self::resolve_code_action`] follows for its own `data`-bearing
+    /// items.
+    pub fn resolve_code_lens(&self, language_id: &str, lens: &Value) -> Result<Value, LspError> {
+        self.request_with_timeout(
+            language_id,
+            "codeLens/resolve",
+            lens.clone(),
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+    }
+
     /// `workspace/executeCommand`: ask the server to carry out a command a
-    /// code action named.
+    /// code action or a code lens (C10) named — both hand this the same
+    /// [`CommandRef`], so there is exactly one execution path for either.
     ///
     /// This is the request during which a server may ask us to apply an edit
     /// (`crate::apply_edit`), so the caller must be holding a
@@ -1341,6 +1400,10 @@ fn connect(
             // field), and `semantic_tokens_legend` needs to answer
             // correctly either way.
             *server.semantic_tokens_legend.lock().unwrap() = semantic_tokens::parse_legend(result);
+            // C10: same read-once-here convention, for the same reason —
+            // csharp-ls may instead only register `textDocument/codeLens`
+            // dynamically, which `code_lenses_supported` also checks.
+            *server.code_lens_supported.lock().unwrap() = code_lens::is_offered(result);
             break (
                 parse_trigger_characters(result),
                 parse_signature_triggers(result),
@@ -1715,6 +1778,14 @@ fn client_capabilities() -> Value {
                 "tokenModifiers": crate::semantic_tokens::STANDARD_TOKEN_MODIFIERS,
                 "formats": ["relative"],
             },
+            // C10: dynamic, because csharp-ls is believed to register this
+            // one dynamically too, same reasoning as `semanticTokens` above.
+            // No `resolveSupport`-shaped field exists for code lens in the
+            // spec — a lens without a `command` always needs
+            // `codeLens/resolve`, decided per item
+            // (`code_lens::CodeLensItem::needs_resolve`), not by a
+            // capability this client would advertise.
+            "codeLens": {"dynamicRegistration": true},
         },
         "workspace": {
             // RF5: we answer `workspace/applyEdit`, which is how the
