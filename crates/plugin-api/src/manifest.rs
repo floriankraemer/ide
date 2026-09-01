@@ -289,13 +289,19 @@ impl PluginManifest {
 
         for server in &self.contributes.language_servers {
             check_id("contributes.language-servers.id", &server.id)?;
-            non_empty("contributes.language-servers.language-id", &server.language_id)?;
+            non_empty(
+                "contributes.language-servers.language-id",
+                &server.language_id,
+            )?;
             non_empty("contributes.language-servers.name", &server.name)?;
             non_empty("contributes.language-servers.command", &server.command)?;
         }
         check_unique(
             ContributionPoint::LanguageServers,
-            self.contributes.language_servers.iter().map(|s| s.id.as_str()),
+            self.contributes
+                .language_servers
+                .iter()
+                .map(|s| s.id.as_str()),
         )?;
 
         // A language server needs no `[wasm]` component either: it is a

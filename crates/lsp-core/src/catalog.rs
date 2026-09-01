@@ -439,11 +439,14 @@ mod tests {
 
     #[test]
     fn user_override_replaces_only_the_fields_it_names() {
-        let resolved = resolve_servers(&[ServerOverride {
-            language_id: "rust".into(),
-            command: Some("/opt/ra".into()),
-            ..Default::default()
-        }], &[]);
+        let resolved = resolve_servers(
+            &[ServerOverride {
+                language_id: "rust".into(),
+                command: Some("/opt/ra".into()),
+                ..Default::default()
+            }],
+            &[],
+        );
         let rust = resolved.iter().find(|c| c.language_id == "rust").unwrap();
         assert_eq!(rust.command, "/opt/ra");
         assert_eq!(rust.name, "rust-analyzer");
@@ -453,11 +456,14 @@ mod tests {
 
     #[test]
     fn user_can_disable_a_shipped_server() {
-        let resolved = resolve_servers(&[ServerOverride {
-            language_id: "go".into(),
-            enabled: Some(false),
-            ..Default::default()
-        }], &[]);
+        let resolved = resolve_servers(
+            &[ServerOverride {
+                language_id: "go".into(),
+                enabled: Some(false),
+                ..Default::default()
+            }],
+            &[],
+        );
         let go = resolved.iter().find(|c| c.language_id == "go").unwrap();
         assert!(!go.enabled);
         assert_eq!(go.command, "gopls");
@@ -465,12 +471,15 @@ mod tests {
 
     #[test]
     fn user_can_add_an_unknown_language() {
-        let resolved = resolve_servers(&[ServerOverride {
-            language_id: "nim".into(),
-            command: Some("nimlsp".into()),
-            args: Some(vec!["--stdio".into()]),
-            ..Default::default()
-        }], &[]);
+        let resolved = resolve_servers(
+            &[ServerOverride {
+                language_id: "nim".into(),
+                command: Some("nimlsp".into()),
+                args: Some(vec!["--stdio".into()]),
+                ..Default::default()
+            }],
+            &[],
+        );
         let nim = resolved.iter().find(|c| c.language_id == "nim").unwrap();
         assert_eq!(nim.command, "nimlsp");
         assert_eq!(nim.args, ["--stdio"]);
@@ -479,21 +488,27 @@ mod tests {
 
     #[test]
     fn an_unknown_language_without_a_command_is_dropped() {
-        let resolved = resolve_servers(&[ServerOverride {
-            language_id: "nim".into(),
-            enabled: Some(true),
-            ..Default::default()
-        }], &[]);
+        let resolved = resolve_servers(
+            &[ServerOverride {
+                language_id: "nim".into(),
+                enabled: Some(true),
+                ..Default::default()
+            }],
+            &[],
+        );
         assert!(resolved.iter().all(|c| c.language_id != "nim"));
     }
 
     #[test]
     fn a_disabled_server_is_never_offered_for_launch() {
-        let resolved = resolve_servers(&[ServerOverride {
-            language_id: "rust".into(),
-            enabled: Some(false),
-            ..Default::default()
-        }], &[]);
+        let resolved = resolve_servers(
+            &[ServerOverride {
+                language_id: "rust".into(),
+                enabled: Some(false),
+                ..Default::default()
+            }],
+            &[],
+        );
         assert!(enabled_server(&resolved, "rust").is_none());
         assert_eq!(enabled_server(&resolved, "go").unwrap().command, "gopls");
         assert!(enabled_server(&resolved, "brainfuck").is_none());
@@ -517,11 +532,14 @@ mod tests {
             let language_id = lsp_language_id(def.id).to_string();
             assert!(!language_id.is_empty(), "{} has no LSP id", def.id);
 
-            let resolved = resolve_servers(&[ServerOverride {
-                language_id: language_id.clone(),
-                command: Some("some-server".into()),
-                ..Default::default()
-            }], &[]);
+            let resolved = resolve_servers(
+                &[ServerOverride {
+                    language_id: language_id.clone(),
+                    command: Some("some-server".into()),
+                    ..Default::default()
+                }],
+                &[],
+            );
             let found = enabled_server(&resolved, &language_id)
                 .unwrap_or_else(|| panic!("{} resolves to no server", def.id));
             assert_eq!(found.command, "some-server");
@@ -564,14 +582,16 @@ mod tests {
         assert!(default_server("csharp").is_none());
 
         let resolved = resolve_servers(&[], &[csharp_plugin()]);
-        let csharp = resolved
-            .iter()
-            .find(|c| c.language_id == "csharp")
-            .unwrap();
+        let csharp = resolved.iter().find(|c| c.language_id == "csharp").unwrap();
         assert_eq!(csharp.command, "csharp-ls");
         assert_eq!(csharp.name, "csharp-ls");
         assert_eq!(csharp.settings_section.as_deref(), Some("csharp"));
-        assert_eq!(csharp.source, ServerSource::Plugin { plugin_id: "csharp".into() });
+        assert_eq!(
+            csharp.source,
+            ServerSource::Plugin {
+                plugin_id: "csharp".into()
+            }
+        );
         assert!(enabled_server(&resolved, "csharp").is_some());
     }
 
@@ -597,7 +617,10 @@ mod tests {
             }
         );
         // Const row is gone entirely, not merged with the plugin's fields.
-        assert_eq!(resolved.iter().filter(|c| c.language_id == "rust").count(), 1);
+        assert_eq!(
+            resolved.iter().filter(|c| c.language_id == "rust").count(),
+            1
+        );
     }
 
     #[test]
@@ -610,10 +633,7 @@ mod tests {
             }],
             &[csharp_plugin()],
         );
-        let csharp = resolved
-            .iter()
-            .find(|c| c.language_id == "csharp")
-            .unwrap();
+        let csharp = resolved.iter().find(|c| c.language_id == "csharp").unwrap();
         assert_eq!(csharp.command, "/opt/csharp-ls");
         // Fields the override didn't name stay whatever the plugin set.
         assert_eq!(csharp.name, "csharp-ls");
