@@ -29,6 +29,7 @@ pub mod icons;
 /// Where plugins and the Markdown/Mermaid renderer are joined (ADR-0033).
 pub mod preview;
 mod tree_sort;
+mod virtual_doc; // Read-only virtual documents with no backing file (C12).
 
 pub use file_ops::{FileOp, ResourceOpError};
 
@@ -228,11 +229,11 @@ impl TabContent {
         }
     }
 
-    fn path(&self) -> &Path {
+    fn path(&self) -> Option<&Path> {
         match self {
             TabContent::Text(doc) => doc.path(),
-            TabContent::Binary(file) => file.path(),
-            TabContent::Diff(diff) => &diff.path,
+            TabContent::Binary(file) => Some(file.path()),
+            TabContent::Diff(diff) => Some(&diff.path),
         }
     }
 
@@ -570,9 +571,10 @@ impl AppSession {
     pub fn save_tab(&mut self, id: TabId, content: &str) -> Result<(), AppError> {
         let doc = self.text_doc_mut(id)?;
         doc.replace_content(content);
-        let path = doc.path().to_path_buf();
         doc.save().map_err(AppError::Save)?;
-        self.suppressed_changes.insert(path, Instant::now());
+        if let Some(path) = doc.path().map(|p| p.to_path_buf()) {
+            self.suppressed_changes.insert(path, Instant::now());
+        }
         Ok(())
     }
 
@@ -611,9 +613,10 @@ impl AppSession {
     /// asymmetry is why `save_tab` needs `content` and this doesn't).
     pub fn save_buffer(&mut self, id: TabId) -> Result<(), AppError> {
         let doc = self.text_doc_mut(id)?;
-        let path = doc.path().to_path_buf();
         doc.save().map_err(AppError::Save)?;
-        self.suppressed_changes.insert(path, Instant::now());
+        if let Some(path) = doc.path().map(|p| p.to_path_buf()) {
+            self.suppressed_changes.insert(path, Instant::now());
+        }
         Ok(())
     }
 
@@ -740,13 +743,10 @@ impl AppSession {
     /// The tab's backing file name (`"main.rs"`, `"Dockerfile"`), used to
     /// pick a highlighting language (Y2). File *name*, not extension:
     /// `Dockerfile`/`Makefile` have no extension, and the language
-    /// registry matches on either.
+    /// registry matches on either. Goes through `content.title()`, already
+    /// this derivation for every tab kind — including a virtual tab (C12).
     pub fn tab_file_name(&self, id: TabId) -> Option<String> {
-        self.entry(id)?
-            .content
-            .path()
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
+        Some(self.entry(id)?.content.title())
     }
 
     /// The tab's display title: the file name, plus a "(deleted)" suffix
@@ -762,10 +762,10 @@ impl AppSession {
         })
     }
 
-    /// The tab's backing file path. The view persists it so a split editor
-    /// layout can reopen the same files into the same groups next launch.
+    /// The tab's backing file path, or `None` for an unknown or virtual
+    /// (C12) tab. The view persists it to reopen a split layout next launch.
     pub fn tab_path(&self, id: TabId) -> Option<PathBuf> {
-        self.entry(id).map(|e| e.content.path().to_path_buf())
+        self.entry(id)?.content.path().map(|p| p.to_path_buf())
     }
 
     /// Re-read the tab's backing file from disk, discarding any in-editor
@@ -869,7 +869,7 @@ impl AppSession {
     fn find_tab_by_path(&self, path: &Path) -> Option<TabId> {
         self.docs
             .iter()
-            .find(|e| e.content.path() == path)
+            .find(|e| e.content.path() == Some(path))
             .map(|e| e.id)
     }
 

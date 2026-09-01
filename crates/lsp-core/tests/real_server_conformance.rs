@@ -28,13 +28,16 @@
 //! changed rather than because we did. A red CI that is nobody's fault is how
 //! a suite like this gets ignored and then deleted. Nightly and on demand.
 
+mod support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use lsp_core::catalog::ServerConfig;
 use lsp_core::manager::{LspEvent, LspManager};
+use support::{retry_until, wait_for};
 
 /// Long enough for rust-analyzer to index a one-file crate on a loaded CI box,
 /// short enough that a hang is a failure rather than a timeout of the job.
@@ -98,35 +101,9 @@ fn config() -> ServerConfig {
         command: "rust-analyzer".into(),
         args: Vec::new(),
         enabled: true,
-    }
-}
-
-/// Drain events until one matches, or fail naming what we waited for.
-/// Non-matching events are skipped: a real server emits progress and log
-/// notifications we do not care about here.
-fn wait_for<T>(
-    rx: &Receiver<LspEvent>,
-    what: &str,
-    timeout: Duration,
-    mut pick: impl FnMut(&LspEvent) -> Option<T>,
-) -> T {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            panic!("timed out after {timeout:?} waiting for {what}");
-        }
-        match rx.recv_timeout(remaining) {
-            Ok(event) => {
-                if let LspEvent::ServerFailed { message, .. } = &event {
-                    panic!("server failed while waiting for {what}: {message}");
-                }
-                if let Some(value) = pick(&event) {
-                    return value;
-                }
-            }
-            Err(e) => panic!("waiting for {what}: {e}"),
-        }
+        settings_section: None,
+        settings: serde_json::Value::Null,
+        source: lsp_core::catalog::ServerSource::Builtin,
     }
 }
 
@@ -144,40 +121,18 @@ fn started(fixture: &Fixture) -> (LspManager, Receiver<LspEvent>) {
     (manager, rx)
 }
 
-/// Poll `attempt` until it yields a value, or the deadline passes.
-///
-/// This exists because of the first thing this suite found: `ServerReady` is
-/// emitted as soon as `initialize` returns, but rust-analyzer cannot answer a
-/// single request until it has run `cargo metadata` and indexed the crate —
-/// tens of seconds on a cold cache. Every request before that returns an
-/// empty result that is indistinguishable from "no answer exists".
-///
-/// F0-16 gave the *product* something better than retrying: the client now
-/// handles `$/progress`, so the status bar says which server is indexing and
-/// how far along it is instead of silently answering nothing. The suite still
-/// retries, because a test has to get an answer either way and progress is
-/// advisory — a server that reports none must not hang it. Returns how long
-/// it took, so the suite keeps reporting the real cost rather than hiding it.
-fn retry_until<T>(
-    what: &str,
-    timeout: Duration,
-    mut attempt: impl FnMut() -> Option<T>,
-) -> (T, Duration) {
-    let started = Instant::now();
-    let deadline = started + timeout;
-    loop {
-        if let Some(value) = attempt() {
-            return (value, started.elapsed());
-        }
-        if Instant::now() >= deadline {
-            panic!(
-                "{what} still had no answer after {timeout:?} — rust-analyzer never \
-                 finished indexing, or the request is genuinely unsupported"
-            );
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-}
+// `wait_for` and `retry_until` are shared with `csharp_conformance.rs` via
+// `tests/support/mod.rs`. `retry_until` exists because of the first thing
+// this suite found: `ServerReady` is emitted as soon as `initialize`
+// returns, but rust-analyzer cannot answer a single request until it has run
+// `cargo metadata` and indexed the crate — tens of seconds on a cold cache.
+// Every request before that returns an empty result that is
+// indistinguishable from "no answer exists". F0-16 gave the *product*
+// something better than retrying: the client now handles `$/progress`, so
+// the status bar says which server is indexing and how far along it is
+// instead of silently answering nothing. The suite still retries, because a
+// test has to get an answer either way and progress is advisory — a server
+// that reports none must not hang it.
 
 // ---------------------------------------------------------------------------
 // Observations, recorded into the expectations file.

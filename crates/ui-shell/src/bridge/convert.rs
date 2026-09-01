@@ -48,6 +48,12 @@ pub(crate) struct SyntaxHighlighterHandle {
     /// per-language colours without the view having to know, or plumb,
     /// a language id of its own.
     language: syntax_core::Language,
+    /// C9: the tree-sitter spans from the last `set_text`/`apply_edit`,
+    /// kept so `overlay_semantic_tokens` — called separately, once a
+    /// server's answer arrives, not on the same revision-change hook that
+    /// drives highlighting — has something to overlay onto without a third
+    /// reparse.
+    last_spans: Vec<syntax_core::HighlightSpan>,
 }
 
 pub(crate) fn new_syntax_highlighter(file_name: &str) -> Box<SyntaxHighlighterHandle> {
@@ -55,12 +61,14 @@ pub(crate) fn new_syntax_highlighter(file_name: &str) -> Box<SyntaxHighlighterHa
     Box::new(SyntaxHighlighterHandle {
         highlighter: syntax_core::Highlighter::new(language),
         language,
+        last_spans: Vec::new(),
     })
 }
 
 impl SyntaxHighlighterHandle {
     pub(crate) fn set_text(&mut self, text: &str) -> Vec<ffi::FfiHighlightSpan> {
-        to_ffi_spans(self.highlighter.set_text(text))
+        self.last_spans = self.highlighter.set_text(text);
+        to_ffi_spans(self.last_spans.clone())
     }
 
     pub(crate) fn apply_edit(
@@ -70,10 +78,37 @@ impl SyntaxHighlighterHandle {
         old_end_byte: usize,
         new_end_byte: usize,
     ) -> Vec<ffi::FfiHighlightSpan> {
-        to_ffi_spans(
-            self.highlighter
-                .edit(new_text, start_byte, old_end_byte, new_end_byte),
-        )
+        self.last_spans = self
+            .highlighter
+            .edit(new_text, start_byte, old_end_byte, new_end_byte);
+        to_ffi_spans(self.last_spans.clone())
+    }
+
+    /// C9: overlay `semantic` — already-mapped semantic-token spans, in the
+    /// same byte-offset/scope-id shape as `last_spans` — onto the
+    /// tree-sitter spans from this handle's last `set_text`/`apply_edit`.
+    /// `lsp_core::semantic_tokens::overlay` owns the merge rule (semantic
+    /// wins where it covers, tree-sitter fills the rest, per F0-16); this
+    /// only translates across the FFI seam, matching every other method
+    /// here (ADR-0002).
+    pub(crate) fn overlay_semantic_tokens(
+        &self,
+        semantic: Vec<ffi::FfiHighlightSpan>,
+    ) -> Vec<ffi::FfiHighlightSpan> {
+        let semantic: Vec<lsp_core::MappedSemanticSpan> = semantic
+            .into_iter()
+            .filter_map(|span| {
+                Some(lsp_core::MappedSemanticSpan {
+                    start: span.start,
+                    end: span.end,
+                    scope: scope_from_id(span.scope)?,
+                })
+            })
+            .collect();
+        to_ffi_spans(lsp_core::overlay_semantic_tokens(
+            &self.last_spans,
+            &semantic,
+        ))
     }
 
     pub(crate) fn fold_ranges(&self) -> Vec<ffi::FfiFoldRange> {
@@ -146,6 +181,15 @@ pub(crate) fn syntax_scope_names() -> Vec<String> {
         .iter()
         .map(|s| (*s).to_owned())
         .collect()
+}
+
+/// The inverse of `to_ffi_spans`' per-span `scope: span.scope.id()`: rebuilds
+/// a `syntax_core::Scope` from the raw id `FfiHighlightSpan` carries. `None`
+/// for an id past `syntax_core::SCOPES`, which cannot happen for a span this
+/// process itself produced, but a malformed one from across the seam must
+/// not panic.
+fn scope_from_id(id: u16) -> Option<syntax_core::Scope> {
+    syntax_core::Scope::from_id(id)
 }
 
 pub(crate) fn to_ffi_spans(spans: Vec<syntax_core::HighlightSpan>) -> Vec<ffi::FfiHighlightSpan> {

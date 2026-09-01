@@ -96,25 +96,40 @@ RUN curl -fsSL -o /tmp/sccache.tar.gz \
     && sccache --version
 
 # ---------------------------------------------------------------------------
-# lsp-conformance: linux-builder plus a real language server, for the
-# conformance suite (crates/lsp-core/tests/real_server_conformance.rs).
+# lsp-conformance: linux-builder plus real language servers, for the
+# conformance suites (crates/lsp-core/tests/real_server_conformance.rs and
+# crates/lsp-core/tests/csharp_conformance.rs).
 #
 # Deliberately NOT folded into linux-builder: that image is pulled by every CI
 # job and every developer, and this adds ~40MB and a download for a suite that
 # runs nightly. Keeping it a separate stage means the delta is all that is
 # pulled, and linux-builder's layer cache is untouched.
 #
-# rust-analyzer only, for now. It is enough to exercise the two things the
-# client has never had checked against a real server: UTF-16 position encoding
-# on non-ASCII text, and the shape of a real `textDocument/codeAction` reply.
-# pyright and clangd disagree with it in useful ways (Node runtime, different
-# encoding history, compile_commands.json, heavier use of codeAction/resolve),
-# and get added when a feature actually depends on that divergence.
+# rust-analyzer and csharp-ls, pinned. Two servers now, not one: the C#
+# language-servers work built client support for dynamic capability
+# registration (client/registerCapability) and pulled configuration
+# (workspace/configuration), and no real server had ever exercised either
+# path — csharp-ls is the first that does. See
+# docs/architecture/lsp-conformance.md for the full rationale. rust-analyzer
+# remains for the two things it was originally added for: UTF-16 position
+# encoding on non-ASCII text, and the shape of a real
+# `textDocument/codeAction` reply.
 #
-# The version is PINNED on purpose. An unpinned language server turns a
-# conformance suite into a random number generator, and "upstream changed its
-# codeAction shape" arriving as a red CI on an unrelated PR is exactly how a
-# suite like this gets switched off. Bumping the pin is a deliberate commit.
+# pyright and clangd still disagree with rust-analyzer in useful ways (Node
+# runtime, different encoding history, compile_commands.json, heavier use of
+# codeAction/resolve), and get added when a feature actually depends on that
+# divergence — the same bar csharp-ls had to clear.
+#
+# Kept as ONE stage rather than split: the Makefile's `lsp-conformance`
+# target has no `--target` parameter, both suites run from the same
+# `lsp-conformance-ci` invocation, and this image is already only pulled
+# nightly/on demand — the extra ~1GB from the .NET SDK is not a per-PR tax on
+# anyone.
+#
+# Every version below is PINNED on purpose. An unpinned language server turns
+# a conformance suite into a random number generator, and "upstream changed
+# its shape" arriving as a red CI on an unrelated PR is exactly how a suite
+# like this gets switched off. Bumping a pin is a deliberate commit.
 # ---------------------------------------------------------------------------
 FROM linux-builder AS lsp-conformance
 
@@ -126,6 +141,36 @@ RUN curl -fsSL -o /tmp/ra.gz \
     && chmod +x /usr/local/bin/rust-analyzer \
     && rm /tmp/ra.gz \
     && rust-analyzer --version
+
+# .NET SDK via Microsoft's own dotnet-install.sh, the same "download a pinned
+# release directly" style as rust-analyzer above — no third-party apt repo.
+# 10.0 (LTS) rather than 8.0: the pinned csharp-ls below ships a
+# `tools/net10.0/any` global-tool payload, and an 8.0 SDK cannot select it —
+# `dotnet tool install` fails with a misleading "DotnetToolSettings.xml was
+# not found" rather than a clear TFM mismatch. Verified to exist at
+# https://dotnet.microsoft.com/download/dotnet/10.0.
+ARG DOTNET_SDK_VERSION=10.0.400
+ENV DOTNET_ROOT=/usr/local/dotnet
+# `dotnet tool install --global` always installs under $HOME/.dotnet/tools
+# regardless of DOTNET_ROOT — this stage runs as root, so that is
+# /root/.dotnet/tools.
+ENV PATH="${DOTNET_ROOT}:/root/.dotnet/tools:${PATH}"
+# dotnet-install.sh needs libicu for globalization; linux-builder is Debian
+# bookworm and does not carry it.
+RUN apt-get update && apt-get install -y --no-install-recommends libicu72 \
+    && rm -rf /var/lib/apt/lists/*
+RUN curl -fsSL -o /tmp/dotnet-install.sh https://dot.net/v1/dotnet-install.sh \
+    && chmod +x /tmp/dotnet-install.sh \
+    && /tmp/dotnet-install.sh --version "${DOTNET_SDK_VERSION}" --install-dir "${DOTNET_ROOT}" \
+    && rm /tmp/dotnet-install.sh \
+    && dotnet --version
+
+# csharp-ls: Roslyn-based LSP server, installed as a pinned global dotnet
+# tool. Verified to exist on nuget.org (api.nuget.org/v3-flatcontainer/
+# csharp-ls/index.json) before pinning.
+ARG CSHARP_LS_VERSION=0.27.0
+RUN dotnet tool install --global csharp-ls --version "${CSHARP_LS_VERSION}" \
+    && csharp-ls --version
 
 # ---------------------------------------------------------------------------
 # linux-artifact-builder: linux-builder + baked-in source, for buildx

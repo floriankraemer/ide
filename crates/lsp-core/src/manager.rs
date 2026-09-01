@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{self, BufReader, Write};
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
@@ -25,19 +26,27 @@ use crate::catalog::ServerConfig;
 use crate::code_action::{
     filter_by_kind, needs_unfiltered_retry, parse_code_actions, CodeActionItem, CommandRef,
 };
-use crate::completion::{parse_completion, parse_trigger_characters, CompletionList};
+use crate::code_lens::{self, CodeLensItem};
+use crate::completion::{
+    parse_completion, parse_resolve_provider, parse_trigger_characters, CompletionList,
+};
+use crate::configuration;
 use crate::document_highlight::{parse_document_highlights, DocumentHighlight};
 use crate::formatting::{parse_formatting, FormattingOptions, FormattingOutcome};
 use crate::framing::{read_message, write_message};
+use crate::hierarchy::{self, HierarchyItem, IncomingCall, OutgoingCall};
 use crate::hover::{parse_hover, HoverText};
 use crate::inlay_hint::{line_range, parse_inlay_hints, InlayHint};
 use crate::intentions::{assemble, Intention, ORGANIZE_IMPORTS};
 use crate::navigation::{parse_definition, DefinitionTarget};
 use crate::progress::{ProgressTracker, ServerActivity};
+use crate::registration::{Registration, Registrations};
 use crate::rename::{parse_prepare_rename, PrepareRename};
+use crate::semantic_tokens::{self, SemanticTokensLegend};
 use crate::signature_help::{
     parse_signature_help, parse_signature_triggers, SignatureHelp, SignatureTriggers,
 };
+use crate::watched_files::{FileChangeKind, WatchedFiles};
 use crate::workspace_edit::{parse_workspace_edit, DocumentEdits};
 
 /// How long a request waits for its response before it is cancelled.
@@ -58,6 +67,11 @@ pub const REFACTOR_TIMEOUT: Duration = Duration::from_secs(30);
 /// Go to Definition is an explicit gesture and the user is waiting for it,
 /// but a jump that lands half a minute later is a bug, not a jump.
 pub const DEFINITION_TIMEOUT: Duration = Duration::from_secs(5);
+/// C12: `csharp/metadata` decompiles or reconstructs source for a framework
+/// symbol server-side — real work, and the user is one navigation gesture
+/// past [`DEFINITION_TIMEOUT`] already having decided to wait, so this is
+/// closer to [`FORMATTING_TIMEOUT`] than to a caret-driven request.
+pub const METADATA_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Reformatting a whole file is real work — rustfmt on a large file, or a
 /// formatter that shells out — so this is generous compared with hover or
@@ -88,6 +102,22 @@ pub const INLAY_HINT_TIMEOUT: Duration = Duration::from_secs(5);
 /// [`REFACTOR_TIMEOUT`]; *applying* the action they then choose still is,
 /// because by then they have committed to waiting.
 pub const INTENTION_TIMEOUT: Duration = Duration::from_secs(5);
+/// C9: `textDocument/semanticTokens/full` re-analyses the whole open
+/// document, not a viewport or a keystroke, so this is generous like
+/// [`FORMATTING_TIMEOUT`] rather than short like hover or completion — but
+/// it is still fired in the background on document open, never blocking
+/// typing, so a slow answer costs nothing but a delayed repaint.
+pub const SEMANTIC_TOKENS_TIMEOUT: Duration = Duration::from_secs(10);
+/// C10: `textDocument/codeLens` re-analyses the whole open document, same as
+/// semantic tokens, and is likewise fired in the background on document
+/// open rather than blocking typing — so it gets the same generous, non-UI-
+/// blocking deadline as [`SEMANTIC_TOKENS_TIMEOUT`].
+pub const CODE_LENS_TIMEOUT: Duration = Duration::from_secs(10);
+/// C11: call hierarchy and type hierarchy each re-analyse the caret's whole
+/// call/type graph, not a keystroke — an explicit gesture (Ctrl+Alt+H and
+/// friends) the user is waiting on, so this matches [`DEFINITION_TIMEOUT`]
+/// rather than the background-refresh features above.
+pub const HIERARCHY_TIMEOUT: Duration = Duration::from_secs(5);
 /// Delay before the first respawn attempt; doubles per consecutive failure.
 const RESTART_BACKOFF_INITIAL: Duration = Duration::from_millis(200);
 /// Ceiling for the exponential backoff.
@@ -117,6 +147,13 @@ pub enum LspEvent {
         /// characters trigger and retrigger it — from the same `initialize`
         /// result, read once for the same reason `trigger_characters` is.
         signature_triggers: SignatureTriggers,
+        /// C7: whether this server offers `completionItem/resolve`
+        /// (`completionProvider.resolveProvider`), from the same
+        /// `initialize` result — kept so an accept or a preview knows
+        /// whether the second round trip is worth making at all, rather
+        /// than sending it to every server and reading `MethodNotFound`
+        /// back one keystroke at a time.
+        completion_resolve_supported: bool,
     },
     /// The server's stdout hit EOF or errored, i.e. it died. A respawn follows
     /// after `retry_in` unless the restart budget is used up.
@@ -276,6 +313,46 @@ struct Server {
     /// `dispatch` to decide whether an inbound `workspace/applyEdit` was
     /// asked for. Shared with the manager, not owned here.
     sessions: Arc<RefactorSessions>,
+    /// C4: what this server has asked us to watch for it via
+    /// `client/registerCapability`, keyed by registration id like the
+    /// protocol keys it. Per server, like `progress`, because a
+    /// registration id is only unique within one server's session.
+    registrations: Registrations,
+    /// C6: the `workspace/configuration` section this server pulls its
+    /// settings from, from the `ServerConfig` it was launched with. Fixed
+    /// for the server's lifetime — changing it means relaunching with a
+    /// different config, same as `command`/`args`.
+    settings_section: Option<String>,
+    /// C6: the settings blob answered for `settings_section`, mutable via
+    /// [`LspManager::update_settings`] without a relaunch.
+    settings: Mutex<Value>,
+    /// C9: this server's semantic-tokens legend, if it offers the request at
+    /// all — set from `initialize`'s static `semanticTokensProvider`
+    /// capability at connect time, or from a dynamic
+    /// `client/registerCapability` registration if one arrives later
+    /// (csharp-ls's path; see `dispatch`'s `client/registerCapability` arm).
+    /// `None` means "not known to support it yet", checked generically by
+    /// [`LspManager::semantic_tokens_legend`] rather than gating on one path
+    /// or the other.
+    semantic_tokens_legend: Mutex<Option<SemanticTokensLegend>>,
+    /// C10: whether this server statically advertised `codeLensProvider` in
+    /// its `initialize` result. The dynamic half of the same dual path —
+    /// a `client/registerCapability` for `textDocument/codeLens` — needs no
+    /// mirror of this field: unlike a semantic-tokens legend, a
+    /// `CodeLensOptions` carries nothing this client reads back out, so
+    /// `LspManager::code_lenses_supported` checks `registrations` directly
+    /// (see `code_lens::is_offered`'s own doc comment).
+    code_lens_supported: Mutex<bool>,
+    /// C11: whether this server statically advertised `callHierarchyProvider`
+    /// in its `initialize` result. Same dual-path convention as
+    /// `code_lens_supported` — the dynamic half needs no mirror field here
+    /// either, since a `CallHierarchyOptions` carries nothing this client
+    /// reads back out; `LspManager::call_hierarchy_supported` checks
+    /// `registrations` directly for that half.
+    call_hierarchy_supported: Mutex<bool>,
+    /// C11: the type-hierarchy twin of `call_hierarchy_supported`, for
+    /// `typeHierarchyProvider`.
+    type_hierarchy_supported: Mutex<bool>,
 }
 
 impl Server {
@@ -387,6 +464,13 @@ impl LspManager {
             stopping: AtomicBool::new(false),
             progress: Mutex::new(ProgressTracker::default()),
             sessions: Arc::clone(&self.sessions),
+            registrations: Registrations::default(),
+            settings_section: cfg.settings_section.clone(),
+            settings: Mutex::new(cfg.settings.clone()),
+            semantic_tokens_legend: Mutex::new(None),
+            code_lens_supported: Mutex::new(false),
+            call_hierarchy_supported: Mutex::new(false),
+            type_hierarchy_supported: Mutex::new(false),
         });
 
         let (ready_tx, ready_rx) = channel();
@@ -525,6 +609,51 @@ impl LspManager {
         )
     }
 
+    /// Tell a server about filesystem changes it asked to watch
+    /// (`client/registerCapability` → `workspace/didChangeWatchedFiles`,
+    /// C4/C5), off `project_model::ProjectWatcher` rather than a second
+    /// watcher of this client's own. `changes` is filtered down to what
+    /// this server's current registrations actually cover and sent as one
+    /// batched notification — LSP's `changes` param is already an array,
+    /// so this is one notification per call, not one per file. A server
+    /// with no matching registration, or no server running for
+    /// `language_id` at all, gets nothing: this never wakes a server that
+    /// asked for no watches.
+    pub fn did_change_watched_files(
+        &self,
+        language_id: &str,
+        changes: &[(PathBuf, FileChangeKind)],
+    ) -> Result<(), LspError> {
+        let Some(server) = self.server(language_id) else {
+            return Ok(());
+        };
+        // Registration is rare (once per server session, typically), so
+        // recompiling on every call — rather than caching the compiled
+        // `GlobSet` on `Server` and invalidating it on register/unregister
+        // — is the simpler correct choice here.
+        let watched = WatchedFiles::compile(&server.registrations.watchers());
+        if watched.is_empty() {
+            return Ok(());
+        }
+        let interesting: Vec<Value> = changes
+            .iter()
+            .filter(|(path, kind)| watched.interested(path, *kind))
+            .map(|(path, kind)| {
+                json!({
+                    "uri": crate::diagnostics::uri_from_path(&path.to_string_lossy()),
+                    "type": *kind as u8,
+                })
+            })
+            .collect();
+        if interesting.is_empty() {
+            return Ok(());
+        }
+        server.notify(
+            "workspace/didChangeWatchedFiles",
+            json!({"changes": interesting}),
+        )
+    }
+
     /// `textDocument/hover` for a position in an open document, already
     /// reduced to the one text the tooltip shows. `Ok(None)` means the server
     /// has nothing to say here, which is not an error.
@@ -561,6 +690,43 @@ impl LspManager {
             DEFINITION_TIMEOUT,
         )?;
         Ok(parse_definition(&result))
+    }
+
+    /// C12: csharp-ls's custom `csharp/metadata` request — fetches the
+    /// decompiled/generated source text a `csharp:/...` definition target
+    /// points at (see [`crate::navigation::DefinitionOutcome::NeedsMetadataFetch`]),
+    /// so it can be opened as a read-only virtual document instead of a
+    /// broken tab.
+    ///
+    /// `language_id` is passed explicitly rather than derived from `uri` via
+    /// `language_of` (as [`LspManager::definition`] does): `uri` here is a
+    /// definition *target* the client has never opened, so it is not in the
+    /// open-documents table `language_of` reads.
+    ///
+    /// This is not a method in the LSP base specification — csharp-ls
+    /// documents it (`Custom Request: csharp/metadata`) but publishes no
+    /// formal schema, so the request/response shape below is a best-effort
+    /// reconstruction from the common `{textDocument: {uri}}` request /
+    /// `{source: string, ...}` response shape other LSP metadata extensions
+    /// (e.g. OmniSharp's own predecessor of this request) use, and is
+    /// **unverified against a real csharp-ls process** — this repo's Docker
+    /// verification budget did not extend to a live decompiled-symbol round
+    /// trip. `stub_server`'s `csharp/metadata` mode exercises the wire
+    /// shape this code expects, not what a real server actually sends.
+    pub fn fetch_metadata(&self, language_id: &str, uri: &str) -> Result<String, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "csharp/metadata",
+            json!({"textDocument": {"uri": uri}}),
+            METADATA_TIMEOUT,
+        )?;
+        result
+            .get("source")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                LspError::Protocol(format!("csharp/metadata for {uri} had no \"source\" field"))
+            })
     }
 
     /// `textDocument/codeAction` for a range of an open document.
@@ -697,8 +863,197 @@ impl LspManager {
         Ok(parse_code_actions(&json!([result])))
     }
 
+    /// `textDocument/codeLens` for a whole open document.
+    ///
+    /// Whether it is worth calling at all is
+    /// [`Self::code_lenses_supported`]'s answer, not this method's — same
+    /// convention [`Self::semantic_tokens`] follows for the same reason.
+    pub fn code_lenses(&self, language_id: &str, uri: &str) -> Result<Vec<CodeLensItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "textDocument/codeLens",
+            json!({"textDocument": {"uri": uri}}),
+            CODE_LENS_TIMEOUT,
+        )?;
+        Ok(code_lens::parse_code_lenses(&result))
+    }
+
+    /// Whether this server offers code lenses at all — from `initialize`'s
+    /// static `codeLensProvider` capability, or a dynamic
+    /// `client/registerCapability` registration for `textDocument/codeLens`
+    /// (csharp-ls's suspected path, the same dual path C9 checks for
+    /// semantic tokens). `false` for a server that is not running.
+    pub fn code_lenses_supported(&self, language_id: &str) -> bool {
+        self.server(language_id).is_some_and(|server| {
+            *server.code_lens_supported.lock().unwrap()
+                || server
+                    .registrations
+                    .method_registered("textDocument/codeLens")
+        })
+    }
+
+    /// `codeLens/resolve` for a lens the server sent without a `command`
+    /// (csharp-ls resolves lazily, per the plan). `lens` is sent back
+    /// exactly as the server gave it, same convention
+    /// [`Self::resolve_code_action`] follows for its own `data`-bearing
+    /// items.
+    pub fn resolve_code_lens(&self, language_id: &str, lens: &Value) -> Result<Value, LspError> {
+        self.request_with_timeout(
+            language_id,
+            "codeLens/resolve",
+            lens.clone(),
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+    }
+
+    /// `textDocument/prepareCallHierarchy`: the call-hierarchy item(s) at a
+    /// position, the starting point `incomingCalls`/`outgoingCalls` walk
+    /// from. Whether it is worth calling at all is
+    /// [`Self::call_hierarchy_supported`]'s answer, not this method's — same
+    /// convention [`Self::code_lenses_supported`] follows.
+    ///
+    /// C11: call hierarchy has no `index-core` fallback (see `crate::hierarchy`
+    /// module docs) — an empty answer here is final, not a signal to fall
+    /// back to anything.
+    pub fn prepare_call_hierarchy(
+        &self,
+        language_id: &str,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<HierarchyItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "textDocument/prepareCallHierarchy",
+            position_params(uri, line, character),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(hierarchy::parse_hierarchy_items(&result))
+    }
+
+    /// Whether this server offers call hierarchy at all — from `initialize`'s
+    /// static `callHierarchyProvider` capability, or a dynamic
+    /// `client/registerCapability` registration for
+    /// `textDocument/prepareCallHierarchy`. `false` for a server that is not
+    /// running.
+    pub fn call_hierarchy_supported(&self, language_id: &str) -> bool {
+        self.server(language_id).is_some_and(|server| {
+            *server.call_hierarchy_supported.lock().unwrap()
+                || server
+                    .registrations
+                    .method_registered("textDocument/prepareCallHierarchy")
+        })
+    }
+
+    /// `callHierarchy/incomingCalls`: everything that calls the item
+    /// `prepare_call_hierarchy` returned. `item` is sent back exactly as the
+    /// server gave it, same convention [`Self::resolve_code_lens`] follows
+    /// for its own `data`-bearing items.
+    pub fn incoming_calls(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Vec<IncomingCall>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "callHierarchy/incomingCalls",
+            json!({"item": item}),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(hierarchy::parse_incoming_calls(&result))
+    }
+
+    /// `callHierarchy/outgoingCalls`: everything the item
+    /// `prepare_call_hierarchy` returned calls. An empty answer here is a
+    /// real leaf function, not a hint to fall back — see the module docs on
+    /// [`crate::hierarchy`].
+    pub fn outgoing_calls(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Vec<OutgoingCall>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "callHierarchy/outgoingCalls",
+            json!({"item": item}),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(hierarchy::parse_outgoing_calls(&result))
+    }
+
+    /// `textDocument/prepareTypeHierarchy`: the type-hierarchy item(s) at a
+    /// position, the starting point `supertypes`/`subtypes` walk from.
+    /// Whether it is worth calling at all is
+    /// [`Self::type_hierarchy_supported`]'s answer.
+    ///
+    /// Unlike call hierarchy, an empty or missing answer here is
+    /// `crate::hierarchy::type_hierarchy_outcome`'s cue to fall back to
+    /// `index-core`'s supertype-edge data — see the module docs.
+    pub fn prepare_type_hierarchy(
+        &self,
+        language_id: &str,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<HierarchyItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "textDocument/prepareTypeHierarchy",
+            position_params(uri, line, character),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(hierarchy::parse_hierarchy_items(&result))
+    }
+
+    /// Whether this server offers type hierarchy at all — from
+    /// `initialize`'s static `typeHierarchyProvider` capability, or a
+    /// dynamic `client/registerCapability` registration for
+    /// `textDocument/prepareTypeHierarchy`. `false` for a server that is not
+    /// running.
+    pub fn type_hierarchy_supported(&self, language_id: &str) -> bool {
+        self.server(language_id).is_some_and(|server| {
+            *server.type_hierarchy_supported.lock().unwrap()
+                || server
+                    .registrations
+                    .method_registered("textDocument/prepareTypeHierarchy")
+        })
+    }
+
+    /// `typeHierarchy/supertypes`: every supertype of the item
+    /// `prepare_type_hierarchy` returned, as the server sees it.
+    pub fn supertypes(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Vec<HierarchyItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "typeHierarchy/supertypes",
+            json!({"item": item}),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(hierarchy::parse_hierarchy_items(&result))
+    }
+
+    /// `typeHierarchy/subtypes`: every subtype of the item
+    /// `prepare_type_hierarchy` returned, as the server sees it.
+    pub fn subtypes(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Vec<HierarchyItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "typeHierarchy/subtypes",
+            json!({"item": item}),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(hierarchy::parse_hierarchy_items(&result))
+    }
+
     /// `workspace/executeCommand`: ask the server to carry out a command a
-    /// code action named.
+    /// code action or a code lens (C10) named — both hand this the same
+    /// [`CommandRef`], so there is exactly one execution path for either.
     ///
     /// This is the request during which a server may ask us to apply an edit
     /// (`crate::apply_edit`), so the caller must be holding a
@@ -782,6 +1137,33 @@ impl LspManager {
             COMPLETION_TIMEOUT,
         )?;
         Ok(parse_completion(&result))
+    }
+
+    /// `completionItem/resolve`: ask the server to fill in what it left out
+    /// of the initial list — most importantly `additionalTextEdits`, the
+    /// `using` an unimported type's completion brings with it (C7).
+    ///
+    /// `item` is sent back exactly as the server gave it
+    /// ([`CompletionItem::raw`]); the protocol's own contract for this
+    /// request is "the item you handed me", not a reconstruction from the
+    /// reduced fields the rest of this client works with.
+    ///
+    /// Whether it is worth calling at all — [`LspEvent::ServerReady::completion_resolve_supported`]
+    /// — is the caller's decision, not this method's: a server that never
+    /// advertised `resolveProvider` is never asked, so this sends the
+    /// request unconditionally on the assumption that check already
+    /// happened.
+    pub fn resolve_completion_item(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Value, LspError> {
+        self.request_with_timeout(
+            language_id,
+            "completionItem/resolve",
+            item.clone(),
+            DEFAULT_REQUEST_TIMEOUT,
+        )
     }
 
     /// `textDocument/formatting` for a whole open document.
@@ -920,9 +1302,72 @@ impl LspManager {
         Ok(parse_inlay_hints(&result))
     }
 
+    /// `textDocument/semanticTokens/full` for a whole open document, raw —
+    /// decoding the response and mapping it onto `syntax_core`'s taxonomy is
+    /// `crate::semantic_tokens`'s job, not this method's, the same
+    /// convention [`Self::resolve_completion_item`] and
+    /// [`Self::execute_command`] follow for a server's raw JSON.
+    ///
+    /// Whether it is worth calling at all is
+    /// [`Self::semantic_tokens_legend`]'s answer, not this method's — C9
+    /// only ever sends the full request, never
+    /// `textDocument/semanticTokens/full/delta`, so there is no `previous_result_id`
+    /// parameter to thread through yet.
+    pub fn semantic_tokens(&self, language_id: &str, uri: &str) -> Result<Value, LspError> {
+        self.request_with_timeout(
+            language_id,
+            "textDocument/semanticTokens/full",
+            json!({"textDocument": {"uri": uri}}),
+            SEMANTIC_TOKENS_TIMEOUT,
+        )
+    }
+
+    /// This server's semantic-tokens legend, if it has told us about one —
+    /// via `initialize`'s static capability (set at connect time, `connect`
+    /// below) or a dynamic `client/registerCapability` registration
+    /// (`dispatch`'s `client/registerCapability` arm) — whichever arrived.
+    /// `None` for a server that has done neither yet, which is this
+    /// method's answer to "is `semantic_tokens` worth calling right now" —
+    /// checked generically across both paths rather than the caller having
+    /// to know which one a given server uses (C9's plan explicitly calls
+    /// out that csharp-ls's path is unconfirmed, so both are handled).
+    pub fn semantic_tokens_legend(&self, language_id: &str) -> Option<SemanticTokensLegend> {
+        self.server(language_id)?
+            .semantic_tokens_legend
+            .lock()
+            .unwrap()
+            .clone()
+    }
+
     /// The version last sent for a document, if it is open.
     pub fn document_version(&self, uri: &str) -> Option<i32> {
         self.documents.lock().unwrap().get(uri).map(|d| d.version)
+    }
+
+    /// Whether the running server has dynamically registered `method` via
+    /// `client/registerCapability`. `false` for a server that is not
+    /// running at all, same as "it never registered anything".
+    pub fn method_registered(&self, language_id: &str, method: &str) -> bool {
+        self.server(language_id)
+            .is_some_and(|server| server.registrations.method_registered(method))
+    }
+
+    /// C6: update the settings a running server pulls via
+    /// `workspace/configuration` and tell it to re-pull them.
+    ///
+    /// The notification's `settings` is deliberately `null`, not `settings`
+    /// itself — that is what tells a client-supports-pull server (csharp-ls
+    /// included) to re-issue `workspace/configuration` rather than treat the
+    /// notification as the new value pushed inline.
+    pub fn update_settings(&self, language_id: &str, settings: Value) -> Result<(), LspError> {
+        let server = self
+            .server(language_id)
+            .ok_or_else(|| LspError::NoServer(language_id.to_string()))?;
+        *server.settings.lock().unwrap() = settings;
+        server.notify(
+            "workspace/didChangeConfiguration",
+            json!({"settings": Value::Null}),
+        )
     }
 
     /// Shut one server down: `shutdown`, `exit`, then kill if it lingers.
@@ -1013,7 +1458,12 @@ fn spawn_supervisor(
 
         loop {
             match connect(&server, &cfg, &root_uri) {
-                Ok((stdout, trigger_characters, signature_triggers)) => {
+                Ok((
+                    stdout,
+                    trigger_characters,
+                    signature_triggers,
+                    completion_resolve_supported,
+                )) => {
                     if let Some(tx) = ready.take() {
                         let _ = tx.send(Ok(()));
                     }
@@ -1022,6 +1472,7 @@ fn spawn_supervisor(
                         restarts,
                         trigger_characters,
                         signature_triggers,
+                        completion_resolve_supported,
                     });
                     let started = Instant::now();
                     read_loop(&server, &cfg.language_id, stdout, &events);
@@ -1095,6 +1546,7 @@ fn connect(
         BufReader<std::process::ChildStdout>,
         Vec<String>,
         SignatureTriggers,
+        bool,
     ),
     LspError,
 > {
@@ -1132,7 +1584,7 @@ fn connect(
         &serde_json::to_vec(&init).map_err(io::Error::from)?,
     )?;
 
-    let (trigger_characters, signature_triggers) = loop {
+    let (trigger_characters, signature_triggers, completion_resolve_supported) = loop {
         let Some(body) = read_message(&mut stdout)? else {
             return Err(LspError::Disconnected {
                 method: "initialize".into(),
@@ -1146,9 +1598,30 @@ fn connect(
             // What the server can do is read here, once, and published with
             // `ServerReady` — nothing else ever sees the raw result.
             let result = message.get("result").unwrap_or(&Value::Null);
+            // C9: read once, here, same as the other capabilities above —
+            // but stored on `server` rather than threaded through the
+            // return tuple, because a server may instead only tell us via a
+            // *later* `client/registerCapability` (`dispatch` sets the same
+            // field), and `semantic_tokens_legend` needs to answer
+            // correctly either way.
+            *server.semantic_tokens_legend.lock().unwrap() = semantic_tokens::parse_legend(result);
+            // C10: same read-once-here convention, for the same reason —
+            // csharp-ls may instead only register `textDocument/codeLens`
+            // dynamically, which `code_lenses_supported` also checks.
+            *server.code_lens_supported.lock().unwrap() = code_lens::is_offered(result);
+            // C11: same read-once-here convention — presence of either
+            // capability is the whole answer, same reasoning
+            // `code_lens::is_offered` gives for its own capability.
+            *server.call_hierarchy_supported.lock().unwrap() = result
+                .pointer("/capabilities/callHierarchyProvider")
+                .is_some();
+            *server.type_hierarchy_supported.lock().unwrap() = result
+                .pointer("/capabilities/typeHierarchyProvider")
+                .is_some();
             break (
                 parse_trigger_characters(result),
                 parse_signature_triggers(result),
+                parse_resolve_provider(result),
             );
         }
         // Anything else before the response (log messages, server requests)
@@ -1163,7 +1636,12 @@ fn connect(
     stdin.flush()?;
 
     *server.conn.lock().unwrap() = Some(Conn { stdin, child });
-    Ok((stdout, trigger_characters, signature_triggers))
+    Ok((
+        stdout,
+        trigger_characters,
+        signature_triggers,
+        completion_resolve_supported,
+    ))
 }
 
 /// Read and dispatch until the server's stdout ends (i.e. it died).
@@ -1251,10 +1729,85 @@ fn dispatch(server: &Arc<Server>, language_id: &str, message: Value, events: &Se
         (Some("window/workDoneProgress/create"), Some(id)) => {
             let _ = server.send(&json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}));
         }
+        // C4: csharp-ls (and any server that leans on dynamic registration
+        // rather than declaring capabilities in `initialize`) sends this
+        // right after `initialized`. There is nothing to decide — this
+        // client always accepts a registration, same reasoning as
+        // `window/workDoneProgress/create` above — and no blocking work, so
+        // it is answered inline here rather than dispatched elsewhere.
+        // Malformed params (missing/wrong-shaped fields) are treated as an
+        // empty registration list rather than crashing this reader thread;
+        // refusing a registration the server would only retry is worse than
+        // ignoring one this client could not parse.
+        (Some("client/registerCapability"), Some(id)) => {
+            let registrations = message
+                .get("params")
+                .and_then(|p| p.get("registrations"))
+                .cloned()
+                .and_then(|v| serde_json::from_value::<Vec<Registration>>(v).ok())
+                .unwrap_or_default();
+            // C9: csharp-ls's suspected path — a server that declares
+            // `textDocument/semanticTokens` dynamically rather than in
+            // `initialize`'s static result carries the same
+            // `SemanticTokensOptions` shape in its `registerOptions`
+            // (`semantic_tokens::parse_provider` reads either). The last
+            // registration for the method wins, matching `Registrations::register`'s
+            // own "replacing a reused id is the safer read" reasoning.
+            if let Some(legend) = registrations
+                .iter()
+                .filter(|r| r.method == "textDocument/semanticTokens")
+                .find_map(|r| semantic_tokens::parse_provider(&r.register_options))
+            {
+                *server.semantic_tokens_legend.lock().unwrap() = Some(legend);
+            }
+            server.registrations.register(registrations);
+            let _ = server.send(&json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}));
+        }
+        // The spec really does spell this "unregisterations".
+        (Some("client/unregisterCapability"), Some(id)) => {
+            let ids: Vec<String> = message
+                .get("params")
+                .and_then(|p| p.get("unregisterations"))
+                .and_then(Value::as_array)
+                .map(|entries| {
+                    entries
+                        .iter()
+                        .filter_map(|e| e.get("id").and_then(Value::as_str))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+            server.registrations.unregister(&ids);
+            let _ = server.send(&json!({"jsonrpc": "2.0", "id": id, "result": Value::Null}));
+        }
+        // C6: csharp-ls pulls its settings rather than taking them pushed,
+        // so it sends this right after `initialized` (and again after
+        // `workspace/didChangeConfiguration`). A pure lookup against this
+        // server's own configured section — nothing to decide, nothing to
+        // block on — so it is answered inline here, same reasoning as
+        // `window/workDoneProgress/create` and `client/registerCapability`
+        // above. Answers are returned in request order, `null` for any
+        // section this client has no opinion on (ADR-0016: single-root, so
+        // `scopeUri` is ignorable).
+        (Some("workspace/configuration"), Some(id)) => {
+            let items = message
+                .get("params")
+                .and_then(|p| p.get("items"))
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let settings = server.settings.lock().unwrap().clone();
+            let result: Vec<Value> = items
+                .iter()
+                .map(|item| {
+                    let section = item.get("section").and_then(Value::as_str).unwrap_or("");
+                    configuration::resolve(server.settings_section.as_deref(), &settings, section)
+                })
+                .collect();
+            let _ = server.send(&json!({"jsonrpc": "2.0", "id": id, "result": result}));
+        }
         // Every other server-to-client request. The server blocks until it
         // gets an answer, so answer honestly rather than not at all.
-        // ponytail: a real handler (workspace/configuration, registerCapability)
-        // lands with the features that need it.
         (Some(method), Some(id)) => {
             let _ = server.send(&json!({
                 "jsonrpc": "2.0",
@@ -1361,6 +1914,14 @@ fn client_capabilities() -> Value {
                 "completionItem": {
                     "snippetSupport": false,
                     "documentationFormat": ["plaintext", "markdown"],
+                    // C7: which fields are worth a `completionItem/resolve`
+                    // round trip for — `additionalTextEdits` is the `using`
+                    // csharp-ls adds for an unimported type; `documentation`
+                    // and `detail` are the two fields most servers only
+                    // fill in on resolve, to keep the initial list cheap.
+                    "resolveSupport": {
+                        "properties": ["documentation", "detail", "additionalTextEdits"],
+                    },
                 },
                 "contextSupport": false,
             },
@@ -1413,6 +1974,41 @@ fn client_capabilities() -> Value {
             // The `InlayHintLabelPart[]` label form needs no capability and
             // is parsed regardless.
             "inlayHint": {"dynamicRegistration": false},
+            // C9: `dynamicRegistration: true` — unlike every other entry in
+            // this block — because csharp-ls is believed to declare this
+            // one dynamically rather than statically (see
+            // `semantic_tokens` module docs); `formats: ["relative"]` is
+            // the only encoding LSP 3.17 defines, so it is the only value
+            // that could go here. `tokenTypes`/`tokenModifiers` are the
+            // full LSP standard vocabulary this client's mapping
+            // understands (`semantic_tokens::base_scope_name`); a server is
+            // free to define fewer, and any it defines that this list omits
+            // still decodes correctly; `requests.full: true` and no `range`
+            // entry is what makes only the whole-document request offered.
+            "semanticTokens": {
+                "dynamicRegistration": true,
+                "requests": {"full": true},
+                "tokenTypes": crate::semantic_tokens::STANDARD_TOKEN_TYPES,
+                "tokenModifiers": crate::semantic_tokens::STANDARD_TOKEN_MODIFIERS,
+                "formats": ["relative"],
+            },
+            // C10: dynamic, because csharp-ls is believed to register this
+            // one dynamically too, same reasoning as `semanticTokens` above.
+            // No `resolveSupport`-shaped field exists for code lens in the
+            // spec — a lens without a `command` always needs
+            // `codeLens/resolve`, decided per item
+            // (`code_lens::CodeLensItem::needs_resolve`), not by a
+            // capability this client would advertise.
+            "codeLens": {"dynamicRegistration": true},
+            // C11: dynamic, on the same suspicion as `semanticTokens` and
+            // `codeLens` above — csharp-ls is not confirmed to declare
+            // either hierarchy capability statically. Neither carries a
+            // resolve-style sub-capability worth advertising: an item's
+            // `data` always round-trips through `incomingCalls`/
+            // `outgoingCalls`/`supertypes`/`subtypes` verbatim, with no
+            // separate resolve request in the spec.
+            "callHierarchy": {"dynamicRegistration": true},
+            "typeHierarchy": {"dynamicRegistration": true},
         },
         "workspace": {
             // RF5: we answer `workspace/applyEdit`, which is how the
@@ -1432,6 +2028,20 @@ fn client_capabilities() -> Value {
                 "failureHandling": "abort",
                 "normalizesLineEndings": false,
             },
+            // C4: the one capability this client dynamically registers for
+            // — csharp-ls and others declare their watched-file globs this
+            // way rather than up front. `relativePatternSupport: false`
+            // because `Registrations::watchers` hands `globPattern` on
+            // untouched to C5, which does not yet resolve a `RelativePattern`
+            // against a base URI.
+            "didChangeWatchedFiles": {
+                "dynamicRegistration": true,
+                "relativePatternSupport": false,
+            },
+            // C6: we answer `workspace/configuration`, which is how
+            // csharp-ls (and any server that pulls rather than takes pushed
+            // settings) gets its config at all.
+            "configuration": true,
         },
         // F0-16: without this a server has no permission to open a progress
         // token, and rust-analyzer stays silent while it indexes — which is

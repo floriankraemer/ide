@@ -124,6 +124,16 @@ impl Scope {
     pub fn id(self) -> u16 {
         self.0
     }
+
+    /// The inverse of [`Scope::id`]: rebuilds a `Scope` from a raw table
+    /// index a caller read back off the FFI seam (C9's semantic-token
+    /// overlay does this — a `FfiHighlightSpan::scope` this same process
+    /// wrote out earlier). `None` for an out-of-range id, matching the
+    /// range-guard [`HighlightSpan`]'s own doc comment says the view must
+    /// already apply.
+    pub fn from_id(id: u16) -> Option<Scope> {
+        (usize::from(id) < SCOPES.len()).then_some(Scope(id))
+    }
 }
 
 /// A classified byte range within the highlighted text.

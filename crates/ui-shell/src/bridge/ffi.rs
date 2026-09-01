@@ -410,6 +410,10 @@ mod ffi {
         /// How many UTF-16 characters before the caret the typed word
         /// occupies — what the view replaces when `has_range` is false.
         prefix_length: u32,
+        /// C7: the server's own item, as JSON text — opaque here, carried
+        /// only so `acceptCompletion`/`resolveCompletionPreview` can hand it
+        /// back for `completionItem/resolve`. The view never reads it.
+        resolve_data: QString,
     }
 
     /// One caret, as flat document positions in UTF-16 code units — the
@@ -750,6 +754,49 @@ mod ffi {
         padding_right: bool,
     }
 
+    /// One code lens (C10), reduced to what the strip above/on `line`
+    /// paints: a label, and whether a click does anything yet. A lens that
+    /// still needs `codeLens/resolve` shows its placeholder label but is
+    /// not `clickable` until the click itself triggers the resolve — see
+    /// `LanguageService::runCodeLens`. Which lenses exist and what a click
+    /// means is decided in Rust; the view only draws this and forwards a
+    /// click back by index.
+    struct FfiCodeLens {
+        line: u32,
+        label: QString,
+        clickable: bool,
+    }
+
+    /// One call-hierarchy or type-hierarchy item (C11), 1:1 with
+    /// `lsp_core::HierarchyItem` — the same shape either feature's item
+    /// takes, since `CallHierarchyItem` and `TypeHierarchyItem` are
+    /// structurally identical on the wire. `kind` is the raw LSP
+    /// `SymbolKind` number, same convention `FfiCompletionItem`'s own
+    /// `kind` follows, so the view picks the icon rather than Rust.
+    struct FfiHierarchyItem {
+        name: QString,
+        detail: QString,
+        path: QString,
+        line: u32,
+        column: u32,
+        kind: u32,
+    }
+
+    /// One `callHierarchy/incomingCalls` entry (C11): who calls the item
+    /// that was asked about, and how many call sites `fromRanges` counted —
+    /// the dock draws one row per caller with that count, not the ranges
+    /// themselves.
+    struct FfiIncomingCall {
+        from: FfiHierarchyItem,
+        call_count: u32,
+    }
+
+    /// The `callHierarchy/outgoingCalls` twin of `FfiIncomingCall`.
+    struct FfiOutgoingCall {
+        to: FfiHierarchyItem,
+        call_count: u32,
+    }
+
     /// How many diagnostics of each severity exist right now, 1:1 with
     /// `lsp_core::DiagnosticCounts` — for the status-bar counter and the
     /// Problems panel's filter buttons.
@@ -823,6 +870,31 @@ mod ffi {
         /// shape nor the precedence rules. Build once per (theme,
         /// language) — it is pure data afterwards.
         fn palette(self: &SyntaxHighlighterHandle, theme: &str) -> Vec<FfiScopeStyle>;
+
+        /// C9: overlays `semantic` — `LanguageService::semanticTokenSpans`'s
+        /// answer for this same document, already mapped onto
+        /// `syntax_core`'s taxonomy and converted to byte offsets — onto
+        /// the tree-sitter spans this handle produced at its last
+        /// `set_text`/`apply_edit`. `lsp_core::semantic_tokens::overlay`
+        /// decides the merge (semantic spans win where they cover; the
+        /// tree-sitter colouring underneath still shows through
+        /// everywhere else, per F0-16); this only carries its inputs and
+        /// answer across the seam.
+        ///
+        /// TODO(C9-followup): nothing in `cpp/syntax_highlighter.cpp` calls
+        /// this yet. `LanguageService::requestSemanticTokens`/
+        /// `semanticTokenSpans`/`semanticTokensReady` (see `ffi.rs`'s
+        /// `LanguageService` block) are wired and reachable end to end from
+        /// document open through to a fetchable merged-span answer; only
+        /// the second call site — `SyntaxHighlighter` re-running
+        /// `highlightBlock` with the overlaid spans once
+        /// `semanticTokensReady` fires — is left for follow-up, the same
+        /// allowance C9's plan gives when full C++ rendering wiring is not
+        /// worth the risk of an unfamiliar-file change under one task.
+        fn overlay_semantic_tokens(
+            self: &SyntaxHighlighterHandle,
+            semantic: Vec<FfiHighlightSpan>,
+        ) -> Vec<FfiHighlightSpan>;
     }
 
     unsafe extern "C++Qt" {
@@ -1032,6 +1104,16 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "filesChangedExternally"]
         fn files_changed_externally(self: Pin<&mut ProjectTreeModel>, path: QString);
+
+        /// C5: the same filesystem-watcher event as `filesChangedExternally`,
+        /// plus the LSP `FileChangeType` it maps onto (1=created, 2=changed,
+        /// 3=deleted). `main_window.cpp` connects this to
+        /// `LanguageService::watchedFileChanged`, which is the only consumer
+        /// — the reload/keep-prompt path stays on `filesChangedExternally`
+        /// and does not need the kind.
+        #[qsignal]
+        #[cxx_name = "watchedFileChanged"]
+        fn watched_file_changed(self: Pin<&mut ProjectTreeModel>, path: QString, kind: i32);
 
         /// Emitted when a tree mutation (rename/delete) changed an open
         /// tab's title as a side effect (US-2b) — the tab strip updates its
@@ -2824,6 +2906,15 @@ mod ffi {
         #[cxx_name = "documentClosed"]
         fn document_closed(self: Pin<&mut LanguageService>, path: &QString);
 
+        /// C5: `ProjectTreeModel::watchedFileChanged` — a file on disk
+        /// changed under the project root. Buffered and coalesced (a `git
+        /// checkout` fires thousands of these) before reaching any server as
+        /// one batched `workspace/didChangeWatchedFiles`. `kind` is the LSP
+        /// `FileChangeType` (1=created, 2=changed, 3=deleted).
+        #[qinvokable]
+        #[cxx_name = "watchedFileChanged"]
+        fn watched_file_changed(self: Pin<&mut LanguageService>, path: &QString, kind: i32);
+
         /// L6 — the `[[language_server]]` settings were committed: re-read
         /// them and stop every server whose configuration changed or was
         /// switched off, so the next `reopenDocument` starts the new one.
@@ -2942,6 +3033,17 @@ mod ffi {
         #[cxx_name = "definitionFallback"]
         fn definition_fallback(self: Pin<&mut LanguageService>);
 
+        /// C12 — emitted instead of the pair above when the server's answer
+        /// is a non-`file:` URI (csharp-ls's `csharp:/metadata/...` for
+        /// decompiled framework code) that this IDE cannot yet open as a
+        /// tab. `message` is shown as-is; this is the clean refusal
+        /// `docs/architecture/decisions/0003-ffi-conventions.md`'s C12
+        /// amendment calls for — never a broken tab built from the raw URI
+        /// treated as a path.
+        #[qsignal]
+        #[cxx_name = "definitionUnavailable"]
+        fn definition_unavailable(self: Pin<&mut LanguageService>, message: QString);
+
         /// L5 — ask the server what could be typed at this position.
         /// `text_before_cursor` is the current line up to the caret, from
         /// which `lsp_core::completion` derives both the word being typed
@@ -2988,24 +3090,66 @@ mod ffi {
             text_before_cursor: &QString,
         ) -> Vec<FfiCompletionItem>;
 
-        /// The splice list for accepting `item` — the row `completionItems`
-        /// handed over, passed straight back — with the caret where the
-        /// user has it now.
+        /// Accept `item` — the row `completionItems` handed over, passed
+        /// straight back — with the caret where the user has it now.
         ///
         /// Which span the insertion replaces is a rule, not arithmetic the
         /// view may do: it depends on whether the server named a range, and
         /// on characters typed while the request was in flight, both of
-        /// which `lsp_core::completion` decides. Always one edit, so the
-        /// view splices it through `EditorTabs::applyEditsTo` like every
-        /// other buffer change.
+        /// which `lsp_core::completion` decides. C7: when the server offers
+        /// `completionItem/resolve`, this also asks for it and merges
+        /// whatever `additionalTextEdits` comes back — the `using` an
+        /// unimported type's completion brings with it — into the same
+        /// splice, bounded by the crate's default request timeout so an
+        /// accept can never hang. Answers on `completionEditReady`, never
+        /// synchronously, because the resolve round trip may be in it.
         #[qinvokable]
-        #[cxx_name = "completionEdit"]
-        fn completion_edit(
-            self: &LanguageService,
+        #[cxx_name = "acceptCompletion"]
+        fn accept_completion(
+            self: Pin<&mut LanguageService>,
             item: &FfiCompletionItem,
             caret_line: u32,
             caret_character: u32,
-        ) -> Vec<FfiTextEdit>;
+        );
+
+        /// The splice list for the last `acceptCompletion`, ready for
+        /// `EditorTabs::applyEditsTo` like every other buffer change — one
+        /// edit block, so accepting an import along with the item it
+        /// belongs to is one Ctrl+Z.
+        #[qsignal]
+        #[cxx_name = "completionEditReady"]
+        fn completion_edit_ready(self: Pin<&mut LanguageService>, edits: Vec<FfiTextEdit>);
+
+        /// C7 — as the popup's selection moves, ask the server to fill in
+        /// documentation and detail for `resolve_data` (opaque; from the
+        /// row's own `FfiCompletionItem`). A server that never advertised
+        /// `completionItem/resolve`, or a `resolve_data` that carries none,
+        /// is a silent no-op — the initial list's own fields are shown as
+        /// they are. Cancelling a stale request is
+        /// `resolveCompletionPreview`'s own re-request-invalidates-the-last-one
+        /// rule (`lsp_core::CompletionResolveTracker`), the same shape
+        /// `hoverAt`/`cancelHover` already use; a server round trip that
+        /// outlives its usefulness is left to time out on its own rather
+        /// than cancelled a second way.
+        #[qinvokable]
+        #[cxx_name = "resolveCompletionPreview"]
+        fn resolve_completion_preview(self: Pin<&mut LanguageService>, resolve_data: &QString);
+
+        /// The selection moved again, or the popup closed: whatever preview
+        /// resolution is in flight is no longer wanted.
+        #[qinvokable]
+        #[cxx_name = "cancelCompletionPreview"]
+        fn cancel_completion_preview(self: Pin<&mut LanguageService>);
+
+        /// A preview resolution arrived and is still current — replace the
+        /// row's shown detail/documentation with these.
+        #[qsignal]
+        #[cxx_name = "completionPreviewReady"]
+        fn completion_preview_ready(
+            self: Pin<&mut LanguageService>,
+            detail: QString,
+            documentation: QString,
+        );
 
         /// A completion answer arrived and is still current. The view reads
         /// it back with `completionItems`, the same
@@ -3194,6 +3338,191 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "inlayHints"]
         fn inlay_hints(self: &LanguageService) -> Vec<FfiInlayHint>;
+
+        /// C9 — fire-and-forget `textDocument/semanticTokens/full` for
+        /// `path`'s whole document, gated on
+        /// `LspManager::semantic_tokens_legend` (checked at call time, so
+        /// this also covers a server that registered the capability
+        /// dynamically after this method's first no-op call — see
+        /// `request_semantic_tokens`'s own doc comment). A server with no
+        /// legend yet, or with nothing to say, leaves the previous answer
+        /// (if any) in place rather than clearing it: never let "waiting
+        /// for the server" mean "no colour at all" (F0-16). Answers on
+        /// `semanticTokensReady`.
+        #[qinvokable]
+        #[cxx_name = "requestSemanticTokens"]
+        fn request_semantic_tokens(self: Pin<&mut LanguageService>, path: &QString, text: &QString);
+
+        #[qsignal]
+        #[cxx_name = "semanticTokensReady"]
+        fn semantic_tokens_ready(self: Pin<&mut LanguageService>, path: QString);
+
+        /// The last decoded-and-mapped semantic-token spans for `path`,
+        /// already in `syntax_core::HighlightSpan`'s byte-offset/scope-id
+        /// shape — the same shape `SyntaxHighlighterHandle::overlay_semantic_tokens`
+        /// takes as its `semantic` argument. Empty before the first answer,
+        /// or for a document nothing has ever requested tokens for.
+        #[qinvokable]
+        #[cxx_name = "semanticTokenSpans"]
+        fn semantic_token_spans(self: &LanguageService, path: &QString) -> Vec<FfiHighlightSpan>;
+
+        /// C10 — fire-and-forget `textDocument/codeLens` for `path`'s whole
+        /// document, gated on `LspManager::code_lenses_supported` (checked
+        /// at call time, so this also covers a server that registered the
+        /// capability dynamically after this method's first no-op call —
+        /// see `request_code_lenses`'s own doc comment). Answers on
+        /// `codeLensesReady`.
+        #[qinvokable]
+        #[cxx_name = "requestCodeLenses"]
+        fn request_code_lenses(self: Pin<&mut LanguageService>, path: &QString);
+
+        #[qsignal]
+        #[cxx_name = "codeLensesReady"]
+        fn code_lenses_ready(self: Pin<&mut LanguageService>, path: QString);
+
+        /// The last-fetched lenses for `path`: line, label, clickable —
+        /// what the C++ lens strip needs to draw one row per lens and
+        /// forward a click back by index. Empty before the first answer,
+        /// or for a document nothing has ever requested lenses for.
+        #[qinvokable]
+        #[cxx_name = "codeLenses"]
+        fn code_lenses(self: &LanguageService, path: &QString) -> Vec<FfiCodeLens>;
+
+        /// C10 — run the lens at `index` in the last answer `codeLenses`
+        /// returned for `path`: resolve it if it still needs
+        /// `codeLens/resolve`, then send its command through the existing
+        /// `workspace/executeCommand` path with the refactoring session
+        /// gate held around it, so a `workspace/applyEdit` the command
+        /// provokes is recognised as legitimate. Any resulting edit arrives
+        /// on the usual `refactorReady`/`refactorFailed` refactor-preview
+        /// flow, not a signal of its own.
+        ///
+        /// TODO(C10-followup): nothing in `cpp/editor_tabs_lsp.cpp` calls
+        /// `requestCodeLenses`/`codeLenses`/`runCodeLens` yet. The Rust
+        /// pipeline is wired and reachable end to end from document open
+        /// through fetch, resolve and gated execution (see
+        /// `stub_server_session.rs`'s C10 tests); only the C++ lens strip —
+        /// painting one row per `FfiCodeLens` above/on its line and
+        /// forwarding a click back by index — is left for follow-up, the
+        /// same allowance C9's own repaint call was given.
+        #[qinvokable]
+        #[cxx_name = "runCodeLens"]
+        fn run_code_lens(self: Pin<&mut LanguageService>, path: &QString, index: u32);
+
+        /// C11 — `textDocument/prepareCallHierarchy` at a caret position.
+        /// Gated on `LspManager::call_hierarchy_supported` inside the job,
+        /// same as `requestCodeLenses`. Answers on `callHierarchyReady`; call
+        /// hierarchy has no index fallback at all (`lsp_core::hierarchy`
+        /// module docs), so an unsupported server or empty answer simply
+        /// leaves `callHierarchyItems` empty.
+        ///
+        /// TODO(C11-followup): the Rust+FFI pipeline for call hierarchy and
+        /// type hierarchy below is wired and reachable end to end (see
+        /// `stub_server_session.rs`'s C11 tests for the LSP round trip and
+        /// `lsp_core::hierarchy`'s unit tests for the index-fallback
+        /// precedence); no `cpp/` dock consumes any of it yet. `ClassViewPanel`
+        /// and `FindUsagesPanel` are each a tree over one shape of this same
+        /// data and are the template to extend or sibling from, the same
+        /// allowance C9's semantic-token repaint and C10's lens strip were
+        /// given.
+        #[qinvokable]
+        #[cxx_name = "requestCallHierarchy"]
+        fn request_call_hierarchy(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            line: u32,
+            character: u32,
+        );
+
+        #[qsignal]
+        #[cxx_name = "callHierarchyReady"]
+        fn call_hierarchy_ready(self: Pin<&mut LanguageService>);
+
+        /// The last `prepareCallHierarchy` answer.
+        #[qinvokable]
+        #[cxx_name = "callHierarchyItems"]
+        fn call_hierarchy_items(self: &LanguageService) -> Vec<FfiHierarchyItem>;
+
+        /// `callHierarchy/incomingCalls` for the item at `index` in the last
+        /// `callHierarchyItems` answer. Answers on `incomingCallsReady`.
+        #[qinvokable]
+        #[cxx_name = "requestIncomingCalls"]
+        fn request_incoming_calls(self: Pin<&mut LanguageService>, index: u32);
+
+        #[qsignal]
+        #[cxx_name = "incomingCallsReady"]
+        fn incoming_calls_ready(self: Pin<&mut LanguageService>);
+
+        #[qinvokable]
+        #[cxx_name = "incomingCalls"]
+        fn incoming_calls(self: &LanguageService) -> Vec<FfiIncomingCall>;
+
+        /// `callHierarchy/outgoingCalls` for the item at `index` in the last
+        /// `callHierarchyItems` answer. Answers on `outgoingCallsReady`; an
+        /// empty answer is a real leaf, not a hint to look elsewhere.
+        #[qinvokable]
+        #[cxx_name = "requestOutgoingCalls"]
+        fn request_outgoing_calls(self: Pin<&mut LanguageService>, index: u32);
+
+        #[qsignal]
+        #[cxx_name = "outgoingCallsReady"]
+        fn outgoing_calls_ready(self: Pin<&mut LanguageService>);
+
+        #[qinvokable]
+        #[cxx_name = "outgoingCalls"]
+        fn outgoing_calls(self: &LanguageService) -> Vec<FfiOutgoingCall>;
+
+        /// C11 — `textDocument/prepareTypeHierarchy` at a caret position.
+        /// LSP-only, like `requestCallHierarchy` — the index fallback
+        /// applies one step later, to `requestSupertypes`/`requestSubtypes`,
+        /// once a type name is known.
+        #[qinvokable]
+        #[cxx_name = "requestTypeHierarchy"]
+        fn request_type_hierarchy(
+            self: Pin<&mut LanguageService>,
+            path: &QString,
+            line: u32,
+            character: u32,
+        );
+
+        #[qsignal]
+        #[cxx_name = "typeHierarchyReady"]
+        fn type_hierarchy_ready(self: Pin<&mut LanguageService>);
+
+        #[qinvokable]
+        #[cxx_name = "typeHierarchyItems"]
+        fn type_hierarchy_items(self: &LanguageService) -> Vec<FfiHierarchyItem>;
+
+        /// `typeHierarchy/supertypes` for the item at `index` in the last
+        /// `typeHierarchyItems` answer — LSP-first, `index-core`'s
+        /// supertype-edge data as the fallback
+        /// (`lsp_core::hierarchy::type_hierarchy_outcome`, ADR-0016's same
+        /// precedence as go-to-definition). Answers on `supertypesReady`.
+        #[qinvokable]
+        #[cxx_name = "requestSupertypes"]
+        fn request_supertypes(self: Pin<&mut LanguageService>, index: u32);
+
+        #[qsignal]
+        #[cxx_name = "supertypesReady"]
+        fn supertypes_ready(self: Pin<&mut LanguageService>);
+
+        #[qinvokable]
+        #[cxx_name = "supertypes"]
+        fn supertypes(self: &LanguageService) -> Vec<FfiHierarchyItem>;
+
+        /// `typeHierarchy/subtypes`, the other direction of the same walk.
+        /// Answers on `subtypesReady`.
+        #[qinvokable]
+        #[cxx_name = "requestSubtypes"]
+        fn request_subtypes(self: Pin<&mut LanguageService>, index: u32);
+
+        #[qsignal]
+        #[cxx_name = "subtypesReady"]
+        fn subtypes_ready(self: Pin<&mut LanguageService>);
+
+        #[qinvokable]
+        #[cxx_name = "subtypes"]
+        fn subtypes(self: &LanguageService) -> Vec<FfiHierarchyItem>;
 
         /// RF8 — rename the symbol at a position.
         ///

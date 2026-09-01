@@ -117,7 +117,13 @@ impl ServerDraft {
                 .unwrap_or_else(|| language_id.to_string())
         };
 
-        let mut rows: Vec<ServerRow> = resolve_servers(&overrides)
+        // TODO(C3-followup): wire in the plugin registry's language-server
+        // contributions once `override_for` below can diff a saved row
+        // against a plugin's default instead of only `default_server`
+        // (the const catalog) — otherwise every plugin-backed row would
+        // look "changed from nothing" and get persisted as a full override
+        // on every save, even untouched.
+        let mut rows: Vec<ServerRow> = resolve_servers(&overrides, &[])
             .into_iter()
             .map(|config| ServerRow {
                 language_name: name_of(&config.language_id),

@@ -105,12 +105,6 @@ pub const SERVERS: &[ServerDef] = &[
         args: &["--stdio"],
     },
     ServerDef {
-        language_id: "csharp",
-        name: "OmniSharp",
-        command: "omnisharp",
-        args: &["-lsp"],
-    },
-    ServerDef {
         language_id: "java",
         name: "Eclipse JDT.LS",
         command: "jdtls",
@@ -201,8 +195,19 @@ pub fn default_server(language_id: &str) -> Option<&'static ServerDef> {
     SERVERS.iter().find(|s| s.language_id == language_id)
 }
 
-/// A resolved server launch configuration: a catalog default, a user entry,
-/// or a default with user fields applied on top.
+/// Where a resolved server's definition came from — the shipped `SERVERS`
+/// table, a plugin's `language-servers` contribution, or a user entry with
+/// no catalog or plugin row underneath it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ServerSource {
+    Builtin,
+    Plugin { plugin_id: String },
+    User,
+}
+
+/// A resolved server launch configuration: a catalog default, a plugin
+/// contribution, a user entry, or one of those with user fields applied on
+/// top.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     pub language_id: String,
@@ -211,6 +216,13 @@ pub struct ServerConfig {
     pub args: Vec<String>,
     /// A user may keep the entry but switch the server off.
     pub enabled: bool,
+    /// The `workspace/configuration` section this server pulls its settings
+    /// from, if any.
+    pub settings_section: Option<String>,
+    /// Default settings for `settings_section`, sent to the server as JSON.
+    /// `Null` when the server takes no pulled configuration.
+    pub settings: serde_json::Value,
+    pub source: ServerSource,
 }
 
 impl From<&ServerDef> for ServerConfig {
@@ -221,6 +233,47 @@ impl From<&ServerDef> for ServerConfig {
             command: def.command.to_string(),
             args: def.args.iter().map(|a| a.to_string()).collect(),
             enabled: true,
+            settings_section: None,
+            settings: serde_json::Value::Null,
+            source: ServerSource::Builtin,
+        }
+    }
+}
+
+/// One language server a plugin offers, translated into the shape
+/// `lsp-core` understands.
+///
+/// Deliberately not `plugin_api::LanguageServerContribution` — `lsp-core`
+/// stays free of the plugin stack (`docs/architecture/layering.md`).
+/// `ui-shell` and `settings-model`, which already depend on `plugin-host`
+/// for other contribution points, map the contribution type into this one
+/// at the call site.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PluginServer {
+    /// The plugin that contributed this server, e.g. `"csharp"`.
+    pub plugin_id: String,
+    /// LSP language id this server serves, e.g. `"csharp"`.
+    pub language_id: String,
+    pub name: String,
+    pub command: String,
+    pub args: Vec<String>,
+    pub settings_section: Option<String>,
+    pub settings: serde_json::Value,
+}
+
+impl From<&PluginServer> for ServerConfig {
+    fn from(plugin: &PluginServer) -> Self {
+        ServerConfig {
+            language_id: plugin.language_id.clone(),
+            name: plugin.name.clone(),
+            command: plugin.command.clone(),
+            args: plugin.args.clone(),
+            enabled: true,
+            settings_section: plugin.settings_section.clone(),
+            settings: plugin.settings.clone(),
+            source: ServerSource::Plugin {
+                plugin_id: plugin.plugin_id.clone(),
+            },
         }
     }
 }
@@ -236,15 +289,34 @@ pub struct ServerOverride {
     pub enabled: Option<bool>,
 }
 
-/// Merge user entries over the shipped catalog.
+/// Merge plugin contributions and user entries over the shipped catalog,
+/// low to high precedence: `SERVERS` -> `plugin_servers` -> `overrides`.
 ///
-/// Catalog order is preserved; user entries for unknown languages are
-/// appended in the order given and must carry a command (one without a
-/// command has nothing to launch and is dropped). Disabled entries are kept
-/// in the result so a settings page can show them — callers start only the
-/// ones with `enabled`.
-pub fn resolve_servers(overrides: &[ServerOverride]) -> Vec<ServerConfig> {
+/// A plugin entry for a language the const catalog already has REPLACES
+/// that row entirely — it is a full alternate definition, not a
+/// field-by-field patch like a [`ServerOverride`]. A plugin entry for a
+/// language with no catalog row is appended. Catalog order is preserved
+/// otherwise; user entries for unknown languages are appended in the order
+/// given and must carry a command (one without a command has nothing to
+/// launch and is dropped). Disabled entries are kept in the result so a
+/// settings page can show them — callers start only the ones with
+/// `enabled`.
+pub fn resolve_servers(
+    overrides: &[ServerOverride],
+    plugin_servers: &[PluginServer],
+) -> Vec<ServerConfig> {
     let mut resolved: Vec<ServerConfig> = SERVERS.iter().map(ServerConfig::from).collect();
+
+    for plugin in plugin_servers {
+        let cfg = ServerConfig::from(plugin);
+        match resolved
+            .iter_mut()
+            .find(|c| c.language_id == cfg.language_id)
+        {
+            Some(existing) => *existing = cfg,
+            None => resolved.push(cfg),
+        }
+    }
 
     for ov in overrides {
         match resolved
@@ -262,6 +334,9 @@ pub fn resolve_servers(overrides: &[ServerOverride]) -> Vec<ServerConfig> {
                     command,
                     args: Vec::new(),
                     enabled: true,
+                    settings_section: None,
+                    settings: serde_json::Value::Null,
+                    source: ServerSource::User,
                 };
                 apply(&mut cfg, ov);
                 resolved.push(cfg);
@@ -364,11 +439,14 @@ mod tests {
 
     #[test]
     fn user_override_replaces_only_the_fields_it_names() {
-        let resolved = resolve_servers(&[ServerOverride {
-            language_id: "rust".into(),
-            command: Some("/opt/ra".into()),
-            ..Default::default()
-        }]);
+        let resolved = resolve_servers(
+            &[ServerOverride {
+                language_id: "rust".into(),
+                command: Some("/opt/ra".into()),
+                ..Default::default()
+            }],
+            &[],
+        );
         let rust = resolved.iter().find(|c| c.language_id == "rust").unwrap();
         assert_eq!(rust.command, "/opt/ra");
         assert_eq!(rust.name, "rust-analyzer");
@@ -378,11 +456,14 @@ mod tests {
 
     #[test]
     fn user_can_disable_a_shipped_server() {
-        let resolved = resolve_servers(&[ServerOverride {
-            language_id: "go".into(),
-            enabled: Some(false),
-            ..Default::default()
-        }]);
+        let resolved = resolve_servers(
+            &[ServerOverride {
+                language_id: "go".into(),
+                enabled: Some(false),
+                ..Default::default()
+            }],
+            &[],
+        );
         let go = resolved.iter().find(|c| c.language_id == "go").unwrap();
         assert!(!go.enabled);
         assert_eq!(go.command, "gopls");
@@ -390,12 +471,15 @@ mod tests {
 
     #[test]
     fn user_can_add_an_unknown_language() {
-        let resolved = resolve_servers(&[ServerOverride {
-            language_id: "nim".into(),
-            command: Some("nimlsp".into()),
-            args: Some(vec!["--stdio".into()]),
-            ..Default::default()
-        }]);
+        let resolved = resolve_servers(
+            &[ServerOverride {
+                language_id: "nim".into(),
+                command: Some("nimlsp".into()),
+                args: Some(vec!["--stdio".into()]),
+                ..Default::default()
+            }],
+            &[],
+        );
         let nim = resolved.iter().find(|c| c.language_id == "nim").unwrap();
         assert_eq!(nim.command, "nimlsp");
         assert_eq!(nim.args, ["--stdio"]);
@@ -404,21 +488,27 @@ mod tests {
 
     #[test]
     fn an_unknown_language_without_a_command_is_dropped() {
-        let resolved = resolve_servers(&[ServerOverride {
-            language_id: "nim".into(),
-            enabled: Some(true),
-            ..Default::default()
-        }]);
+        let resolved = resolve_servers(
+            &[ServerOverride {
+                language_id: "nim".into(),
+                enabled: Some(true),
+                ..Default::default()
+            }],
+            &[],
+        );
         assert!(resolved.iter().all(|c| c.language_id != "nim"));
     }
 
     #[test]
     fn a_disabled_server_is_never_offered_for_launch() {
-        let resolved = resolve_servers(&[ServerOverride {
-            language_id: "rust".into(),
-            enabled: Some(false),
-            ..Default::default()
-        }]);
+        let resolved = resolve_servers(
+            &[ServerOverride {
+                language_id: "rust".into(),
+                enabled: Some(false),
+                ..Default::default()
+            }],
+            &[],
+        );
         assert!(enabled_server(&resolved, "rust").is_none());
         assert_eq!(enabled_server(&resolved, "go").unwrap().command, "gopls");
         assert!(enabled_server(&resolved, "brainfuck").is_none());
@@ -442,11 +532,14 @@ mod tests {
             let language_id = lsp_language_id(def.id).to_string();
             assert!(!language_id.is_empty(), "{} has no LSP id", def.id);
 
-            let resolved = resolve_servers(&[ServerOverride {
-                language_id: language_id.clone(),
-                command: Some("some-server".into()),
-                ..Default::default()
-            }]);
+            let resolved = resolve_servers(
+                &[ServerOverride {
+                    language_id: language_id.clone(),
+                    command: Some("some-server".into()),
+                    ..Default::default()
+                }],
+                &[],
+            );
             let found = enabled_server(&resolved, &language_id)
                 .unwrap_or_else(|| panic!("{} resolves to no server", def.id));
             assert_eq!(found.command, "some-server");
@@ -467,5 +560,89 @@ mod tests {
                 def.language_id
             );
         }
+    }
+
+    fn csharp_plugin() -> PluginServer {
+        PluginServer {
+            plugin_id: "csharp".into(),
+            language_id: "csharp".into(),
+            name: "csharp-ls".into(),
+            command: "csharp-ls".into(),
+            args: vec!["--loglevel".into(), "warning".into()],
+            settings_section: Some("csharp".into()),
+            settings: serde_json::json!({"analyzersEnabled": true}),
+        }
+    }
+
+    #[test]
+    fn a_plugin_entry_beats_the_const_catalog_row_for_the_same_language() {
+        // `csharp` has no const-catalog row any more (it now comes from the
+        // built-in plugin only), so this also proves a plugin entry is
+        // reachable for a language the catalog itself never shipped.
+        assert!(default_server("csharp").is_none());
+
+        let resolved = resolve_servers(&[], &[csharp_plugin()]);
+        let csharp = resolved.iter().find(|c| c.language_id == "csharp").unwrap();
+        assert_eq!(csharp.command, "csharp-ls");
+        assert_eq!(csharp.name, "csharp-ls");
+        assert_eq!(csharp.settings_section.as_deref(), Some("csharp"));
+        assert_eq!(
+            csharp.source,
+            ServerSource::Plugin {
+                plugin_id: "csharp".into()
+            }
+        );
+        assert!(enabled_server(&resolved, "csharp").is_some());
+    }
+
+    #[test]
+    fn a_plugin_entry_replaces_a_const_row_wholesale_not_field_by_field() {
+        let plugin = PluginServer {
+            plugin_id: "rust-alt".into(),
+            language_id: "rust".into(),
+            name: "Alt Rust LS".into(),
+            command: "alt-rust-ls".into(),
+            args: vec![],
+            settings_section: None,
+            settings: serde_json::Value::Null,
+        };
+        let resolved = resolve_servers(&[], std::slice::from_ref(&plugin));
+        let rust = resolved.iter().find(|c| c.language_id == "rust").unwrap();
+        assert_eq!(rust.command, "alt-rust-ls");
+        assert_eq!(rust.name, "Alt Rust LS");
+        assert_eq!(
+            rust.source,
+            ServerSource::Plugin {
+                plugin_id: "rust-alt".into()
+            }
+        );
+        // Const row is gone entirely, not merged with the plugin's fields.
+        assert_eq!(
+            resolved.iter().filter(|c| c.language_id == "rust").count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_user_override_still_beats_a_plugin_entry() {
+        let resolved = resolve_servers(
+            &[ServerOverride {
+                language_id: "csharp".into(),
+                command: Some("/opt/csharp-ls".into()),
+                ..Default::default()
+            }],
+            &[csharp_plugin()],
+        );
+        let csharp = resolved.iter().find(|c| c.language_id == "csharp").unwrap();
+        assert_eq!(csharp.command, "/opt/csharp-ls");
+        // Fields the override didn't name stay whatever the plugin set.
+        assert_eq!(csharp.name, "csharp-ls");
+        assert_eq!(csharp.settings_section.as_deref(), Some("csharp"));
+        assert_eq!(
+            csharp.source,
+            ServerSource::Plugin {
+                plugin_id: "csharp".into()
+            }
+        );
     }
 }

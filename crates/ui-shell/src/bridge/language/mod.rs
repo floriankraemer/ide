@@ -1,6 +1,7 @@
 use core::pin::Pin;
-use std::cell::RefCell;
-use std::path::Path;
+use std::cell::{Cell, RefCell};
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use cxx_qt::Threading;
 use cxx_qt_lib::QString;
@@ -13,6 +14,31 @@ use crate::bridge::registry::SharedDiagnostics;
 /// highlights and inlay hints — split out once this file crossed the
 /// file-size ceiling, the way `ai/agent.rs` splits out of `ai/chat.rs`.
 mod lsp_surface;
+
+/// Every `language-servers` contribution from the live plugin registry,
+/// translated into `lsp_core::PluginServer`.
+///
+/// `lsp-core` stays free of the plugin stack (`docs/architecture/
+/// layering.md`), so this mapping — not a `From` impl in either crate —
+/// is where `LanguageServerContribution` becomes the plain data
+/// `resolve_servers` understands. `ui-shell` already depends on
+/// `plugin-host` for icon themes (`bridge/icons.rs`), so this is the same
+/// pattern, not a new dependency.
+fn plugin_servers() -> Vec<lsp_core::PluginServer> {
+    let registry = plugin_host::registry();
+    registry
+        .language_servers()
+        .map(|(plugin, server)| lsp_core::PluginServer {
+            plugin_id: plugin.id().to_string(),
+            language_id: server.language_id.clone(),
+            name: server.name.clone(),
+            command: server.command.clone(),
+            args: server.args.clone(),
+            settings_section: server.settings_section.clone(),
+            settings: serde_json::to_value(&server.settings).unwrap_or(serde_json::Value::Null),
+        })
+        .collect()
+}
 
 // ---------------------------------------------------------------------------
 // Language servers (Task L2)
@@ -27,6 +53,26 @@ mod lsp_surface;
 /// queued while the server is still starting is still delivered after the
 /// `didOpen` that preceded it.
 type LspJob = Box<dyn FnOnce(&lsp_core::LspManager) + Send>;
+
+/// C5: how long a burst of filesystem-watcher events is allowed to run
+/// before it is flushed as one batched `workspace/didChangeWatchedFiles`.
+/// 200ms is comfortably inside the 150-300ms window a debounce needs to
+/// absorb a `git checkout`'s event storm without making a server wait
+/// noticeably longer than a human notices.
+const WATCHED_FILES_DEBOUNCE: Duration = Duration::from_millis(200);
+
+/// LSP's `FileChangeType` wire values, as sent over `watchedFileChanged`
+/// (the Qt signal can't carry `lsp_core::watched_files::FileChangeKind`
+/// itself, only primitives).
+fn wire_to_file_change_kind(kind: i32) -> Option<lsp_core::watched_files::FileChangeKind> {
+    use lsp_core::watched_files::FileChangeKind;
+    match kind {
+        1 => Some(FileChangeKind::Created),
+        2 => Some(FileChangeKind::Changed),
+        3 => Some(FileChangeKind::Deleted),
+        _ => None,
+    }
+}
 
 /// Rust side of the `LanguageService` QObject: a handle to the worker, the
 /// resolved server table, and the diagnostics currently published. No rules —
@@ -64,6 +110,19 @@ pub struct LanguageServiceRust {
     /// Trigger characters per language, as each server advertised them in
     /// its `initialize` result (`LspEvent::ServerReady`).
     triggers: RefCell<std::collections::HashMap<String, Vec<String>>>,
+    /// C7: whether each language's server offers `completionItem/resolve`,
+    /// from the same `initialize` result, stored the same way trigger
+    /// characters are — a per-language flag the accept path and the preview
+    /// path both gate on, rather than sending the request to a server that
+    /// never advertised it.
+    completion_resolve_supported: RefCell<std::collections::HashMap<String, bool>>,
+    /// C7: the language of the last `completionAt`, so an accept or a
+    /// preview resolution — neither of which is handed a path — knows which
+    /// server to ask. Set alongside `completion`/`completions`.
+    completion_language: RefCell<Option<String>>,
+    /// C7: which completion-item preview resolution (documentation/detail as
+    /// the popup's selection moves) is still the current one.
+    completion_resolve: RefCell<lsp_core::CompletionResolveTracker>,
     /// RF8: the offers of the last `codeActionsAt`, plus the language they
     /// came from — resolving or executing one has to go back to that server.
     actions: RefCell<Vec<lsp_core::CodeActionItem>>,
@@ -86,6 +145,36 @@ pub struct LanguageServiceRust {
     pub(crate) highlights_tracker: RefCell<lsp_core::RequestTracker>,
     pub(crate) inlay_hints: RefCell<Vec<lsp_core::InlayHint>>,
     pub(crate) inlay_hints_tracker: RefCell<lsp_core::RequestTracker>,
+    /// C9: the last decoded-and-mapped semantic-token spans per open
+    /// document path, fire-and-forget refreshed by `request_semantic_tokens`
+    /// — see that method's doc comment for why an unsupported/failed/empty
+    /// answer leaves a path's entry untouched rather than clearing it.
+    pub(crate) semantic_tokens:
+        RefCell<std::collections::HashMap<String, Vec<lsp_core::MappedSemanticSpan>>>,
+    /// C10: the last-fetched `textDocument/codeLens` items per open
+    /// document path, fire-and-forget refreshed by `request_code_lenses` —
+    /// same storage shape `semantic_tokens` uses, and for the same reason
+    /// (`request_code_lenses`'s own doc comment).
+    pub(crate) code_lenses: RefCell<std::collections::HashMap<String, Vec<lsp_core::CodeLensItem>>>,
+    /// C11: the last `prepareCallHierarchy` answer, plus the language it
+    /// came from — `requestIncomingCalls`/`requestOutgoingCalls` index into
+    /// this by position, the same convention `runCodeLens` follows for
+    /// `code_lenses`.
+    pub(crate) call_hierarchy_items: RefCell<Vec<lsp_core::HierarchyItem>>,
+    pub(crate) call_hierarchy_language: RefCell<String>,
+    pub(crate) incoming_calls: RefCell<Vec<lsp_core::IncomingCall>>,
+    pub(crate) outgoing_calls: RefCell<Vec<lsp_core::OutgoingCall>>,
+    /// C11: the type-hierarchy twins of the four fields above.
+    pub(crate) type_hierarchy_items: RefCell<Vec<lsp_core::HierarchyItem>>,
+    pub(crate) type_hierarchy_language: RefCell<String>,
+    pub(crate) supertypes: RefCell<Vec<lsp_core::HierarchyItem>>,
+    pub(crate) subtypes: RefCell<Vec<lsp_core::HierarchyItem>>,
+    /// C11: the project index, shared with `SearchModel`
+    /// (`registry::index_slot`) — the fallback for `supertypes`/`subtypes`
+    /// when no server answers (`lsp_core::hierarchy::type_hierarchy_outcome`),
+    /// built from the same `inh_type`/`inh_supertype` edges
+    /// `SearchModel::find_supertypes`/`find_implementations` already read.
+    pub(crate) index: mcp_server::IndexHandle,
     /// The refactoring waiting to be applied, if any: what it changes, what
     /// to call it, and — when it came from the server asking us — the gate
     /// that server is blocked on.
@@ -100,6 +189,14 @@ pub struct LanguageServiceRust {
     /// keying by language id makes which one deterministic rather than
     /// dependent on event arrival order.
     busy: RefCell<std::collections::BTreeMap<String, (String, lsp_core::ServerActivity)>>,
+    /// C5: filesystem changes waiting for the debounce window to lapse
+    /// before becoming one batched `workspace/didChangeWatchedFiles` per
+    /// affected server. See `watched_file_changed`/`flush_watched_changes`.
+    watched_changes: RefCell<Vec<(PathBuf, lsp_core::watched_files::FileChangeKind)>>,
+    /// Whether a flush is already scheduled — sending only one debounce
+    /// timer per burst, however many events land inside its window, is
+    /// what makes this a debounce rather than one timer per event.
+    watch_flush_pending: Cell<bool>,
 }
 
 impl Default for LanguageServiceRust {
@@ -115,6 +212,9 @@ impl Default for LanguageServiceRust {
             completion: RefCell::default(),
             completions: RefCell::default(),
             triggers: RefCell::default(),
+            completion_resolve_supported: RefCell::default(),
+            completion_language: RefCell::default(),
+            completion_resolve: RefCell::default(),
             actions: RefCell::default(),
             actions_language: RefCell::default(),
             intentions: RefCell::default(),
@@ -127,9 +227,22 @@ impl Default for LanguageServiceRust {
             highlights_tracker: RefCell::default(),
             inlay_hints: RefCell::default(),
             inlay_hints_tracker: RefCell::default(),
+            semantic_tokens: RefCell::default(),
+            code_lenses: RefCell::default(),
+            call_hierarchy_items: RefCell::default(),
+            call_hierarchy_language: RefCell::default(),
+            incoming_calls: RefCell::default(),
+            outgoing_calls: RefCell::default(),
+            type_hierarchy_items: RefCell::default(),
+            type_hierarchy_language: RefCell::default(),
+            supertypes: RefCell::default(),
+            subtypes: RefCell::default(),
+            index: crate::bridge::registry::index_slot(),
             pending: RefCell::default(),
             edits: RefCell::default(),
             busy: RefCell::default(),
+            watched_changes: RefCell::default(),
+            watch_flush_pending: Cell::default(),
         }
     }
 }
@@ -254,6 +367,12 @@ fn to_ffi_completion(item: lsp_core::CompletionItem, prefix_length: u32) -> ffi:
         end_line: 0,
         end_character: 0,
     });
+    // C7: the item exactly as the server sent it, carried through the FFI
+    // boundary as JSON text because `completionItem/resolve` needs it back
+    // verbatim and cxx-qt structs cannot hold an arbitrary `serde_json::Value`.
+    // Whether it is worth sending anywhere is `completion_resolve_supported`'s
+    // decision, not this translation's.
+    let resolve_data = serde_json::to_string(&item.raw).unwrap_or_default();
     ffi::FfiCompletionItem {
         label: QString::from(item.label.as_str()),
         kind: QString::from(lsp_core::kind_name(item.kind)),
@@ -266,6 +385,7 @@ fn to_ffi_completion(item: lsp_core::CompletionItem, prefix_length: u32) -> ffi:
         end_line: range.end_line,
         end_character: range.end_character,
         prefix_length,
+        resolve_data: QString::from(resolve_data.as_str()),
     }
 }
 
@@ -304,7 +424,7 @@ impl ffi::LanguageService {
                 enabled: entry.enabled,
             })
             .collect();
-        *self.configs.borrow_mut() = lsp_core::resolve_servers(&overrides);
+        *self.configs.borrow_mut() = lsp_core::resolve_servers(&overrides, &plugin_servers());
 
         let (manager, events) = lsp_core::LspManager::new(lsp_core::uri_from_path(&root));
         let (jobs, rx) = std::sync::mpsc::channel::<LspJob>();
@@ -329,24 +449,33 @@ impl ffi::LanguageService {
     }
 
     pub fn document_opened(mut self: Pin<&mut Self>, path: &QString, text: &QString) {
-        let path = path.to_string();
-        let Some(config) = self.config_for_path(&path) else {
+        let path_str = path.to_string();
+        let Some(config) = self.config_for_path(&path_str) else {
             return;
         };
         let language_id = config.language_id.clone();
-        let uri = lsp_core::uri_from_path(&path);
-        let text = text.to_string();
+        let uri = lsp_core::uri_from_path(&path_str);
+        let text_str = text.to_string();
         self.open_docs
             .borrow_mut()
-            .insert(path, language_id.clone());
+            .insert(path_str, language_id.clone());
 
         if self.started.borrow_mut().insert(language_id.clone()) {
             self.as_mut().start_server(config);
         }
         let language = language_id.clone();
-        self.push_job(move |manager| {
-            let _ = manager.did_open(&uri, &language, &text);
+        self.as_mut().push_job(move |manager| {
+            let _ = manager.did_open(&uri, &language, &text_str);
         });
+        // C9: fire-and-forget — a server whose semantic-tokens capability
+        // is not yet known (still starting, or registers it dynamically
+        // after `initialized`) simply gets a no-op from this call; nothing
+        // here retries. `SyntaxHighlighter` re-requesting on its own next
+        // revision-change hook is the second call site
+        // `overlay_semantic_tokens`'s TODO leaves for follow-up.
+        self.as_mut().request_semantic_tokens(path, text);
+        // C10: same fire-and-forget convention, immediately above.
+        self.as_mut().request_code_lenses(path);
     }
 
     pub fn document_changed(self: Pin<&mut Self>, path: &QString, text: &QString) {
@@ -386,6 +515,65 @@ impl ffi::LanguageService {
         self.as_mut().diagnostics_changed();
     }
 
+    /// C5: `ProjectTreeModel::watchedFileChanged` — buffer the change and
+    /// make sure exactly one debounce timer is running. `git checkout` in a
+    /// real repo fires thousands of these in a burst; sending one
+    /// `workspace/didChangeWatchedFiles` per event would stall a server
+    /// behind re-analysing between each, so every event inside the
+    /// `WATCHED_FILES_DEBOUNCE` window collapses into the next flush.
+    pub fn watched_file_changed(mut self: Pin<&mut Self>, path: &QString, kind: i32) {
+        let Some(kind) = wire_to_file_change_kind(kind) else {
+            return;
+        };
+        self.watched_changes
+            .borrow_mut()
+            .push((PathBuf::from(path.to_string()), kind));
+
+        if self.watch_flush_pending.replace(true) {
+            return; // A timer is already on its way; this event rides it.
+        }
+        let qt_thread = self.as_mut().qt_thread();
+        std::thread::spawn(move || {
+            std::thread::sleep(WATCHED_FILES_DEBOUNCE);
+            let _ = qt_thread.queue(|service: Pin<&mut Self>| service.flush_watched_changes());
+        });
+    }
+
+    /// Send the buffered changes, one batched notification per server whose
+    /// language they touch, filtered through that server's watchers inside
+    /// `LspManager::did_change_watched_files`. A language with no server
+    /// currently running is dropped here rather than queued and later
+    /// silently ignored by `LspManager::server` — same "no server, nothing
+    /// sent" rule either way, just paid once per flush instead of per file.
+    fn flush_watched_changes(self: Pin<&mut Self>) {
+        self.watch_flush_pending.set(false);
+        let changes = std::mem::take(&mut *self.watched_changes.borrow_mut());
+        if changes.is_empty() {
+            return;
+        }
+        let started = self.started.borrow();
+        let mut by_language: std::collections::HashMap<
+            String,
+            Vec<(PathBuf, lsp_core::watched_files::FileChangeKind)>,
+        > = std::collections::HashMap::new();
+        for (path, kind) in changes {
+            let catalog_id = syntax_core::language_for_path(&path).id();
+            let language_id = lsp_core::lsp_language_id(&catalog_id).to_string();
+            if started.contains(&language_id) {
+                by_language
+                    .entry(language_id)
+                    .or_default()
+                    .push((path, kind));
+            }
+        }
+        drop(started);
+        for (language_id, changes) in by_language {
+            self.push_job(move |manager| {
+                let _ = manager.did_change_watched_files(&language_id, &changes);
+            });
+        }
+    }
+
     pub fn apply_server_settings(self: Pin<&mut Self>) {
         // The resolved layer, not the global file: a project may name its
         // own language servers (ADR-0022), and a project that pins a
@@ -402,7 +590,7 @@ impl ffi::LanguageService {
                 enabled: entry.enabled,
             })
             .collect();
-        let resolved = lsp_core::resolve_servers(&overrides);
+        let resolved = lsp_core::resolve_servers(&overrides, &plugin_servers());
 
         // Which running servers the new settings no longer describe: the
         // comparison is between two resolved configurations, so "changed" is
@@ -1063,6 +1251,7 @@ impl ffi::LanguageService {
         }
 
         let uri = lsp_core::uri_from_path(&path);
+        *self.completion_language.borrow_mut() = Some(language_id.clone());
         let token = self
             .completion
             .borrow_mut()
@@ -1104,12 +1293,23 @@ impl ffi::LanguageService {
             .collect()
     }
 
-    pub fn completion_edit(
-        &self,
+    /// Accept `item`: the splice that types it, plus — when the server
+    /// supports `completionItem/resolve` (C7) — whatever
+    /// `additionalTextEdits` resolving it adds, merged into the same
+    /// application so one Ctrl+Z undoes both.
+    ///
+    /// Answers on `completionEditReady`, never synchronously: the server may
+    /// have to be asked, and `push_job` only ever answers off the Qt thread.
+    /// A server with nothing to resolve, or one that times out
+    /// ([`lsp_core::DEFAULT_REQUEST_TIMEOUT`]), still gets its answer — the
+    /// item's own edit alone — because an accept must never be left half
+    /// finished.
+    pub fn accept_completion(
+        mut self: Pin<&mut Self>,
         item: &ffi::FfiCompletionItem,
         caret_line: u32,
         caret_character: u32,
-    ) -> Vec<ffi::FfiTextEdit> {
+    ) {
         let range = item.has_range.then_some(lsp_core::TextRange {
             start_line: item.start_line,
             start_character: item.start_character,
@@ -1122,15 +1322,114 @@ impl ffi::LanguageService {
             caret_line,
             caret_character,
         );
-        vec![ffi::FfiTextEdit {
-            path: QString::default(),
-            in_buffer: true,
-            start_line: span.start_line,
-            start_character: span.start_character,
-            end_line: span.end_line,
-            end_character: span.end_character,
-            new_text: item.insert.clone(),
-        }]
+        let own_edit = lsp_core::completion_own_edit(span, &item.insert.to_string());
+
+        let language_id = self.completion_language.borrow().clone();
+        let resolvable = language_id.as_deref().is_some_and(|lang| {
+            self.completion_resolve_supported
+                .borrow()
+                .get(lang)
+                .copied()
+                .unwrap_or(false)
+        });
+        let raw: Option<serde_json::Value> = resolvable
+            .then(|| serde_json::from_str(&item.resolve_data.to_string()).ok())
+            .flatten();
+
+        let Some((language_id, raw)) = language_id.zip(raw) else {
+            self.as_mut().emit_completion_edit(vec![own_edit]);
+            return;
+        };
+
+        let fallback = own_edit.clone();
+        let qt_thread = self.as_mut().qt_thread();
+        let queued = self.push_job(move |manager| {
+            let additional = manager
+                .resolve_completion_item(&language_id, &raw)
+                .map(|resolved| lsp_core::completion_additional_edits(&resolved))
+                .unwrap_or_default();
+            let mut edits = additional;
+            edits.push(own_edit);
+            let edits = lsp_core::descending(edits);
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                service.as_mut().emit_completion_edit(edits);
+            });
+        });
+        if !queued {
+            self.as_mut().emit_completion_edit(vec![fallback]);
+        }
+    }
+
+    /// [`lsp_core::TextEdit`]s, translated to the FFI shape and sent on
+    /// `completionEditReady` — the one place that signal is emitted, so
+    /// every path out of `accept_completion` produces exactly one answer.
+    fn emit_completion_edit(mut self: Pin<&mut Self>, edits: Vec<lsp_core::TextEdit>) {
+        let edits = edits
+            .into_iter()
+            .map(|edit| ffi::FfiTextEdit {
+                path: QString::default(),
+                in_buffer: true,
+                start_line: edit.start_line,
+                start_character: edit.start_character,
+                end_line: edit.end_line,
+                end_character: edit.end_character,
+                new_text: QString::from(edit.new_text.as_str()),
+            })
+            .collect();
+        self.as_mut().completion_edit_ready(edits);
+    }
+
+    /// C7 — the popup's selection moved to `resolve_data`'s item: ask the
+    /// server to fill in documentation and detail, when it offers
+    /// `completionItem/resolve` at all. A superseded or too-late answer
+    /// produces no signal, `lsp_core::CompletionResolveTracker`'s rule —
+    /// the same shape `hover_at` uses for the pointer.
+    pub fn resolve_completion_preview(mut self: Pin<&mut Self>, resolve_data: &QString) {
+        let language_id = self.completion_language.borrow().clone();
+        let resolvable = language_id.as_deref().is_some_and(|lang| {
+            self.completion_resolve_supported
+                .borrow()
+                .get(lang)
+                .copied()
+                .unwrap_or(false)
+        });
+        let raw: Option<serde_json::Value> = resolvable
+            .then(|| serde_json::from_str(&resolve_data.to_string()).ok())
+            .flatten();
+        let Some((language_id, raw)) = language_id.zip(raw) else {
+            return;
+        };
+
+        let token = self.completion_resolve.borrow_mut().begin();
+        let qt_thread = self.as_mut().qt_thread();
+        self.push_job(move |manager| {
+            let Ok(resolved) = manager.resolve_completion_item(&language_id, &raw) else {
+                return;
+            };
+            // Reuses `parse_completion`'s own field extraction rather than a
+            // second reader for the same `CompletionItem` shape — a resolved
+            // item answers with the same fields a list entry does.
+            let Some(item) = lsp_core::parse_completion(&serde_json::json!([resolved]))
+                .items
+                .into_iter()
+                .next()
+            else {
+                return;
+            };
+            let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| {
+                if !service.completion_resolve.borrow().accept(token) {
+                    return;
+                }
+                service.as_mut().completion_preview_ready(
+                    QString::from(item.detail.as_str()),
+                    QString::from(item.documentation.as_str()),
+                );
+            });
+        });
+    }
+
+    pub fn cancel_completion_preview(self: Pin<&mut Self>) {
+        self.completion_resolve.borrow_mut().cancel();
     }
 
     pub fn resolve_definition(mut self: Pin<&mut Self>, path: &QString, line: u32, character: u32) {
@@ -1164,6 +1463,18 @@ impl ffi::LanguageService {
                 self.as_mut().definition_finished();
             }
             lsp_core::DefinitionOutcome::Index => self.as_mut().definition_fallback(),
+            // C12 foundation: the server pointed at decompiled/generated
+            // source (a non-`file:` URI), which this IDE cannot yet fetch
+            // and open as a tab end to end — refuse cleanly rather than
+            // treating the raw URI as a path and building a broken tab from
+            // it (the bug this guard replaces; see navigation.rs's
+            // `DefinitionOutcome::NeedsMetadataFetch` doc comment).
+            lsp_core::DefinitionOutcome::NeedsMetadataFetch(_uri) => {
+                self.as_mut().definition_unavailable(QString::from(
+                    "Go to Definition landed in decompiled framework code, \
+                     which this IDE cannot open yet.",
+                ));
+            }
         }
     }
 
@@ -1247,6 +1558,7 @@ impl ffi::LanguageService {
                 language_id,
                 trigger_characters,
                 signature_triggers,
+                completion_resolve_supported,
                 ..
             } => {
                 let name = name_of(&language_id);
@@ -1256,6 +1568,9 @@ impl ffi::LanguageService {
                 self.signature_triggers
                     .borrow_mut()
                     .insert(language_id.clone(), signature_triggers);
+                self.completion_resolve_supported
+                    .borrow_mut()
+                    .insert(language_id.clone(), completion_resolve_supported);
                 self.as_mut().server_state_changed(
                     QString::from(language_id.as_str()),
                     QString::from(name.as_str()),

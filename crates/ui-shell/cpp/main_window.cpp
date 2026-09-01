@@ -404,6 +404,17 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                       docManager,
                       [docManager](const QString &path) { docManager->checkExternalChange(path); });
 
+    // C5: relay the same watcher events, plus their LSP `FileChangeType`,
+    // to the language service. Debouncing and per-server filtering are
+    // `LanguageService::watchedFileChanged`'s job (Rust); this is a plain
+    // signal relay, same as the connection above.
+    QObject::connect(treeModel,
+                      &ProjectTreeModel::watchedFileChanged,
+                      languageService,
+                      [languageService](const QString &path, qint32 kind) {
+                          languageService->watchedFileChanged(path, kind);
+                      });
+
     // Keep the search index in step with the disk. Paths are coalesced over a
     // short window because a single save can produce several watcher events,
     // and re-indexing a file is far more expensive than remembering its name.

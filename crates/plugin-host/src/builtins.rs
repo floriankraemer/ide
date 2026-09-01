@@ -45,6 +45,15 @@ pub(crate) const MARKDOWN_PREVIEW: BuiltinPlugin = BuiltinPlugin {
     files: &[],
 };
 
+/// C# support via `csharp-ls`, first-party like the Markdown preview above:
+/// a `language-servers` contribution needs no `[wasm]` component or
+/// packaged files either, since the server itself is a native process on
+/// `PATH` that the host launches, never bundled.
+pub(crate) const CSHARP: BuiltinPlugin = BuiltinPlugin {
+    manifest: include_str!("../builtin/csharp/plugin.toml"),
+    files: &[],
+};
+
 // The id list is packed by line width, which rustfmt would otherwise
 // unpack to one per line and undo the point of the macro.
 #[rustfmt::skip]

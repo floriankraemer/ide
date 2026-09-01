@@ -44,17 +44,45 @@ pub use search::{
     TextMatch,
 };
 
-/// A single open file: a rope-backed buffer, its backing path, and a
+/// What a [`Document`] is backed by: a real file on disk, or a read-only
+/// virtual buffer with no path at all (ADR-0003 amendment: decompiled
+/// metadata, `csharp:/...` and the like — C12).
+///
+/// `Virtual`'s `key` is treated as an opaque identifier, not a path: the
+/// server that minted it (e.g. csharp-ls's `csharp/metadata`) owns its
+/// structure, and this type never parses it. `(scheme, key)` together are
+/// the document's identity for dedup/re-open, the same role a `PathBuf`
+/// plays for `File`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DocumentSource {
+    /// A real file at this path.
+    File(PathBuf),
+    /// A read-only buffer with no backing file — its content arrived over
+    /// some other channel (e.g. an LSP custom request) and there is nowhere
+    /// on disk to save it back to.
+    Virtual { scheme: String, key: String },
+}
+
+/// A single open file: a rope-backed buffer, its [`DocumentSource`], and a
 /// dirty flag tracking unsaved edits.
 pub struct Document {
-    path: PathBuf,
+    source: DocumentSource,
     rope: Rope,
     dirty: bool,
     /// Set when the tree tells us this document's backing file was deleted
     /// (US-2b) — blocks further silent-write-to-nowhere saves until the
     /// user does something about it (e.g. Save As, not in MVP scope, or
-    /// simply accepts the error and closes the tab).
+    /// simply accepts the error and closes the tab). Always `false` for a
+    /// [`DocumentSource::Virtual`] document — there is no backing file to
+    /// have been deleted.
     deleted: bool,
+    /// `save()`/`reload()` refuse on a read-only document rather than
+    /// silently no-opping or panicking (C12). Every [`DocumentSource::Virtual`]
+    /// document is read-only; a `File` document is never constructed this
+    /// way today, but the flag lives on `Document` rather than being
+    /// inferred from the source so a future read-only *file* (e.g. a
+    /// permissions-denied reopen) has somewhere to record it too.
+    read_only: bool,
 }
 
 impl Document {
@@ -63,26 +91,65 @@ impl Document {
         let path = path.as_ref().to_path_buf();
         let content = fs::read_to_string(&path)?;
         Ok(Self {
-            path,
+            source: DocumentSource::File(path),
             rope: Rope::from_str(&content),
             dirty: false,
             deleted: false,
+            read_only: false,
         })
     }
 
-    /// The file this document is backed by.
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// A read-only virtual document with no backing file (C12): `text`
+    /// arrived over some other channel (an LSP custom request fetching
+    /// decompiled source, say) and is handed to the rope as-is. Never dirty
+    /// on open, and [`Document::save`]/[`Document::reload`] refuse on it —
+    /// see their docs.
+    pub fn open_virtual(scheme: impl Into<String>, key: impl Into<String>, text: &str) -> Self {
+        Self {
+            source: DocumentSource::Virtual {
+                scheme: scheme.into(),
+                key: key.into(),
+            },
+            rope: Rope::from_str(text),
+            dirty: false,
+            deleted: false,
+            read_only: true,
+        }
+    }
+
+    /// What this document is backed by.
+    pub fn source(&self) -> &DocumentSource {
+        &self.source
+    }
+
+    /// The file this document is backed by, or `None` for a
+    /// [`DocumentSource::Virtual`] document — it has no path.
+    pub fn path(&self) -> Option<&Path> {
+        match &self.source {
+            DocumentSource::File(path) => Some(path),
+            DocumentSource::Virtual { .. } => None,
+        }
     }
 
     /// Update the backing path after the tree renames the underlying file
-    /// (US-2b) — future saves target the new location.
+    /// (US-2b) — future saves target the new location. A no-op on a
+    /// [`DocumentSource::Virtual`] document: it has no path to retarget,
+    /// the same way a tree rename never touches a `TabKind::Diff` tab
+    /// (`app_core::diff_tab`).
     pub fn set_path(&mut self, path: PathBuf) {
-        self.path = path;
+        if matches!(self.source, DocumentSource::File(_)) {
+            self.source = DocumentSource::File(path);
+        }
+    }
+
+    /// Whether this document cannot be saved or reloaded. Every
+    /// [`DocumentSource::Virtual`] document is read-only.
+    pub fn is_read_only(&self) -> bool {
+        self.read_only
     }
 
     /// Whether the tree reported this document's backing file as deleted
-    /// (US-2b).
+    /// (US-2b). Always `false` for a [`DocumentSource::Virtual`] document.
     pub fn is_deleted(&self) -> bool {
         self.deleted
     }
@@ -90,17 +157,33 @@ impl Document {
     /// Record that the tree deleted this document's backing file (US-2b).
     /// Subsequent `save()` calls fail with a clear error instead of
     /// silently writing to a path that no longer exists as the user
-    /// expects.
+    /// expects. A no-op on a [`DocumentSource::Virtual`] document — there is
+    /// no backing file for the tree to have deleted.
     pub fn mark_deleted(&mut self) {
-        self.deleted = true;
+        if matches!(self.source, DocumentSource::File(_)) {
+            self.deleted = true;
+        }
     }
 
-    /// Tab title derived from the file name.
+    /// Tab title: the file name for a [`DocumentSource::File`] document, or
+    /// the last `/`-separated segment of `key` (falling back to the whole
+    /// key) for a [`DocumentSource::Virtual`] one — csharp-ls's
+    /// `csharp:/metadata/.../Console.cs`-shaped keys carry a real file name
+    /// worth showing, and this also doubles as the extension the
+    /// highlighting/language registry matches on (Y2).
     pub fn title(&self) -> String {
-        self.path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| self.path.to_string_lossy().into_owned())
+        match &self.source {
+            DocumentSource::File(path) => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.to_string_lossy().into_owned()),
+            DocumentSource::Virtual { scheme, key } => key
+                .rsplit('/')
+                .next()
+                .filter(|segment| !segment.is_empty())
+                .map(|segment| segment.to_string())
+                .unwrap_or_else(|| format!("{scheme}:{key}")),
+        }
     }
 
     /// Whether this document has unsaved edits.
@@ -157,9 +240,16 @@ impl Document {
     /// Re-read the backing file from disk into the buffer, discarding any
     /// in-editor edits (the external-change "Reload" choice).
     /// Clears the dirty flag on success; leaves existing state untouched on
-    /// failure.
+    /// failure. A [`DocumentSource::Virtual`] document has no backing file
+    /// to re-read and always refuses.
     pub fn reload(&mut self) -> io::Result<()> {
-        let content = fs::read_to_string(&self.path)?;
+        let DocumentSource::File(path) = &self.source else {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("\"{}\" has no backing file to reload", self.title()),
+            ));
+        };
+        let content = fs::read_to_string(path)?;
         self.rope = Rope::from_str(&content);
         self.dirty = false;
         Ok(())
@@ -168,14 +258,33 @@ impl Document {
     /// Write the current buffer content to disk, overwriting the file.
     /// Clears the dirty flag on success; leaves it set on failure so no
     /// unsaved state is silently lost (US-4's save-failure criterion).
+    ///
+    /// Refuses cleanly, not silently, on a read-only document (C12) — a
+    /// [`DocumentSource::Virtual`] document has no file to write to in the
+    /// first place.
     pub fn save(&mut self) -> io::Result<()> {
+        if self.read_only {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("\"{}\" is read-only and cannot be saved", self.title()),
+            ));
+        }
         if self.deleted {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 format!("\"{}\" was deleted; nothing to save to", self.title()),
             ));
         }
-        fs::write(&self.path, self.rope.to_string())?;
+        let DocumentSource::File(path) = &self.source else {
+            // Unreachable today (only a `Virtual` document is read-only,
+            // caught above), but a `save()` with no path to write to must
+            // never silently no-op — fail loudly rather than assume.
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("\"{}\" has no backing file to save to", self.title()),
+            ));
+        };
+        fs::write(path, self.rope.to_string())?;
         self.dirty = false;
         Ok(())
     }
@@ -268,9 +377,10 @@ impl TabList {
         self.tabs.iter()
     }
 
-    /// Index of the tab backed by `path`, if any is open.
+    /// Index of the tab backed by `path`, if any is open. A
+    /// [`DocumentSource::Virtual`] tab has no path and never matches.
     pub fn find_by_path(&self, path: &Path) -> Option<usize> {
-        self.tabs.iter().position(|d| d.path() == path)
+        self.tabs.iter().position(|d| d.path() == Some(path))
     }
 }
 
@@ -508,5 +618,87 @@ mod tests {
         doc.insert(0, "x");
         doc.save().unwrap();
         assert!(new_path.exists());
+    }
+
+    // --- DocumentSource::Virtual (C12) ------------------------------------
+
+    #[test]
+    fn a_virtual_document_has_no_path_and_a_title_derived_from_its_key() {
+        let doc = Document::open_virtual("csharp", "metadata/Projects/x/Console.cs", "// stub");
+        assert_eq!(doc.path(), None);
+        assert_eq!(doc.title(), "Console.cs");
+        assert!(doc.is_read_only());
+        assert!(!doc.is_dirty());
+        assert_eq!(doc.content(), "// stub");
+        assert_eq!(
+            doc.source(),
+            &DocumentSource::Virtual {
+                scheme: "csharp".to_string(),
+                key: "metadata/Projects/x/Console.cs".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn a_virtual_document_with_no_slash_in_its_key_titles_itself_the_whole_key() {
+        let doc = Document::open_virtual("csharp", "opaque-id", "text");
+        assert_eq!(doc.title(), "opaque-id");
+    }
+
+    #[test]
+    fn a_virtual_document_refuses_to_be_saved() {
+        let mut doc = Document::open_virtual("csharp", "metadata/Console.cs", "// decompiled");
+
+        let err = doc.save().unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::PermissionDenied);
+        assert!(err.to_string().contains("read-only"));
+    }
+
+    #[test]
+    fn a_virtual_document_refuses_to_be_reloaded() {
+        let mut doc = Document::open_virtual("csharp", "metadata/Console.cs", "// decompiled");
+
+        let err = doc.reload().unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(doc.content(), "// decompiled", "reload must not clear it");
+    }
+
+    #[test]
+    fn a_virtual_document_still_accepts_in_memory_edits_and_dirty_tracking() {
+        // Read-only is enforced at the save boundary (C12's non-negotiable
+        // rule), not by refusing every edit at this layer — the same
+        // "editing is permitted, saving is separately gated" split
+        // `AppSession`'s binary/diff tabs already use one layer up.
+        let mut doc = Document::open_virtual("csharp", "metadata/Console.cs", "one");
+        doc.insert(3, " two");
+        assert_eq!(doc.content(), "one two");
+        assert!(doc.is_dirty());
+    }
+
+    #[test]
+    fn set_path_and_mark_deleted_are_no_ops_on_a_virtual_document() {
+        let mut doc = Document::open_virtual("csharp", "metadata/Console.cs", "text");
+
+        doc.set_path(PathBuf::from("/should/not/apply.cs"));
+        assert_eq!(doc.path(), None);
+
+        doc.mark_deleted();
+        assert!(
+            !doc.is_deleted(),
+            "a virtual document has no file to delete"
+        );
+    }
+
+    #[test]
+    fn tablist_find_by_path_never_matches_a_virtual_document() {
+        // Not directly exercisable through `TabList::open` (which only ever
+        // creates `File` documents), but a defensive proof that
+        // `find_by_path` is `Some(path)`-keyed, not path-shaped-string-keyed
+        // — a virtual document's key could coincidentally look like a path.
+        let doc = Document::open_virtual("csharp", "/a/weird/key.cs", "text");
+        assert_eq!(doc.path(), None);
+        assert_ne!(doc.path(), Some(Path::new("/a/weird/key.cs")));
     }
 }

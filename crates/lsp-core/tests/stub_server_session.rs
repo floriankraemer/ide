@@ -22,6 +22,9 @@ fn config(command: &str, args: &[&str]) -> ServerConfig {
         command: command.into(),
         args: args.iter().map(|a| a.to_string()).collect(),
         enabled: true,
+        settings_section: None,
+        settings: serde_json::Value::Null,
+        source: lsp_core::catalog::ServerSource::Builtin,
     }
 }
 
@@ -34,6 +37,28 @@ fn stub_config() -> ServerConfig {
 /// integration tests share one process.
 fn dying_stub_config() -> ServerConfig {
     config("env", &["STUB_LSP_DIE_ON_DIDOPEN=1", STUB])
+}
+
+/// C6: a stub configured with a `workspace/configuration` section and
+/// starting settings, the way the `csharp` plugin's `ServerConfig` is.
+fn stub_config_with_settings() -> ServerConfig {
+    ServerConfig {
+        settings_section: Some("csharp".into()),
+        settings: json!({"analyzersEnabled": true}),
+        ..stub_config()
+    }
+}
+
+/// C7: the stub advertises `completionProvider.resolveProvider: true`, the
+/// way csharp-ls does.
+fn stub_config_with_completion_resolve() -> ServerConfig {
+    config("env", &["STUB_LSP_COMPLETION_RESOLVE=1", STUB])
+}
+
+/// C9: the stub advertises `semanticTokensProvider` statically in
+/// `initialize`'s result, the way rust-analyzer does.
+fn stub_config_with_semantic_tokens_static() -> ServerConfig {
+    config("env", &["STUB_LSP_SEMANTIC_TOKENS_STATIC=1", STUB])
 }
 
 /// Drain events until one matches, or fail. Non-matching events are skipped:
@@ -1360,4 +1385,944 @@ fn work_done_progress_is_advertised() {
     assert_eq!(capabilities["window"]["workDoneProgress"], true);
 
     manager.stop(LANG);
+}
+
+// ---------------------------------------------------------------------------
+// C4: `client/registerCapability` / `client/unregisterCapability`
+// ---------------------------------------------------------------------------
+
+/// csharp-ls declares most of its capabilities via dynamic registration
+/// rather than up front, so a client that cannot answer
+/// `client/registerCapability` never sees them. This drives the stub through
+/// the real register-then-unregister sequence on the actual reader thread
+/// and checks the registry on the other side of it, not just the unit-level
+/// `Registrations` struct.
+#[test]
+fn register_capability_then_unregister_round_trips_through_the_reader_thread() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    assert!(
+        !manager.method_registered(LANG, "workspace/didChangeWatchedFiles"),
+        "nothing has registered yet",
+    );
+
+    // The stub pauses between its register and unregister requests, wide
+    // enough that the test thread can observe the registration actually
+    // land — through the real reader thread, not a direct call into
+    // `Registrations` — before it is taken away again.
+    let outcome = thread::scope(|scope| {
+        let run = scope.spawn(|| {
+            manager
+                .request(LANG, "stub/registerCapabilityRun", json!({"pause_ms": 200}))
+                .expect("the stub runs its register/unregister sequence")
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline
+            && !manager.method_registered(LANG, "workspace/didChangeWatchedFiles")
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            manager.method_registered(LANG, "workspace/didChangeWatchedFiles"),
+            "a client that answers client/registerCapability with \"not \
+             implemented\" is what makes csharp-ls never see its own \
+             capabilities",
+        );
+
+        run.join().expect("stub run thread did not panic")
+    });
+
+    assert_eq!(outcome["registered"], true);
+    assert_eq!(outcome["unregistered"], true);
+    assert!(
+        !manager.method_registered(LANG, "workspace/didChangeWatchedFiles"),
+        "client/unregisterCapability must remove the registration again",
+    );
+
+    manager.stop(LANG);
+}
+
+/// C5: while the stub's `**/*.rs` watcher (`stub/registerCapabilityRun`) is
+/// live, `did_change_watched_files` must filter out the non-matching path,
+/// batch the matching ones into one notification, and send nothing at all
+/// once the registration is gone again.
+#[test]
+fn did_change_watched_files_filters_and_batches_through_the_real_registration() {
+    use lsp_core::watched_files::FileChangeKind;
+    use std::path::PathBuf;
+
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    thread::scope(|scope| {
+        let run = scope.spawn(|| {
+            manager
+                .request(LANG, "stub/registerCapabilityRun", json!({"pause_ms": 300}))
+                .expect("the stub runs its register/unregister sequence")
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline
+            && !manager.method_registered(LANG, "workspace/didChangeWatchedFiles")
+        {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(manager.method_registered(LANG, "workspace/didChangeWatchedFiles"));
+
+        manager
+            .did_change_watched_files(
+                LANG,
+                &[
+                    (
+                        PathBuf::from("/workspace/src/a.rs"),
+                        FileChangeKind::Changed,
+                    ),
+                    (
+                        PathBuf::from("/workspace/README.md"),
+                        FileChangeKind::Changed,
+                    ),
+                ],
+            )
+            .expect("filtering and sending must not error");
+
+        run.join().expect("stub run thread did not panic");
+    });
+
+    let sent = manager
+        .request(LANG, "stub/lastWatchedFilesChange", json!({}))
+        .expect("stub answers");
+    let changes = sent["changes"].as_array().expect("changes array");
+    assert_eq!(changes.len(), 1, "only the .rs path matches **/*.rs");
+    assert_eq!(changes[0]["uri"], "file:///workspace/src/a.rs");
+    assert_eq!(changes[0]["type"], FileChangeKind::Changed as u8);
+
+    // The registration is gone again after the stub's unregister — sending
+    // must now be a no-op rather than waking a server that asked for
+    // nothing.
+    assert!(!manager.method_registered(LANG, "workspace/didChangeWatchedFiles"));
+    manager
+        .did_change_watched_files(
+            LANG,
+            &[(
+                PathBuf::from("/workspace/src/b.rs"),
+                FileChangeKind::Created,
+            )],
+        )
+        .expect("no-op send must not error");
+    let after_unregister = manager
+        .request(LANG, "stub/lastWatchedFilesChange", json!({}))
+        .expect("stub answers");
+    assert_eq!(
+        after_unregister, sent,
+        "no new notification should have been sent once nothing is registered",
+    );
+
+    manager.stop(LANG);
+}
+
+/// C6: `workspace/configuration` answers the pulled section with the
+/// server's configured settings, and any other section with `null` — the
+/// full round trip through the real reader thread and `dispatch`, not just
+/// `configuration::resolve` in isolation.
+#[test]
+fn workspace_configuration_answers_the_configured_section_and_nulls_the_rest() {
+    let (manager, _rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_settings())
+        .expect("stub starts");
+
+    let answer = manager
+        .request(LANG, "stub/configurationRun", json!({}))
+        .expect("the stub's configuration pull does not deadlock us");
+    let items = answer.as_array().expect("array reply, one per item");
+    assert_eq!(items.len(), 2);
+    assert_eq!(
+        items[0],
+        json!({"analyzersEnabled": true}),
+        "the configured section"
+    );
+    assert_eq!(
+        items[1],
+        serde_json::Value::Null,
+        "a section this client has no opinion on"
+    );
+
+    manager.stop(LANG);
+}
+
+/// C6: `update_settings` replaces the stored settings and sends
+/// `workspace/didChangeConfiguration` with `{"settings": null}` — telling a
+/// pull-based server to re-fetch rather than pushing the value inline — so a
+/// pull issued afterwards sees the new settings.
+#[test]
+fn update_settings_changes_what_the_next_pull_answers() {
+    let (manager, _rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_settings())
+        .expect("stub starts");
+
+    manager
+        .update_settings(LANG, json!({"analyzersEnabled": false}))
+        .expect("the server is running");
+
+    let answer = manager
+        .request(LANG, "stub/configurationRun", json!({}))
+        .expect("pull after the settings change");
+    assert_eq!(answer[0], json!({"analyzersEnabled": false}));
+
+    manager.stop(LANG);
+}
+
+/// C6: a language with no running server is reported the same way every
+/// other per-language method reports it, not a silent no-op.
+#[test]
+fn update_settings_on_a_server_that_is_not_running_is_an_error() {
+    let (manager, _rx) = LspManager::new("file:///workspace");
+    assert!(matches!(
+        manager.update_settings(LANG, json!({})),
+        Err(LspError::NoServer(_))
+    ));
+}
+
+// ---------------------------------------------------------------------------
+// C7: completionItem/resolve
+// ---------------------------------------------------------------------------
+
+/// A server that never advertises `completionProvider.resolveProvider`
+/// reports `completion_resolve_supported: false` on `ServerReady` — the flag
+/// that gates every caller from spending the round trip on a server that
+/// cannot answer it.
+#[test]
+fn server_ready_reports_no_resolve_support_when_not_advertised() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    let supported = wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady {
+            completion_resolve_supported,
+            ..
+        } => Some(*completion_resolve_supported),
+        _ => None,
+    });
+    assert!(!supported);
+    manager.stop(LANG);
+}
+
+/// The same event reports `true` for a server that advertises
+/// `completionProvider.resolveProvider: true`, the way csharp-ls does.
+#[test]
+fn server_ready_reports_resolve_support_when_advertised() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_completion_resolve())
+        .expect("stub starts");
+    let supported = wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady {
+            completion_resolve_supported,
+            ..
+        } => Some(*completion_resolve_supported),
+        _ => None,
+    });
+    assert!(supported);
+    manager.stop(LANG);
+}
+
+/// `resolve_completion_item` round-trips the item through the reader thread
+/// and returns whatever the server added — here, the `additionalTextEdits`
+/// that simulate a `using` insertion.
+#[test]
+fn resolve_completion_item_returns_the_resolved_item() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_completion_resolve())
+        .expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    let item = json!({"label": "List", "kind": 7});
+    let resolved = manager
+        .resolve_completion_item(LANG, &item)
+        .expect("the stub answers completionItem/resolve");
+    assert_eq!(resolved["label"], "List");
+    assert_eq!(
+        resolved["additionalTextEdits"][0]["newText"],
+        "using System.Collections.Generic;\n"
+    );
+
+    manager.stop(LANG);
+}
+
+/// C12: `fetch_metadata` round-trips a `csharp/metadata` request through the
+/// reader thread and returns the decompiled source text, the same shape
+/// `resolve_completion_item` proves above for `completionItem/resolve`.
+/// This only proves the client speaks the wire shape `manager.rs` assumes
+/// (`{textDocument: {uri}}` in, `{source: string}` out) — that shape is
+/// itself unverified against a real csharp-ls (see `fetch_metadata`'s doc
+/// comment).
+#[test]
+fn fetch_metadata_returns_the_stub_servers_decompiled_source() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    let source = manager
+        .fetch_metadata(LANG, "csharp:/metadata/Projects/x/Console.cs")
+        .expect("the stub answers csharp/metadata");
+    assert!(source.contains("csharp:/metadata/Projects/x/Console.cs"));
+
+    manager.stop(LANG);
+}
+
+/// A response with no `"source"` field (the stub's stand-in for whatever a
+/// real server sends when it cannot serve the metadata — `useMetadataUris`
+/// off, an unknown assembly, or a malformed reply) is a clean
+/// [`lsp_core::LspError::Protocol`], not a panic and not an empty string
+/// mistaken for real content — this is the case the C12 UI guard refuses on.
+#[test]
+fn fetch_metadata_with_no_source_field_is_a_protocol_error() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    let err = manager
+        .fetch_metadata(LANG, "csharp:/metadata/missing.cs")
+        .unwrap_err();
+    assert!(matches!(err, lsp_core::LspError::Protocol(_)));
+
+    manager.stop(LANG);
+}
+
+/// A `completionItem/resolve` that never answers is bounded by the same
+/// timeout/`$/cancelRequest` path every other request uses — proven here
+/// through `request_with_timeout` directly (with a short deadline, rather
+/// than `resolve_completion_item`'s own [`lsp_core::DEFAULT_REQUEST_TIMEOUT`],
+/// so the test does not have to wait ten seconds) since `resolve_completion_item`
+/// is a thin wrapper with no logic of its own to test separately — see its
+/// source in `manager.rs`. The accept-path fallback this unblocks — apply the
+/// unresolved item's own edit rather than hang — is exercised at the
+/// `ui-shell` layer, in `crates/ui-shell/src/bridge/language/mod.rs`.
+#[test]
+fn a_resolve_that_never_answers_times_out_and_is_cancelled() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_completion_resolve())
+        .expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    let item = json!({"label": "stub/silence"});
+    let result = manager.request_with_timeout(
+        LANG,
+        "completionItem/resolve",
+        item,
+        Duration::from_millis(200),
+    );
+    assert!(matches!(
+        result,
+        Err(LspError::Timeout { method }) if method == "completionItem/resolve"
+    ));
+
+    // The server is still alive and answering: the request was cancelled,
+    // not the connection torn down.
+    let echoed = manager
+        .request(LANG, "stub/echo", json!({"tag": "after-resolve-timeout"}))
+        .expect("the server is still usable after a cancelled resolve");
+    assert_eq!(echoed["tag"], "after-resolve-timeout");
+
+    manager.stop(LANG);
+}
+
+/// C9: `semantic_tokens_legend` reads the legend from `initialize`'s static
+/// `semanticTokensProvider`, and `semantic_tokens` decodes the canned
+/// response into the tokens `crates/lsp-core/src/bin/stub_server.rs`
+/// documents — through the real reader thread and `dispatch`, not just
+/// `lsp_core::semantic_tokens` in isolation.
+#[test]
+fn semantic_tokens_are_read_from_the_static_initialize_capability() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_semantic_tokens_static())
+        .expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    let legend = manager
+        .semantic_tokens_legend(LANG)
+        .expect("the static capability was read at connect time");
+    assert_eq!(legend.token_types[1], "type");
+    assert_eq!(legend.token_types[12], "function");
+    assert!(legend.full);
+
+    let result = manager
+        .semantic_tokens(LANG, "file:///stub/main.rs")
+        .expect("the stub answers textDocument/semanticTokens/full");
+    let (result_id, tokens) =
+        lsp_core::parse_semantic_tokens_full(&result).expect("the stub sent data");
+    assert_eq!(result_id, Some("1".to_string()));
+    assert_eq!(tokens.len(), 3);
+    // Same-line, multiple tokens: the second token's column is relative to
+    // the first token's own start (0 + 4 = 4), not to column 0.
+    assert_eq!(tokens[0].line, 0);
+    assert_eq!(tokens[0].start_char, 0);
+    assert_eq!(tokens[1].line, 0);
+    assert_eq!(tokens[1].start_char, 4);
+    // Line advance: the third token resets its column to its own delta.
+    assert_eq!(tokens[2].line, 1);
+    assert_eq!(tokens[2].start_char, 0);
+
+    let scope = lsp_core::semantic_token_scope(&legend, &tokens[1])
+        .expect("\"function\" with defaultLibrary resolves");
+    assert_eq!(scope.name(), "function.builtin");
+
+    manager.stop(LANG);
+}
+
+/// C9: a server with nothing to say for a document (the stub's
+/// `uri.ends_with("empty.rs")` case) answers `null`, which
+/// `parse_semantic_tokens_full` reports as `None` rather than an empty
+/// token list mistaken for "the server said nothing was highlighted".
+#[test]
+fn semantic_tokens_null_response_is_not_an_error() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_semantic_tokens_static())
+        .expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    let result = manager
+        .semantic_tokens(LANG, "file:///stub/empty.rs")
+        .expect("the stub answers even with nothing to say");
+    assert!(lsp_core::parse_semantic_tokens_full(&result).is_none());
+
+    manager.stop(LANG);
+}
+
+/// C9: a server with no semantic-tokens capability at all — the plain
+/// `stub_config()`, which advertises neither the static capability nor
+/// runs the dynamic registration — must never be asked: `semantic_tokens_legend`
+/// answers `None`, which is this client's generic gate on both paths.
+#[test]
+fn semantic_tokens_legend_is_none_for_a_server_that_never_advertised_it() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    assert!(manager.semantic_tokens_legend(LANG).is_none());
+
+    manager.stop(LANG);
+}
+
+/// C9: csharp-ls's suspected path — declaring `textDocument/semanticTokens`
+/// via `client/registerCapability` rather than `initialize`'s static
+/// result. `semantic_tokens_legend` must pick it up exactly as it does the
+/// static path, through the real reader thread's `client/registerCapability`
+/// handling, not a direct call into `crate::semantic_tokens`.
+#[test]
+fn semantic_tokens_legend_is_read_from_a_dynamic_registration() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    assert!(
+        manager.semantic_tokens_legend(LANG).is_none(),
+        "nothing has registered yet"
+    );
+
+    let outcome = manager
+        .request(LANG, "stub/semanticTokensRegisterRun", json!({}))
+        .expect("the stub runs its registration sequence");
+    assert_eq!(outcome["registered"], true);
+
+    let legend = manager
+        .semantic_tokens_legend(LANG)
+        .expect("the dynamic registration's legend was captured");
+    assert_eq!(legend.token_types[15], "keyword");
+    assert!(legend.full);
+
+    manager.stop(LANG);
+}
+
+/// C10: the stub advertises `codeLensProvider` statically in `initialize`'s
+/// result, the way rust-analyzer would.
+fn stub_config_with_code_lens_static() -> ServerConfig {
+    config("env", &["STUB_LSP_CODE_LENS_STATIC=1", STUB])
+}
+
+/// C10: a server with no code-lens capability at all — neither the static
+/// capability nor a dynamic registration — must never be asked:
+/// `code_lenses_supported` answers `false`, the same generic gate C9's
+/// `semantic_tokens_legend` provides for its own feature.
+#[test]
+fn code_lenses_supported_is_false_for_a_server_that_never_advertised_it() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    assert!(!manager.code_lenses_supported(LANG));
+
+    manager.stop(LANG);
+}
+
+/// C10: `code_lenses_supported` reads the static `codeLensProvider`
+/// capability, and `code_lenses` parses the stub's canned response — one
+/// lens that already carries its `command`, one that needs
+/// `codeLens/resolve` — through the real reader thread and `dispatch`, not
+/// just `lsp_core::code_lens` in isolation.
+#[test]
+fn code_lenses_are_read_from_the_static_initialize_capability() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_code_lens_static())
+        .expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    assert!(manager.code_lenses_supported(LANG));
+
+    let lenses = manager
+        .code_lenses(LANG, "file:///workspace/main.rs")
+        .expect("the stub answers textDocument/codeLens");
+    assert_eq!(lenses.len(), 2);
+    assert_eq!(lenses[0].range.start_line, 0);
+    let command = lenses[0].command.as_ref().expect("already resolved");
+    assert_eq!(command.title, "1 reference");
+    assert!(!lenses[0].needs_resolve());
+    assert!(lenses[1].needs_resolve(), "the second lens only has data");
+
+    let resolved = manager
+        .resolve_code_lens(LANG, &lenses[1].raw)
+        .expect("the stub resolves it");
+    assert_eq!(resolved["command"]["command"], "stub.applyEdit");
+
+    manager.stop(LANG);
+}
+
+/// C10: csharp-ls's suspected path — declaring `textDocument/codeLens` via
+/// `client/registerCapability` rather than `initialize`'s static result.
+/// `code_lenses_supported` must pick it up through the same
+/// `Registrations` registry C5's watched-files matching already reads, with
+/// no bespoke per-feature storage needed for it (unlike C9's legend, a
+/// `CodeLensOptions` carries nothing else this client reads back out).
+#[test]
+fn code_lenses_supported_is_read_from_a_dynamic_registration() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    assert!(
+        !manager.code_lenses_supported(LANG),
+        "nothing has registered yet"
+    );
+
+    let outcome = manager
+        .request(LANG, "stub/codeLensRegisterRun", json!({}))
+        .expect("the stub runs its registration sequence");
+    assert_eq!(outcome["registered"], true);
+
+    assert!(manager.code_lenses_supported(LANG));
+
+    manager.stop(LANG);
+}
+
+/// C10 end to end: fetch, resolve, and run a lens's command through the
+/// *existing* `workspace/executeCommand` path — no second execution method —
+/// with the session gate open around it exactly as a code action's command
+/// is run (`run_action` in `ui-shell`). The resolved command is
+/// `stub.applyEdit`, so this is the same command-driven-refactoring shape
+/// `an_edit_asked_for_during_a_refactoring_reaches_the_editor_and_is_applied`
+/// proves for a code action, reached this time by a lens click.
+#[test]
+fn a_lens_click_resolves_and_executes_through_the_gated_command_path() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    let manager = Arc::new(manager);
+    manager
+        .start(&stub_config_with_code_lens_static())
+        .expect("stub starts");
+
+    let lenses = manager
+        .code_lenses(LANG, "file:///workspace/main.rs")
+        .expect("the stub answers");
+    let unresolved = lenses
+        .into_iter()
+        .find(|l| l.needs_resolve())
+        .expect("the second lens needs resolving");
+
+    // The guard is what makes the command's resulting applyEdit legitimate —
+    // a lens click is exactly the user gesture the gate exists for.
+    let session = manager.begin_refactor();
+    assert!(manager.refactor_active());
+
+    let resolved = manager
+        .resolve_code_lens(LANG, &unresolved.raw)
+        .expect("the stub resolves it");
+    let command = lsp_core::parse_code_lenses(&json!([resolved]))
+        .into_iter()
+        .next()
+        .and_then(|l| l.command)
+        .expect("the resolved lens carries a command");
+    assert_eq!(command.command, "stub.applyEdit");
+
+    let commanded = Arc::clone(&manager);
+    let running = thread::spawn(move || commanded.execute_command(LANG, &command));
+
+    let (label, gate) = wait_for(&rx, "the applyEdit request", |event| match event {
+        LspEvent::ApplyEdit { label, gate, .. } => Some((label.clone(), gate.clone())),
+        _ => None,
+    });
+    assert_eq!(label.as_deref(), Some("Extract class"));
+    assert!(gate.claim(), "the editor takes the edit");
+
+    let answer = running.join().unwrap().expect("the command completes");
+    assert_eq!(
+        answer["clientApplied"], true,
+        "the server hears that its edit was applied",
+    );
+    drop(session);
+    assert!(!manager.refactor_active());
+
+    manager.stop(LANG);
+}
+
+/// C10: the other half of the same proof — running a lens's command with no
+/// refactoring session open must be refused exactly the way an unsolicited
+/// `workspace/applyEdit` already is (`apply_edit::UNSOLICITED_REASON`), not
+/// a special case of its own. This is the gate `an_unsolicited_apply_edit_is_refused_without_troubling_the_editor`
+/// exercises for a code action, reached here by `execute_command` directly —
+/// the same call a lens click makes.
+#[test]
+fn running_a_lens_command_with_no_session_open_is_refused_like_any_unsolicited_edit() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_code_lens_static())
+        .expect("stub starts");
+    assert!(!manager.refactor_active());
+
+    let command = lsp_core::CommandRef {
+        title: "Run".to_string(),
+        command: "stub.applyEdit".to_string(),
+        arguments: vec![json!("file:///workspace/main.rs")],
+    };
+    let answer = manager
+        .execute_command(LANG, &command)
+        .expect("the command completes without deadlocking");
+
+    assert_eq!(
+        answer["clientApplied"], false,
+        "nobody asked for this edit, so the server is told it was not applied",
+    );
+    assert!(
+        !matches!(rx.try_recv(), Ok(LspEvent::ApplyEdit { .. })),
+        "an unsolicited edit must never reach the UI",
+    );
+
+    manager.stop(LANG);
+}
+
+// --- C11: call hierarchy + type hierarchy ---------------------------------
+
+/// C11: the stub advertises `callHierarchyProvider` statically in
+/// `initialize`'s result.
+fn stub_config_with_call_hierarchy_static() -> ServerConfig {
+    config("env", &["STUB_LSP_CALL_HIERARCHY_STATIC=1", STUB])
+}
+
+/// C11: the type-hierarchy twin of `stub_config_with_call_hierarchy_static`.
+fn stub_config_with_type_hierarchy_static() -> ServerConfig {
+    config("env", &["STUB_LSP_TYPE_HIERARCHY_STATIC=1", STUB])
+}
+
+#[test]
+fn call_and_type_hierarchy_are_advertised_with_dynamic_registration() {
+    let (manager, _rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+
+    let capabilities = manager
+        .request(LANG, "stub/clientCapabilities", json!({}))
+        .expect("the stub hands back what we sent");
+    assert_eq!(
+        capabilities["textDocument"]["callHierarchy"]["dynamicRegistration"], true,
+        "csharp-ls is not confirmed to declare this statically",
+    );
+    assert_eq!(
+        capabilities["textDocument"]["typeHierarchy"]["dynamicRegistration"],
+        true,
+    );
+
+    manager.stop(LANG);
+}
+
+#[test]
+fn call_hierarchy_supported_is_false_for_a_server_that_never_advertised_it() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    assert!(!manager.call_hierarchy_supported(LANG));
+
+    manager.stop(LANG);
+}
+
+#[test]
+fn call_hierarchy_supported_is_read_from_a_dynamic_registration() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    assert!(
+        !manager.call_hierarchy_supported(LANG),
+        "nothing registered yet"
+    );
+
+    let outcome = manager
+        .request(LANG, "stub/callHierarchyRegisterRun", json!({}))
+        .expect("the stub runs its registration sequence");
+    assert_eq!(outcome["registered"], true);
+
+    assert!(manager.call_hierarchy_supported(LANG));
+
+    manager.stop(LANG);
+}
+
+/// C11 end to end: `prepareCallHierarchy` -> `incomingCalls` ->
+/// `outgoingCalls`, through the real reader thread, not `lsp_core::hierarchy`
+/// in isolation. `outgoingCalls` on the item itself proves the populated
+/// path; a second call on the leaf item (line 9) proves an empty array comes
+/// back as a real, final answer — not something the client second-guesses.
+#[test]
+fn call_hierarchy_prepares_and_walks_incoming_and_outgoing_calls() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_call_hierarchy_static())
+        .expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+    assert!(manager.call_hierarchy_supported(LANG));
+
+    let items = manager
+        .prepare_call_hierarchy(LANG, "file:///workspace/main.cs", 3, 0)
+        .expect("the stub answers prepareCallHierarchy");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "DoWork");
+
+    let incoming = manager
+        .incoming_calls(LANG, &items[0].raw)
+        .expect("the stub answers incomingCalls");
+    assert_eq!(incoming.len(), 1);
+    assert_eq!(incoming[0].from.name, "Main");
+    assert_eq!(incoming[0].from_ranges.len(), 1);
+
+    let outgoing = manager
+        .outgoing_calls(LANG, &items[0].raw)
+        .expect("the stub answers outgoingCalls");
+    assert_eq!(outgoing.len(), 1);
+    assert_eq!(outgoing[0].to.name, "Helper");
+
+    // Asking about the leaf item itself (line 9) answers with an empty
+    // array — a real answer, not "the server had nothing".
+    let leaf = manager
+        .prepare_call_hierarchy(LANG, "file:///workspace/main.cs", 9, 0)
+        .expect("the stub answers");
+    let leaf_outgoing = manager
+        .outgoing_calls(LANG, &leaf[0].raw)
+        .expect("the stub answers with an empty array, not an error");
+    assert!(leaf_outgoing.is_empty(), "Helper calls nothing further");
+
+    manager.stop(LANG);
+}
+
+/// C11: no call at all — line 99 is the stub's "nothing here" convention,
+/// same as `textDocument/hover`'s.
+#[test]
+fn prepare_call_hierarchy_returns_nothing_where_the_server_has_no_answer() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_call_hierarchy_static())
+        .expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    let items = manager
+        .prepare_call_hierarchy(LANG, "file:///workspace/main.cs", 99, 0)
+        .expect("a null result is not an error");
+    assert!(items.is_empty());
+
+    manager.stop(LANG);
+}
+
+#[test]
+fn type_hierarchy_supported_is_false_for_a_server_that_never_advertised_it() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    assert!(!manager.type_hierarchy_supported(LANG));
+
+    manager.stop(LANG);
+}
+
+#[test]
+fn type_hierarchy_supported_is_read_from_a_dynamic_registration() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager.start(&stub_config()).expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+
+    assert!(
+        !manager.type_hierarchy_supported(LANG),
+        "nothing registered yet"
+    );
+
+    let outcome = manager
+        .request(LANG, "stub/typeHierarchyRegisterRun", json!({}))
+        .expect("the stub runs its registration sequence");
+    assert_eq!(outcome["registered"], true);
+
+    assert!(manager.type_hierarchy_supported(LANG));
+
+    manager.stop(LANG);
+}
+
+/// C11 end to end: `prepareTypeHierarchy` -> `supertypes`/`subtypes`,
+/// through the real reader thread.
+#[test]
+fn type_hierarchy_prepares_and_walks_supertypes_and_subtypes() {
+    let (manager, rx) = LspManager::new("file:///workspace");
+    manager
+        .start(&stub_config_with_type_hierarchy_static())
+        .expect("stub starts");
+    wait_for(&rx, "ServerReady", |e| match e {
+        LspEvent::ServerReady { .. } => Some(()),
+        _ => None,
+    });
+    assert!(manager.type_hierarchy_supported(LANG));
+
+    let items = manager
+        .prepare_type_hierarchy(LANG, "file:///workspace/shapes.cs", 3, 0)
+        .expect("the stub answers prepareTypeHierarchy");
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].name, "Circle");
+
+    let supertypes = manager
+        .supertypes(LANG, &items[0].raw)
+        .expect("the stub answers supertypes");
+    assert_eq!(supertypes.len(), 1);
+    assert_eq!(supertypes[0].name, "Shape");
+
+    let subtypes = manager
+        .subtypes(LANG, &items[0].raw)
+        .expect("the stub answers subtypes");
+    assert!(subtypes.is_empty(), "the stub gives Circle no subtypes");
+
+    manager.stop(LANG);
+}
+
+/// C11: the pure fallback logic — no LSP process, no index — proving
+/// `type_hierarchy_outcome` reaches for the index-derived fallback exactly
+/// when `definition_outcome` would (ADR-0016's precedent), and that call
+/// hierarchy's absence of a fallback (see `lsp_core::hierarchy` module docs)
+/// is a deliberate asymmetry, not something this test needs to cover — there
+/// is nothing to fall back to.
+#[test]
+fn type_hierarchy_outcome_falls_back_to_the_index_exactly_like_definition_outcome() {
+    use lsp_core::completion::TextRange;
+    use lsp_core::hierarchy::{type_hierarchy_outcome, HierarchyItem};
+
+    let index_item = HierarchyItem {
+        name: "Shape".into(),
+        kind: 5,
+        detail: None,
+        uri: "file:///workspace/shapes.cs".into(),
+        range: TextRange {
+            start_line: 0,
+            start_character: 0,
+            end_line: 0,
+            end_character: 5,
+        },
+        selection_range: TextRange {
+            start_line: 0,
+            start_character: 0,
+            end_line: 0,
+            end_character: 5,
+        },
+        data: None,
+        raw: json!({"name": "Shape"}),
+    };
+    let fallback = vec![index_item.clone()];
+
+    // No server was asked at all.
+    assert_eq!(
+        type_hierarchy_outcome(None, fallback.clone()),
+        lsp_core::hierarchy::TypeHierarchyOutcome::Index(fallback.clone())
+    );
+    // A server exists but knows nothing here.
+    assert_eq!(
+        type_hierarchy_outcome(Some(Ok(vec![])), fallback.clone()),
+        lsp_core::hierarchy::TypeHierarchyOutcome::Index(fallback.clone())
+    );
+    // Not currently running.
+    assert_eq!(
+        type_hierarchy_outcome(
+            Some(Err(LspError::NotRunning("csharp".into()))),
+            fallback.clone()
+        ),
+        lsp_core::hierarchy::TypeHierarchyOutcome::Index(fallback.clone())
+    );
+    // The server answered for real: its answer wins over the index.
+    assert_eq!(
+        type_hierarchy_outcome(Some(Ok(vec![index_item.clone()])), vec![]),
+        lsp_core::hierarchy::TypeHierarchyOutcome::Lsp(vec![index_item])
+    );
 }

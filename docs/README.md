@@ -40,6 +40,8 @@ ADR numbers 0006 and 0013–0015 were never used; the gaps are historical and in
 - [ADR-0032: run configurations](architecture/decisions/0032-run-configurations.md) — a PTY-backed console over the debugger-agnostic `LaunchSpec`; ANSI-stripped output in v1; one `TerminalSupervisorRust` QObject for N terminal sessions, not N QObject instances; the AI agent gains no run tool from this.
 - [ADR-0033: Markdown and Mermaid preview](architecture/decisions/0033-markdown-preview.md) — the `previews` contribution point (no `api_version` bump), a second wasm world (`preview-plugin`) for a sandboxed renderer, comrak + merman + resvg native rendering joined in `app_core::preview`, an ADS dock rather than a new `TabKind`.
 - [ADR-0034: model selection](architecture/decisions/0034-model-selection.md) — the model catalogue is fetched from the provider and never compiled in; the picker stays typeable; the chosen model belongs to the conversation, not the provider row.
+- [ADR-0035: semantic-tokens overlay](architecture/decisions/0035-semantic-tokens-overlay.md) — `lsp-core` takes a normal (not dev-only) dependency on `syntax-core` so C9's semantic-token mapping and overlay can reuse `Scope::resolve` and `HighlightSpan`, amending ADR-0018 without reopening the language-detection duplication it fixed.
+- [ADR-0036: read-only virtual documents](architecture/decisions/0036-virtual-documents.md) — `editor_core::DocumentSource::{File, Virtual}` for a document with no backing file (C12's decompiled `csharp:/` metadata), the systematic audit of "every tab is a file" call sites it amends ADR-0003 to close, and the clean-refusal guard that replaces a confusing generic I/O error.
 
 ## Plans
 

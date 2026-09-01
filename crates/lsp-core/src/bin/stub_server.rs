@@ -34,6 +34,57 @@
 //! on line 900. A `codeAction` request at line 5 answers with a resource
 //! operation ahead of its text edits (F2-3), for the one thing none of the
 //! above exercises: creating a file as part of an edit.
+//!
+//! C4 added `stub/registerCapabilityRun`, which sends a
+//! `client/registerCapability` for `workspace/didChangeWatchedFiles`
+//! followed by a `client/unregisterCapability` for the same id — the
+//! sequence csharp-ls actually runs, since it declares most of its
+//! capabilities dynamically rather than in `initialize`.
+//!
+//! C6 added `stub/configurationRun`, which sends a `workspace/configuration`
+//! request for two sections — one the test's server was configured under
+//! and one it was not — the way csharp-ls pulls its settings after
+//! `initialized`.
+//!
+//! C7 added `STUB_LSP_COMPLETION_RESOLVE`, which makes `initialize`
+//! advertise `completionProvider.resolveProvider: true` (unset, the default,
+//! advertises the provider with no `resolveProvider` at all — a server that
+//! never offers the second round trip). `completionItem/resolve` itself is
+//! always answered regardless of the flag — the flag only controls what a
+//! test can observe was *advertised*, matching real servers that answer a
+//! request whether or not a client bothered to check the capability first.
+//! The reply echoes the item back with an `additionalTextEdits` entry added,
+//! simulating the `using` an unimported type's completion brings with it in
+//! csharp-ls; a `label` of `"stub/silence"` gets no reply at all, the same
+//! never-answer affordance `stub/silence` is elsewhere, so the client's own
+//! timeout path is reachable for this method too.
+//!
+//! C9 added `textDocument/semanticTokens/full`, answered with canned
+//! delta-encoded tokens covering the same-line-multiple-tokens and
+//! line-advance decoding cases, plus two ways to advertise the capability:
+//! `STUB_LSP_SEMANTIC_TOKENS_STATIC` puts `semanticTokensProvider` in
+//! `initialize`'s result the way rust-analyzer does, and
+//! `stub/semanticTokensRegisterRun` sends a `client/registerCapability`
+//! for it instead — the path csharp-ls is believed to use, so a client that
+//! only reads the static capability never sees it.
+//!
+//! C10 added `textDocument/codeLens` and `codeLens/resolve`, plus
+//! `STUB_LSP_CODE_LENS_STATIC`/`stub/codeLensRegisterRun` for the same
+//! static/dynamic split. The resolved lens's command is `stub.applyEdit` —
+//! the same command `workspace/executeCommand`'s handler already blocks on a
+//! `workspace/applyEdit` answer for — so running a lens exercises the
+//! session gate through the existing path rather than a second one.
+//!
+//! C11 added the call- and type-hierarchy methods —
+//! `textDocument/prepareCallHierarchy`, `callHierarchy/incomingCalls`,
+//! `callHierarchy/outgoingCalls`, `textDocument/prepareTypeHierarchy`,
+//! `typeHierarchy/supertypes` and `typeHierarchy/subtypes` — with the same
+//! static/dynamic split (`STUB_LSP_CALL_HIERARCHY_STATIC`/
+//! `stub/callHierarchyRegisterRun`, and the type-hierarchy twins).
+//! `outgoingCalls` answers an empty array for the item at line 9, so a test
+//! can tell a leaf function's real answer apart from "the server had
+//! nothing"; `supertypes` answers `null` for the item at line 99, the case
+//! `type_hierarchy_outcome`'s index fallback exists for.
 
 use std::collections::HashMap;
 use std::io::{self, BufReader, Stdout, Write};
@@ -48,6 +99,43 @@ use serde_json::{json, Value};
 /// Set to `1` to exit(1) right after answering the first `textDocument/didOpen`,
 /// so respawn and backoff can be exercised.
 const DIE_ON_DIDOPEN: &str = "STUB_LSP_DIE_ON_DIDOPEN";
+/// C7: set to `1` to advertise `completionProvider.resolveProvider: true`
+/// in `initialize`'s result.
+const COMPLETION_RESOLVE: &str = "STUB_LSP_COMPLETION_RESOLVE";
+/// C9: set to `1` to advertise `semanticTokensProvider` statically in
+/// `initialize`'s result, the way rust-analyzer does. Unset, a test instead
+/// reaches `stub/semanticTokensRegisterRun` for the dynamic-registration
+/// path csharp-ls is believed to use.
+const SEMANTIC_TOKENS_STATIC: &str = "STUB_LSP_SEMANTIC_TOKENS_STATIC";
+/// C10: set to `1` to advertise `codeLensProvider` statically in
+/// `initialize`'s result. Unset, a test instead reaches
+/// `stub/codeLensRegisterRun` for the dynamic-registration path csharp-ls is
+/// believed to use — the same static/dynamic split C9 exercises.
+const CODE_LENS_STATIC: &str = "STUB_LSP_CODE_LENS_STATIC";
+/// C11: set to `1` to advertise `callHierarchyProvider` statically in
+/// `initialize`'s result. Unset, a test instead reaches
+/// `stub/callHierarchyRegisterRun` for the dynamic-registration path, the
+/// same static/dynamic split C9/C10 exercise for their own features.
+const CALL_HIERARCHY_STATIC: &str = "STUB_LSP_CALL_HIERARCHY_STATIC";
+/// C11: the type-hierarchy twin of [`CALL_HIERARCHY_STATIC`].
+const TYPE_HIERARCHY_STATIC: &str = "STUB_LSP_TYPE_HIERARCHY_STATIC";
+/// C9: the legend both the static and dynamic paths advertise — the LSP
+/// standard vocabulary, same order `lsp_core::semantic_tokens::STANDARD_TOKEN_TYPES`/
+/// `STANDARD_TOKEN_MODIFIERS` define, so a test can index into it by name.
+fn semantic_tokens_legend() -> Value {
+    json!({
+        "tokenTypes": [
+            "namespace", "type", "class", "enum", "interface", "struct", "typeParameter",
+            "parameter", "variable", "property", "enumMember", "event", "function", "method",
+            "macro", "keyword", "modifier", "comment", "string", "number", "regexp", "operator",
+            "decorator",
+        ],
+        "tokenModifiers": [
+            "declaration", "definition", "readonly", "static", "deprecated", "abstract",
+            "async", "modification", "documentation", "defaultLibrary",
+        ],
+    })
+}
 
 type Out = Arc<Mutex<Stdout>>;
 
@@ -71,10 +159,20 @@ fn main() {
     // What the client said it can do, kept so a test can assert the
     // advertisement end to end rather than against a private function.
     let client_capabilities: Arc<Mutex<Value>> = Arc::new(Mutex::new(Value::Null));
+    // C5: the last `workspace/didChangeWatchedFiles` notification this
+    // server was sent, so a test can assert what actually crossed the wire
+    // rather than only that `LspManager::did_change_watched_files` returned
+    // `Ok`.
+    let last_watched_files_change: Arc<Mutex<Value>> = Arc::new(Mutex::new(Value::Null));
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
     let mut next_request_id = 9100i64;
     let mut input = BufReader::new(io::stdin());
     let die_on_didopen = std::env::var(DIE_ON_DIDOPEN).is_ok_and(|v| v == "1");
+    let completion_resolve = std::env::var(COMPLETION_RESOLVE).is_ok_and(|v| v == "1");
+    let semantic_tokens_static = std::env::var(SEMANTIC_TOKENS_STATIC).is_ok_and(|v| v == "1");
+    let code_lens_static = std::env::var(CODE_LENS_STATIC).is_ok_and(|v| v == "1");
+    let call_hierarchy_static = std::env::var(CALL_HIERARCHY_STATIC).is_ok_and(|v| v == "1");
+    let type_hierarchy_static = std::env::var(TYPE_HIERARCHY_STATIC).is_ok_and(|v| v == "1");
 
     while let Some(body) = read_message(&mut input).expect("read from stdin") {
         let message: Value = match serde_json::from_slice(&body) {
@@ -104,24 +202,46 @@ fn main() {
             ("initialize", Some(id)) => {
                 *client_capabilities.lock().expect("capabilities lock") =
                     params.get("capabilities").cloned().unwrap_or(Value::Null);
+                let mut completion_provider = json!({
+                    // L5: the same pair rust-analyzer advertises, so `.` and
+                    // (twice over) `::` are covered.
+                    "triggerCharacters": [".", ":"],
+                });
+                if completion_resolve {
+                    completion_provider["resolveProvider"] = json!(true);
+                }
+                let mut capabilities = json!({
+                    "textDocumentSync": 1,
+                    "completionProvider": completion_provider,
+                    // F2: the pair every language agrees on, plus
+                    // the closing paren as a retrigger so the nested
+                    // -call case is reachable offline.
+                    "signatureHelpProvider": {
+                        "triggerCharacters": ["(", ","],
+                        "retriggerCharacters": [")"],
+                    },
+                    "documentHighlightProvider": true,
+                    "inlayHintProvider": true,
+                });
+                if semantic_tokens_static {
+                    capabilities["semanticTokensProvider"] = json!({
+                        "legend": semantic_tokens_legend(),
+                        "full": true,
+                    });
+                }
+                if code_lens_static {
+                    capabilities["codeLensProvider"] = json!({"resolveProvider": true});
+                }
+                if call_hierarchy_static {
+                    capabilities["callHierarchyProvider"] = json!(true);
+                }
+                if type_hierarchy_static {
+                    capabilities["typeHierarchyProvider"] = json!(true);
+                }
                 send(
                     &out,
                     json!({"jsonrpc": "2.0", "id": id, "result": {
-                        "capabilities": {
-                            "textDocumentSync": 1,
-                            // L5: the same pair rust-analyzer advertises, so
-                            // `.` and (twice over) `::` are covered.
-                            "completionProvider": {"triggerCharacters": [".", ":"]},
-                            // F2: the pair every language agrees on, plus
-                            // the closing paren as a retrigger so the nested
-                            // -call case is reachable offline.
-                            "signatureHelpProvider": {
-                                "triggerCharacters": ["(", ","],
-                                "retriggerCharacters": [")"],
-                            },
-                            "documentHighlightProvider": true,
-                            "inlayHintProvider": true,
-                        },
+                        "capabilities": capabilities,
                         "serverInfo": {"name": "stub_server", "version": "0.1.0"},
                     }}),
                 )
@@ -139,6 +259,20 @@ fn main() {
                 );
             }
             ("initialized", _) => {}
+            ("workspace/didChangeWatchedFiles", _) => {
+                *last_watched_files_change
+                    .lock()
+                    .expect("watched files lock") = params;
+            }
+            // What the client last sent via `workspace/didChangeWatchedFiles`,
+            // so a test can assert its `changes` array end to end.
+            ("stub/lastWatchedFilesChange", Some(id)) => {
+                let change = last_watched_files_change
+                    .lock()
+                    .expect("watched files lock")
+                    .clone();
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": change}));
+            }
             ("shutdown", Some(id)) => {
                 send(&out, json!({"jsonrpc": "2.0", "id": id, "result": null}))
             }
@@ -257,6 +391,47 @@ fn main() {
                 };
                 send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
             }
+            // C7: echo the item back with `additionalTextEdits` added — the
+            // `using` an unimported type's completion brings with it,
+            // csharp-ls's reason for this request existing at all. A label
+            // of `"stub/silence"` gets no reply, so the client's own
+            // timeout/`$/cancelRequest` path is reachable for this method.
+            ("completionItem/resolve", Some(id)) => {
+                if params.get("label").and_then(Value::as_str) == Some("stub/silence") {
+                    continue;
+                }
+                let mut item = params.clone();
+                if let Value::Object(map) = &mut item {
+                    map.insert(
+                        "additionalTextEdits".into(),
+                        json!([{
+                            "newText": "using System.Collections.Generic;\n",
+                            "range": {"start": {"line": 0, "character": 0},
+                                      "end": {"line": 0, "character": 0}},
+                        }]),
+                    );
+                }
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": item}));
+            }
+            // C12: `csharp/metadata` is not a real LSP method — this stub
+            // proves `LspManager::fetch_metadata`'s request/response shape
+            // against *something*, since it has never been round-tripped
+            // against a real csharp-ls (see that method's doc comment). A
+            // uri containing "missing" answers with no "source" field at
+            // all, exercising the clean-refusal path.
+            ("csharp/metadata", Some(id)) => {
+                let uri = params
+                    .pointer("/textDocument/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                let result = if uri.contains("missing") {
+                    json!({})
+                } else {
+                    json!({"source": format!("// decompiled from {uri}\nclass Stub {{}}\n")})
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
             // F2-5: one signature-help shape per requested line —
             // line 0 -> offset parameter labels, line 1 -> substring labels,
             // line 2 -> an overload set whose second signature carries its
@@ -347,6 +522,320 @@ fn main() {
                 };
                 send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
             }
+            // C9: canned tokens covering the delta-decoding cases that
+            // matter — same-line multiple tokens and a line advance —
+            // against the legend `semantic_tokens_legend()` advertises:
+            // (line 0, char 0, len 3, type "type" idx 1) then
+            // (line 0, char +4, len 6, type "function" idx 12, modifier
+            // "defaultLibrary" bit 9) then (line 1, char 0, len 4, type
+            // "keyword" idx 15). `uri == "file:///stub/empty.rs"` answers
+            // `null`, so a server with nothing to say for a document is
+            // reachable too.
+            ("textDocument/semanticTokens/full", Some(id)) => {
+                let uri = params
+                    .pointer("/textDocument/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let result = if uri.ends_with("empty.rs") {
+                    Value::Null
+                } else {
+                    json!({"resultId": "1", "data": [
+                        0, 0, 3, 1, 0,
+                        0, 4, 6, 12, 1 << 9,
+                        1, 0, 4, 15, 0,
+                    ]})
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // C9: the dynamic-registration path a client must also handle —
+            // csharp-ls is believed to declare `textDocument/semanticTokens`
+            // this way rather than in `initialize`'s static result. Answers
+            // once the registration round-trips, the same shape
+            // `stub/registerCapabilityRun` uses.
+            ("stub/semanticTokensRegisterRun", Some(id)) => {
+                let register_id = next_request_id;
+                next_request_id += 1;
+                let (register_tx, register_rx) = channel();
+                pending
+                    .lock()
+                    .expect("pending lock")
+                    .insert(register_id, register_tx);
+
+                let out = Arc::clone(&out);
+                let pending = Arc::clone(&pending);
+                thread::spawn(move || {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": register_id,
+                               "method": "client/registerCapability", "params": {
+                            "registrations": [{
+                                "id": "stub-semantic-tokens",
+                                "method": "textDocument/semanticTokens",
+                                "registerOptions": {
+                                    "legend": semantic_tokens_legend(),
+                                    "full": true,
+                                },
+                            }],
+                        }}),
+                    );
+                    let register_answer = register_rx
+                        .recv_timeout(CLIENT_REPLY_TIMEOUT)
+                        .unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&register_id);
+                    let registered = register_answer.get("id").is_some()
+                        && register_answer.get("error").is_none();
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "result": {"registered": registered}}),
+                    );
+                });
+            }
+            // C10: two lenses — one already carries its `command` (a plain
+            // `workspace/executeCommand`, `stub.plain`, which the generic
+            // handler below answers with `null`), the other only `data`,
+            // csharp-ls's lazy-resolve path, which `codeLens/resolve` below
+            // fills in with `stub.applyEdit` — the same command
+            // `workspace/executeCommand`'s handler already blocks on a
+            // client answer for, so a lens click exercises the applyEdit
+            // gate through the same path a code action's command does,
+            // rather than a second command of its own.
+            ("textDocument/codeLens", Some(id)) => {
+                let result = json!([
+                    {"range": {"start": {"line": 0, "character": 0},
+                               "end": {"line": 0, "character": 3}},
+                     "command": {"title": "1 reference", "command": "stub.plain",
+                                 "arguments": [1]}},
+                    {"range": {"start": {"line": 5, "character": 0},
+                               "end": {"line": 5, "character": 1}},
+                     "data": {"token": "resolve-me"}},
+                ]);
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // The unresolved lens from line 5 above, with its command filled
+            // in. The item comes back whole, same convention
+            // `codeAction/resolve` follows.
+            ("codeLens/resolve", Some(id)) => {
+                let mut lens = params.clone();
+                lens["command"] = json!({"title": "Run", "command": "stub.applyEdit",
+                                          "arguments": ["file:///workspace/main.rs"]});
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": lens}));
+            }
+            // C10: the dynamic-registration path — csharp-ls is believed to
+            // declare `textDocument/codeLens` this way rather than in
+            // `initialize`'s static result. Same shape
+            // `stub/semanticTokensRegisterRun` uses.
+            ("stub/codeLensRegisterRun", Some(id)) => {
+                let register_id = next_request_id;
+                next_request_id += 1;
+                let (register_tx, register_rx) = channel();
+                pending
+                    .lock()
+                    .expect("pending lock")
+                    .insert(register_id, register_tx);
+
+                let out = Arc::clone(&out);
+                let pending = Arc::clone(&pending);
+                thread::spawn(move || {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": register_id,
+                               "method": "client/registerCapability", "params": {
+                            "registrations": [{
+                                "id": "stub-code-lens",
+                                "method": "textDocument/codeLens",
+                                "registerOptions": {"resolveProvider": true},
+                            }],
+                        }}),
+                    );
+                    let register_answer = register_rx
+                        .recv_timeout(CLIENT_REPLY_TIMEOUT)
+                        .unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&register_id);
+                    let registered = register_answer.get("id").is_some()
+                        && register_answer.get("error").is_none();
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "result": {"registered": registered}}),
+                    );
+                });
+            }
+            // C11: line 99 answers `null` — "no call hierarchy here", a
+            // valid answer for a position that is not a callable symbol.
+            // Any other line answers with one item, `DoWork` in
+            // `main.cs`/`main.rs` (whichever `uri` was asked about).
+            ("textDocument/prepareCallHierarchy", Some(id)) => {
+                let uri = params
+                    .pointer("/textDocument/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let line = params
+                    .pointer("/position/line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let result = match line {
+                    99 => Value::Null,
+                    // The leaf function `outgoingCalls` reports as calling
+                    // nothing further — see that handler below.
+                    9 => json!([hierarchy_item(uri, "Helper", 12, 9)]),
+                    _ => json!([hierarchy_item(uri, "DoWork", 12, 3)]),
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // C11: one caller, `Main`, with one call site — `fromRanges` is
+            // never empty here (the empty case is `outgoingCalls`' below,
+            // which is the one that matters for the fallback-vs-real-
+            // answer distinction).
+            ("callHierarchy/incomingCalls", Some(id)) => {
+                let uri = params
+                    .pointer("/item/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let result = json!([{
+                    "from": hierarchy_item(uri, "Main", 12, 9),
+                    "fromRanges": [{"start": {"line": 9, "character": 4},
+                                    "end": {"line": 9, "character": 10}}],
+                }]);
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // C11: `DoWork` (line 3) calls one thing, `Helper`; asking about
+            // `Helper` itself (line 9, `stub/outgoingLeaf`'s target) answers
+            // with an empty array — a leaf function's real, non-fallback
+            // answer, per the plan's own distinction.
+            ("callHierarchy/outgoingCalls", Some(id)) => {
+                let uri = params
+                    .pointer("/item/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let line = params
+                    .pointer("/item/range/start/line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let result = if line == 9 {
+                    json!([])
+                } else {
+                    json!([{
+                        "to": hierarchy_item(uri, "Helper", 12, 9),
+                        "fromRanges": [{"start": {"line": 3, "character": 8},
+                                        "end": {"line": 3, "character": 14}}],
+                    }])
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // C11: the dynamic-registration path for call hierarchy — same
+            // shape as `stub/codeLensRegisterRun`.
+            ("stub/callHierarchyRegisterRun", Some(id)) => {
+                let register_id = next_request_id;
+                next_request_id += 1;
+                let (register_tx, register_rx) = channel();
+                pending
+                    .lock()
+                    .expect("pending lock")
+                    .insert(register_id, register_tx);
+
+                let out = Arc::clone(&out);
+                let pending = Arc::clone(&pending);
+                thread::spawn(move || {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": register_id,
+                               "method": "client/registerCapability", "params": {
+                            "registrations": [{
+                                "id": "stub-call-hierarchy",
+                                "method": "textDocument/prepareCallHierarchy",
+                                "registerOptions": {},
+                            }],
+                        }}),
+                    );
+                    let register_answer = register_rx
+                        .recv_timeout(CLIENT_REPLY_TIMEOUT)
+                        .unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&register_id);
+                    let registered = register_answer.get("id").is_some()
+                        && register_answer.get("error").is_none();
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "result": {"registered": registered}}),
+                    );
+                });
+            }
+            // C11: line 99 answers `null`, same convention as
+            // `prepareCallHierarchy`. Any other line answers with `Circle`.
+            ("textDocument/prepareTypeHierarchy", Some(id)) => {
+                let uri = params
+                    .pointer("/textDocument/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let line = params
+                    .pointer("/position/line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let result = if line == 99 {
+                    Value::Null
+                } else {
+                    json!([hierarchy_item(uri, "Circle", 5, 3)])
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // C11: `Circle`'s one supertype, `Shape` — line 99 answers
+            // `null`, the case `type_hierarchy_outcome`'s index fallback
+            // reaches for.
+            ("typeHierarchy/supertypes", Some(id)) => {
+                let uri = params
+                    .pointer("/item/uri")
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let line = params
+                    .pointer("/item/range/start/line")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let result = if line == 99 {
+                    Value::Null
+                } else {
+                    json!([hierarchy_item(uri, "Shape", 5, 0)])
+                };
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": result}));
+            }
+            // C11: `Circle`'s subtypes — empty, since the stub gives it none.
+            ("typeHierarchy/subtypes", Some(id)) => {
+                send(&out, json!({"jsonrpc": "2.0", "id": id, "result": []}));
+            }
+            // C11: the dynamic-registration path for type hierarchy — same
+            // shape as `stub/callHierarchyRegisterRun`.
+            ("stub/typeHierarchyRegisterRun", Some(id)) => {
+                let register_id = next_request_id;
+                next_request_id += 1;
+                let (register_tx, register_rx) = channel();
+                pending
+                    .lock()
+                    .expect("pending lock")
+                    .insert(register_id, register_tx);
+
+                let out = Arc::clone(&out);
+                let pending = Arc::clone(&pending);
+                thread::spawn(move || {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": register_id,
+                               "method": "client/registerCapability", "params": {
+                            "registrations": [{
+                                "id": "stub-type-hierarchy",
+                                "method": "textDocument/prepareTypeHierarchy",
+                                "registerOptions": {},
+                            }],
+                        }}),
+                    );
+                    let register_answer = register_rx
+                        .recv_timeout(CLIENT_REPLY_TIMEOUT)
+                        .unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&register_id);
+                    let registered = register_answer.get("id").is_some()
+                        && register_answer.get("error").is_none();
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "result": {"registered": registered}}),
+                    );
+                });
+            }
             // F2: a request that is simply never answered, so the client's
             // timeout and its `$/cancelRequest` are reachable offline. No
             // real server can be asked to do this on demand.
@@ -434,6 +923,118 @@ fn main() {
                     send(
                         &out,
                         json!({"jsonrpc": "2.0", "id": id, "result": {"created": created}}),
+                    );
+                });
+            }
+            // C4: the sequence csharp-ls actually runs — register
+            // `workspace/didChangeWatchedFiles` right after `initialized`,
+            // then later unregister the same id. Answered only once both
+            // requests have gone out and come back, so a test holding the
+            // answer knows the whole round trip already went through the
+            // client's reader thread.
+            ("stub/registerCapabilityRun", Some(id)) => {
+                let register_id = next_request_id;
+                let unregister_id = next_request_id + 1;
+                next_request_id += 2;
+
+                let (register_tx, register_rx) = channel();
+                let (unregister_tx, unregister_rx) = channel();
+                pending
+                    .lock()
+                    .expect("pending lock")
+                    .insert(register_id, register_tx);
+                pending
+                    .lock()
+                    .expect("pending lock")
+                    .insert(unregister_id, unregister_tx);
+
+                let out = Arc::clone(&out);
+                let pending = Arc::clone(&pending);
+                let params = params.clone();
+                thread::spawn(move || {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": register_id,
+                               "method": "client/registerCapability", "params": {
+                            "registrations": [{
+                                "id": "stub-watch",
+                                "method": "workspace/didChangeWatchedFiles",
+                                "registerOptions": {"watchers": [
+                                    {"globPattern": "**/*.rs", "kind": 7},
+                                ]},
+                            }],
+                        }}),
+                    );
+                    let register_answer = register_rx
+                        .recv_timeout(CLIENT_REPLY_TIMEOUT)
+                        .unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&register_id);
+                    let registered = register_answer.get("id").is_some()
+                        && register_answer.get("error").is_none();
+
+                    // A test hunting for the window in which the
+                    // registration is live gets to choose how wide it is.
+                    let pause_ms = params.get("pause_ms").and_then(Value::as_u64).unwrap_or(0);
+                    thread::sleep(Duration::from_millis(pause_ms));
+
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": unregister_id,
+                               "method": "client/unregisterCapability", "params": {
+                            "unregisterations": [
+                                {"id": "stub-watch", "method": "workspace/didChangeWatchedFiles"},
+                            ],
+                        }}),
+                    );
+                    let unregister_answer = unregister_rx
+                        .recv_timeout(CLIENT_REPLY_TIMEOUT)
+                        .unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&unregister_id);
+                    let unregistered = unregister_answer.get("id").is_some()
+                        && unregister_answer.get("error").is_none();
+
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id, "result": {
+                            "registered": registered,
+                            "unregistered": unregistered,
+                        }}),
+                    );
+                });
+            }
+            // C6: pull configuration for two sections — `"csharp"`, which a
+            // test's `ServerConfig` is configured under, and `"other"`,
+            // which nothing is — so both the matched and null-fallback
+            // paths of `workspace/configuration` are exercised through the
+            // real reader thread. Answered only once the pull's reply is
+            // back, so a test holding the answer knows the round trip
+            // already completed.
+            ("stub/configurationRun", Some(id)) => {
+                let request_id = next_request_id;
+                next_request_id += 1;
+
+                let (tx, rx) = channel();
+                pending.lock().expect("pending lock").insert(request_id, tx);
+
+                let out = Arc::clone(&out);
+                let pending = Arc::clone(&pending);
+                thread::spawn(move || {
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": request_id,
+                               "method": "workspace/configuration", "params": {
+                            "items": [
+                                {"scopeUri": Value::Null, "section": "csharp"},
+                                {"scopeUri": Value::Null, "section": "other"},
+                            ],
+                        }}),
+                    );
+                    let answer = rx.recv_timeout(CLIENT_REPLY_TIMEOUT).unwrap_or(Value::Null);
+                    pending.lock().expect("pending lock").remove(&request_id);
+                    send(
+                        &out,
+                        json!({"jsonrpc": "2.0", "id": id,
+                               "result": answer.get("result").cloned().unwrap_or(Value::Null)}),
                     );
                 });
             }
@@ -697,7 +1298,7 @@ fn main() {
             }
             // RF3: the command-driven refactoring shape. `stub.applyEdit`
             // asks the client to apply an edit and blocks on the answer
-            // before completing, which is exactly what jdtls, omnisharp and
+            // before completing, which is exactly what jdtls, csharp-ls and
             // intelephense do for Extract — and the reason the client may
             // not answer server requests on its read thread.
             ("workspace/executeCommand", Some(id)) => {
@@ -804,6 +1405,20 @@ fn location(uri: &str, line: u64, character: u64) -> Value {
         "start": {"line": line, "character": character},
         "end": {"line": line, "character": character + 4},
     }})
+}
+
+/// C11: a `CallHierarchyItem`/`TypeHierarchyItem` — the two are the same
+/// shape on the wire, so one builder covers both stub features.
+fn hierarchy_item(uri: &str, name: &str, kind: u64, line: u64) -> Value {
+    json!({
+        "name": name,
+        "kind": kind,
+        "uri": uri,
+        "range": {"start": {"line": line, "character": 0},
+                  "end": {"line": line, "character": 10}},
+        "selectionRange": {"start": {"line": line, "character": 4},
+                           "end": {"line": line, "character": 4 + name.len() as u64}},
+    })
 }
 
 /// The one diagnostic this server ever reports, on line 1.
