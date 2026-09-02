@@ -6,6 +6,7 @@
 !crates
 !third_party
 !docker
+!assets
 
 # Re-exclude build/VCS junk nested inside the allowed dirs
 # (worktrees, submodule git dirs, stale target dirs).
