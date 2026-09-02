@@ -587,6 +587,20 @@ void EditorTabs::setInlayHintsEnabled(bool enabled)
     });
 }
 
+void EditorTabs::collapseAllFolds()
+{
+    if (auto *codeEditor = qobject_cast<CodeEditor *>(currentEditor())) {
+        codeEditor->collapseAll();
+    }
+}
+
+void EditorTabs::expandAllFolds()
+{
+    if (auto *codeEditor = qobject_cast<CodeEditor *>(currentEditor())) {
+        codeEditor->expandAll();
+    }
+}
+
 void EditorTabs::setEditorColors(const QString &backgroundHex, const QString &foregroundHex,
                       const QString &currentLineHex)
 {

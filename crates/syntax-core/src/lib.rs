@@ -4,6 +4,7 @@
 //! wraps [`highlight`] behind a `QSyntaxHighlighter` adapter later. This
 //! crate only classifies bytes of already-loaded text into spans.
 
+mod folds;
 mod registry;
 pub mod runtime;
 pub mod theme;
@@ -167,6 +168,12 @@ pub struct Occurrence {
 pub struct FoldRange {
     pub start: usize,
     pub end: usize,
+    /// Byte offset of the line the fold marker anchors to: the declaration
+    /// that owns this block (`fn foo(...)`, `class Foo`, `impl Foo {`, ...)
+    /// rather than the `{` line itself. Computed structurally — see
+    /// [`Highlighter::fold_ranges`] — with no per-language special-casing.
+    /// Equal to `start` when no owning declaration is found.
+    pub anchor: usize,
 }
 
 /// Structural kind of a symbol extracted by [`outline()`] (Task D). Not
@@ -1135,37 +1142,6 @@ impl Highlighter {
         self.tree = Some(new_tree);
         spans
     }
-
-    /// Foldable regions (Task C) in document order, from the current
-    /// incremental tree — i.e. whatever `set_text`/`edit` last left behind.
-    /// Does not reparse: call after `set_text`/`edit`, not instead of it.
-    /// Empty for [`Language::PLAIN_TEXT`], a language with no `folds.scm`,
-    /// or before the first `set_text`/`edit` call.
-    pub fn fold_ranges(&self) -> Vec<FoldRange> {
-        let (Some(query), Some(tree)) = (
-            self.compiled.as_ref().and_then(|c| c.folds.as_ref()),
-            self.tree.as_ref(),
-        ) else {
-            return Vec::new();
-        };
-        let mut ranges = Vec::new();
-        let mut cursor = QueryCursor::new();
-        let mut matches = cursor.matches(query, tree.root_node(), self.text.as_bytes());
-        while let Some(m) = matches.next() {
-            for capture in m.captures {
-                let capture_name = query.capture_names()[capture.index as usize];
-                if capture_name == "fold" {
-                    ranges.push(FoldRange {
-                        start: capture.node.start_byte(),
-                        end: capture.node.end_byte(),
-                    });
-                }
-            }
-        }
-        ranges.sort_by_key(|r| (r.start, r.end));
-        ranges.dedup();
-        ranges
-    }
 }
 
 #[cfg(test)]
@@ -1818,163 +1794,6 @@ mod tests {
         assert_eq!(names.len(), 3, "1 definition + 2 references: {names:?}");
         assert_eq!(names.iter().filter(|o| o.is_definition).count(), 1);
         assert_eq!(names.iter().filter(|o| !o.is_definition).count(), 2);
-    }
-
-    // --- fold_ranges (Task C) ---
-
-    #[test]
-    fn plain_text_has_no_fold_ranges() {
-        let mut highlighter = Highlighter::new(Language::PLAIN_TEXT);
-        highlighter.set_text("hello");
-        assert!(highlighter.fold_ranges().is_empty());
-    }
-
-    #[test]
-    fn fold_ranges_are_empty_before_any_parse() {
-        assert!(Highlighter::new(rust()).fold_ranges().is_empty());
-    }
-
-    #[test]
-    fn rust_function_body_is_foldable() {
-        let text = "fn add(x: i32, y: i32) -> i32 {\n    x + y\n}";
-        let mut highlighter = Highlighter::new(rust());
-        highlighter.set_text(text);
-        let ranges = highlighter.fold_ranges();
-        let body = ranges
-            .iter()
-            .find(|r| &text[r.start..r.end] == "{\n    x + y\n}")
-            .expect("expected the function body to be foldable");
-        assert_eq!(&text[body.start..body.end], "{\n    x + y\n}");
-    }
-
-    #[test]
-    fn rust_struct_body_is_foldable() {
-        let text = "struct Point {\n    x: i32,\n    y: i32,\n}";
-        let mut highlighter = Highlighter::new(rust());
-        highlighter.set_text(text);
-        let ranges = highlighter.fold_ranges();
-        assert!(
-            ranges
-                .iter()
-                .any(|r| &text[r.start..r.end] == "{\n    x: i32,\n    y: i32,\n}"),
-            "expected the struct body to be foldable: {ranges:?}"
-        );
-    }
-
-    #[test]
-    fn json_object_is_foldable() {
-        let text = "{\"a\": 1, \"b\": [1, 2, 3]}";
-        let mut highlighter = Highlighter::new(json());
-        highlighter.set_text(text);
-        let ranges = highlighter.fold_ranges();
-        assert!(
-            ranges.iter().any(|r| &text[r.start..r.end] == text),
-            "expected the whole object to be foldable: {ranges:?}"
-        );
-        assert!(
-            ranges.iter().any(|r| &text[r.start..r.end] == "[1, 2, 3]"),
-            "expected the nested array to be foldable: {ranges:?}"
-        );
-    }
-
-    #[test]
-    fn csharp_method_body_is_foldable() {
-        let mut highlighter = Highlighter::new(csharp());
-        highlighter.set_text(CSHARP_SNIPPET);
-        let ranges = highlighter.fold_ranges();
-        assert!(
-            ranges
-                .iter()
-                .any(|r| CSHARP_SNIPPET[r.start..r.end].starts_with("{\n        // say hi")),
-            "expected the Greet() body to be foldable: {ranges:?}"
-        );
-    }
-
-    #[test]
-    fn csharp_class_body_is_foldable() {
-        let mut highlighter = Highlighter::new(csharp());
-        highlighter.set_text(CSHARP_SNIPPET);
-        let ranges = highlighter.fold_ranges();
-        assert!(
-            ranges
-                .iter()
-                .any(|r| r.start == CSHARP_SNIPPET.find('{').unwrap()
-                    && r.end == CSHARP_SNIPPET.rfind('}').unwrap() + 1),
-            "expected the class body to be foldable: {ranges:?}"
-        );
-    }
-
-    #[test]
-    fn java_method_body_is_foldable() {
-        let mut highlighter = Highlighter::new(java());
-        highlighter.set_text(JAVA_SNIPPET);
-        let ranges = highlighter.fold_ranges();
-        assert!(
-            ranges
-                .iter()
-                .any(|r| JAVA_SNIPPET[r.start..r.end].starts_with("{\n        // say hi")),
-            "expected the greet() body to be foldable: {ranges:?}"
-        );
-    }
-
-    #[test]
-    fn java_class_body_is_foldable() {
-        let mut highlighter = Highlighter::new(java());
-        highlighter.set_text(JAVA_SNIPPET);
-        let ranges = highlighter.fold_ranges();
-        assert!(
-            ranges
-                .iter()
-                .any(|r| r.start == JAVA_SNIPPET.find('{').unwrap()
-                    && r.end == JAVA_SNIPPET.rfind('}').unwrap() + 1),
-            "expected the class body to be foldable: {ranges:?}"
-        );
-    }
-
-    #[test]
-    fn php_method_body_is_foldable() {
-        let mut highlighter = Highlighter::new(php());
-        highlighter.set_text(PHP_SNIPPET);
-        let ranges = highlighter.fold_ranges();
-        assert!(
-            ranges
-                .iter()
-                .any(|r| PHP_SNIPPET[r.start..r.end].starts_with("{\n        // say hi")),
-            "expected the greet() body to be foldable: {ranges:?}"
-        );
-    }
-
-    #[test]
-    fn php_class_body_is_foldable() {
-        let mut highlighter = Highlighter::new(php());
-        highlighter.set_text(PHP_SNIPPET);
-        let ranges = highlighter.fold_ranges();
-        assert!(
-            ranges
-                .iter()
-                .any(|r| r.start == PHP_SNIPPET.find('{').unwrap()
-                    && r.end == PHP_SNIPPET.rfind('}').unwrap() + 1),
-            "expected the class body to be foldable: {ranges:?}"
-        );
-    }
-
-    #[test]
-    fn fold_ranges_reflect_incremental_edits() {
-        let old_text = "fn foo() {\n    1\n}";
-        let new_text = "fn foo() {\n    1 + 2\n}";
-
-        let mut highlighter = Highlighter::new(rust());
-        highlighter.set_text(old_text);
-        // Insert " + 2" right after "1" (byte offset 15..15 -> 15..19).
-        highlighter.edit(new_text, 15, 15, 19);
-
-        let ranges = highlighter.fold_ranges();
-        assert!(
-            ranges
-                .iter()
-                .any(|r| &new_text[r.start..r.end] == "{\n    1 + 2\n}"),
-            "expected the fold range to track the edit: {ranges:?}"
-        );
     }
 
     #[test]

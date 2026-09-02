@@ -118,6 +118,7 @@ impl SyntaxHighlighterHandle {
             .map(|range| ffi::FfiFoldRange {
                 start: range.start,
                 end: range.end,
+                anchor: range.anchor,
             })
             .collect()
     }

@@ -238,6 +238,18 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "",
     },
     ActionDef {
+        id: "code.collapseAll",
+        label: "Collapse All",
+        category: "Code",
+        default_shortcut: "Ctrl+Shift+-",
+    },
+    ActionDef {
+        id: "code.expandAll",
+        label: "Expand All",
+        category: "Code",
+        default_shortcut: "Ctrl+Shift+=",
+    },
+    ActionDef {
         id: "view.classView",
         label: "Class View",
         category: "View",
