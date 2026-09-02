@@ -1,4 +1,4 @@
-# IDE
+# Kestrel IDE
 
 ![Screenshot](docs/kestrel.jpg)
 
