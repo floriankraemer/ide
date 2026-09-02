@@ -410,8 +410,8 @@ impl ffi::LanguageService {
             .server_busy_changed(false, QString::default(), QString::default(), false, 0);
 
         // The resolved layer, not the global file: a project may name its
-        // own language servers (ADR-0022), and a project that pins a
-        // toolchain-local server is the reason that field is project-scoped.
+        // own language servers (ADR-0022). Deliberately synchronous, unlike
+        // `SearchModel::open_index`'s matching read (ADR-0037 § Alternatives).
         let settings = crate::bridge::convert::load_resolved_settings();
         let overrides: Vec<lsp_core::ServerOverride> = settings
             .language_servers

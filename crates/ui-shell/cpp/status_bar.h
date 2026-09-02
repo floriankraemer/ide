@@ -27,6 +27,13 @@ UiFontTargets buildStatusBar(QMainWindow *window, AppSettings *appSettings,
                               LanguageService *languageService, SearchModel *searchModel,
                               VcsService *vcsService, EditorTabs *editorTabs,
                               QTreeView *projectTree, DockRegistry *docks,
-                              ProblemsPanel *problemsPanel);
+                              ProblemsPanel *problemsPanel, ProjectTreeModel *treeModel);
+
+// Busy indication for an in-flight "Open Folder..."/Recent Projects open
+// (ADR-0037: the walk itself runs off the Qt thread, so nothing else says a
+// project is loading). Call at the moment `ProjectTreeModel::openFolder` is
+// invoked; `buildStatusBar`'s own `projectOpened`/`projectOpenFailed`
+// connections clear it automatically, so callers never have to.
+void showProjectOpening(QMainWindow *window);
 
 } // namespace ui_shell

@@ -1,5 +1,6 @@
 use core::pin::Pin;
 use std::cell::RefCell;
+use std::path::Path;
 use std::rc::Rc;
 
 use app_core::{AppError, AppSession};
@@ -198,14 +199,13 @@ impl ffi::ProjectTreeModel {
         roles
     }
 
-    /// Persisted sort direction — read fresh from `settings.toml` rather
-    /// than cached on this QObject, so it matches whatever
-    /// `AppSettings`/the settings dialog last wrote, the same pattern
-    /// `AppSettings::ui_font_scales` uses.
+    /// Persisted sort direction. Reads the shared session's in-memory copy
+    /// rather than `settings.toml` itself — `Default` seeds it from disk
+    /// once at construction, and `set_sort_descending` below is the only
+    /// writer of the setting, keeping both in sync — so this no longer
+    /// costs a file read at all.
     pub fn sort_descending(&self) -> bool {
-        app_config::load(&app_core::resolve_config_dir())
-            .unwrap_or_default()
-            .project_tree_sort_descending
+        self.session.borrow().tree_sort_order() == project_model::SortOrder::Descending
     }
 
     /// Flip the sort direction: persist it, then re-order the open tree
@@ -227,39 +227,81 @@ impl ffi::ProjectTreeModel {
         }
     }
 
-    pub fn open_folder(mut self: Pin<&mut Self>, path: &QString) -> FfiResult {
+    /// Open `path` as the active project. Fire-and-forget (ADR-0037): the
+    /// walk runs on a worker thread, and the outcome arrives later as
+    /// `projectOpened`/`projectOpenFailed`.
+    pub fn open_folder(self: Pin<&mut Self>, path: &QString) {
         let path = std::path::PathBuf::from(path.to_string());
-        // Borrow scoped tightly: `endResetModel` synchronously re-enters
-        // `rowCount`/`data`, which take their own borrow of the session.
-        let result = self.session.borrow_mut().open_project(&path);
-        if result.is_ok() {
-            unsafe {
-                self.as_mut().begin_reset_model();
-                self.as_mut().end_reset_model();
-            }
-            self.as_mut().start_watcher();
-            self.as_mut().emit_project_opened();
-            push_recent_project(path);
-        }
-        to_ffi_result(result)
+        self.open_folder_async(path);
     }
 
+    /// Reopen the last-persisted project (US-1), the same way as
+    /// `openFolder` — fire-and-forget, walking on a worker thread. Returns
+    /// whether a reopen was kicked off at all: `false` means nothing was
+    /// ever persisted, so the caller (the splash screen) knows no
+    /// `projectOpened`/`projectOpenFailed` is coming and startup should
+    /// proceed without waiting. Reading the persisted path itself is cheap
+    /// (one small text file) and stays synchronous — only the directory
+    /// walk that follows is worth moving off the Qt thread.
     pub fn reopen_last_project(mut self: Pin<&mut Self>) -> bool {
-        let opened = self.session.borrow_mut().reopen_last_project();
-        if opened {
-            unsafe {
-                self.as_mut().begin_reset_model();
-                self.as_mut().end_reset_model();
+        let config_dir = app_core::resolve_config_dir();
+        match project_model::read_last_project(&config_dir) {
+            Ok(Some(path)) => {
+                self.as_mut().open_folder_async(path);
+                true
             }
-            self.as_mut().start_watcher();
-            self.as_mut().emit_project_opened();
+            _ => false,
         }
-        opened
     }
 
-    /// Shared tail for `open_folder`/`reopen_last_project`: re-reads the
-    /// now-current root path from the session (rather than trusting the
-    /// caller-supplied `path` verbatim) and emits `projectOpened`.
+    /// Shared worker for `openFolder`/`reopenLastProject`: walks `path` off
+    /// the Qt thread — `project_model::open_folder_sorted` is pure, no
+    /// `AppSession`, no Qt, so it is safe to run on a plain `std::thread` —
+    /// and marshals the outcome back via `qt_thread.queue`, the same
+    /// worker-thread shape `VcsService::open_project` uses (ADR-0037). A
+    /// fresh thread per open rather than a persistent job queue: unlike
+    /// VCS, there is never more than one project-open in flight that
+    /// matters — a second one simply replaces whatever the first would have
+    /// installed once both land.
+    fn open_folder_async(mut self: Pin<&mut Self>, path: std::path::PathBuf) {
+        let order = self.session.borrow().tree_sort_order();
+        let config_dir = app_core::resolve_config_dir();
+        let qt_thread = self.as_mut().qt_thread();
+        std::thread::spawn(
+            move || match project_model::open_folder_sorted(&path, order) {
+                Ok(project) => {
+                    // Persistence failure shouldn't prevent the project from
+                    // opening — it only degrades "reopen last project" next
+                    // launch, same tolerance `ProjectSession::open_folder` has.
+                    let _ = project_model::persist_last_project(&config_dir, project.root.path());
+                    let root = project.root.path().to_path_buf();
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model.session.borrow_mut().install_opened_project(project);
+                        // Borrow scoped tightly: `endResetModel` synchronously
+                        // re-enters `rowCount`/`data`, which take their own
+                        // borrow of the session.
+                        unsafe {
+                            model.as_mut().begin_reset_model();
+                            model.as_mut().end_reset_model();
+                        }
+                        model.as_mut().start_watcher();
+                        model.as_mut().emit_project_opened();
+                        push_recent_project(root);
+                    });
+                }
+                Err(err) => {
+                    let result = to_ffi_result(Err(AppError::OpenFolder(err)));
+                    let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                        model.as_mut().project_open_failed(result);
+                    });
+                }
+            },
+        );
+    }
+
+    /// Shared tail for a successful open: re-reads the now-current root
+    /// path from the session (rather than trusting the caller-supplied
+    /// path verbatim) and emits `projectOpened`.
     fn emit_project_opened(mut self: Pin<&mut Self>) {
         let root = self
             .session
@@ -304,13 +346,11 @@ impl ffi::ProjectTreeModel {
                 let watched_kind = lsp_core::watched_files::FileChangeKind::from(kind) as i32;
                 let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
                     if structural {
-                        let rebuilt = model.session.borrow_mut().rebuild_tree().is_ok();
-                        if rebuilt {
-                            unsafe {
-                                model.as_mut().begin_reset_model();
-                                model.as_mut().end_reset_model();
-                            }
-                        }
+                        // Off the Qt thread (ADR-0037): a `git checkout` of
+                        // a branch with many new files re-walks the whole
+                        // tree here, and that walk must not block the UI
+                        // any more than the initial "Open Folder" walk does.
+                        model.as_mut().rebuild_tree_async();
                     }
                     let path = QString::from(changed_path.to_string_lossy().as_ref());
                     model
@@ -319,6 +359,37 @@ impl ffi::ProjectTreeModel {
                     model.as_mut().files_changed_externally(path);
                 });
             });
+    }
+
+    /// Re-walk the current project's tree off the Qt thread and reset the
+    /// model once it lands — the rebuild half of `open_folder_async`'s
+    /// worker-thread shape, triggered by a structural filesystem-watcher
+    /// event instead of an explicit open (ADR-0037). A no-op if no project
+    /// is open by the time this runs (the watcher was about to be replaced
+    /// or stopped anyway).
+    fn rebuild_tree_async(mut self: Pin<&mut Self>) {
+        let Some(root) = self.session.borrow().root_path().map(Path::to_path_buf) else {
+            return;
+        };
+        let order = self.session.borrow().tree_sort_order();
+        let qt_thread = self.as_mut().qt_thread();
+        std::thread::spawn(move || {
+            if let Ok(tree) = project_model::rebuild_tree_sorted(&root, order) {
+                let _ = qt_thread.queue(move |mut model: Pin<&mut Self>| {
+                    // `false` means the open project changed while this
+                    // rebuild was in flight (a fresh `openFolder` landed
+                    // first) — the stale result is dropped rather than
+                    // stomping the newer tree.
+                    let applied = model.session.borrow_mut().install_rebuilt_tree(&root, tree);
+                    if applied {
+                        unsafe {
+                            model.as_mut().begin_reset_model();
+                            model.as_mut().end_reset_model();
+                        }
+                    }
+                });
+            }
+        });
     }
 
     pub fn root_path(&self) -> QString {

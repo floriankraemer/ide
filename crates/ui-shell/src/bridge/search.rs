@@ -189,16 +189,20 @@ impl ffi::SearchModel {
             }
             *current = index_core::IndexSlot::Building(root.clone());
         }
-        // Read on this thread, before the worker starts: the settings layers
-        // are files, and the resolved answer belongs to the project being
-        // opened rather than to whatever is open when the walk reaches a
-        // directory. Which layer the patterns came from is
-        // `settings_model::scope`'s answer (ADR-0022); all `index-core` gets
-        // is the list.
-        let options = index_core::IndexOptions {
-            excludes: crate::bridge::convert::load_resolved_settings().index_excludes,
-        };
         std::thread::spawn(move || {
+            // Read on the worker thread rather than the Qt thread (F0-freeze
+            // fix, ADR-0037): the settings layers are files, and reading
+            // them for `root` explicitly (`load_resolved_settings_for`,
+            // rather than `load_resolved_settings`'s "whatever project is
+            // currently open") is what makes that safe off the Qt thread —
+            // the resolved answer still belongs to the project being
+            // opened, not to whatever the shared session has open when the
+            // walk reaches a directory. Which layer the patterns came from
+            // is `settings_model::scope`'s answer (ADR-0022); all
+            // `index-core` gets is the list.
+            let options = index_core::IndexOptions {
+                excludes: crate::bridge::convert::load_resolved_settings_for(&root).index_excludes,
+            };
             // One cross-thread hop per file would cost more than the file
             // took to index, so the closure reports at most every
             // `PROGRESS_INTERVAL` — plus the first report of a pass (which

@@ -482,6 +482,21 @@ pub(crate) fn load_resolved_settings() -> app_config::Settings {
     settings_model::scope::resolve(&load_settings(), &load_project_settings())
 }
 
+/// Same as [`load_resolved_settings`], but for an explicitly given project
+/// root rather than whatever `shared_session` currently has open.
+///
+/// Needed off the Qt thread: `shared_session` (and so
+/// [`current_project_root`]/[`load_project_settings`]) is a `thread_local`,
+/// sound only because every QObject and every slot/signal lives on the one
+/// Qt thread — reading it from a worker thread would silently construct a
+/// second, empty `AppSession` on that thread instead of erroring. A worker
+/// that already knows which project it is opening (it was handed the root)
+/// has no need to ask the shared session anyway.
+pub(crate) fn load_resolved_settings_for(root: &Path) -> app_config::Settings {
+    let project_settings = app_config::project_settings::load(root).unwrap_or_default();
+    settings_model::scope::resolve(&load_settings(), &project_settings)
+}
+
 /// `editor_core::diff::Hunk`s as `DiffView`'s change ribbon reads them
 /// (F3-13). Shared by the refactor-preview and Replace-in-Files diff
 /// panels — both hand `editor_core` hunks to the same widget.

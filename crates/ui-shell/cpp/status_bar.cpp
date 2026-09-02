@@ -6,6 +6,7 @@
 #include "theme.h"
 #include "vcs_menu.h"
 
+#include <QApplication>
 #include <QColor>
 #include <QLabel>
 #include <QMainWindow>
@@ -17,11 +18,48 @@
 
 namespace ui_shell {
 
+namespace {
+
+// Guards `showProjectOpening`/the clearing connections below against a
+// stray `QApplication::restoreOverrideCursor()` with nothing pushed — e.g.
+// `projectOpened` firing at startup when nothing ever called
+// `showProjectOpening` (no explicit "Open Folder..."/Recent Projects click
+// happened). One open at a time is the only case that matters in practice
+// (a second explicit open before the first settles is rare and, worst
+// case, just clears one open's indication a little early).
+bool projectOpeningBusy = false;
+
+} // namespace
+
+void showProjectOpening(QMainWindow *window)
+{
+    if (projectOpeningBusy) {
+        return;
+    }
+    projectOpeningBusy = true;
+    QApplication::setOverrideCursor(Qt::WaitCursor);
+    window->statusBar()->showMessage(QObject::tr("Opening project..."));
+}
+
+namespace {
+
+void clearProjectOpening(QStatusBar *statusBar)
+{
+    if (!projectOpeningBusy) {
+        return;
+    }
+    projectOpeningBusy = false;
+    QApplication::restoreOverrideCursor();
+    statusBar->clearMessage();
+}
+
+} // namespace
+
 UiFontTargets buildStatusBar(QMainWindow *window, AppSettings *appSettings,
                               LanguageService *languageService, SearchModel *searchModel,
                               VcsService *vcsService, EditorTabs *editorTabs,
                               QTreeView *projectTree, DockRegistry *docks,
-                              ProblemsPanel *problemsPanel)
+                              ProblemsPanel *problemsPanel, ProjectTreeModel *treeModel)
 {
     // L3: line:col + language update per current tab / cursor move; "UTF-8"
     // is static since only UTF-8 is supported today (US-2b's binary-file
@@ -150,6 +188,13 @@ UiFontTargets buildStatusBar(QMainWindow *window, AppSettings *appSettings,
                               serverBar->setValue(static_cast<int>(percent));
                           }
                       });
+
+    // ADR-0037: clears whatever `showProjectOpening` set, regardless of
+    // which call site triggered the open or how it ended.
+    QObject::connect(treeModel, &ProjectTreeModel::projectOpened, statusBar,
+                      [statusBar]() { clearProjectOpening(statusBar); });
+    QObject::connect(treeModel, &ProjectTreeModel::projectOpenFailed, statusBar,
+                      [statusBar](const FfiResult &) { clearProjectOpening(statusBar); });
 
     statusBar->addPermanentWidget(indexLabel);
     statusBar->addPermanentWidget(indexBar);

@@ -54,7 +54,10 @@ baseline() {
 	# must live beside TabKind/TabContent themselves (F3-14). DiffContent,
 	# AppSession's open_diff_tab/diff_labels/diff_texts/diff_hunks and their
 	# tests all went to app-core/src/diff_tab.rs rather than in here.
-	crates/app-core/src/lib.rs) echo 1594 ;;           # no split planned; ratcheted so it cannot grow
+	# Raised from 1594 by 1 line for the project_open module declaration
+	# (ADR-0037); install_opened_project/install_rebuilt_tree and their tests
+	# live in app-core/src/project_open.rs rather than in here.
+	crates/app-core/src/lib.rs) echo 1595 ;;           # no split planned; ratcheted so it cannot grow
 	# 1442 -> 2052 across the C1-C12 csharp-ls chain: registerCapability
 	# (C4), didChangeWatchedFiles (C5), workspace/configuration (C6),
 	# completionItem/resolve (C7), semantic tokens (C9), code lens (C10)

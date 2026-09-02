@@ -288,6 +288,30 @@ pub fn open_folder(path: impl AsRef<Path>) -> Result<Project, OpenFolderError> {
     })
 }
 
+/// [`open_folder`], with the tree sorted the caller's way. The pure,
+/// `AppSession`-free piece of "open folder" — no thread-local, no Qt
+/// dependency — so it is safe to run on a worker thread rather than the Qt
+/// main thread (ADR-0037).
+pub fn open_folder_sorted(
+    path: impl AsRef<Path>,
+    order: SortOrder,
+) -> Result<Project, OpenFolderError> {
+    let mut project = open_folder(path)?;
+    project.tree.apply_sort_order(order);
+    Ok(project)
+}
+
+/// Re-walk `root` from disk and sort — the pure piece of a tree rebuild
+/// (e.g. after a filesystem-watcher event), safe to run off the Qt thread
+/// for the same reason [`open_folder_sorted`] is. Skips the existence/
+/// readability checks `open_folder` does, since `root` is by construction
+/// an already-open project's root.
+pub fn rebuild_tree_sorted(root: &Path, order: SortOrder) -> io::Result<DirectoryTree> {
+    let mut tree = DirectoryTree::build(root)?;
+    tree.apply_sort_order(order);
+    Ok(tree)
+}
+
 /// Persist `project_path` as the last-opened project: one plain-text line
 /// in `config_dir` (per plan §3 — deliberately not serde/toml/json).
 pub fn persist_last_project(config_dir: &Path, project_path: &Path) -> io::Result<()> {
@@ -388,13 +412,36 @@ impl ProjectSession {
         path: impl AsRef<Path>,
         config_dir: &Path,
     ) -> Result<(), OpenFolderError> {
-        let mut project = open_folder(path)?;
-        project.tree.apply_sort_order(self.sort_order);
+        let project = open_folder_sorted(path, self.sort_order)?;
         // Persistence failure shouldn't prevent the project from opening —
         // it only degrades "reopen last project" on next launch.
         let _ = persist_last_project(config_dir, project.root.path());
         self.current = Some(project);
         Ok(())
+    }
+
+    /// Install an already walked-and-sorted project as current, replacing
+    /// any previous one — the swap-in half of "Open Folder" when the walk
+    /// itself ran off the Qt thread (ADR-0037). Persisting "last opened" is
+    /// the caller's job, same as it is off of [`open_folder`]'s pure half,
+    /// `open_folder_sorted`.
+    pub fn install_project(&mut self, project: Project) {
+        self.current = Some(project);
+    }
+
+    /// Swap in an already re-walked tree for the still-current project, e.g.
+    /// after a filesystem-watcher rebuild ran off the Qt thread (ADR-0037).
+    /// `root` must match the currently open project's root; a mismatch means
+    /// the project changed while the rebuild was in flight, so the stale
+    /// result is dropped instead of applied. Returns whether it was applied.
+    pub fn install_tree(&mut self, root: &Path, tree: DirectoryTree) -> bool {
+        match self.current.as_mut() {
+            Some(project) if project.root.path() == root => {
+                project.tree = tree;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Re-snapshot the current project's tree from disk — a full rebuild,
@@ -403,12 +450,14 @@ impl ProjectSession {
     /// Callers use this after a create/rename/delete mutation
     /// (US-2b). No-op if no project is open.
     pub fn rebuild_tree(&mut self) -> io::Result<()> {
-        let Some(project) = self.current.as_mut() else {
+        let Some(project) = self.current.as_ref() else {
             return Ok(());
         };
         let root_path = project.root.path().to_path_buf();
-        project.tree = DirectoryTree::build(&root_path)?;
-        project.tree.apply_sort_order(self.sort_order);
+        let tree = rebuild_tree_sorted(&root_path, self.sort_order)?;
+        // `current` cannot have changed between the two lines above (no
+        // yield point in synchronous code), so this always applies.
+        self.current.as_mut().expect("checked Some above").tree = tree;
         Ok(())
     }
 
@@ -546,6 +595,83 @@ mod tests {
             .map(|&id| tree.node(id).name.as_str())
             .collect();
         assert_eq!(names, vec!["src", "empty_dir", "zzz.txt", "README.md"]);
+    }
+
+    #[test]
+    fn open_folder_sorted_applies_the_requested_order() {
+        let dir = tempfile::tempdir().unwrap();
+        make_fixture_tree(dir.path());
+
+        let project = open_folder_sorted(dir.path(), SortOrder::Descending).unwrap();
+        let tree = &project.tree;
+        let names: Vec<&str> = tree
+            .children(tree.root_id())
+            .iter()
+            .map(|&id| tree.node(id).name.as_str())
+            .collect();
+        // Folders still lead either way; only the name order within each
+        // group flips.
+        assert_eq!(names, vec!["src", "empty_dir", "README.md"]);
+    }
+
+    #[test]
+    fn rebuild_tree_sorted_reflects_disk_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        make_fixture_tree(dir.path());
+        fs::write(dir.path().join("zzz.txt"), "").unwrap();
+
+        let tree = rebuild_tree_sorted(dir.path(), SortOrder::Ascending).unwrap();
+        let names: Vec<&str> = tree
+            .children(tree.root_id())
+            .iter()
+            .map(|&id| tree.node(id).name.as_str())
+            .collect();
+        assert_eq!(names, vec!["empty_dir", "src", "README.md", "zzz.txt"]);
+    }
+
+    /// `install_project`/`install_tree` are the swap-in half of an
+    /// off-thread open/rebuild (ADR-0037): the walk already happened
+    /// elsewhere, only installing the result into the session is left.
+    #[test]
+    fn install_project_replaces_the_current_project() {
+        let dir = tempfile::tempdir().unwrap();
+        make_fixture_tree(dir.path());
+        let project = open_folder_sorted(dir.path(), SortOrder::Ascending).unwrap();
+
+        let mut session = ProjectSession::new();
+        assert!(session.current().is_none());
+        session.install_project(project);
+        assert_eq!(session.current().unwrap().root.path(), dir.path());
+    }
+
+    #[test]
+    fn install_tree_applies_only_when_the_root_still_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        make_fixture_tree(dir.path());
+        let config_dir = tempfile::tempdir().unwrap();
+        let mut session = ProjectSession::new();
+        session.open_folder(dir.path(), config_dir.path()).unwrap();
+
+        fs::write(dir.path().join("new_file.txt"), "").unwrap();
+
+        // A stale rebuild for a root that is no longer open is dropped.
+        let other_dir = tempfile::tempdir().unwrap();
+        let rebuilt = rebuild_tree_sorted(dir.path(), session.sort_order()).unwrap();
+        assert!(!session.install_tree(other_dir.path(), rebuilt));
+        let tree = &session.current().unwrap().tree;
+        assert!(!tree
+            .children(tree.root_id())
+            .iter()
+            .any(|&id| tree.node(id).name == "new_file.txt"));
+
+        // A rebuild whose root still matches is applied.
+        let rebuilt = rebuild_tree_sorted(dir.path(), session.sort_order()).unwrap();
+        assert!(session.install_tree(dir.path(), rebuilt));
+        let tree = &session.current().unwrap().tree;
+        assert!(tree
+            .children(tree.root_id())
+            .iter()
+            .any(|&id| tree.node(id).name == "new_file.txt"));
     }
 
     #[test]

@@ -28,6 +28,7 @@ pub mod file_ops;
 pub mod icons;
 /// Where plugins and the Markdown/Mermaid renderer are joined (ADR-0033).
 pub mod preview;
+mod project_open; // Swap-in half of an off-thread project open/rebuild (ADR-0037).
 mod tree_sort;
 mod virtual_doc; // Read-only virtual documents with no backing file (C12).
 
