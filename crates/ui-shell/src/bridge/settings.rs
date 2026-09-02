@@ -15,7 +15,7 @@ use crate::bridge::convert::{load_settings, user_styles};
 use crate::bridge::errors;
 use crate::bridge::ffi::{
     self, FfiEditingProblem, FfiEditingRow, FfiEditorColors, FfiEditorFont, FfiResult,
-    FfiUiFontScales, FfiWindowGeometry,
+    FfiUiFontScales, FfiWhitespaceOptions, FfiWindowGeometry,
 };
 
 /// Rust side of the `AppSettings` QObject: every call re-reads or re-writes
@@ -235,6 +235,30 @@ impl ffi::AppSettings {
         };
         settings.editor_font_family = family.to_string();
         settings.editor_font_size = size;
+        let _ = app_config::save(&config_dir, &settings);
+    }
+
+    pub fn whitespace_options(&self) -> FfiWhitespaceOptions {
+        let settings = app_config::load(&app_core::resolve_config_dir()).unwrap_or_default();
+        FfiWhitespaceOptions {
+            enabled: settings.show_whitespace,
+            leading: settings.show_whitespace_leading,
+            inner: settings.show_whitespace_inner,
+            trailing: settings.show_whitespace_trailing,
+            eol_markers: settings.show_eol_markers,
+        }
+    }
+
+    pub fn save_whitespace_options(&self, options: &FfiWhitespaceOptions) {
+        let config_dir = app_core::resolve_config_dir();
+        let Ok(mut settings) = app_config::load(&config_dir) else {
+            return;
+        };
+        settings.show_whitespace = options.enabled;
+        settings.show_whitespace_leading = options.leading;
+        settings.show_whitespace_inner = options.inner;
+        settings.show_whitespace_trailing = options.trailing;
+        settings.show_eol_markers = options.eol_markers;
         let _ = app_config::save(&config_dir, &settings);
     }
 

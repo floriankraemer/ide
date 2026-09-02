@@ -613,6 +613,10 @@ void buildMainWindow(AppSettings *appSettings,
     const FfiEditorColors savedColors = appSettings->editorColors();
     editorTabs->setEditorColors(savedColors.background, savedColors.foreground,
                                  savedColors.current_line);
+    const FfiWhitespaceOptions savedWhitespace = appSettings->whitespaceOptions();
+    editorTabs->setWhitespaceOptions(WhitespaceOptions{
+      savedWhitespace.enabled, savedWhitespace.leading, savedWhitespace.inner,
+      savedWhitespace.trailing, savedWhitespace.eol_markers});
 
     wireAiChatToEditor(window, aiChat, central.aiChatPanel, editorTabs, searchModel);
 

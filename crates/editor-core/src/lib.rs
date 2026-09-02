@@ -39,6 +39,10 @@ pub mod line_ops;
 pub mod save_rules;
 pub use save_rules::{detect_line_ending, LineEnding, SaveRules};
 
+/// Leading/inner/trailing classification of the space/tab characters on a
+/// line (JetBrains-style "show whitespaces").
+pub mod whitespace;
+
 pub use search::{
     find_matches, replacement_edits, replacements, Replacement, SearchError, SearchOptions,
     TextMatch,
