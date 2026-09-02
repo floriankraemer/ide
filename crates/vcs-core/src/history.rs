@@ -65,7 +65,16 @@ impl Repository {
     /// rename tracking. A merge commit's non-first parents are not
     /// compared against — same simplification `git log --follow` avoids
     /// but `git log <path>` without `-m` makes by default.
-    pub fn file_history(&self, relative_path: &Path) -> Result<Vec<LogEntry>, VcsError> {
+    ///
+    /// `max` caps how many matching commits are returned, the same shape
+    /// `log` has — without it, every ancestor commit is walked and both its
+    /// and its first parent's tree loaded, for a panel that only ever shows
+    /// the first page.
+    pub fn file_history(
+        &self,
+        relative_path: &Path,
+        max: Option<usize>,
+    ) -> Result<Vec<LogEntry>, VcsError> {
         let head_id = match self.inner.head_id() {
             Ok(id) => id,
             Err(_) => return Ok(Vec::new()),
@@ -96,6 +105,9 @@ impl Repository {
 
             if entry_oid != parent_oid {
                 entries.push(log_entry(&commit)?);
+                if max.is_some_and(|max| entries.len() >= max) {
+                    break;
+                }
             }
         }
         Ok(entries)
@@ -135,7 +147,7 @@ fn log_entry(commit: &gix::Commit<'_>) -> Result<LogEntry, VcsError> {
 /// not to survive concurrent-edit races the way [`crate::hunks::HunkCache`]
 /// must.
 type LogKey = (String, Option<usize>);
-type FileHistoryKey = (PathBuf, String);
+type FileHistoryKey = (PathBuf, String, Option<usize>);
 
 #[derive(Default)]
 pub struct HistoryCache {
@@ -162,12 +174,13 @@ impl HistoryCache {
         &self,
         repo: &Repository,
         relative_path: &Path,
+        max: Option<usize>,
     ) -> Result<Vec<LogEntry>, VcsError> {
-        let key = (relative_path.to_path_buf(), head_key(repo)?);
+        let key = (relative_path.to_path_buf(), head_key(repo)?, max);
         if let Some(cached) = self.file_history.lock().unwrap().get(&key) {
             return Ok(cached.clone());
         }
-        let entries = repo.file_history(relative_path)?;
+        let entries = repo.file_history(relative_path, max)?;
         self.file_history
             .lock()
             .unwrap()
@@ -270,13 +283,31 @@ mod tests {
         git(dir.path(), &["commit", "-m", "edit a"]);
 
         let repo = open(dir.path());
-        let history = repo.file_history(Path::new("a.txt")).unwrap();
+        let history = repo.file_history(Path::new("a.txt"), None).unwrap();
         assert_eq!(
             history
                 .iter()
                 .map(|e| e.summary.as_str())
                 .collect::<Vec<_>>(),
             vec!["edit a", "add a"]
+        );
+    }
+
+    #[test]
+    fn file_history_respects_max() {
+        let dir = tempfile::tempdir().unwrap();
+        git(dir.path(), &["init", "--quiet"]);
+        for n in 0..3 {
+            std::fs::write(dir.path().join("a.txt"), format!("{n}\n")).unwrap();
+            git(dir.path(), &["add", "a.txt"]);
+            git(dir.path(), &["commit", "-m", &format!("commit {n}")]);
+        }
+        let repo = open(dir.path());
+        assert_eq!(
+            repo.file_history(Path::new("a.txt"), Some(2))
+                .unwrap()
+                .len(),
+            2
         );
     }
 

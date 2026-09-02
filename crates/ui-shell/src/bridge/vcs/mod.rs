@@ -94,6 +94,20 @@ fn to_ffi_result(err: &vcs_core::VcsError) -> ffi::FfiResult {
     }
 }
 
+/// A tab's own path (`DocumentManager::tabPath`) is absolute; every
+/// `vcs_core::Repository` lookup that walks a tree (`head_blob`,
+/// `HunkCache::hunks`, `Repository::blob_at`, `Repository::file_history`,
+/// `Repository::blame`) wants one relative to the repository root instead.
+/// One shared place to do that strip, so a caller can't reintroduce the bug
+/// `requestHunks`/`requestBlobAt` already fixed independently of
+/// `file_history`/`blame` (see PR discussion on issue #164).
+pub(crate) fn to_repo_relative<'a>(repo: &vcs_core::Repository, absolute: &'a Path) -> &'a Path {
+    match repo.work_dir() {
+        Some(root) => absolute.strip_prefix(&root).unwrap_or(absolute),
+        None => absolute,
+    }
+}
+
 fn to_ffi_change_kind(kind: Option<vcs_core::ChangeKind>) -> ffi::FfiChangeKind {
     match kind {
         None => ffi::FfiChangeKind::None,
@@ -229,11 +243,7 @@ impl ffi::VcsService {
             // Changes dock's own `changedFiles()` never has this bug because
             // `vcs_core::Repository::status` already returns repo-relative
             // paths.
-            let absolute = Path::new(&job_path);
-            let relative = match worker.repo.work_dir() {
-                Some(root) => absolute.strip_prefix(&root).unwrap_or(absolute),
-                None => absolute,
-            };
+            let relative = to_repo_relative(&worker.repo, Path::new(&job_path));
             let head = worker.repo.head_blob(relative);
             let hunks = worker
                 .hunk_cache
@@ -290,11 +300,7 @@ impl ffi::VcsService {
         self.as_ref().push_job(move |worker: &VcsWorker| {
             // Same absolute-vs-repository-relative fix `requestHunks` already
             // needs (`job_path` is a tab's own path via `tabPath`).
-            let absolute = Path::new(&job_path);
-            let relative = match worker.repo.work_dir() {
-                Some(root) => absolute.strip_prefix(&root).unwrap_or(absolute),
-                None => absolute,
-            };
+            let relative = to_repo_relative(&worker.repo, Path::new(&job_path));
             let outcome = worker.repo.blob_at(&job_revision, relative);
             let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| match outcome {
                 Ok(text) => {

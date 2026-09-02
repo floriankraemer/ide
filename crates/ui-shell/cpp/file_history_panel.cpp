@@ -1,5 +1,7 @@
 #include "file_history_panel.h"
 
+#include "e2e_mark.h"
+
 #include <QAction>
 #include <QDateTime>
 #include <QLabel>
@@ -38,6 +40,8 @@ FileHistoryPanel::FileHistoryPanel(
     layout->addWidget(list_, 1);
 
     connect(vcsService_, &VcsService::historyReady, this, &FileHistoryPanel::onHistoryReady);
+    connect(vcsService_, &VcsService::historyUnavailable, this,
+            &FileHistoryPanel::onHistoryUnavailable);
 }
 
 void FileHistoryPanel::setCurrentFile(const QString &path)
@@ -70,6 +74,38 @@ void FileHistoryPanel::onHistoryReady(const QString &path, const ::rust::Vec<Ffi
         auto *item = new QListWidgetItem(text, list_);
         item->setData(kCommitIdRole, commitId);
     }
+    // Each row's own rect, so an E2E flow can right-click a specific commit
+    // without computing its position from row height/font metrics — same
+    // reasoning as `markChangesRow` (changes_panel.cpp).
+    for (int row = 0; row < list_->count(); ++row) {
+        QListWidgetItem *item = list_->item(row);
+        const QRect rect = list_->visualItemRect(item);
+        const QPoint origin =
+          rect.isEmpty() ? QPoint() : list_->viewport()->mapToGlobal(rect.topLeft());
+        e2eMark(QStringLiteral("{\"ev\":\"history_row\",\"path\":%1,\"commit\":%2,"
+                                "\"row\":%3,\"rect\":[%4,%5,%6,%7]}")
+                  .arg(e2eJson(path), e2eJson(item->data(kCommitIdRole).toString()))
+                  .arg(row)
+                  .arg(origin.x())
+                  .arg(origin.y())
+                  .arg(rect.width())
+                  .arg(rect.height()));
+    }
+    // F3-18's own bridge fix carries the path so a race between two
+    // requests is observable too, not just the final count.
+    e2eMark(QStringLiteral("{\"ev\":\"history_ready\",\"path\":%1,\"count\":%2}")
+              .arg(e2eJson(path))
+              .arg(entries.size()));
+}
+
+void FileHistoryPanel::onHistoryUnavailable(const QString &path)
+{
+    if (path != currentPath_) {
+        return;
+    }
+    list_->clear();
+    titleLabel_->setText(tr("%1 — not a version-controlled file").arg(path));
+    e2eMark(QStringLiteral("{\"ev\":\"history_unavailable\",\"path\":%1}").arg(e2eJson(path)));
 }
 
 void FileHistoryPanel::showContextMenu(const QPoint &pos)
@@ -78,6 +114,28 @@ void FileHistoryPanel::showContextMenu(const QPoint &pos)
     if (selected.isEmpty() || currentPath_.isEmpty()) {
         return;
     }
+
+    // Read everything the chosen action will need into locals now: `menu.exec()`
+    // below spins a nested event loop, during which a re-entrant
+    // `setCurrentFile`/`onHistoryReady` can call `list_->clear()` and delete
+    // every `QListWidgetItem*` in `selected` out from under us. Nothing after
+    // `menu.exec()` may dereference a `QListWidgetItem*` again.
+    QString firstRevision = selected.first()->data(kCommitIdRole).toString();
+    QString leftRevision;
+    QString rightRevision;
+    if (selected.size() == 2) {
+        // Newest-first list: the later (higher) row is the older revision,
+        // so the diff reads left-to-right as old-to-new either way it was
+        // selected.
+        QListWidgetItem *first = selected.at(0);
+        QListWidgetItem *second = selected.at(1);
+        if (list_->row(first) < list_->row(second)) {
+            std::swap(first, second);
+        }
+        leftRevision = first->data(kCommitIdRole).toString();
+        rightRevision = second->data(kCommitIdRole).toString();
+    }
+    const QString path = currentPath_;
 
     QMenu menu(list_);
     QAction *compareWithWorkingTree = nullptr;
@@ -92,26 +150,24 @@ void FileHistoryPanel::showContextMenu(const QPoint &pos)
         return;
     }
 
+    // Same reasoning as `EditorTabs::showTabContextMenu`: a popup menu grabs
+    // the keyboard rather than input focus, so this mark is the only way an
+    // E2E flow driving `xdotool` from outside the process can know the menu
+    // is up — and it has to fire before `exec()`, which does not return
+    // until the menu is gone.
+    e2eMark("{\"ev\":\"dialog_shown\",\"name\":\"file_history_context_menu\"}");
     QAction *chosen = menu.exec(list_->viewport()->mapToGlobal(pos));
+    e2eMark(QStringLiteral("{\"ev\":\"dialog_closed\",\"name\":\"file_history_context_menu\","
+                            "\"accepted\":%1}")
+              .arg(chosen != nullptr ? QLatin1String("true") : QLatin1String("false")));
     if (!chosen) {
         return;
     }
     if (chosen == compareWithWorkingTree) {
-        const QString revision = selected.first()->data(kCommitIdRole).toString();
-        compareRevisions_(currentPath_, revision, revision.left(8), QString(),
+        compareRevisions_(path, firstRevision, firstRevision.left(8), QString(),
                             tr("Working Tree"));
     } else if (chosen == compareSelected) {
-        // Newest-first list: the later (higher) row is the older revision,
-        // so the diff reads left-to-right as old-to-new either way it was
-        // selected.
-        QListWidgetItem *first = selected.at(0);
-        QListWidgetItem *second = selected.at(1);
-        if (list_->row(first) < list_->row(second)) {
-            std::swap(first, second);
-        }
-        const QString leftRevision = first->data(kCommitIdRole).toString();
-        const QString rightRevision = second->data(kCommitIdRole).toString();
-        compareRevisions_(currentPath_, leftRevision, leftRevision.left(8), rightRevision,
+        compareRevisions_(path, leftRevision, leftRevision.left(8), rightRevision,
                             rightRevision.left(8));
     }
 }
