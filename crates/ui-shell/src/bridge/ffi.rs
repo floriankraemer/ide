@@ -5067,6 +5067,16 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "blameReady"]
         fn blame_ready(self: Pin<&mut VcsService>, path: QString, lines: Vec<FfiBlameLine>);
+
+        /// `fileHistory(path)` could not even be queued — no worker exists
+        /// yet because the project is not a Git repository, or discovery is
+        /// still running. Tagged with the path the same way `historyReady`
+        /// is, so a caller can tell "not version-controlled" apart from "no
+        /// commits yet" (an empty `historyReady` answer) instead of the
+        /// panel sitting on a stale or empty list forever.
+        #[qsignal]
+        #[cxx_name = "historyUnavailable"]
+        fn history_unavailable(self: Pin<&mut VcsService>, path: QString);
     }
 
     // Enables `self.qt_thread()` on `VcsService` for its worker thread,

@@ -313,8 +313,13 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
           classViewPanel->refresh(editorTabs->currentTabId());
           // The current file's group sorts to the top of the Problems panel.
           problemsPanel->setCurrentFile(editorTabs->currentPath());
-          // F3-18: keep File History/annotate pinned to the current tab.
-          fileHistoryPanel->setCurrentFile(editorTabs->currentPath());
+          // F3-18: keep File History pinned to the current tab, but only
+          // while its dock is actually shown — otherwise every tab switch
+          // walks the whole ancestry of a file nobody is looking at.
+          // Opening the dock (View menu) refreshes it itself.
+          if (!previewDocks->isClosed(QStringLiteral("fileHistory"))) {
+              fileHistoryPanel->setCurrentFile(editorTabs->currentPath());
+          }
           editorTabs->setAnnotateEnabled(editorTabs->annotateEnabled());
           // Locate-in-tree only makes sense while a tab is open.
           projectTreeLocateAction->setEnabled(!editorTabs->currentPath().isEmpty());

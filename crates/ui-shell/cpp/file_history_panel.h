@@ -43,6 +43,7 @@ public:
 
 private:
     void onHistoryReady(const QString &path, const ::rust::Vec<FfiLogEntry> &entries);
+    void onHistoryUnavailable(const QString &path);
     void showContextMenu(const QPoint &pos);
 
     VcsService *vcsService_;

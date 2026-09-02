@@ -14,7 +14,11 @@ use cxx_qt_lib::QString;
 
 use crate::bridge::ffi;
 
-use super::{to_ffi_result, VcsWorker};
+use super::{to_ffi_result, to_repo_relative, VcsWorker};
+
+/// `fileHistory`/`blame` page rather than load the whole ancestry — a panel
+/// only ever shows the first page of commits for one file.
+const HISTORY_MAX: usize = 200;
 
 fn to_ffi_log_entry(entry: &vcs_core::LogEntry) -> ffi::FfiLogEntry {
     ffi::FfiLogEntry {
@@ -182,10 +186,15 @@ impl ffi::VcsService {
         let path = path.to_string();
         let qt_thread = self.as_mut().qt_thread();
         let signal_path = path.clone();
-        self.as_ref().push_job(move |worker: &VcsWorker| {
-            let result = worker
-                .history_cache
-                .file_history(&worker.repo, Path::new(&path));
+        let unavailable_path = path.clone();
+        let queued = self.as_ref().push_job(move |worker: &VcsWorker| {
+            // `path` is the tab's own (absolute) path — same normalization
+            // `requestHunks`/`requestBlobAt` need, now shared.
+            let relative = to_repo_relative(&worker.repo, Path::new(&path));
+            let result =
+                worker
+                    .history_cache
+                    .file_history(&worker.repo, relative, Some(HISTORY_MAX));
             let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| match result {
                 Ok(entries) => {
                     let entries: Vec<ffi::FfiLogEntry> =
@@ -200,6 +209,13 @@ impl ffi::VcsService {
                 }
             });
         });
+        if !queued {
+            // No worker yet: not a repository, or discovery still running.
+            // An empty `historyReady` would read as "no commits" — tell the
+            // panel explicitly instead of leaving it to wait forever.
+            self.as_mut()
+                .history_unavailable(QString::from(unavailable_path.as_str()));
+        }
     }
 
     pub fn blame(mut self: Pin<&mut Self>, path: &QString) {
@@ -207,7 +223,8 @@ impl ffi::VcsService {
         let qt_thread = self.as_mut().qt_thread();
         let signal_path = path.clone();
         self.as_ref().push_job(move |worker: &VcsWorker| {
-            let result = worker.blame_cache.blame(&worker.repo, Path::new(&path));
+            let relative = to_repo_relative(&worker.repo, Path::new(&path));
+            let result = worker.blame_cache.blame(&worker.repo, relative);
             let _ = qt_thread.queue(move |mut service: Pin<&mut Self>| match result {
                 Ok(lines) => {
                     let lines: Vec<ffi::FfiBlameLine> =

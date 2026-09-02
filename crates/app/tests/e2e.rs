@@ -1229,6 +1229,97 @@ fn e2e_stage_and_commit_through_the_changes_dock() {
     assert_eq!(ide.quit(), 0);
 }
 
+/// Issue #164 regression: `fileHistory` used to hand `gix` an absolute path
+/// (defect B, always-empty history) and `showContextMenu` kept raw
+/// `QListWidgetItem*` across `menu.exec()`'s nested loop (defect A, the
+/// UAF). The re-entrant clear behind A is unreachable from outside the
+/// process here (the popup owns the keyboard grab, so no `xdotool` event
+/// can drive a tab switch while it's up) — this proves the count B zeroed,
+/// and exercises the fixed `showContextMenu` on the locals it now reads
+/// before `exec()`.
+#[test]
+#[ignore = "E2E: needs an X server; run via `make e2e`"]
+fn e2e_file_history_lists_commits_and_survives_the_context_menu() {
+    let name = "e2e_file_history_lists_commits_and_survives_the_context_menu";
+
+    let repo = git_fixture(&[("history.txt", "v1\n"), ("other.txt", "unrelated\n")]);
+    // A second commit on history.txt so "lists everything" and "lists
+    // nothing" can't look the same.
+    std::fs::write(repo.path().join("history.txt"), "v2\n").expect("edit history.txt");
+    for args in [
+        ["add", "history.txt"].as_slice(),
+        &["commit", "--quiet", "-m", "second"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .unwrap_or_else(|e| panic!("running git {args:?}: {e}"));
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    let mut ide = Ide::launch(name, APP, repo.path());
+    drop(repo); // already copied into the app's own temp project root
+
+    let mcp = ide.mcp();
+    ide.wait_for_ev(Mark::start(), "project_opened");
+    wait_for_index(&mcp);
+
+    let tab = open_file(&ide, "history.txt");
+    let editor_tab_id = tab["tab_id"].as_u64().expect("tab_id");
+
+    // `view.vcsHistory` has no default shortcut; reach it via Find Action,
+    // same as `vcs_menu.cpp`'s View entry: shows the dock, calls
+    // `setCurrentFile`.
+    let mark = open_search_popup(&ide, "ctrl+shift+a");
+    accept_top_hit(&ide, mark, "File History");
+
+    let ready = ide.wait_for_event(mark, "history_ready for history.txt", |e| {
+        e["ev"] == "history_ready" && e["path"] == "history.txt"
+    });
+    assert_eq!(
+        ready["count"].as_u64(),
+        Some(2),
+        "history did not list both commits"
+    );
+
+    let row0 = ide.wait_for_event(mark, "history_row 0", |e| {
+        e["ev"] == "history_row" && e["path"] == "history.txt" && e["row"] == 0
+    });
+
+    // Select then right-click the newest commit's row to raise the menu.
+    let (row_x, row_y) = rect_centre(&row0["rect"]);
+    ide.click_at(row_x, row_y, 1);
+    let menu_mark = ide.mark();
+    ide.click_at(row_x, row_y, 3);
+    ide.wait_for_event(menu_mark, "the context menu to open", |e| {
+        e["ev"] == "dialog_shown" && e["name"] == "file_history_context_menu"
+    });
+    // One row selected -> one action; Down then Return selects it whether
+    // or not `exec()` pre-highlighted it.
+    ide.key("Down");
+    ide.key("Return");
+    ide.wait_for_event(menu_mark, "the context menu to close", |e| {
+        e["ev"] == "dialog_closed"
+            && e["name"] == "file_history_context_menu"
+            && e["accepted"] == true
+    });
+
+    // A new diff tab, distinct from the plain editor tab, proves
+    // `compareRevisions_` ran on the revision read before `exec()` rather
+    // than crashing or reading a dangling item.
+    let diff_tab = ide.wait_for_event(menu_mark, "a diff tab for history.txt", |e| {
+        e["ev"] == "tab_added" && e["title"] == "history.txt"
+    });
+    assert_ne!(
+        diff_tab["tab_id"].as_u64(),
+        Some(editor_tab_id),
+        "no new tab opened"
+    );
+
+    assert_eq!(ide.quit(), 0);
+}
+
 /// F4-15 (1/2): a real process, launched by `run.run`, delivers output
 /// across `RunService`'s per-console reader thread to the console dock's
 /// own widget, and `run.stop` reaches the process cleanly. Batching math,
