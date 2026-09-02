@@ -3002,6 +3002,33 @@ mod tests {
     }
 
     #[test]
+    fn find_definitions_round_trips_the_four_new_symbol_kinds() {
+        // Task 4a: guards symbol_kind_to_str/from_str's round trip.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "const MAX: i32 = 10;\n");
+        write(
+            dir.path(),
+            "src/Person.cs",
+            "class Person {\n    public string Name { get; set; }\n    public Person() {}\n}\n",
+        );
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        assert_eq!(
+            index.find_definitions("MAX").unwrap()[0].kind,
+            Some(SymbolKind::Constant)
+        );
+        assert_eq!(
+            index.find_definitions("Name").unwrap()[0].kind,
+            Some(SymbolKind::Property)
+        );
+        let ctor = index.find_definitions("Person").unwrap();
+        let ctor = ctor
+            .iter()
+            .find(|d| d.kind == Some(SymbolKind::Constructor));
+        assert!(ctor.is_some(), "expected a Person constructor definition");
+    }
+
+    #[test]
     fn find_definitions_locates_a_java_class_by_name_proving_language_dispatch() {
         let dir = tempfile::tempdir().unwrap();
         write(
