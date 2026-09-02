@@ -539,6 +539,10 @@ fn symbol_kind_to_str(kind: SymbolKind) -> &'static str {
         SymbolKind::Method => "method",
         SymbolKind::Function => "function",
         SymbolKind::Field => "field",
+        SymbolKind::Constant => "constant",
+        SymbolKind::Property => "property",
+        SymbolKind::Constructor => "constructor",
+        SymbolKind::EnumMember => "enum_member",
     }
 }
 
@@ -551,6 +555,10 @@ fn symbol_kind_from_str(s: &str) -> Option<SymbolKind> {
         "method" => Some(SymbolKind::Method),
         "function" => Some(SymbolKind::Function),
         "field" => Some(SymbolKind::Field),
+        "constant" => Some(SymbolKind::Constant),
+        "property" => Some(SymbolKind::Property),
+        "constructor" => Some(SymbolKind::Constructor),
+        "enum_member" => Some(SymbolKind::EnumMember),
         _ => None,
     }
 }

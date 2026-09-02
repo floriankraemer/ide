@@ -2,7 +2,7 @@
 ; JavaScript patterns are included directly (no `inherits:` support).
 (class_declaration name: (type_identifier) @name) @definition.class
 (method_definition name: (property_identifier) @name) @definition.method
-(public_field_definition name: (property_identifier) @name) @definition.field
+(public_field_definition name: (property_identifier) @name) @definition.property
 (function_declaration name: (identifier) @name) @definition.function
 (generator_function_declaration name: (identifier) @name) @definition.function
 
@@ -19,4 +19,11 @@
 ; Restricted to interface bodies on purpose: a bare `property_signature`
 ; also matches members of an inline object type (a destructured
 ; parameter's annotation), which is not an outline entry.
-(interface_body (property_signature name: (property_identifier) @name) @definition.field)
+(interface_body (property_signature name: (property_identifier) @name) @definition.property)
+; Enum members: `enum_body`'s own `name:` field covers a bare `Foo` entry,
+; `enum_assignment` covers `Foo = 1`. The bare-entry definition is the name
+; token itself, not the whole `enum_body` -- else every bare member's
+; "whole definition" range would span (and byte-range-contain) every other
+; member's, corrupting `outline()`'s containment-based nesting.
+(enum_body name: (property_identifier) @definition.enum_member @name)
+(enum_assignment name: (property_identifier) @name) @definition.enum_member

@@ -16,5 +16,14 @@
 (local_function_statement name: (identifier) @definition)
 (parameter name: (identifier) @definition)
 (variable_declarator name: (identifier) @definition)
+; Task 4a: `property_declaration`/`enum_member_declaration` joined
+; tags.scm's `@definition.<kind>` set (auto-properties, enum members) but
+; were missing here — the same drift the comment above warns about, this
+; time catching a property/enum-member name in the "no @definition
+; anywhere" gap, which left it referenced but never indexed as a
+; definition (`sym_is_definition` never set) even though `outline()`
+; already reported it as one.
+(property_declaration name: (identifier) @definition)
+(enum_member_declaration name: (identifier) @definition)
 
 (identifier) @reference

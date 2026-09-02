@@ -7,6 +7,7 @@
 (interface_declaration name: (identifier) @name) @definition.interface
 (enum_declaration name: (identifier) @name) @definition.enum
 (method_declaration name: (identifier) @name) @definition.method
-(constructor_declaration name: (identifier) @name) @definition.method
+(constructor_declaration name: (identifier) @name) @definition.constructor
 (field_declaration
   declarator: (variable_declarator name: (identifier) @name)) @definition.field
+(enum_constant name: (identifier) @name) @definition.enum_member

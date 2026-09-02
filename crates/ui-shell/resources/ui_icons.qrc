@@ -2,5 +2,23 @@
     <qresource prefix="/ui">
         <file>icons/close_mask_32.a8</file>
         <file>icons/app_icon.png</file>
+        <file>icons/symbols/class.a8</file>
+        <file>icons/symbols/struct.a8</file>
+        <file>icons/symbols/enum.a8</file>
+        <file>icons/symbols/interface.a8</file>
+        <file>icons/symbols/method.a8</file>
+        <file>icons/symbols/function.a8</file>
+        <file>icons/symbols/field.a8</file>
+        <file>icons/symbols/constant.a8</file>
+        <file>icons/symbols/property.a8</file>
+        <file>icons/symbols/constructor.a8</file>
+        <file>icons/symbols/enum_member.a8</file>
+        <file>icons/symbols/category_constants.a8</file>
+        <file>icons/symbols/category_fields.a8</file>
+        <file>icons/symbols/category_properties.a8</file>
+        <file>icons/symbols/category_constructors.a8</file>
+        <file>icons/symbols/category_methods.a8</file>
+        <file>icons/symbols/category_nested_types.a8</file>
+        <file>icons/symbols/category_other.a8</file>
     </qresource>
 </RCC>

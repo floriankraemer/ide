@@ -217,6 +217,7 @@ pub(crate) fn flatten_symbol_tree(
         out.push(ffi::FfiSymbolNode {
             name: QString::from(node.name.as_str()),
             kind: to_ffi_symbol_kind(node.kind),
+            category: to_ffi_symbol_category(node.kind.category()),
             start: node.start,
             end: node.end,
             name_start: node.name_start,
@@ -240,13 +241,15 @@ pub(crate) fn to_ffi_location(location: Option<app_core::Location>) -> ffi::FfiL
 }
 
 pub(crate) fn to_ffi_symbol_match(m: index_core::SymbolMatch) -> ffi::FfiSymbolMatch {
+    let kind = m.kind.unwrap_or(syntax_core::SymbolKind::Class);
     ffi::FfiSymbolMatch {
         path: QString::from(m.path.to_string_lossy().as_ref()),
         line: m.line as u32,
         column: m.col as u32,
         name: QString::from(m.name.as_str()),
         has_kind: m.kind.is_some(),
-        kind: to_ffi_symbol_kind(m.kind.unwrap_or(syntax_core::SymbolKind::Class)),
+        kind: to_ffi_symbol_kind(kind),
+        category: to_ffi_symbol_category(kind.category()),
         is_definition: m.is_definition,
         container: QString::from(m.container.as_deref().unwrap_or("")),
     }
@@ -269,6 +272,27 @@ pub(crate) fn to_ffi_symbol_kind(kind: syntax_core::SymbolKind) -> ffi::FfiSymbo
         syntax_core::SymbolKind::Method => ffi::FfiSymbolKind::Method,
         syntax_core::SymbolKind::Function => ffi::FfiSymbolKind::Function,
         syntax_core::SymbolKind::Field => ffi::FfiSymbolKind::Field,
+        syntax_core::SymbolKind::Constant => ffi::FfiSymbolKind::Constant,
+        syntax_core::SymbolKind::Property => ffi::FfiSymbolKind::Property,
+        syntax_core::SymbolKind::Constructor => ffi::FfiSymbolKind::Constructor,
+        syntax_core::SymbolKind::EnumMember => ffi::FfiSymbolKind::EnumMember,
+    }
+}
+
+/// Task 4b: `syntax_core::SymbolKind::category`'s result as the FFI
+/// ordinal C++ groups children by (ADR-0002 — a translation, the mapping
+/// itself is decided in `syntax_core`).
+pub(crate) fn to_ffi_symbol_category(
+    category: syntax_core::SymbolCategory,
+) -> ffi::FfiSymbolCategory {
+    match category {
+        syntax_core::SymbolCategory::Constants => ffi::FfiSymbolCategory::Constants,
+        syntax_core::SymbolCategory::Fields => ffi::FfiSymbolCategory::Fields,
+        syntax_core::SymbolCategory::Properties => ffi::FfiSymbolCategory::Properties,
+        syntax_core::SymbolCategory::Constructors => ffi::FfiSymbolCategory::Constructors,
+        syntax_core::SymbolCategory::Methods => ffi::FfiSymbolCategory::Methods,
+        syntax_core::SymbolCategory::NestedTypes => ffi::FfiSymbolCategory::NestedTypes,
+        syntax_core::SymbolCategory::Other => ffi::FfiSymbolCategory::Other,
     }
 }
 
@@ -439,6 +463,10 @@ pub(crate) fn symbol_kind_word(kind: Option<syntax_core::SymbolKind>) -> &'stati
         Some(syntax_core::SymbolKind::Method) => "method",
         Some(syntax_core::SymbolKind::Function) => "function",
         Some(syntax_core::SymbolKind::Field) => "field",
+        Some(syntax_core::SymbolKind::Constant) => "constant",
+        Some(syntax_core::SymbolKind::Property) => "property",
+        Some(syntax_core::SymbolKind::Constructor) => "constructor",
+        Some(syntax_core::SymbolKind::EnumMember) => "enum member",
         None => "symbol",
     }
 }
@@ -570,4 +598,95 @@ fn utf16_offset(line: &str, byte_offset: usize) -> u32 {
         .chars()
         .map(|c| c.len_utf16() as u32)
         .sum()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn to_ffi_symbol_kind_covers_every_variant() {
+        // A `matches!` per variant rather than `==` (cxx-qt shared enums
+        // do not derive `PartialEq`): this is the exhaustive-match
+        // itself's regression guard — a new `SymbolKind` variant that
+        // `to_ffi_symbol_kind` forgets to map is a compile error there,
+        // but a variant mapped to the *wrong* `FfiSymbolKind` compiles
+        // fine and would only show up here.
+        assert!(matches!(
+            to_ffi_symbol_kind(syntax_core::SymbolKind::Constant),
+            ffi::FfiSymbolKind::Constant
+        ));
+        assert!(matches!(
+            to_ffi_symbol_kind(syntax_core::SymbolKind::Property),
+            ffi::FfiSymbolKind::Property
+        ));
+        assert!(matches!(
+            to_ffi_symbol_kind(syntax_core::SymbolKind::Constructor),
+            ffi::FfiSymbolKind::Constructor
+        ));
+        assert!(matches!(
+            to_ffi_symbol_kind(syntax_core::SymbolKind::EnumMember),
+            ffi::FfiSymbolKind::EnumMember
+        ));
+    }
+
+    #[test]
+    fn to_ffi_symbol_category_covers_every_variant() {
+        assert!(matches!(
+            to_ffi_symbol_category(syntax_core::SymbolCategory::Constants),
+            ffi::FfiSymbolCategory::Constants
+        ));
+        assert!(matches!(
+            to_ffi_symbol_category(syntax_core::SymbolCategory::Constructors),
+            ffi::FfiSymbolCategory::Constructors
+        ));
+        assert!(matches!(
+            to_ffi_symbol_category(syntax_core::SymbolCategory::NestedTypes),
+            ffi::FfiSymbolCategory::NestedTypes
+        ));
+        assert!(matches!(
+            to_ffi_symbol_category(syntax_core::SymbolCategory::Other),
+            ffi::FfiSymbolCategory::Other
+        ));
+    }
+
+    #[test]
+    fn flatten_symbol_tree_records_depth_and_derives_category_from_kind() {
+        let tree = vec![syntax_core::SymbolNode {
+            name: "Point".to_owned(),
+            kind: syntax_core::SymbolKind::Class,
+            start: 0,
+            end: 40,
+            name_start: 6,
+            name_end: 11,
+            children: vec![syntax_core::SymbolNode {
+                name: "x".to_owned(),
+                kind: syntax_core::SymbolKind::Property,
+                start: 16,
+                end: 22,
+                name_start: 16,
+                name_end: 17,
+                children: vec![],
+            }],
+        }];
+        let mut out = Vec::new();
+        flatten_symbol_tree(&tree, 0, &mut out);
+
+        assert_eq!(out.len(), 2, "root + one nested child");
+        assert_eq!(out[0].name.to_string(), "Point");
+        assert_eq!(out[0].depth, 0);
+        assert!(matches!(out[0].kind, ffi::FfiSymbolKind::Class));
+        assert!(matches!(
+            out[0].category,
+            ffi::FfiSymbolCategory::NestedTypes
+        ));
+
+        assert_eq!(out[1].name.to_string(), "x");
+        assert_eq!(out[1].depth, 1);
+        assert!(matches!(out[1].kind, ffi::FfiSymbolKind::Property));
+        assert!(matches!(
+            out[1].category,
+            ffi::FfiSymbolCategory::Properties
+        ));
+    }
 }
