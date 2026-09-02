@@ -235,6 +235,29 @@ mod ffi {
         Method,
         Function,
         Field,
+        Constant,
+        Property,
+        Constructor,
+        EnumMember,
+    }
+
+    /// Which fixed-order group (Task 4b) a symbol belongs to among its
+    /// siblings under the same parent in the Class View tree, 1:1 with
+    /// `syntax_core::SymbolCategory`. An ordinal rather than a label: the
+    /// view groups children by this value alone (equal category -> same
+    /// group, groups created in ascending order) and never has to know
+    /// which `FfiSymbolKind`s make up a group — that mapping is a business
+    /// rule and stays in Rust (CLAUDE.md's hard layering rule).
+    #[derive(Default)]
+    enum FfiSymbolCategory {
+        #[default]
+        Constants,
+        Fields,
+        Properties,
+        Constructors,
+        Methods,
+        NestedTypes,
+        Other,
     }
 
     /// One entry of `DocumentManager::tabOutline`'s flattened tree (Task
@@ -247,10 +270,14 @@ mod ffi {
     /// definition's UTF-8 byte range (used to jump/select it);
     /// `name_start`/`name_end` are just the identifier's (used to place
     /// the cursor exactly on the name) — both in the tab's UTF-8 buffer,
-    /// same convention as `FfiHighlightSpan`.
+    /// same convention as `FfiHighlightSpan`. `category` (Task 4b) is this
+    /// symbol's group among its siblings under the same parent; the view
+    /// creates one group node per distinct category actually present, in
+    /// `FfiSymbolCategory`'s declared order, and nests this item under it.
     struct FfiSymbolNode {
         name: QString,
         kind: FfiSymbolKind,
+        category: FfiSymbolCategory,
         start: usize,
         end: usize,
         name_start: usize,
@@ -318,6 +345,10 @@ mod ffi {
         column: u32,
         name: QString,
         kind: FfiSymbolKind,
+        // Task 4b: meaningless when `has_kind == false`, same convention
+        // as `kind` itself — the Project tier only groups a row into a
+        // category when it has a kind to derive one from.
+        category: FfiSymbolCategory,
         has_kind: bool,
         is_definition: bool,
         container: QString,

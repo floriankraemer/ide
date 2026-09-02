@@ -725,6 +725,10 @@ fn lsp_symbol_kind(kind: Option<syntax_core::SymbolKind>) -> u32 {
         Some(syntax_core::SymbolKind::Method) => 6,
         Some(syntax_core::SymbolKind::Function) => 12,
         Some(syntax_core::SymbolKind::Field) => 8,
+        Some(syntax_core::SymbolKind::Property) => 7,
+        Some(syntax_core::SymbolKind::Constructor) => 9,
+        Some(syntax_core::SymbolKind::Constant) => 14,
+        Some(syntax_core::SymbolKind::EnumMember) => 22,
         Some(syntax_core::SymbolKind::Class) | None => 5,
     }
 }

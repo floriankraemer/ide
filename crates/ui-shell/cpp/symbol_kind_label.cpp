@@ -25,6 +25,35 @@ QString symbolKindLabel(FfiSymbolKind kind)
         return QCoreApplication::translate("SymbolKind", "function");
     case FfiSymbolKind::Field:
         return QCoreApplication::translate("SymbolKind", "field");
+    case FfiSymbolKind::Constant:
+        return QCoreApplication::translate("SymbolKind", "constant");
+    case FfiSymbolKind::Property:
+        return QCoreApplication::translate("SymbolKind", "property");
+    case FfiSymbolKind::Constructor:
+        return QCoreApplication::translate("SymbolKind", "constructor");
+    case FfiSymbolKind::EnumMember:
+        return QCoreApplication::translate("SymbolKind", "enum member");
+    }
+    return {};
+}
+
+QString symbolCategoryLabel(FfiSymbolCategory category)
+{
+    switch (category) {
+    case FfiSymbolCategory::Constants:
+        return QCoreApplication::translate("SymbolCategory", "Constants");
+    case FfiSymbolCategory::Fields:
+        return QCoreApplication::translate("SymbolCategory", "Fields");
+    case FfiSymbolCategory::Properties:
+        return QCoreApplication::translate("SymbolCategory", "Properties");
+    case FfiSymbolCategory::Constructors:
+        return QCoreApplication::translate("SymbolCategory", "Constructors");
+    case FfiSymbolCategory::Methods:
+        return QCoreApplication::translate("SymbolCategory", "Methods");
+    case FfiSymbolCategory::NestedTypes:
+        return QCoreApplication::translate("SymbolCategory", "Nested types");
+    case FfiSymbolCategory::Other:
+        return QCoreApplication::translate("SymbolCategory", "Other");
     }
     return {};
 }

@@ -22,3 +22,8 @@
 (impl_item type: (type_identifier) @name) @definition.class
 (function_item name: (identifier) @name) @definition.function
 (field_declaration name: (field_identifier) @name) @definition.field
+; `const`/`static` items have their own grammar node, unlike a constructor
+; (Rust has no dedicated constructor syntax to distinguish from a plain
+; associated `fn`), so only these two get a new kind here.
+(const_item name: (identifier) @name) @definition.constant
+(static_item name: (identifier) @name) @definition.constant

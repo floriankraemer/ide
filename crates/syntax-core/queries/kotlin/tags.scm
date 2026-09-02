@@ -16,5 +16,8 @@
 (class_declaration "interface" name: (identifier) @name) @definition.interface
 (object_declaration name: (identifier) @name) @definition.class
 (function_declaration name: (identifier) @name) @definition.function
-(property_declaration (variable_declaration (identifier) @name)) @definition.field
-(enum_entry (identifier) @name) @definition.field
+; Kotlin properties (`val`/`var`) are a first-class language concept, not
+; merely fields, so this gets the dedicated kind; enum entries likewise
+; have their own grammar node.
+(property_declaration (variable_declaration (identifier) @name)) @definition.property
+(enum_entry (identifier) @name) @definition.enum_member

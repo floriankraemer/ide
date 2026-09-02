@@ -9,3 +9,6 @@
 (type_spec name: (type_identifier) @name type: (struct_type)) @definition.struct
 (type_spec name: (type_identifier) @name type: (interface_type)) @definition.interface
 (field_declaration name: (field_identifier) @name) @definition.field
+; `const_spec` is a real, distinct grammar node — Go has no property or
+; constructor syntax of its own, so this is the only new kind that fits.
+(const_declaration (const_spec name: (identifier) @name)) @definition.constant

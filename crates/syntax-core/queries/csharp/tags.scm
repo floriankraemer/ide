@@ -9,8 +9,9 @@
 (struct_declaration name: (identifier) @name) @definition.struct
 (enum_declaration name: (identifier) @name) @definition.enum
 (method_declaration name: (identifier) @name) @definition.method
-(constructor_declaration name: (identifier) @name) @definition.method
+(constructor_declaration name: (identifier) @name) @definition.constructor
 (field_declaration
   (variable_declaration
     (variable_declarator name: (identifier) @name))) @definition.field
-(property_declaration name: (identifier) @name) @definition.field
+(property_declaration name: (identifier) @name) @definition.property
+(enum_member_declaration name: (identifier) @name) @definition.enum_member

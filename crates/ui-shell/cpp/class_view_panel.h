@@ -67,6 +67,20 @@ private:
     // each have their own same-named class.
     void addProjectSymbol(const FfiSymbolMatch &row);
 
+    // Task 4b: the category sub-node `parent`'s children are grouped under
+    // for `category` — created lazily, in `FfiSymbolCategory`'s fixed
+    // order among whichever sibling categories already exist under the
+    // same `parent`, the first time that category is actually seen (both
+    // tiers route every symbol/leaf item through this instead of parenting
+    // it directly). `groups` is `categoryGroups_` for the project tier
+    // (rows stream in over the panel's lifetime) or a call-local map for
+    // the per-file tier (`refresh()` rebuilds the whole tree each time).
+    // Group items carry no `UserRole` data, same invariant file/container
+    // items already follow, so double-click/context-menu keep skipping
+    // them for free.
+    QTreeWidgetItem *categoryGroup(QHash<QTreeWidgetItem *, QHash<int, QTreeWidgetItem *>> &groups,
+                                    QTreeWidgetItem *parent, FfiSymbolCategory category);
+
     void onItemDoubleClicked(QTreeWidgetItem *item);
 
     // Task J: "Find Usages" on a leaf symbol item (per-file or project
@@ -83,6 +97,8 @@ private:
     bool projectMode_ = false;
     QHash<QString, QTreeWidgetItem *> fileItems_;
     QHash<QString, QTreeWidgetItem *> containerItems_;
+    // Project tier only; see categoryGroup()'s doc comment.
+    QHash<QTreeWidgetItem *, QHash<int, QTreeWidgetItem *>> categoryGroups_;
 };
 
 } // namespace ui_shell

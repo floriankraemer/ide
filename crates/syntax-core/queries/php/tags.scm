@@ -17,4 +17,6 @@
 (method_declaration name: (name) @name) @definition.method
 (function_definition name: (name) @name) @definition.function
 (property_declaration
-  (property_element name: (variable_name) @name)) @definition.field
+  (property_element name: (variable_name) @name)) @definition.property
+(const_element (name) @name) @definition.constant
+(enum_case name: (name) @name) @definition.enum_member

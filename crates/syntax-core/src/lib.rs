@@ -180,8 +180,11 @@ pub struct FoldRange {
 /// every language uses every variant — e.g. Rust has no `Interface` in the
 /// literal sense (its `trait`s map onto it), PHP's `trait`s also map onto
 /// it (see `php/tags.scm`), and JSON uses none of them. Kept to what's
-/// actually meaningful across Rust/C#/Java/PHP rather than a maximal
-/// per-language taxonomy.
+/// actually meaningful across the languages whose grammar distinguishes
+/// it rather than a maximal per-language taxonomy — a language with no
+/// distinct grammar node for e.g. a property keeps reporting it as
+/// `Field` (see each `tags.scm`'s own comments for what a given
+/// language's grammar actually supports).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
     Class,
@@ -191,7 +194,14 @@ pub enum SymbolKind {
     Method,
     Function,
     Field,
+    Constant,
+    Property,
+    Constructor,
+    EnumMember,
 }
+
+mod symbol_category;
+pub use symbol_category::SymbolCategory;
 
 /// One definition site extracted by [`outline()`] (Task D): a name plus
 /// its structural kind, the byte range of the whole definition (`start`/
@@ -240,6 +250,10 @@ fn symbol_kind_for_capture(capture_name: &str) -> Option<SymbolKind> {
         "method" => Some(SymbolKind::Method),
         "function" => Some(SymbolKind::Function),
         "field" => Some(SymbolKind::Field),
+        "constant" => Some(SymbolKind::Constant),
+        "property" => Some(SymbolKind::Property),
+        "constructor" => Some(SymbolKind::Constructor),
+        "enum_member" => Some(SymbolKind::EnumMember),
         _ => None,
     }
 }
@@ -1875,12 +1889,12 @@ mod tests {
         let names: Vec<&str> = greeter.children.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["Name", "Greeter", "Greet"]);
         assert_eq!(greeter.children[0].kind, SymbolKind::Field);
-        assert_eq!(greeter.children[1].kind, SymbolKind::Method); // constructor
+        assert_eq!(greeter.children[1].kind, SymbolKind::Constructor);
         assert_eq!(greeter.children[2].kind, SymbolKind::Method);
     }
 
     #[test]
-    fn csharp_outline_captures_auto_properties_as_fields() {
+    fn csharp_outline_captures_auto_properties_as_properties() {
         const SNIPPET: &str = "class Person {\n    public string Name { get; set; }\n}\n";
         let roots = outline(csharp(), SNIPPET);
         let person = roots
@@ -1888,8 +1902,24 @@ mod tests {
             .find(|s| s.kind == SymbolKind::Class && s.name == "Person")
             .expect("expected a Person class root");
         assert_eq!(person.children.len(), 1);
-        assert_eq!(person.children[0].kind, SymbolKind::Field);
+        assert_eq!(person.children[0].kind, SymbolKind::Property);
         assert_eq!(person.children[0].name, "Name");
+    }
+
+    #[test]
+    fn csharp_outline_captures_enum_members() {
+        const SNIPPET: &str = "enum Color {\n    Red,\n    Green,\n}\n";
+        let roots = outline(csharp(), SNIPPET);
+        let color = roots
+            .iter()
+            .find(|s| s.kind == SymbolKind::Enum && s.name == "Color")
+            .expect("expected a Color enum root");
+        let names: Vec<&str> = color.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Red", "Green"]);
+        assert!(color
+            .children
+            .iter()
+            .all(|c| c.kind == SymbolKind::EnumMember));
     }
 
     #[test]
@@ -1902,8 +1932,24 @@ mod tests {
         let names: Vec<&str> = greeter.children.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["name", "Greeter", "greet"]);
         assert_eq!(greeter.children[0].kind, SymbolKind::Field);
-        assert_eq!(greeter.children[1].kind, SymbolKind::Method); // constructor
+        assert_eq!(greeter.children[1].kind, SymbolKind::Constructor);
         assert_eq!(greeter.children[2].kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn java_outline_captures_enum_constants() {
+        const SNIPPET: &str = "enum Color {\n    RED,\n    GREEN;\n}\n";
+        let roots = outline(java(), SNIPPET);
+        let color = roots
+            .iter()
+            .find(|s| s.kind == SymbolKind::Enum && s.name == "Color")
+            .expect("expected a Color enum root");
+        let names: Vec<&str> = color.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["RED", "GREEN"]);
+        assert!(color
+            .children
+            .iter()
+            .all(|c| c.kind == SymbolKind::EnumMember));
     }
 
     #[test]
@@ -1915,9 +1961,100 @@ mod tests {
             .expect("expected a Greeter class root");
         let names: Vec<&str> = greeter.children.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["$name", "__construct", "greet"]);
-        assert_eq!(greeter.children[0].kind, SymbolKind::Field);
+        assert_eq!(greeter.children[0].kind, SymbolKind::Property);
         assert_eq!(greeter.children[1].kind, SymbolKind::Method);
         assert_eq!(greeter.children[2].kind, SymbolKind::Method);
+    }
+
+    #[test]
+    fn php_outline_captures_class_constants() {
+        const SNIPPET: &str = "<?php\nclass Greeter {\n    const GREETING = \"hi\";\n}\n";
+        let roots = outline(php(), SNIPPET);
+        let greeter = roots
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "Greeter")
+            .expect("expected a Greeter class root");
+        assert_eq!(greeter.children.len(), 1);
+        assert_eq!(greeter.children[0].kind, SymbolKind::Constant);
+        assert_eq!(greeter.children[0].name, "GREETING");
+    }
+
+    #[test]
+    fn rust_outline_captures_const_and_static_items() {
+        let text = "const MAX: i32 = 10;\nstatic NAME: &str = \"x\";\n";
+        let roots = outline(rust(), text);
+        let names: Vec<&str> = roots.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["MAX", "NAME"]);
+        assert!(roots.iter().all(|s| s.kind == SymbolKind::Constant));
+    }
+
+    #[test]
+    fn go_outline_captures_const_declarations() {
+        let text = "package main\n\nconst MaxItems = 10\n";
+        let roots = outline(lang("go"), text);
+        let max_items = roots
+            .iter()
+            .find(|s| s.name == "MaxItems")
+            .expect("expected a MaxItems constant root");
+        assert_eq!(max_items.kind, SymbolKind::Constant);
+    }
+
+    #[test]
+    fn typescript_outline_captures_properties_and_enum_members() {
+        let text = "class Point {\n    x: number;\n}\nenum Color {\n    Red,\n    Green = 2,\n}\n";
+        let roots = outline(lang("typescript"), text);
+        let point = roots
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "Point")
+            .expect("expected a Point class root");
+        assert_eq!(point.children[0].kind, SymbolKind::Property);
+        assert_eq!(point.children[0].name, "x");
+
+        let color = roots
+            .iter()
+            .find(|s| s.kind == SymbolKind::Enum && s.name == "Color")
+            .expect("expected a Color enum root");
+        let names: Vec<&str> = color.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["Red", "Green"]);
+        assert!(color
+            .children
+            .iter()
+            .all(|c| c.kind == SymbolKind::EnumMember));
+    }
+
+    #[test]
+    fn javascript_outline_captures_class_fields_as_properties() {
+        let text = "class Point {\n    x = 0;\n}\n";
+        let roots = outline(lang("javascript"), text);
+        let point = roots
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "Point")
+            .expect("expected a Point class root");
+        assert_eq!(point.children[0].kind, SymbolKind::Property);
+        assert_eq!(point.children[0].name, "x");
+    }
+
+    #[test]
+    fn kotlin_outline_captures_properties_and_enum_entries() {
+        let text = "class Point {\n    val x: Int = 0\n}\nenum class Color {\n    RED, GREEN\n}\n";
+        let roots = outline(lang("kotlin"), text);
+        let point = roots
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "Point")
+            .expect("expected a Point class root");
+        assert_eq!(point.children[0].kind, SymbolKind::Property);
+        assert_eq!(point.children[0].name, "x");
+
+        let color = roots
+            .iter()
+            .find(|s| s.kind == SymbolKind::Class && s.name == "Color")
+            .expect("expected a Color enum-class root");
+        let names: Vec<&str> = color.children.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["RED", "GREEN"]);
+        assert!(color
+            .children
+            .iter()
+            .all(|c| c.kind == SymbolKind::EnumMember));
     }
 
     // --- supertype edges (Go to Implementation / Go to Interface) ---

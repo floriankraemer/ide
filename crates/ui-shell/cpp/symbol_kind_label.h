@@ -19,4 +19,10 @@ namespace ui_shell {
 // Rust side, and labelling it "field" would hide that.
 QString symbolKindLabel(FfiSymbolKind kind);
 
+// The Class View group heading for a symbol category (Task 4b) — "Fields",
+// "Methods", etc. Same closed-enum convention as symbolKindLabel: an
+// out-of-range category yields an empty string rather than a plausible
+// word.
+QString symbolCategoryLabel(FfiSymbolCategory category);
+
 } // namespace ui_shell

@@ -539,6 +539,10 @@ fn symbol_kind_to_str(kind: SymbolKind) -> &'static str {
         SymbolKind::Method => "method",
         SymbolKind::Function => "function",
         SymbolKind::Field => "field",
+        SymbolKind::Constant => "constant",
+        SymbolKind::Property => "property",
+        SymbolKind::Constructor => "constructor",
+        SymbolKind::EnumMember => "enum_member",
     }
 }
 
@@ -551,6 +555,10 @@ fn symbol_kind_from_str(s: &str) -> Option<SymbolKind> {
         "method" => Some(SymbolKind::Method),
         "function" => Some(SymbolKind::Function),
         "field" => Some(SymbolKind::Field),
+        "constant" => Some(SymbolKind::Constant),
+        "property" => Some(SymbolKind::Property),
+        "constructor" => Some(SymbolKind::Constructor),
+        "enum_member" => Some(SymbolKind::EnumMember),
         _ => None,
     }
 }
@@ -2991,6 +2999,33 @@ mod tests {
         assert_eq!(defs[0].path, file);
         assert!(defs[0].is_definition);
         assert_eq!(defs[0].line, 1);
+    }
+
+    #[test]
+    fn find_definitions_round_trips_the_four_new_symbol_kinds() {
+        // Task 4a: guards symbol_kind_to_str/from_str's round trip.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "src/lib.rs", "const MAX: i32 = 10;\n");
+        write(
+            dir.path(),
+            "src/Person.cs",
+            "class Person {\n    public string Name { get; set; }\n    public Person() {}\n}\n",
+        );
+        let index = TextIndex::build(dir.path()).unwrap();
+
+        assert_eq!(
+            index.find_definitions("MAX").unwrap()[0].kind,
+            Some(SymbolKind::Constant)
+        );
+        assert_eq!(
+            index.find_definitions("Name").unwrap()[0].kind,
+            Some(SymbolKind::Property)
+        );
+        let ctor = index.find_definitions("Person").unwrap();
+        let ctor = ctor
+            .iter()
+            .find(|d| d.kind == Some(SymbolKind::Constructor));
+        assert!(ctor.is_some(), "expected a Person constructor definition");
     }
 
     #[test]
