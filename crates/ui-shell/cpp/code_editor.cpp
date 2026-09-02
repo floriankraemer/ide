@@ -466,6 +466,13 @@ void CodeEditor::paintEvent(QPaintEvent *event)
                              QStringLiteral(" ") + text);
         }
     }
+
+    // Show-whitespace-characters task: off by default, like inlay hints
+    // above, and for the same reason — a glyph that isn't in the file
+    // should cost nothing to a user who never turned it on.
+    if (whitespaceOptions_.enabled || whitespaceOptions_.eolMarkers) {
+        paintWhitespace();
+    }
 }
 
 bool CodeEditor::viewportEvent(QEvent *event)
@@ -583,6 +590,146 @@ void CodeEditor::setInlayHintsEnabled(bool enabled)
     viewport()->update();
 }
 
+void CodeEditor::setWhitespaceOptions(const WhitespaceOptions &options)
+{
+    whitespaceOptions_ = options;
+    viewport()->update();
+}
+
+void CodeEditor::setWhitespaceClassifier(WhitespaceClassifier classifier)
+{
+    whitespaceClassifier_ = std::move(classifier);
+}
+
+void CodeEditor::setEditorTabWidth(int columns)
+{
+    tabWidthColumns_ = qMax(1, columns);
+    refreshTabStopDistance();
+}
+
+void CodeEditor::refreshTabStopDistance()
+{
+    setTabStopDistance(fontMetrics().horizontalAdvance(QLatin1Char(' ')) * tabWidthColumns_);
+}
+
+namespace {
+
+// A small filled dot, centered in [start, end)'s cell — the space glyph.
+void paintSpaceGlyph(QPainter &painter, const QRect &start, const QRect &end)
+{
+    const int cx = (start.left() + qMax(end.left(), start.left() + 2)) / 2;
+    const int cy = start.center().y();
+    const int r = qMax(1, start.height() / 10);
+    painter.drawEllipse(QPoint(cx, cy), r, r);
+}
+
+// A right-pointing arrow spanning [start, end)'s cell — the tab glyph. The
+// cell's width already reflects `setTabStopDistance` (Qt's own layout, not
+// anything computed here), so the arrow visually ends where the tab does.
+void paintTabGlyph(QPainter &painter, const QRect &start, const QRect &end)
+{
+    const int y = start.center().y();
+    const int x1 = start.left() + 2;
+    const int x2 = qMax(x1 + 4, end.left() - 3);
+    painter.drawLine(x1, y, x2, y);
+    const QPolygon arrow{QPoint(x2, y - 3), QPoint(x2, y + 3), QPoint(x2 + 3, y)};
+    painter.drawPolygon(arrow);
+}
+
+} // namespace
+
+void CodeEditor::paintWhitespace()
+{
+    QTextBlock block = firstVisibleBlock();
+    if (!block.isValid()) {
+        return;
+    }
+    const int firstBlockNumber = block.blockNumber();
+    QStringList lines;
+    QVector<int> blockNumbers;
+    int top = qRound(blockBoundingGeometry(block).translated(contentOffset()).top());
+    const int viewportBottom = viewport()->rect().bottom();
+    while (block.isValid() && top <= viewportBottom) {
+        if (block.isVisible()) {
+            lines.append(block.text());
+            blockNumbers.append(block.blockNumber());
+        }
+        top += qRound(blockBoundingRect(block).height());
+        block = block.next();
+    }
+    if (blockNumbers.isEmpty()) {
+        return;
+    }
+    const int lastBlockNumber = blockNumbers.last();
+
+    if (whitespaceOptions_.enabled && whitespaceClassifier_) {
+        // Simple "recompute on revision or visible-range change" cache
+        // (documented on whitespaceCache*_ in the header): cheap to check,
+        // and it turns "one classifier call per paint" into "one per
+        // scroll step or edit".
+        const int revision = document()->revision();
+        if (revision != whitespaceCacheRevision_ || firstBlockNumber != whitespaceCacheFirstBlock_
+            || lastBlockNumber != whitespaceCacheLastBlock_) {
+            whitespaceCache_ = whitespaceClassifier_(lines.join(QLatin1Char('\n')));
+            whitespaceCacheRevision_ = revision;
+            whitespaceCacheFirstBlock_ = firstBlockNumber;
+            whitespaceCacheLastBlock_ = lastBlockNumber;
+        }
+
+        QPainter painter(viewport());
+        const QColor glyphColor = tinted(palette().color(QPalette::Text), 100, 145);
+        painter.setPen(glyphColor);
+        painter.setBrush(glyphColor);
+        const int maxPosition = document()->characterCount() - 1;
+        for (const WhitespaceSpan &span : std::as_const(whitespaceCache_)) {
+            const bool categoryOn = (span.category == 0 && whitespaceOptions_.leading)
+              || (span.category == 1 && whitespaceOptions_.inner)
+              || (span.category == 2 && whitespaceOptions_.trailing);
+            if (!categoryOn) {
+                continue;
+            }
+            const QTextBlock lineBlock =
+              document()->findBlockByNumber(firstBlockNumber + span.line);
+            if (!lineBlock.isValid() || !lineBlock.isVisible()) {
+                continue;
+            }
+            const int startPos = qBound(0, lineBlock.position() + span.column, maxPosition);
+            const int endPos = qBound(0, startPos + 1, maxPosition);
+            QTextCursor startCursor(document());
+            startCursor.setPosition(startPos);
+            QTextCursor endCursor(document());
+            endCursor.setPosition(endPos);
+            const QRect startRect = cursorRect(startCursor);
+            const QRect endRect = cursorRect(endCursor);
+            if (span.isTab) {
+                paintTabGlyph(painter, startRect, endRect);
+            } else {
+                paintSpaceGlyph(painter, startRect, endRect);
+            }
+        }
+    }
+
+    if (whitespaceOptions_.eolMarkers) {
+        QPainter painter(viewport());
+        painter.setPen(tinted(palette().color(QPalette::Text), 100, 145));
+        const int maxPosition = document()->characterCount() - 1;
+        for (int blockNumber : std::as_const(blockNumbers)) {
+            const QTextBlock lineBlock = document()->findBlockByNumber(blockNumber);
+            if (!lineBlock.isValid() || !lineBlock.isVisible()) {
+                continue;
+            }
+            const int endPos = qBound(0, lineBlock.position() + lineBlock.length() - 1, maxPosition);
+            QTextCursor cursor(document());
+            cursor.setPosition(endPos);
+            const QRect rect = cursorRect(cursor);
+            const QRect markerRect(rect.right() + 2, rect.top(),
+                                   painter.fontMetrics().horizontalAdvance(QChar(0xB6)) + 2,
+                                   rect.height());
+            painter.drawText(markerRect, Qt::AlignVCenter | Qt::AlignLeft, QString(QChar(0xB6)));
+        }
+    }
+}
+
 void CodeEditor::highlightCurrentLine()
 {
     QList<QTextEdit::ExtraSelection> selections;
@@ -662,6 +809,12 @@ void CodeEditor::changeEvent(QEvent *event)
     // colour is derived from it, so it has to be recomputed here.
     if (event->type() == QEvent::PaletteChange) {
         highlightCurrentLine();
+    }
+    // Show-whitespace-characters task: the tab stop distance is computed
+    // from the font's own space width, so a font change (Settings > Editor,
+    // live preview) leaves it stale until this recomputes it.
+    if (event->type() == QEvent::FontChange) {
+        refreshTabStopDistance();
     }
 }
 

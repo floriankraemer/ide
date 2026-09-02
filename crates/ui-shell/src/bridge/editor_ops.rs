@@ -751,4 +751,42 @@ impl ffi::EditorOps {
         }
         self.to_ffi_edits(&text, &transaction)
     }
+
+    /// The tab width `text` in this tab renders at, resolved through
+    /// `settings-model` for the tab's language — what `CodeEditor` sets
+    /// `setTabStopDistance` from, so a rendered tab glyph ends where the
+    /// tab actually ends (show-whitespace-characters task).
+    pub fn tab_width_for_tab(&self, tab_id: u64) -> u32 {
+        let language = language_of(&self.session.borrow(), tab_id);
+        self.tab_width(language) as u32
+    }
+
+    /// Classifies every space/tab character in `text` into leading, inner,
+    /// and trailing whitespace (`editor_core::whitespace`), one line at a
+    /// time. `text` is whatever multi-line slice the caller wants
+    /// classified — the view passes only its currently visible blocks,
+    /// joined with `\n`, so this is one call per repaint rather than one
+    /// per line (show-whitespace-characters task). Stateless: unlike
+    /// `matching_bracket`/`save_rule_edits` above it needs no tab id or
+    /// language, since space/tab classification does not depend on either.
+    pub fn whitespace_spans(&self, text: &QString) -> Vec<ffi::FfiWhitespaceSpan> {
+        let text = text.to_string();
+        text.split('\n')
+            .enumerate()
+            .flat_map(|(line, line_text)| {
+                editor_core::whitespace::classify_whitespace(line_text)
+                    .into_iter()
+                    .map(move |c| ffi::FfiWhitespaceSpan {
+                        line: line as u32,
+                        column: c.column as u32,
+                        is_tab: c.is_tab,
+                        category: match c.category {
+                            editor_core::whitespace::WhitespaceCategory::Leading => 0,
+                            editor_core::whitespace::WhitespaceCategory::Inner => 1,
+                            editor_core::whitespace::WhitespaceCategory::Trailing => 2,
+                        },
+                    })
+            })
+            .collect()
+    }
 }

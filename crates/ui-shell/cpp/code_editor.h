@@ -11,6 +11,8 @@
 #include <QVector>
 #include <QWidget>
 
+#include <functional>
+
 class QCompleter;
 class QContextMenuEvent;
 class QEvent;
@@ -110,6 +112,36 @@ struct InlayHintSpan
     QString label;
     bool paddingLeft;
     bool paddingRight;
+};
+
+// One classified space/tab character (show-whitespace-characters task),
+// view-local for the same reason FoldRange and DiagnosticSpan are:
+// converted from FfiWhitespaceSpan by whoever owns the mapping (EditorTabs),
+// so this widget stays decoupled from the cxx-qt generated header. `line`/
+// `column` are relative to whatever multi-line text the classifier was
+// asked about — this widget's own paintEvent, which only ever asks about
+// its currently visible blocks — not absolute document positions.
+// `category` mirrors `editor_core::whitespace::WhitespaceCategory`: 0 =
+// leading, 1 = inner, 2 = trailing.
+struct WhitespaceSpan
+{
+    int line;
+    int column;
+    bool isTab;
+    int category;
+};
+
+// JetBrains-style "show whitespace characters" (show-whitespace-characters
+// task): the master toggle plus which of leading/inner/trailing paint when
+// it is on, and the independent end-of-line marker toggle. 1:1 with
+// `FfiWhitespaceOptions`, but view-local like every other struct here.
+struct WhitespaceOptions
+{
+    bool enabled = false;
+    bool leading = false;
+    bool inner = false;
+    bool trailing = false;
+    bool eolMarkers = false;
 };
 
 // One caret that is not the widget's own (F1-15), view-local for the same
@@ -233,6 +265,31 @@ public:
     void setInlayHints(const QVector<InlayHintSpan> &hints);
     void setInlayHintsEnabled(bool enabled);
     bool inlayHintsEnabled() const { return inlayHintsEnabled_; }
+
+    // Show-whitespace-characters task: what to paint. `paintEvent` re-asks
+    // `whitespaceClassifier_` for the visible blocks whenever the document
+    // revision or the visible block range changes — nothing to invalidate
+    // here, setting new options just changes what the next paint filters
+    // in or draws.
+    void setWhitespaceOptions(const WhitespaceOptions &options);
+    const WhitespaceOptions &whitespaceOptions() const { return whitespaceOptions_; }
+
+    // Classifies one multi-line slice of text (the widget's own currently
+    // visible blocks, joined with '\n') into leading/inner/trailing
+    // space-and-tab spans. Set once, at tab-open time, by whoever owns the
+    // FFI seam (EditorTabs) — kept as a callback rather than a direct
+    // `ui-shell/src/bridge` include so this header stays decoupled from the
+    // cxx-qt generated one, the same reason WhitespaceSpan above is a
+    // plain struct and not FfiWhitespaceSpan.
+    using WhitespaceClassifier = std::function<QVector<WhitespaceSpan>(const QString &text)>;
+    void setWhitespaceClassifier(WhitespaceClassifier classifier);
+
+    // The tab width (in columns) a tab character advances to, resolved for
+    // this tab's language. Recomputes `setTabStopDistance` from the
+    // current font immediately, and `changeEvent` recomputes it again on
+    // every later font change, so a rendered tab glyph always ends where
+    // the tab actually ends.
+    void setEditorTabWidth(int columns);
 
     // L5: show these candidates, or hide the popup when the vector is
     // empty. Called with whatever `LanguageService::completionItems` last
@@ -446,6 +503,15 @@ private:
     // F3-16: the marker painted at `blockNumber`, if any.
     bool changeMarkerAt(int blockNumber, ChangeMarker *out) const;
 
+    // Show-whitespace-characters task: paints whichever of the whitespace
+    // glyphs and the end-of-line marker are currently on, over the
+    // currently visible blocks. Split out of paintEvent because it needs
+    // its own two-pass shape (gather the visible blocks' text for one
+    // batched classifier call, then paint from the answer) that would
+    // otherwise crowd out the secondary-caret/inlay-hint painting above it.
+    void paintWhitespace();
+    void refreshTabStopDistance();
+
     LineNumberArea *lineNumberArea_;
     // F3-18: blame text keyed by block, and whether the gutter currently
     // widens to show it — same "empty means default, off by default"
@@ -470,6 +536,21 @@ private:
     QVector<OccurrenceSpan> occurrenceSpans_;
     QVector<InlayHintSpan> inlayHints_;
     bool inlayHintsEnabled_ = false;
+    WhitespaceOptions whitespaceOptions_;
+    WhitespaceClassifier whitespaceClassifier_;
+    // Simple "recompute if the document revision or the visible block
+    // range changed" cache (show-whitespace-characters task): classifying
+    // one line is cheap, but it is still an FFI call, and paintEvent can
+    // fire many times a second while scrolling or typing. -1 never
+    // matches a real revision, so the first paint always computes once.
+    int whitespaceCacheRevision_ = -1;
+    int whitespaceCacheFirstBlock_ = -1;
+    int whitespaceCacheLastBlock_ = -1;
+    QVector<WhitespaceSpan> whitespaceCache_;
+    // Tab width in columns, resolved for this tab's language
+    // (`EditorOps::tabWidthForTab`); 4 is a reasonable pre-resolution
+    // default, matching `settings_model::editing`'s own default.
+    int tabWidthColumns_ = 4;
     // The Ctrl-hovered word, as [start, end) document positions, or
     // {-1, -1} for none. Pure view state, like the fold collapse state.
     QPair<int, int> hoverSpan_{-1, -1};

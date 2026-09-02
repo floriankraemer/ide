@@ -216,6 +216,29 @@ pub struct Settings {
     /// thing, so there is no default-vs-unset distinction to preserve.
     #[serde(default)]
     pub project_tree_sort_descending: bool,
+    /// JetBrains-style "show whitespace characters": the master toggle.
+    /// Off by default, like `project_tree_sort_descending` above — "never
+    /// chosen" and "off" are the same thing here, so a bare `bool` is
+    /// correct and there is no default-vs-unset distinction to preserve.
+    #[serde(default)]
+    pub show_whitespace: bool,
+    /// Paint leading whitespace (before the first non-whitespace character
+    /// on a line) when [`Settings::show_whitespace`] is on.
+    #[serde(default)]
+    pub show_whitespace_leading: bool,
+    /// Paint inner whitespace (between two non-whitespace characters) when
+    /// [`Settings::show_whitespace`] is on.
+    #[serde(default)]
+    pub show_whitespace_inner: bool,
+    /// Paint trailing whitespace (after the last non-whitespace character)
+    /// when [`Settings::show_whitespace`] is on.
+    #[serde(default)]
+    pub show_whitespace_trailing: bool,
+    /// Paint a marker at the end of every line. Independent of
+    /// `show_whitespace`: a line ending isn't a space or a tab, so this can
+    /// be on with the master toggle off (or vice versa).
+    #[serde(default)]
+    pub show_eol_markers: bool,
     /// Interface font scale in percent for the menu bar and its popup menus,
     /// independent of [`Settings::ui_font_scale`].
     #[serde(default)]
@@ -813,6 +836,11 @@ mod tests {
             ui_font_scale: 130,
             project_tree_font_scale: 150,
             project_tree_sort_descending: true,
+            show_whitespace: true,
+            show_whitespace_leading: true,
+            show_whitespace_inner: false,
+            show_whitespace_trailing: true,
+            show_eol_markers: true,
             menu_font_scale: 90,
             mcp_enabled: Some(true),
             mcp_port: 7337,

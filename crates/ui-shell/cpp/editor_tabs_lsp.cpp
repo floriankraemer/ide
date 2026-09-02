@@ -497,6 +497,23 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
     editor->setFont(editorFont_);
     editor->setInlayHintsEnabled(inlayHintsEnabled_);
     applyEditorAppearance(editor);
+    // Show-whitespace-characters task: the classifier is a plain callback
+    // into editorOps_ (kept off the header so CodeEditor stays decoupled
+    // from the cxx-qt generated types, same as every other FFI-to-view
+    // conversion in this file), and the tab width is resolved once per
+    // tab open — it depends on the tab's language, which does not change
+    // for the tab's lifetime.
+    editor->setWhitespaceOptions(whitespaceOptions_);
+    editor->setWhitespaceClassifier([this](const QString &text) {
+        QVector<WhitespaceSpan> spans;
+        for (const FfiWhitespaceSpan &span : editorOps_->whitespaceSpans(text)) {
+            spans.append(WhitespaceSpan{static_cast<int>(span.line),
+                                        static_cast<int>(span.column), span.is_tab,
+                                        static_cast<int>(span.category)});
+        }
+        return spans;
+    });
+    editor->setEditorTabWidth(static_cast<int>(editorOps_->tabWidthForTab(tabId)));
     // Y2: self-parents to editor->document(), no manual lifetime
     // management needed. Plain text (a file no language claims) yields
     // no spans from the incremental highlighter, so this is a

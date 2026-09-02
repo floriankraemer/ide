@@ -109,6 +109,20 @@ mod ffi {
         current_line: QString,
     }
 
+    /// JetBrains-style "show whitespace characters" (task
+    /// show-whitespace-characters), 1:1 with the five `Settings::show_*`
+    /// fields. Bundled into one struct rather than five get/set pairs,
+    /// matching how `FfiEditorFont`/`FfiEditorColors` bundle their related
+    /// settings above.
+    #[derive(Default)]
+    struct FfiWhitespaceOptions {
+        enabled: bool,
+        leading: bool,
+        inner: bool,
+        trailing: bool,
+        eol_markers: bool,
+    }
+
     /// One row of the Keymap settings page, 1:1 with `app_config::Binding`.
     /// `shortcut` is `QKeySequence` portable text, empty for "unbound";
     /// `is_default` is resolved in Rust so the view can style rebound rows
@@ -156,6 +170,22 @@ mod ffi {
         bold: bool,
         italic: bool,
         underline: bool,
+    }
+
+    /// One classified space/tab character, from `EditorOps::whitespaceSpans`
+    /// (show-whitespace-characters task). `line`/`column` are 0-based,
+    /// relative to the multi-line text the call was made with — not
+    /// absolute document positions, since the view only ever asks about
+    /// its currently visible blocks and maps `line` back to a `QTextBlock`
+    /// number itself. `category` is a bare integer rather than a second
+    /// cxx enum for one field's worth of values, the same call
+    /// `line_ops.rs`'s `LINE_OP_*` constants make: 0 = leading, 1 = inner,
+    /// 2 = trailing (`editor_core::whitespace::WhitespaceCategory`).
+    struct FfiWhitespaceSpan {
+        line: u32,
+        column: u32,
+        is_tab: bool,
+        category: u8,
     }
 
     /// One in-editor find match, as a half-open `[start, end)` range of
@@ -1875,6 +1905,17 @@ mod ffi {
             current_line: &QString,
         );
 
+        /// JetBrains-style "show whitespace characters", off by default.
+        #[qinvokable]
+        #[cxx_name = "whitespaceOptions"]
+        fn whitespace_options(self: &AppSettings) -> FfiWhitespaceOptions;
+
+        /// Persist the whitespace display options (the Editor page, live
+        /// preview + on OK).
+        #[qinvokable]
+        #[cxx_name = "saveWhitespaceOptions"]
+        fn save_whitespace_options(self: &AppSettings, options: &FfiWhitespaceOptions);
+
         /// Where the running server publishes its port and auth token, so
         /// the Settings page can tell the user what to point an agent at.
         #[qinvokable]
@@ -2899,6 +2940,20 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "saveRuleEdits"]
         fn save_rule_edits(self: &EditorOps, tab_id: u64, text: &QString) -> Vec<FfiTextEdit>;
+
+        /// The tab width this tab's language resolves to (show-whitespace-
+        /// characters task): what `CodeEditor::setTabStopDistance` uses.
+        #[qinvokable]
+        #[cxx_name = "tabWidthForTab"]
+        fn tab_width_for_tab(self: &EditorOps, tab_id: u64) -> u32;
+
+        /// Classified space/tab spans for `text` (show-whitespace-
+        /// characters task) — the view passes its currently visible
+        /// blocks' text, joined with `\n`, once per repaint rather than
+        /// once per line.
+        #[qinvokable]
+        #[cxx_name = "whitespaceSpans"]
+        fn whitespace_spans(self: &EditorOps, text: &QString) -> Vec<FfiWhitespaceSpan>;
 
         /// The carets changed without an edit — after Ctrl+D, Alt+Click, a
         /// column selection or an expansion — so the widget repaints them.

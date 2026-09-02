@@ -572,6 +572,16 @@ void EditorTabs::setEditorFont(const QFont &font)
     });
 }
 
+void EditorTabs::setWhitespaceOptions(const WhitespaceOptions &options)
+{
+    whitespaceOptions_ = options;
+    forEachEditor([&options](QPlainTextEdit *editor) {
+        if (auto *codeEditor = qobject_cast<CodeEditor *>(editor)) {
+            codeEditor->setWhitespaceOptions(options);
+        }
+    });
+}
+
 void EditorTabs::setInlayHintsEnabled(bool enabled)
 {
     inlayHintsEnabled_ = enabled;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "code_editor.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include <QFont>
@@ -358,6 +359,10 @@ public:
     // the override was set.
     void setEditorColors(const QString &backgroundHex, const QString &foregroundHex,
                           const QString &currentLineHex);
+
+    // Show-whitespace-characters task, same S2 live-apply convention as
+    // setEditorFont/setEditorColors above.
+    void setWhitespaceOptions(const WhitespaceOptions &options);
 
     // L6: the language-server settings were committed and stale servers
     // were stopped, so every open document has to be announced again — to a
@@ -752,6 +757,7 @@ private:
     bool signatureTipVisible_ = false;
     CodeEditor *inlayHintsEditor_ = nullptr;
     bool inlayHintsEnabled_ = false;
+    WhitespaceOptions whitespaceOptions_;
 };
 
 } // namespace ui_shell
