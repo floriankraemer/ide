@@ -1032,11 +1032,14 @@ mod ffi {
         fn set_sort_descending(self: Pin<&mut ProjectTreeModel>, descending: bool);
 
         /// Open `path` as the active project (persisted as last-opened) and
-        /// reset the model to reflect the new tree. The current tree (if
-        /// any) is left unchanged on failure (US-1).
+        /// reset the model to reflect the new tree. Fire-and-forget: the
+        /// directory walk runs on a worker thread (ADR-0037), and the
+        /// outcome arrives as `projectOpened` or `projectOpenFailed` rather
+        /// than a synchronous return, so this never blocks the Qt thread.
+        /// The current tree (if any) is left unchanged on failure (US-1).
         #[qinvokable]
         #[cxx_name = "openFolder"]
-        fn open_folder(self: Pin<&mut ProjectTreeModel>, path: &QString) -> FfiResult;
+        fn open_folder(self: Pin<&mut ProjectTreeModel>, path: &QString);
 
         /// Absolute path of the open project's root folder, or an empty
         /// string if none is open. Used by the tree-view context menu to
@@ -1088,10 +1091,17 @@ mod ffi {
 
         /// Reopen the last-persisted project (US-1's "relaunch reopens the
         /// last project" criterion) and start its filesystem watcher.
-        /// Returns whether a project was found and opened; false (with the
-        /// model left empty) if nothing was persisted or it no longer
-        /// exists — startup is silent about a missing last project rather
-        /// than popping an error dialog before the window is even shown.
+        /// Fire-and-forget like `openFolder` (ADR-0037): the walk itself
+        /// runs on a worker thread, and `projectOpened`/`projectOpenFailed`
+        /// report the outcome. Returns whether a reopen was kicked off at
+        /// all — `false` (with the model left empty) only if nothing was
+        /// ever persisted, which the caller (the splash screen) uses to know
+        /// no `projectOpened`/`projectOpenFailed` is coming and it should
+        /// stop waiting. `true` covers a persisted path that turns out to be
+        /// missing or unreadable too — that failure surfaces asynchronously
+        /// through `projectOpenFailed`, same as any other failed open, and
+        /// startup deliberately does not turn it into a popup dialog before
+        /// the window is even shown.
         #[qinvokable]
         #[cxx_name = "reopenLastProject"]
         fn reopen_last_project(self: Pin<&mut ProjectTreeModel>) -> bool;
@@ -1133,6 +1143,16 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "projectOpened"]
         fn project_opened(self: Pin<&mut ProjectTreeModel>, root_path: QString);
+
+        /// Emitted instead of `projectOpened` when `openFolder`/
+        /// `reopenLastProject`'s off-thread walk fails (ADR-0037) — the
+        /// typed-code-plus-message convention (ADR-0003), same as every
+        /// other fallible slot's `FfiResult`, just delivered as a signal
+        /// since the walk itself no longer has a synchronous return to
+        /// carry it on. The current tree (if any) is left unchanged.
+        #[qsignal]
+        #[cxx_name = "projectOpenFailed"]
+        fn project_open_failed(self: Pin<&mut ProjectTreeModel>, result: FfiResult);
     }
 
     // Enables `self.qt_thread()` on `ProjectTreeModel`, giving the

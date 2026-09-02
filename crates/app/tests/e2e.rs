@@ -210,6 +210,46 @@ fn e2e_launches_with_its_project_and_quits() {
     assert_eq!(ide.quit(), 0);
 }
 
+/// Opening a project (ADR-0037: the directory walk moved off the Qt thread)
+/// still completes and leaves both the sidebar tree and the search index
+/// fully populated — not just "some project opened", the specific one this
+/// launch was seeded with, tree and index agreeing on every file in it.
+///
+/// `async_open` has enough files and a nested subdirectory precisely so a
+/// walk that raced its own installation (partial tree, or a tree that
+/// disagreed with the index another async worker built over the same
+/// files) would show up here as a missing or wrong-content file, not as a
+/// timeout — a stuck walk already fails via `wait_for_ev`'s own timeout, so
+/// this test's job is proving the walk's *result* is complete and correct,
+/// not that it eventually happens at all.
+#[test]
+#[ignore = "E2E: needs an X server; run via `make e2e`"]
+fn e2e_open_folder_walk_completes_correctly() {
+    let name = "e2e_open_folder_walk_completes_correctly";
+    let mut ide = Ide::launch(name, APP, fixture("async_open"));
+    let mcp = ide.mcp();
+
+    let opened = ide.wait_for_ev(Mark::start(), "project_opened");
+    assert_eq!(
+        Path::new(opened["root"].as_str().expect("root is a string")),
+        ide.project_root(),
+        "the app opened a different project than the one it was seeded with"
+    );
+    wait_for_index(&mcp);
+
+    // A file several directories deep, only reachable at all if the async
+    // walk actually recursed into `src/nested/deep` rather than stopping
+    // short or racing its own tree installation.
+    let original = fixture_text("async_open", "src/nested/deep/target.rs");
+    let tab = open_file(&ide, "target.rs");
+    assert_eq!(
+        buffer(&mcp, tab["tab_id"].as_u64().expect("tab_id")),
+        original
+    );
+
+    assert_eq!(ide.quit(), 0);
+}
+
 /// Open, edit, save, undo.
 ///
 /// Two assertions here have no other net. The marker's `tab_id` and MCP's

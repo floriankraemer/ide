@@ -15,9 +15,11 @@ namespace ui_shell {
 void populateRecentProjectsMenu(QMenu *menu, AppSettings *appSettings, ProjectTreeModel *treeModel,
                                 QMainWindow *window);
 
-// Shared tail for "Open Folder..." and clicking a Recent Projects entry: open,
-// report failure, and on success refresh the menu so the just-opened path moves
-// to the front (C2).
+// Shared tail for "Open Folder..." and clicking a Recent Projects entry:
+// kicks off the (asynchronous, ADR-0037) open, shows busy indication while
+// it runs, and reports failure or refreshes the menu — so the just-opened
+// path moves to the front (C2) — once `projectOpened`/`projectOpenFailed`
+// arrives.
 void openProjectAndRefreshRecents(ProjectTreeModel *treeModel, QMainWindow *window,
                                   QMenu *recentProjectsMenu, AppSettings *appSettings,
                                   const QString &path);
