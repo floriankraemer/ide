@@ -9,7 +9,7 @@ Orientation for a cold start: `docs/architecture/overview.md` (what the system i
 
 Load these skills before the work they cover — do not wait for a prompt to name the language:
 
-- `clean-code-solid` — before any non-trivial implementation, refactor, or review.
+- `clean-code-solid` — before any non-trivial implementation, refactor, or review. Follow Robert C. Martin's Clean Code and SOLID principles as the baseline for all code in this repo, Rust and C++ alike.
 - `rust` — before writing or reviewing Rust in any crate.
 - `qt` and `cpp` — before touching `crates/ui-shell/cpp/` or the cxx-qt bridge.
 - `conventional-commits` — before writing a commit message or PR title.
