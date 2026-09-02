@@ -6,6 +6,12 @@ edition = "2021"
 [dependencies]
 ui-shell = { path = "../ui-shell" }
 
+[build-dependencies]
+# Only actually invoked on the windows target (see build.rs); winres shells
+# out to `windres`/`rc.exe` rather than linking anything, so it costs nothing
+# on the Linux host build.
+winres = "0.1"
+
 # The E2E harness lives in `crates/e2e` but its tests live here, because
 # `CARGO_BIN_EXE_app` is only set for integration tests of the crate that
 # declares the binary — and guessing at `target/<profile>/app` is wrong under

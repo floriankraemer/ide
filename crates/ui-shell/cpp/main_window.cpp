@@ -959,6 +959,10 @@ int run_app()
 {
     int argc = 0;
     QApplication app(argc, nullptr);
+    // Taskbar/alt-tab/window-decoration icon on Linux and macOS (Windows
+    // gets its exe/taskbar icon from the embedded .ico via app/build.rs
+    // instead — this QIcon is just its in-window icon there).
+    app.setWindowIcon(QIcon(QStringLiteral(":/ui/icons/app_icon.png")));
     // Wraps whatever platform style Qt picked, intercepting only the tab
     // close-button icon (see TabCloseIconStyle above) — every QTabWidget in
     // the app picks it up with no per-call-site change.
