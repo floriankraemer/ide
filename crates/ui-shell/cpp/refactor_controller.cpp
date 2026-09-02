@@ -437,6 +437,16 @@ void RefactorController::buildCodeActions(QMenu *refactorMenu, AppSettings *appS
     toggleInlayHintsAction->setChecked(editorTabs_->inlayHintsEnabled());
     connect(toggleInlayHintsAction, &QAction::toggled, this,
             [this](bool checked) { editorTabs_->setInlayHintsEnabled(checked); });
+
+    QAction *collapseAllAction = registerAction(
+      refactorMenu, QStringLiteral("code.collapseAll"), tr("Collapse All"), appSettings, actions);
+    connect(collapseAllAction, &QAction::triggered, this,
+            [this]() { editorTabs_->collapseAllFolds(); });
+
+    QAction *expandAllAction = registerAction(
+      refactorMenu, QStringLiteral("code.expandAll"), tr("Expand All"), appSettings, actions);
+    connect(expandAllAction, &QAction::triggered, this,
+            [this]() { editorTabs_->expandAllFolds(); });
 }
 
 } // namespace ui_shell

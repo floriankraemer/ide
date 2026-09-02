@@ -247,13 +247,15 @@ void SyntaxHighlighter::highlightBlock(const QString &text)
             for (const auto &range : foldRanges) {
                 const int startChar = utf16IndexForByteOffset(cachedByteOffsets_, range.start);
                 const int endChar = utf16IndexForByteOffset(cachedByteOffsets_, range.end);
+                const int anchorChar = utf16IndexForByteOffset(cachedByteOffsets_, range.anchor);
                 const int startBlock = document()->findBlock(startChar).blockNumber();
                 // `endChar` sits on the closing brace/bracket; back off by
                 // one so a fold ending exactly at a block boundary doesn't
                 // spuriously include the following block.
                 const int endBlock =
                   document()->findBlock(std::max(startChar, endChar - 1)).blockNumber();
-                ranges.append(FoldRange{ startBlock, endBlock });
+                const int anchorBlock = document()->findBlock(anchorChar).blockNumber();
+                ranges.append(FoldRange{ startBlock, endBlock, anchorBlock });
             }
             editor_->setFoldRanges(ranges);
         }

@@ -5,6 +5,7 @@
 #include <QMenu>
 
 #include <QAbstractItemView>
+#include <QAction>
 #include <QColor>
 #include <QCompleter>
 #include <QEvent>
@@ -816,6 +817,19 @@ void CodeEditor::lineNumberAreaMousePressEvent(QMouseEvent *event)
     }
 }
 
+void CodeEditor::lineNumberAreaContextMenuEvent(QContextMenuEvent *event)
+{
+    QMenu menu(this);
+    QAction *collapse = menu.addAction(tr("Collapse All"));
+    QAction *expand = menu.addAction(tr("Expand All"));
+    QAction *chosen = menu.exec(lineNumberArea_->mapToGlobal(event->pos()));
+    if (chosen == collapse) {
+        collapseAll();
+    } else if (chosen == expand) {
+        expandAll();
+    }
+}
+
 bool CodeEditor::foldStartingAt(int blockNumber, FoldRange *out) const
 {
     const auto it = foldStarts_.constFind(blockNumber);
@@ -902,6 +916,24 @@ void CodeEditor::toggleFold(int blockNumber)
     }
 }
 
+void CodeEditor::collapseAll()
+{
+    for (auto it = foldStarts_.constBegin(); it != foldStarts_.constEnd(); ++it) {
+        if (!collapsedRanges_.contains(it.value())) {
+            toggleFold(it.value().anchorBlock);
+        }
+    }
+}
+
+void CodeEditor::expandAll()
+{
+    for (auto it = foldStarts_.constBegin(); it != foldStarts_.constEnd(); ++it) {
+        if (collapsedRanges_.contains(it.value())) {
+            toggleFold(it.value().anchorBlock);
+        }
+    }
+}
+
 void CodeEditor::ensureBlockVisible(int blockNumber)
 {
     QVector<FoldRange> stillCollapsed;
@@ -940,8 +972,8 @@ void CodeEditor::setFoldRanges(const QVector<FoldRange> &ranges)
     foldStarts_.clear();
     foldStarts_.reserve(foldRanges_.size());
     for (const FoldRange &range : foldRanges_) {
-        if (range.endBlock > range.startBlock && !foldStarts_.contains(range.startBlock)) {
-            foldStarts_.insert(range.startBlock, range);
+        if (range.endBlock > range.startBlock && !foldStarts_.contains(range.anchorBlock)) {
+            foldStarts_.insert(range.anchorBlock, range);
         }
     }
 

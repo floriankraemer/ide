@@ -237,6 +237,12 @@ public:
     void setInlayHintsEnabled(bool enabled);
     bool inlayHintsEnabled() const { return inlayHintsEnabled_; }
 
+    // code.collapseAll / code.expandAll: the current tab only, unlike
+    // setInlayHintsEnabled above — folding is per-editor view state, not a
+    // setting that should retroactively apply to every open tab.
+    void collapseAllFolds();
+    void expandAllFolds();
+
     // F2-11: Ctrl+P. Asks again with `explicit_request = true`, which is
     // what lets it work with the caret sitting still on an argument the
     // trigger character for was typed several keystrokes ago.

@@ -264,6 +264,7 @@ mod ffi {
     struct FfiFoldRange {
         start: usize,
         end: usize,
+        anchor: usize,
     }
 
     /// One renderable terminal cell (Task F3), 1:1 with

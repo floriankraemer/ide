@@ -36,12 +36,24 @@ class LineNumberArea;
 // foldable (that's Qt-free Rust).
 struct FoldRange
 {
+    // Body's start block (the `{`/opening-construct line) and end block —
+    // this is the range that actually gets hidden on collapse, via
+    // setBlocksVisible(startBlock, endBlock, ...): the marker/click anchor
+    // below can sit earlier, on the declaration line, while the hidden span
+    // still starts right after the body opens.
     int startBlock;
     int endBlock;
+    // Line the fold marker is drawn/clicked on: the declaration that owns
+    // this block (`fn foo(...)`, `class Foo`, ...) rather than `startBlock`
+    // itself, so a multi-line signature between the declaration and the
+    // `{` stays visible when collapsed. Equal to startBlock when the two
+    // coincide (the common case: `fn foo() {` on one line).
+    int anchorBlock;
 
     bool operator==(const FoldRange &other) const
     {
-        return startBlock == other.startBlock && endBlock == other.endBlock;
+        return startBlock == other.startBlock && endBlock == other.endBlock
+            && anchorBlock == other.anchorBlock;
     }
 };
 
@@ -164,6 +176,10 @@ public:
 
     void lineNumberAreaPaintEvent(QPaintEvent *event);
     void lineNumberAreaMousePressEvent(QMouseEvent *event);
+    // Right-click anywhere in the gutter: a small "Collapse All"/"Expand
+    // All" menu, independent of which (if any) fold marker sits under the
+    // pointer.
+    void lineNumberAreaContextMenuEvent(QContextMenuEvent *event);
     int lineNumberAreaWidth() const;
 
     // Task C: called by SyntaxHighlighter whenever its incremental tree
@@ -177,6 +193,13 @@ public:
     // Line, Find in Files, Go to Symbol) can't park the cursor on an
     // invisible line. Blocks nothing when the line is already visible.
     void ensureBlockVisible(int blockNumber);
+
+    // Collapse/expand every fold in this editor (code.collapseAll /
+    // code.expandAll). Reuses toggleFold's collapse/expand mechanics per
+    // range, rather than duplicating the visibility bookkeeping, so
+    // collapsedRanges_ and setFoldRanges's self-healing stay correct.
+    void collapseAll();
+    void expandAll();
 
     // Find (F3): the spans the find bar wants painted, as [start, end)
     // document positions. Purely decorative — the widget neither computes
@@ -486,6 +509,10 @@ protected:
     void mousePressEvent(QMouseEvent *event) override
     {
         codeEditor_->lineNumberAreaMousePressEvent(event);
+    }
+    void contextMenuEvent(QContextMenuEvent *event) override
+    {
+        codeEditor_->lineNumberAreaContextMenuEvent(event);
     }
 
 private:
