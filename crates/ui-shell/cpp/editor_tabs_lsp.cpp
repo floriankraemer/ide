@@ -311,6 +311,15 @@ void EditorTabs::requestSemanticTokensFor(CodeEditor *editor)
     languageService_->requestSemanticTokens(path, editor->toPlainText());
 }
 
+void EditorTabs::requestCodeLensesFor(CodeEditor *editor)
+{
+    const QString path = editor->property("lspPath").toString();
+    if (path.isEmpty()) {
+        return;
+    }
+    languageService_->requestCodeLenses(path);
+}
+
 void EditorTabs::onIntentionsReady()
 {
     const bool wasPending = intentionsPending_;
@@ -788,6 +797,9 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
         // C9-followup: the server's last answer was for the previous
         // revision, so ask again on the same settle tick.
         requestSemanticTokensFor(editor);
+        // C10-followup: same reasoning — a lens's line/label can be stale
+        // the moment the buffer changes.
+        requestCodeLensesFor(editor);
     });
 
     // F3-16: a click on a change marker. `window_` (not `editor`) owns the
@@ -798,6 +810,16 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
             });
     connect(editor->document(), &QTextDocument::contentsChanged, changeTimer,
              qOverload<>(&QTimer::start));
+
+    // C10-followup: a click on a code lens pill runs it — resolving it
+    // first if needed, then dispatching its command through the
+    // gated-refactor path (`LanguageService::runCodeLens`'s own doc).
+    connect(editor, &CodeEditor::codeLensClicked, this, [this, editor](int index) {
+        const QString path = editor->property("lspPath").toString();
+        if (!path.isEmpty()) {
+            languageService_->runCodeLens(path, static_cast<quint32>(index));
+        }
+    });
 
     // The Preview dock's own debounce (ADR-0033), separate from the LSP
     // one above: a `didChange` and a re-render answer different questions
@@ -828,6 +850,7 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
     requestInlayHintsFor(editor);
     requestHunksFor(editor);
     requestSemanticTokensFor(editor);
+    requestCodeLensesFor(editor);
 }
 
 } // namespace ui_shell

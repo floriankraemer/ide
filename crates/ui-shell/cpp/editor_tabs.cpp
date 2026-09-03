@@ -215,6 +215,8 @@ EditorTabs::EditorTabs(DocumentManager *docManager, LanguageService *languageSer
             &EditorTabs::onInlayHintsReady);
     connect(languageService_, &LanguageService::semanticTokensReady, this,
             &EditorTabs::onSemanticTokensReady);
+    connect(languageService_, &LanguageService::codeLensesReady, this,
+            &EditorTabs::onCodeLensesReady);
 
     activeGroup_ = makeGroup();
     root_->addWidget(activeGroup_);
@@ -655,6 +657,20 @@ void EditorTabs::onSemanticTokensReady(const QString &path)
         return;
     }
     highlighter->applySemanticTokens(languageService_->semanticTokenSpans(path));
+}
+
+void EditorTabs::onCodeLensesReady(const QString &path)
+{
+    CodeEditor *editor = editorForPath(path);
+    if (!editor) {
+        return;
+    }
+    QVector<CodeLensSpan> lenses;
+    for (const FfiCodeLens &lens : languageService_->codeLenses(path)) {
+        lenses.append(
+          CodeLensSpan{ static_cast<int>(lens.line), QString(lens.label), lens.clickable });
+    }
+    editor->setCodeLenses(lenses);
 }
 
 void EditorTabs::refreshHighlighting()
