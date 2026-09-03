@@ -51,7 +51,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         x11-apps \
         imagemagick \
         xdotool \
+        python3-debugpy \
     && rm -rf /var/lib/apt/lists/*
+
+# `python3-debugpy` is the one debug adapter the E2E suite needs (D3-9).
+# Debugging is the feature most likely to be broken by a change nobody
+# noticed, and the only way to see it work is to run a real adapter — the
+# same argument that put `xdotool` and `xvfb` in this list.
 
 ENV QMAKE=/usr/bin/qmake6
 

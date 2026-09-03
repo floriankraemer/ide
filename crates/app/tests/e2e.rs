@@ -1274,8 +1274,17 @@ fn e2e_file_history_lists_commits_and_survives_the_context_menu() {
     let mark = open_search_popup(&ide, "ctrl+shift+a");
     accept_top_hit(&ide, mark, "File History");
 
+    // The marker carries the file's absolute path — `VcsService` reports
+    // what it was asked about, and the panel passes it through — so match on
+    // the name rather than on equality with a relative path the app never
+    // produces. (This assertion was comparing against `"history.txt"`, which
+    // stopped being what the marker says when #170 fixed the panel; the
+    // suite is nightly, so nothing turned red in a PR.)
     let ready = ide.wait_for_event(mark, "history_ready for history.txt", |e| {
-        e["ev"] == "history_ready" && e["path"] == "history.txt"
+        e["ev"] == "history_ready"
+            && e["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("history.txt"))
     });
     assert_eq!(
         ready["count"].as_u64(),
@@ -1284,7 +1293,11 @@ fn e2e_file_history_lists_commits_and_survives_the_context_menu() {
     );
 
     let row0 = ide.wait_for_event(mark, "history_row 0", |e| {
-        e["ev"] == "history_row" && e["path"] == "history.txt" && e["row"] == 0
+        e["ev"] == "history_row"
+            && e["path"]
+                .as_str()
+                .is_some_and(|path| path.ends_with("history.txt"))
+            && e["row"] == 0
     });
 
     // Select then right-click the newest commit's row to raise the menu.

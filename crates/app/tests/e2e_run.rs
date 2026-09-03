@@ -1,6 +1,7 @@
-//! End-to-end flows for running and building (F4, R1, B1): the console, the
-//! run-configuration dialog, running a file from the editor, and a failing
-//! build reaching the Problems dock.
+//! End-to-end flows for running, building and debugging (F4, R1, B1, D3):
+//! the console, the run-configuration dialog, running a file from the
+//! editor, a failing build reaching the Problems dock, and a debug session
+//! stopping at a breakpoint.
 //!
 //! Their own test binary rather than more of `e2e.rs`, which sits at its
 //! ratcheted size ceiling (`scripts/check-file-size.sh`). `make e2e` runs
@@ -333,6 +334,72 @@ fn e2e_build_failure_populates_problems_dock() {
         Some(0),
         "the fixture is supposed to fail to compile"
     );
+
+    assert_eq!(ide.quit(), 0);
+}
+
+/// D3-9: a real debug session stops at a breakpoint, shows variables, steps
+/// and resumes.
+///
+/// The adapter is debugpy, which the builder image installs — this is the
+/// one flow that cannot be faked, because what it proves is that a third
+/// party's adapter and this client agree. What no unit test can reach: the
+/// gutter toggle reaching the store, the store reaching the adapter through
+/// `setBreakpoints` before `configurationDone`, the `stopped` event coming
+/// back through the session's reader thread, and the frames and variables
+/// filling the dock from it.
+#[test]
+#[ignore = "E2E: needs an X server; run via `make e2e`"]
+fn e2e_debug_stops_at_a_breakpoint() {
+    let name = "e2e_debug_stops_at_a_breakpoint";
+    let mut ide = Ide::launch(name, APP, fixture("debuggable"));
+    ide.wait_for_ev(Mark::start(), "project_opened");
+    open_file(&ide, "main.py");
+
+    // Line 2 is `answer = 42`, inside `compute()`. The caret opens on line
+    // 1, so one Down reaches it.
+    let mark = ide.mark();
+    ide.key("Down");
+    ide.key("ctrl+F8"); // debug.toggleBreakpoint
+    ide.wait_for_event(mark, "the breakpoint to reach the gutter", |e| {
+        e["ev"] == "breakpoints_applied" && e["count"].as_u64().unwrap_or(0) == 1
+    });
+
+    let mark = ide.mark();
+    ide.key("shift+F9"); // debug.debug
+    let started = ide.wait_for_event(mark, "the session to start", |e| e["ev"] == "debug_started");
+    let session_id = started["session_id"].as_u64().expect("session_id");
+
+    let stopped = ide.wait_for_event(mark, "the debuggee to suspend", |e| {
+        e["ev"] == "debug_stopped" && e["session_id"].as_u64() == Some(session_id)
+    });
+    assert_eq!(
+        stopped["line"].as_u64(),
+        Some(2),
+        "it must stop on the line the breakpoint is on"
+    );
+
+    ide.wait_for_event(mark, "the variables to arrive", |e| {
+        e["ev"] == "debug_variables" && e["count"].as_u64().unwrap_or(0) > 0
+    });
+
+    // Step over: the next stop is a later line, and it is a step rather than
+    // another breakpoint hit.
+    let mark = ide.mark();
+    ide.key("F8"); // debug.stepOver
+    let stepped = ide.wait_for_event(mark, "the step to land", |e| {
+        e["ev"] == "debug_stopped" && e["session_id"].as_u64() == Some(session_id)
+    });
+    assert!(
+        stepped["line"].as_u64().unwrap_or(0) > 2,
+        "step over moved backwards or not at all: {stepped}"
+    );
+
+    let mark = ide.mark();
+    ide.key("F9"); // debug.resume
+    ide.wait_for_event(mark, "the session to end", |e| {
+        e["ev"] == "debug_terminated" && e["session_id"].as_u64() == Some(session_id)
+    });
 
     assert_eq!(ide.quit(), 0);
 }

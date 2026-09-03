@@ -78,7 +78,7 @@ Task ids are stable; titles may change.
 | D1-3 — `session`: initialize → launch/attach → configurationDone, capability flags | done | this branch |
 | D1-4 — `catalog`: codelldb, debugpy, java-debug, `[[debug_adapter]]` overrides, install hints | done | this branch |
 | D1-5 — adapter lifecycle: spawn, reader thread, shutdown, every in-flight request failed on death | done | this branch; no separate `supervisor` module — the lifetime is the session's, and a second type for it would own nothing. Automatic respawn is deliberately not offered: a debug session that died has lost its debuggee, so restarting the adapter would attach to nothing |
-| D1-6 — `runInTerminal` handed back to `run-core`'s PTY supervisor | blocked on D3-1 | the reverse-request hook exists in `SessionListener`; what answers it is the adapter, which arrives with D3 |
+| D1-6 — `runInTerminal` handed back to `run-core`'s PTY supervisor | blocked on D4-1 | the hook exists, and `initialize` deliberately does **not** advertise the capability until something answers it — advertising it while answering with an empty body is what made debugpy's launcher time out |
 | D1-7 — ADR-0041 + `layering.md` rows for `dap-core` and `stdio-framing` + CI gate | done | this branch |
 
 ### D2 — breakpoints
@@ -101,9 +101,9 @@ Task ids are stable; titles may change.
 | D3-4 — Variables with lazy expansion, Set Value gated on the adapter's capability | done | this branch |
 | D3-5 — Watches, re-evaluated on every stop, and Evaluate in the console | done | this branch |
 | D3-6 — the debugger console, fed by DAP `output` events | done | this branch |
-| D3-7 — inline values from the current frame's scopes | blocked on D3-4 |  |
+| D3-7 — inline values from the current frame's scopes | blocked on D3-4 | deferred to D4: the values are already fetched, what is missing is painting them at the end of a line |
 | D3-8 — view: the Debug toolbar button, the "&Debug" menu, capability-gated enablement | done | this branch; the toolbar now has the whole cluster the mockup shows |
-| D3-9 — E2E: `e2e_breakpoint_hits_and_variables_populate` | blocked on D3-4 |  |
+| D3-9 — E2E: `e2e_debug_stops_at_a_breakpoint`, plus a real-adapter conformance test | done | this branch; found that debugpy holds the `launch` response until `configurationDone`, so a client that waits for it deadlocks |
 
 ### D4 — the remaining debugger surface
 

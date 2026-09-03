@@ -19,7 +19,7 @@ use std::io::{BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::mpsc::{channel, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -63,6 +63,10 @@ pub struct DapSession {
     pending: Arc<Mutex<Pending>>,
     next_seq: AtomicI64,
     capabilities: Mutex<Capabilities>,
+    /// Set when the adapter's `initialized` event arrives. Waited on rather
+    /// than assumed: the event is what says the adapter is ready for
+    /// breakpoints, and DAP puts no ordering guarantee on it beyond that.
+    initialized: Arc<(Mutex<bool>, Condvar)>,
 }
 
 impl DapSession {
@@ -116,6 +120,7 @@ impl DapSession {
             })),
             next_seq: AtomicI64::new(1),
             capabilities: Mutex::new(Capabilities::default()),
+            initialized: Arc::new((Mutex::new(false), Condvar::new())),
         });
 
         let reader_session = Arc::clone(&session);
@@ -160,7 +165,12 @@ impl DapSession {
                 "linesStartAt1": true,
                 "columnsStartAt1": true,
                 "pathFormat": "path",
-                "supportsRunInTerminalRequest": true,
+                // Deliberately *not* claiming `supportsRunInTerminalRequest`.
+                // An adapter that believes the client can start the debuggee
+                // will ask it to and then wait: debugpy's launcher timed out
+                // exactly that way when this was advertised without being
+                // implemented. Claim it in D1-6, when `run-core`'s console
+                // actually answers it.
             }),
         )?;
         let capabilities = Capabilities::from_body(&body);
@@ -172,12 +182,56 @@ impl DapSession {
     /// arguments are the adapter's own — every adapter documents its own
     /// launch schema, and inventing a common one would mean translating into
     /// something no adapter accepts.
+    /// Send `launch` **without waiting for its response**, which is the only
+    /// order that works.
+    ///
+    /// An adapter is entitled to hold the launch response until the
+    /// debuggee is actually up, and the debuggee does not start until
+    /// `configurationDone` — which the client cannot send if it is still
+    /// blocked on `launch`. debugpy does exactly this, and a client that
+    /// waits deadlocks for its whole timeout and then reports "the adapter
+    /// did not answer launch in time", which is a true statement about the
+    /// wrong thing.
+    ///
+    /// A launch that genuinely fails is reported by the adapter as an
+    /// `output` event and a `terminated`, which the caller is listening for
+    /// anyway.
     pub fn launch(&self, arguments: Value) -> Result<(), DapError> {
-        self.request("launch", arguments).map(|_| ())
+        self.send_request("launch", arguments)
     }
 
+    /// The same, for joining a process that is already running.
     pub fn attach(&self, arguments: Value) -> Result<(), DapError> {
-        self.request("attach", arguments).map(|_| ())
+        self.send_request("attach", arguments)
+    }
+
+    /// Send a request and do not wait for it. Its response is matched
+    /// against no waiter and dropped, which is what "fire and forget" means
+    /// on a protocol that answers everything.
+    pub fn send_request(&self, command: &str, arguments: Value) -> Result<(), DapError> {
+        let seq = self.next_seq.fetch_add(1, Ordering::Relaxed);
+        self.send(&Message::request_bytes(seq, command, &arguments))
+    }
+
+    /// Block until the adapter's `initialized` event arrives.
+    ///
+    /// That event is the adapter saying it is ready for breakpoints. Sending
+    /// them before it is the other way to get this handshake wrong.
+    pub fn wait_for_initialized(&self, timeout: Duration) -> Result<(), DapError> {
+        let (lock, condvar) = &*self.initialized;
+        let mut ready = lock
+            .lock()
+            .map_err(|_| DapError::Protocol("the initialized flag was poisoned".to_string()))?;
+        while !*ready {
+            let (guard, wait) = condvar
+                .wait_timeout(ready, timeout)
+                .map_err(|_| DapError::Protocol("the initialized flag was poisoned".to_string()))?;
+            ready = guard;
+            if wait.timed_out() && !*ready {
+                return Err(DapError::Timeout("initialized".to_string()));
+            }
+        }
+        Ok(())
     }
 
     /// End of the configuration phase. Skipped for an adapter that does not
@@ -281,7 +335,16 @@ impl DapSession {
                     let _ = waiter.send(result);
                 }
             }
-            Message::Event { event, body } => listener.event(&event, &body),
+            Message::Event { event, body } => {
+                if event == "initialized" {
+                    let (lock, condvar) = &*self.initialized;
+                    if let Ok(mut ready) = lock.lock() {
+                        *ready = true;
+                        condvar.notify_all();
+                    }
+                }
+                listener.event(&event, &body)
+            }
             Message::Request {
                 seq,
                 command,
@@ -388,13 +451,15 @@ mod tests {
 
     #[test]
     fn a_failed_response_becomes_a_typed_error_naming_the_command() {
-        let response = r#"{"seq":1,"type":"response","request_seq":1,"success":false,"command":"launch","message":"no such file"}"#;
+        let response = r#"{"seq":1,"type":"response","request_seq":1,"success":false,"command":"stackTrace","message":"no such thread"}"#;
         let script = format!("head -c 1 > /dev/null; {}; sleep 1", framed(response));
         let session =
             DapSession::start(&echo_adapter(&script), None, Box::<Recorder>::default()).unwrap();
-        let err = session.launch(json!({})).unwrap_err();
+        let err = session
+            .request("stackTrace", json!({ "threadId": 1 }))
+            .unwrap_err();
         assert_eq!(err.code(), DapError::CODE_REQUEST);
-        assert!(err.to_string().contains("no such file"), "{err}");
+        assert!(err.to_string().contains("no such thread"), "{err}");
         session.shutdown();
     }
 
@@ -450,6 +515,43 @@ mod tests {
             std::thread::sleep(Duration::from_millis(20));
         }
         assert_eq!(reverse.lock().unwrap().as_slice(), ["runInTerminal"]);
+        session.shutdown();
+    }
+
+    #[test]
+    fn launch_does_not_wait_for_its_response() {
+        // An adapter that holds the launch response until `configurationDone`
+        // is not misbehaving — debugpy does it — so `launch` must return
+        // immediately or the handshake deadlocks.
+        let session =
+            DapSession::start(&echo_adapter("sleep 2"), None, Box::<Recorder>::default()).unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(session.launch(json!({})), Ok(()));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "launch waited for a response"
+        );
+        session.shutdown();
+    }
+
+    #[test]
+    fn waiting_for_initialized_ends_when_the_event_arrives() {
+        let event = r#"{"seq":1,"type":"event","event":"initialized"}"#;
+        let script = format!("{}; sleep 1", framed(event));
+        let session =
+            DapSession::start(&echo_adapter(&script), None, Box::<Recorder>::default()).unwrap();
+        assert_eq!(session.wait_for_initialized(Duration::from_secs(5)), Ok(()));
+        session.shutdown();
+    }
+
+    #[test]
+    fn waiting_for_initialized_times_out_rather_than_hanging() {
+        let session =
+            DapSession::start(&echo_adapter("sleep 2"), None, Box::<Recorder>::default()).unwrap();
+        assert_eq!(
+            session.wait_for_initialized(Duration::from_millis(200)),
+            Err(DapError::Timeout("initialized".to_string()))
+        );
         session.shutdown();
     }
 

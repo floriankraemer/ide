@@ -1,0 +1,5 @@
+# A Python project, which is what makes `run_core::context` offer to run
+# `main.py` and `dap-core` pick debugpy for it (D3-9).
+[project]
+name = "debuggable"
+version = "0.0.0"

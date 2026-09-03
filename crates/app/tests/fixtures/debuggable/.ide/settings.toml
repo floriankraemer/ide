@@ -1,0 +1,10 @@
+version = 1
+
+[[run_config]]
+id = "e2e-python"
+name = "main.py"
+program = "python3"
+args = ["main.py"]
+cwd = "$PROJECT_DIR"
+toolchain = "python"
+target = "main.py"
