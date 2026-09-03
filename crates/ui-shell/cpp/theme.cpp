@@ -31,7 +31,8 @@ TabColors tabColorsForTheme(const QString &themeName)
                          QColor(QStringLiteral("#000000")), QColor(QStringLiteral("#e4e4e4")),
                          QColor(QStringLiteral("#1a1a1a")), QColor(QStringLiteral("#4b6eaf")),
                          QColor(QStringLiteral("#cfcfcf")), QColor(QStringLiteral("#ffffff")),
-                         QColor(QStringLiteral("#d0d0d0")), QColor(QStringLiteral("#d0d0d0"))};
+                         QColor(QStringLiteral("#d0d0d0")), QColor(QStringLiteral("#d0d0d0")),
+                         panelCanvasForTheme(themeName)};
     }
     if (themeName == QStringLiteral("vscode-dark")) {
         return TabColors{QColor(QStringLiteral("#252526")), QColor(QStringLiteral("#2d2d2d")),
@@ -39,14 +40,33 @@ TabColors tabColorsForTheme(const QString &themeName)
                          QColor(QStringLiteral("#ffffff")), QColor(QStringLiteral("#1f1f1f")),
                          QColor(QStringLiteral("#cccccc")), QColor(QStringLiteral("#007acc")),
                          QColor(QStringLiteral("#4f4f4f")), QColor(QStringLiteral("#1e1e1e")),
-                         QColor(), QColor(QStringLiteral("#2b2b2b"))};
+                         QColor(), QColor(QStringLiteral("#2b2b2b")),
+                         panelCanvasForTheme(themeName)};
     }
     return TabColors{QColor(QStringLiteral("#3c3f41")), QColor(QStringLiteral("#3c3f41")),
                      QColor(QStringLiteral("#a9b7c6")), QColor(QStringLiteral("#4e5254")),
                      QColor(QStringLiteral("#ffffff")), QColor(QStringLiteral("#45484a")),
                      QColor(QStringLiteral("#cbd6e2")), QColor(QStringLiteral("#4b6eaf")),
                      QColor(QStringLiteral("#5e6060")), QColor(QStringLiteral("#2b2b2b")),
-                     QColor(QStringLiteral("#2b2b2b")), QColor(QStringLiteral("#3c3f41"))};
+                     QColor(QStringLiteral("#2b2b2b")), QColor(QStringLiteral("#3c3f41")),
+                     panelCanvasForTheme(themeName)};
+}
+
+QColor panelCanvasForTheme(const QString &themeName)
+{
+    // Deliberately a long way from the panel colour. The panels carry no
+    // border and no shadow — a mask cannot paint one — so the *only* thing
+    // that makes a rounded corner and a 6px gap read as separation is this
+    // contrast. At a canvas one shade off the panel both are technically
+    // present and invisible at a normal viewing distance, which is what a
+    // first pass of this shipped as.
+    if (themeName == QStringLiteral("light")) {
+        return QColor(QStringLiteral("#d4d8dd"));
+    }
+    if (themeName == QStringLiteral("vscode-dark")) {
+        return QColor(QStringLiteral("#0d0d0d"));
+    }
+    return QColor(QStringLiteral("#141519"));
 }
 
 QString tabStyleSheet(const TabColors &colors)
@@ -125,8 +145,18 @@ QString dockStyleSheet(const TabColors &colors)
     // Vertical padding is 4px rather than the 6px a QTabBar tab gets because
     // an ADS tab lays its label out with margins of its own on top.
     return QStringLiteral(R"(
+/* The gap between two docked panels: `--panel-gap` wide and painted in the
+   canvas colour, so what separates two panels is empty ground rather than a
+   divider line. ADS has no C++ knob for inter-panel spacing — the splitter
+   handle it puts there anyway is the spacing, once it is given a width. */
 ads--CDockContainerWidget ads--CDockSplitter::handle {
-    background: %11;
+    background: %14;
+    width: %15px;
+    height: %15px;
+}
+
+ads--CDockContainerWidget {
+    background: %14;
 }
 
 ads--CAutoHideSideBar[sideBarLocation="0"] { border-bottom: 1px solid %11; }
@@ -134,6 +164,11 @@ ads--CAutoHideSideBar[sideBarLocation="1"] { border-right: 1px solid %11; }
 ads--CAutoHideSideBar[sideBarLocation="2"] { border-left: 1px solid %11; }
 ads--CAutoHideSideBar[sideBarLocation="3"] { border-top: 1px solid %11; }
 
+/* The rounded corner itself is a mask applied in rounded_corners.cpp, not
+   this radius: a QSS radius rounds only the background this widget paints,
+   and every child paints an opaque square over it. The radius stays so the
+   two agree wherever the mask has not been applied yet (first paint before
+   the initial resize). */
 ads--CDockAreaWidget {
     background-color: %1;
     border: none;
@@ -202,7 +237,9 @@ ads--CDockWidgetTab #tabCloseButton:pressed {
         .arg(colors.closeHover.name(), tinted(colors.closeHover, 130, 115).name(),
              colors.divider.name())
         .arg(tokens::kRadiusPanel)
-        .arg(tokens::kRadiusControl);
+        .arg(tokens::kRadiusControl)
+        .arg(colors.canvas.name())
+        .arg(tokens::kPanelGap);
 }
 
 // Embedded as a compile-time string constant rather than a .qrc/rcc
@@ -215,7 +252,7 @@ ads--CDockWidgetTab #tabCloseButton:pressed {
 // theme — only colour is theme-specific, so this is generated once and
 // appended to each of the three sheets below rather than repeated three
 // times with the numbers retyped.
-QString tokenStyleSheet()
+QString tokenStyleSheet(const QString &themeName)
 {
     return QStringLiteral(R"(
 QMenu {
@@ -230,9 +267,28 @@ QTreeView::item, QListView::item, QListWidget::item {
     min-height: %2px;
     border-radius: %1px;
 }
+
+/* The ground the docked panels sit on, so the gap between two of them and
+   the margin around them read as empty space rather than as more panel. */
+QMainWindow {
+    background-color: %3;
+}
+
+/* The status bar is one flat strip in the blend spec. Qt frames every
+   permanent widget by default, and the global `QWidget` background paints
+   each of them as its own block on top of the strip — together that reads
+   as a row of little boxes rather than a status line. */
+QStatusBar::item {
+    border: none;
+}
+
+QStatusBar QLabel, QStatusBar QProgressBar, QStatusBar QToolButton {
+    background: transparent;
+}
 )")
         .arg(tokens::kRadiusControl)
-        .arg(tokens::kRowHeight);
+        .arg(tokens::kRowHeight)
+        .arg(panelCanvasForTheme(themeName).name());
 }
 
 QString darculaStyleSheet()
@@ -305,7 +361,7 @@ QLineEdit, QPlainTextEdit {
     color: #a9b7c6;
     border: 1px solid #3c3f41;
 }
-)") + tokenStyleSheet() + tabStyleSheet(tabColorsForTheme(QStringLiteral("dark")));
+)") + tokenStyleSheet(QStringLiteral("dark")) + tabStyleSheet(tabColorsForTheme(QStringLiteral("dark")));
 }
 
 QString lightStyleSheet()
@@ -378,7 +434,7 @@ QLineEdit, QPlainTextEdit {
     color: #1a1a1a;
     border: 1px solid #d0d0d0;
 }
-)") + tokenStyleSheet() + tabStyleSheet(tabColorsForTheme(QStringLiteral("light")));
+)") + tokenStyleSheet(QStringLiteral("light")) + tabStyleSheet(tabColorsForTheme(QStringLiteral("light")));
 }
 
 // Dark+ (default dark) as VS Code ships it: the same selector set as the two
@@ -490,7 +546,7 @@ QLineEdit, QPlainTextEdit {
 QLineEdit:focus, QPlainTextEdit:focus {
     border: 1px solid #007fd4;
 }
-)") + tokenStyleSheet() + tabStyleSheet(tabColorsForTheme(QStringLiteral("vscode-dark")));
+)") + tokenStyleSheet(QStringLiteral("vscode-dark")) + tabStyleSheet(tabColorsForTheme(QStringLiteral("vscode-dark")));
 }
 
 ThemeColors colorsForTheme(const QString &themeName)

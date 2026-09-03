@@ -35,10 +35,12 @@
 #include "syntax_highlighter.h"
 #include "terminal_sessions_panel.h"
 #include "theme.h"
+#include "rounded_corners.h"
 #include "ui_tokens.h"
 #include "vcs_menu.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
+#include "DockAreaWidget.h"
 #include "DockManager.h"
 #include "DockWidget.h"
 
@@ -60,6 +62,7 @@
 #include <QPlainTextEdit>
 #include <QProxyStyle>
 #include <QStringList>
+#include <QLayout>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTabWidget>
@@ -138,15 +141,25 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // manager install itself as the central widget automatically (ADS's own
     // CDockManager::CDockManager) — no explicit QMainWindow::setCentralWidget().
     auto *dockManager = new ads::CDockManager(window);
-    // --panel-gap (blend spec): Qt Advanced Docking System has no API for
-    // spacing *between* docked panels (checked DockAreaWidget/
-    // DockContainerWidget/DockManager — no margin/spacing knob exists), so
-    // the gap is applied as outer padding around the whole docking area
-    // instead. Combined with each dock area's rounded corner
-    // (dockStyleSheet()'s `ads--CDockAreaWidget` rule) that padding shows
-    // the window's own background between the docks' corners and the edge.
-    dockManager->setContentsMargins(tokens::kPanelGap, tokens::kPanelGap, tokens::kPanelGap,
-                                    tokens::kPanelGap);
+    // --panel-gap (blend spec), the margin *around* the docked panels. It has
+    // to go on the layout: ADS gives the dock manager a layout of its own in
+    // its constructor, and a layout's own margins win over the widget's
+    // contentsMargins, so setting them on the widget alone did nothing.
+    // The gap *between* two panels is the splitter handle, widened to match
+    // in dockStyleSheet().
+    if (QLayout *managerLayout = dockManager->layout()) {
+        managerLayout->setContentsMargins(tokens::kPanelGap, tokens::kPanelGap, tokens::kPanelGap,
+                                          tokens::kPanelGap);
+    }
+    // The rounded panel corner. It cannot be QSS: a `border-radius` rounds
+    // only the background the styled widget paints itself, and every child
+    // inside a dock paints an opaque square over it (this application sets a
+    // global `QWidget { background-color: ... }`). Masking the dock area
+    // clips its whole child tree, which is what makes the corner survive.
+    QObject::connect(dockManager, &ads::CDockManager::dockAreaCreated, window,
+                     [](ads::CDockAreaWidget *dockArea) {
+                         roundCorners(dockArea, tokens::kRadiusPanel);
+                     });
     auto *docks = new DockRegistry(dockManager);
 
     // The editor area is a QSplitter tree of tab groups (see EditorTabs) so

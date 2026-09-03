@@ -64,9 +64,17 @@ struct TabColors
     QColor pane;         // the page area below the strip
     QColor paneBorder;   // an invalid QColor means borderless
     QColor divider;      // the splitter handles between docked panes
+    QColor canvas;       // the ground the panels sit on — see panelCanvasForTheme()
 };
 
 TabColors tabColorsForTheme(const QString &themeName);
+
+// The ground the docked panels sit on: what shows through the gaps between
+// them and in the margin around them, so each panel reads as its own card
+// rather than as one edge-to-edge surface. Deliberately a step away from
+// `TabColors::pane` — with the two equal there is a radius on the panels but
+// nothing behind them for it to be a corner *against*.
+QColor panelCanvasForTheme(const QString &themeName);
 
 // The QTabBar/QTabWidget half, concatenated into each theme's sheet below.
 QString tabStyleSheet(const TabColors &colors);

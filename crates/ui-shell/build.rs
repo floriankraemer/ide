@@ -273,6 +273,7 @@ fn main() {
         // F0-7: the dock show/hide registry. Free of Q_OBJECT (plain class,
         // no signals/slots), so only the source is listed.
         .cpp_file("cpp/dock_layout.cpp")
+        .cpp_file("cpp/rounded_corners.cpp")
         // First hand-written (non-generated) QObject in this crate: header
         // passed to cpp_file() auto-enables moc (CppFile::from, cxx-qt-build
         // 0.9), so this is also the first place build.rs runs moc directly.
