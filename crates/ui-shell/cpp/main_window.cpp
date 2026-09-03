@@ -5,6 +5,8 @@
 #include "markdown_preview_panel.h"
 #include "appearance_page.h"
 #include "changes_panel.h"
+#include "build_menu.h"
+#include "build_panel.h"
 #include "class_view_panel.h"
 #include "code_editor.h"
 #include "dock_layout.h"
@@ -131,6 +133,7 @@ struct CentralWidgets
     ChangesPanel *changesPanel;
     FileHistoryPanel *fileHistoryPanel;
     RunConsolePanel *runConsolePanel;
+    BuildPanel *buildPanel;
     MarkdownPreviewPanel *previewPanel;
 };
 
@@ -139,7 +142,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                                    SearchModel *searchModel, TerminalSupervisor *terminalSupervisor,
                                    LanguageService *languageService, AiChat *aiChat,
                                    VcsService *vcsService, RunService *runService,
-                                   PreviewProvider *previewProvider)
+                                   BuildService *buildService, PreviewProvider *previewProvider)
 {
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
@@ -183,7 +186,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // than inside the Run Console dock, where they were only visible once
     // that dock was opened. The Run Console panel still forwards the global
     // `run.*` shortcuts to it.
-    auto *runToolbar = new RunToolbar(runService, window);
+    auto *runToolbar = new RunToolbar(runService, buildService, window);
     QToolBar *toolBar = window->addToolBar(QObject::tr("Run"));
     toolBar->setObjectName(QStringLiteral("runToolBar"));
     toolBar->setMovable(false);
@@ -319,7 +322,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // Task L2: the Problems panel, tabbed into the same bottom area as Find
     // in Files and Find Usages — the same "list of locations" shape, fed by
     // the language servers instead of a query.
-    auto *problemsPanel = new ProblemsPanel(languageService, openAt, dockManager);
+    auto *problemsPanel = new ProblemsPanel(languageService, buildService, openAt, dockManager);
     auto *problemsDock = new ads::CDockWidget(dockManager, QObject::tr("Problems"));
     problemsDock->setWidget(problemsPanel);
     docks->registerDock(QStringLiteral("problems"), problemsDock, ads::CenterDockWidgetArea,
@@ -343,6 +346,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     docks->registerDock(QStringLiteral("terminal"), terminalDock, ads::CenterDockWidgetArea,
                         bottomArea);
     auto *runConsolePanel = buildRunConsoleDock(dockManager, docks, bottomArea, runToolbar, openAt);
+    auto *buildPanel = buildBuildDock(dockManager, docks, bottomArea, buildService);
 
     // Class View tracks whatever tab is current: refresh on open, on
     // switch, and whenever a tab becomes clean. `tabModifiedChanged`
@@ -564,7 +568,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                            treeView,         searchResultsPanel, classViewPanel,
                            terminalPanel,    findUsagesPanel,  searchEverywhereDialog,
                            problemsPanel,    aiChatPanel,      changesPanel,
-                           fileHistoryPanel, runConsolePanel,  previewPanel};
+                           fileHistoryPanel, runConsolePanel,  buildPanel,
+                           previewPanel};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -634,6 +639,9 @@ void buildMainWindow(AppSettings *appSettings,
     // project is opened, same as LanguageService.
     auto *vcsService = new VcsService(window);
     auto *runService = new RunService(window);
+    // B1-6: one build adapter per window, like the others; it runs nothing
+    // until asked and knows no project until one is open.
+    auto *buildService = new BuildService(window);
     auto *runConfigEditor = new RunConfigEditor(window);
     // ADR-0021: one AI chat session per window, alongside the other
     // per-window QObjects, plus the Settings > AI Providers draft — the same
@@ -656,7 +664,7 @@ void buildMainWindow(AppSettings *appSettings,
     const CentralWidgets central =
       buildCentralWidget(window, treeModel, docManager, appSettings, searchModel,
                           terminalSupervisor, languageService, aiChat, vcsService, runService,
-                          previewProvider);
+                          buildService, previewProvider);
     EditorTabs *editorTabs = central.editorTabs;
     wireVcsService(vcsService, treeModel, editorTabs); // F3-12a/F3-16
     wireRunService(runService, editorTabs);             // R1-7
@@ -975,6 +983,7 @@ void buildMainWindow(AppSettings *appSettings,
                  central.fileHistoryPanel, viewMenu);
     buildRunMenu(window, runService, runConfigEditor, appSettings, *actions, central.docks,
                  central.runConsolePanel, treeModel, editorTabs, viewMenu);
+    buildBuildMenu(window, central.buildPanel, appSettings, *actions, central.docks, viewMenu);
 
     buildNavigateMenu(window, languageService, searchModel, editorTabs, appSettings, *actions,
                        central.docks, central.findUsagesPanel);

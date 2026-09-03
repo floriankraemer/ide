@@ -103,11 +103,29 @@ QIcon rerunGlyph(QColor color)
     });
 }
 
+// Build — a hammer reduced to its silhouette: a head bar and a handle. The
+// mockup shows the same two shapes; at 16px anything more detailed reads as
+// noise.
+QIcon buildGlyph(QColor color)
+{
+    return glyphIcon(color, [](QPainter &painter, QColor tint) {
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(tint);
+        QPainterPath head;
+        head.addRoundedRect(QRectF(2.5, 3.0, 8.0, 3.2), 1, 1);
+        painter.drawPath(head);
+        QPainterPath handle;
+        handle.addRoundedRect(QRectF(7.6, 6.0, 2.2, 7.0), 1, 1);
+        painter.drawPath(handle);
+    });
+}
+
 } // namespace
 
-RunToolbar::RunToolbar(RunService *runService, QWidget *parent)
+RunToolbar::RunToolbar(RunService *runService, BuildService *buildService, QWidget *parent)
   : QWidget(parent)
   , runService_(runService)
+  , buildService_(buildService)
 {
     // Height and horizontal padding come from the QToolBar this sits in
     // (chromeStyleSheet()'s `QToolBar` rule); this widget only orders the
@@ -124,6 +142,8 @@ RunToolbar::RunToolbar(RunService *runService, QWidget *parent)
     stopButton_->setIcon(stopGlyph(semantic.error));
     rerunButton_ = makeGlyphButton(tr("Rerun"), tr("Rerun"), this);
     rerunButton_->setIcon(rerunGlyph(dim));
+    buildButton_ = makeGlyphButton(tr("Build"), tr("Build Project"), this);
+    buildButton_->setIcon(buildGlyph(dim));
 
     auto *layout = new QHBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -131,6 +151,7 @@ RunToolbar::RunToolbar(RunService *runService, QWidget *parent)
     layout->addWidget(runButton_);
     layout->addWidget(stopButton_);
     layout->addWidget(rerunButton_);
+    layout->addWidget(buildButton_);
     layout->addStretch(1);
     layout->addWidget(configCombo_);
 
@@ -140,6 +161,10 @@ RunToolbar::RunToolbar(RunService *runService, QWidget *parent)
     connect(runButton_, &QToolButton::clicked, this, &RunToolbar::runSelected);
     connect(stopButton_, &QToolButton::clicked, this, &RunToolbar::stopSelected);
     connect(rerunButton_, &QToolButton::clicked, this, &RunToolbar::rerunSelected);
+    // The button and `build.build` are two doors onto one call; neither
+    // decides anything about the build (ADR-0040).
+    connect(buildButton_, &QToolButton::clicked, this,
+            [this]() { buildService_->build(); });
 
     connect(runService_, &RunService::consoleStarted, this,
             [this](quint64 consoleId, const QString &configId) {

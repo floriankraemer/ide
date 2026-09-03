@@ -301,6 +301,9 @@ fn main() {
         // leg of EditorTabs, same reasoning as the other three.
         .cpp_file("cpp/editor_tabs_vcs.cpp")
         .cpp_file("cpp/editor_tabs_run.cpp")
+        .cpp_file("cpp/build_panel.h")
+        .cpp_file("cpp/build_panel.cpp")
+        .cpp_file("cpp/build_menu.cpp")
         // The two navigation docks and the QMainWindow subclass, likewise
         // Q_OBJECT-free (they subclass QWidget/QMainWindow but declare no
         // signals or slots of their own), so only the sources are listed.

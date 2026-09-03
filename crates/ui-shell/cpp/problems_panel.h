@@ -3,6 +3,7 @@
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include <QColor>
+#include <QVector>
 #include <QString>
 #include <QWidget>
 
@@ -37,7 +38,12 @@ public:
     // `openAt(path, line, column)` jumps the editor to a diagnostic.
     using OpenAt = std::function<void(const QString &, int, int)>;
 
-    ProblemsPanel(LanguageService *languageService, OpenAt openAt, QWidget *parent);
+    // `buildService` is the second source of rows (B1-7): a compiler error
+    // delivered by a build is not a different kind of thing from the same
+    // error delivered over LSP, so both land here and the Source column
+    // says which produced each (ADR-0040).
+    ProblemsPanel(LanguageService *languageService, BuildService *buildService, OpenAt openAt,
+                  QWidget *parent);
 
     // Called once, the first time a diagnostic arrives in a session, so the
     // window can raise the dock. Never called again: a panel that reopens
@@ -60,6 +66,7 @@ private:
     void updateStatus(int shown, int total);
 
     LanguageService *languageService_;
+    BuildService *buildService_;
     OpenAt openAt_;
     std::function<void()> firstDiagnostic_;
     bool announced_ = false;

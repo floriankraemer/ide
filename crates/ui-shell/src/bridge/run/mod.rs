@@ -109,7 +109,7 @@ struct ConsoleState {
 /// are never mistaken for one of these markers and always fall through
 /// untouched in `Normal` state.
 #[derive(Default)]
-struct AnsiStripper {
+pub(crate) struct AnsiStripper {
     state: AnsiState,
 }
 
@@ -130,7 +130,7 @@ enum AnsiState {
 }
 
 impl AnsiStripper {
-    fn feed(&mut self, text: &str) -> String {
+    pub(crate) fn feed(&mut self, text: &str) -> String {
         let mut out = Vec::with_capacity(text.len());
         for &byte in text.as_bytes() {
             self.state = match (self.state, byte) {

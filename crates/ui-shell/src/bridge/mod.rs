@@ -37,6 +37,7 @@
 // grows multi-bridge or incremental support for this pattern.
 
 pub mod ai;
+pub mod build;
 pub mod convert;
 pub mod editor;
 pub mod editor_ops;

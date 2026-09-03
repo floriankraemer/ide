@@ -22,17 +22,15 @@ namespace ui_shell {
 // enable/disable Run vs. Stop/Rerun without RunConsolePanel reaching back
 // into it.
 //
-// Buttons are icon-only 26x26 glyphs per the blend spec (Run/Stop/Rerun,
-// drawn at runtime — see run_toolbar.cpp's anonymous namespace). The
-// mockup this spec comes from also shows Debug and Build in the same
-// cluster, but neither has a backing command anywhere in this codebase
-// today (no `RunService` debug/build entry point, no menu action) — adding
-// icon buttons with nothing to wire them to would be UI for a feature that
-// doesn't exist, so this toolbar stays Run/Stop/Rerun until one does.
+// Buttons are icon-only 26x26 glyphs per the blend spec (Run/Stop/Rerun/
+// Build, drawn at runtime — see run_toolbar.cpp's anonymous namespace).
+// Build arrived with `BuildService` (B1-7); the mockup's fifth button,
+// Debug, still has no backing command anywhere in this codebase, so it
+// stays off the toolbar until `dap-core` gives it one (phase D).
 class RunToolbar : public QWidget
 {
 public:
-    explicit RunToolbar(RunService *runService, QWidget *parent);
+    RunToolbar(RunService *runService, BuildService *buildService, QWidget *parent);
 
     // Run/Stop/Rerun the currently selected configuration — the targets of
     // the global `run.run`/`run.stop`/`run.rerun` shortcuts, so they act on
@@ -53,10 +51,12 @@ private:
     QString selectedConfigId() const;
 
     RunService *runService_;
+    BuildService *buildService_;
     QComboBox *configCombo_ = nullptr;
     QToolButton *runButton_ = nullptr;
     QToolButton *stopButton_ = nullptr;
     QToolButton *rerunButton_ = nullptr;
+    QToolButton *buildButton_ = nullptr;
 
     // ponytail: one running console tracked per configuration id, the
     // latest `run()` call for it. Running the same configuration a second

@@ -61,9 +61,11 @@ QColor severityColor(FfiSeverity severity)
     return QColor();
 }
 
-ProblemsPanel::ProblemsPanel(LanguageService *languageService, OpenAt openAt, QWidget *parent)
+ProblemsPanel::ProblemsPanel(LanguageService *languageService, BuildService *buildService,
+                             OpenAt openAt, QWidget *parent)
   : QWidget(parent)
   , languageService_(languageService)
+  , buildService_(buildService)
   , openAt_(std::move(openAt))
 {
     filterEdit_ = new QLineEdit(this);
@@ -130,6 +132,7 @@ ProblemsPanel::ProblemsPanel(LanguageService *languageService, OpenAt openAt, QW
     connect(clearFilter, &QShortcut::activated, filterEdit_, &QLineEdit::clear);
 
     connect(languageService_, &LanguageService::diagnosticsChanged, this, &ProblemsPanel::refresh);
+    connect(buildService_, &BuildService::diagnosticsChanged, this, &ProblemsPanel::refresh);
     connect(languageService_,
             &LanguageService::serverStateChanged,
             this,
@@ -181,7 +184,19 @@ void ProblemsPanel::focusTree()
 
 void ProblemsPanel::refresh()
 {
-    const ::rust::Vec<FfiDiagnostic> rows = languageService_->diagnostics();
+    // Two sources, one list. The rows are not re-sorted here: each service
+    // returns its own in its own order, and grouping by file below is what
+    // decides what the user sees.
+    const ::rust::Vec<FfiDiagnostic> serverRows = languageService_->diagnostics();
+    const ::rust::Vec<FfiDiagnostic> buildRows = buildService_->diagnostics();
+    QVector<FfiDiagnostic> rows;
+    rows.reserve(static_cast<int>(serverRows.size() + buildRows.size()));
+    for (const FfiDiagnostic &row : serverRows) {
+        rows.append(row);
+    }
+    for (const FfiDiagnostic &row : buildRows) {
+        rows.append(row);
+    }
 
     tree_->clear();
     QTreeWidgetItem *currentFileGroup = nullptr;
