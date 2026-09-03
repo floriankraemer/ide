@@ -5,7 +5,7 @@ Hexagonal-lite with a humble Qt view: logic in Qt-free Rust, the view only displ
 
 ## Layers
 
-The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `edit-ops`, `vcs-core`, `pty-core`, `terminal-core`, `run-core`, `mcp-server`, `plugin-api`, `plugin-host`, `icon-theme`, `markdown-preview`), adapter + view (`ui-shell`), and the `app` binary.
+The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `edit-ops`, `vcs-core`, `pty-core`, `terminal-core`, `run-core`, `build-core`, `mcp-server`, `plugin-api`, `plugin-host`, `icon-theme`, `markdown-preview`), adapter + view (`ui-shell`), and the `app` binary.
 The building-block diagram lives in [overview.md §3](overview.md#3-building-block-view) — one diagram, one place.
 
 ## Allowed imports
@@ -29,6 +29,7 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `edit-ops` | `editor-core`, `syntax-core` (+ std, tree-sitter) | **No** |
 | `vcs-core` | `editor-core` (+ std, gix, serde) | **No** |
 | `run-core` | `pty-core`, `app-config`, `terminal-core` (+ std, serde, toml, serde_json, regex) | **No** |
+| `build-core` | `run-core` (+ std, serde_json, regex) | **No** |
 | `app-core` | `editor-core`, `project-model`, `plugin-host`, `icon-theme`, `syntax-core`, `markdown-preview` — the last four only for the icon-theme and previews joins, see below | **No** |
 | `ai-chat-core` | `lsp-core` (+ std, serde, serde_json, base64, tiktoken-rs, reqwest/rustls) | **No** |
 | `ui-shell` | `app-core`, `editor-core`, `edit-ops`, `project-model`, `app-config`, `settings-model`, `syntax-core`, `mcp-server`, `index-core`, `lsp-core`, `ai-chat-core`, `pty-core`, `terminal-core`, `plugin-host`, `vcs-core`, `run-core`, `markdown-preview` (+ tokio, cxx, cxx-qt, cxx-qt-lib) | Yes (adapter + view live here) |
@@ -102,6 +103,12 @@ That test target is the one place `app-config` may be read from a test rather th
   Detection is marker-file presence only; nothing here runs the build tool to find out.
   What a run configuration's macros mean (`run_core::macros`) and what running a file would launch (`run_core::context`) live beside it, and the view asks rather than deciding which files look runnable.
 
+- **How a project is built, and what its output means** lives in `build-core` (ADR-0040): which steps a build request runs, and how a tool's output becomes a `BuildDiagnostic`.
+  It delegates and never models — no compiler, no output folder, no artifact, no build-automatically-on-save — because every one of those is a second opinion about something the build tool already decides.
+  It reads `run_core::toolchain` for the invocation and `run_core::LaunchSpec` for the launch, so there is no second detection table and no second way to start a process.
+  Its diagnostics are deliberately the shape the Problems dock already renders for `lsp_core::DiagnosticStore`: one question, one place to look.
+  Its text patterns overlap `run_core::links`' catalogue and stay separate on purpose — a link resolver wants a location, a build wants the severity and message too, and one table serving both would satisfy neither.
+
 - **Which language a file is** is answered in exactly one place, `syntax-core`'s registry (ADR-0018).
   `lsp-core` owns only what the protocol owns — the server command per language id, and the few ids LSP names differently from the grammar (`tsx` -> `typescriptreact`) — and `ui-shell` joins the two, which is translation and so allowed in the adapter.
   No crate may grow a second file-extension table.
@@ -150,6 +157,9 @@ cargo tree -p plugin-api -e normal | grep -i qt     # must be empty
 cargo tree -p plugin-host -e normal | grep -i qt    # must be empty
 cargo tree -p icon-theme -e normal | grep -i qt     # must be empty
 cargo tree -p markdown-preview -e normal | grep -i qt  # must be empty
+cargo tree -p run-core -e normal | grep -i qt        # must be empty
+cargo tree -p build-core -e normal | grep -i qt      # must be empty
+cargo tree -p build-core -e normal | grep -i tokio   # must be empty
 ```
 
 ## Known debt at time of writing

@@ -1,0 +1,18 @@
+[package]
+name = "build-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# The toolchain table (ADR-0039) and `LaunchSpec`: a build is a process
+# launched the same way a run is, so nothing here re-derives either which
+# build tool a project uses or how to start one.
+run-core = { path = "../run-core" }
+# Cargo's `--message-format=json` diagnostics.
+serde_json = "1"
+# The text diagnostic table for the toolchains that have no structured
+# output (javac/Maven/Gradle, CMake/gcc/clang).
+regex = "1"
+
+[dev-dependencies]
+tempfile = "3"
