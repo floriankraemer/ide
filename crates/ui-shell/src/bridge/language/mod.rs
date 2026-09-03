@@ -1432,52 +1432,6 @@ impl ffi::LanguageService {
         self.completion_resolve.borrow_mut().cancel();
     }
 
-    pub fn resolve_definition(mut self: Pin<&mut Self>, path: &QString, line: u32, character: u32) {
-        let uri = lsp_core::uri_from_path(&path.to_string());
-        let qt_thread = self.as_mut().qt_thread();
-        let queued = self.push_job(move |manager| {
-            let outcome =
-                lsp_core::definition_outcome(Some(manager.definition(&uri, line, character)));
-            let _ = qt_thread
-                .queue(move |service: Pin<&mut Self>| service.apply_definition_outcome(outcome));
-        });
-        if !queued {
-            // No worker at all (no project open), which is one more case of
-            // "no server answered" — the same rule decides it.
-            self.apply_definition_outcome(lsp_core::definition_outcome(None));
-        }
-    }
-
-    /// Turn the outcome into signals. The branch is which signal, never
-    /// which source: `definition_outcome` already chose that.
-    fn apply_definition_outcome(mut self: Pin<&mut Self>, outcome: lsp_core::DefinitionOutcome) {
-        match outcome {
-            lsp_core::DefinitionOutcome::Lsp(targets) => {
-                for target in targets {
-                    self.as_mut().definition_found(ffi::FfiDefinition {
-                        path: QString::from(target.path.as_str()),
-                        line: target.line,
-                        column: target.column,
-                    });
-                }
-                self.as_mut().definition_finished();
-            }
-            lsp_core::DefinitionOutcome::Index => self.as_mut().definition_fallback(),
-            // C12 foundation: the server pointed at decompiled/generated
-            // source (a non-`file:` URI), which this IDE cannot yet fetch
-            // and open as a tab end to end — refuse cleanly rather than
-            // treating the raw URI as a path and building a broken tab from
-            // it (the bug this guard replaces; see navigation.rs's
-            // `DefinitionOutcome::NeedsMetadataFetch` doc comment).
-            lsp_core::DefinitionOutcome::NeedsMetadataFetch(_uri) => {
-                self.as_mut().definition_unavailable(QString::from(
-                    "Go to Definition landed in decompiled framework code, \
-                     which this IDE cannot open yet.",
-                ));
-            }
-        }
-    }
-
     /// The enabled server for this path's language, if the catalog plus the
     /// user's settings name one. *Which* language the file is comes from
     /// `syntax-core`'s registry — the single source of file detection — and

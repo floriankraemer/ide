@@ -512,6 +512,10 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
     editor->setProperty("tabId", QVariant::fromValue(tabId));
     editor->setPlainText(docManager_->tabContent(tabId));
     editor->document()->setModified(false);
+    // C12-followup: a virtual document (decompiled/generated source) has
+    // nowhere to save to. `saveEditor` also refuses on `isReadOnly()`, so
+    // Save is a no-op rather than a click that always fails.
+    editor->setReadOnly(docManager_->tabIsReadOnly(tabId));
     editor->setFont(editorFont_);
     editor->setInlayHintsEnabled(inlayHintsEnabled_);
     applyEditorAppearance(editor);

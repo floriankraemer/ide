@@ -48,7 +48,10 @@ No new `TabContent`/`TabKind` variant: a virtual document is still fundamentally
 `ui-shell` gains the **non-negotiable guard**: `apply_definition_outcome`'s new `NeedsMetadataFetch` arm never opens a tab from the raw URI.
 It emits a new `LanguageService::definitionUnavailable(QString message)` signal, wired in `DeclarationNavigator` to the same status-bar `report()` channel "no declaration found" already uses.
 Before this change, a `csharp:/...` target's `path` (the raw URI, via `DefinitionTarget::path`'s existing fallback) reached `EditorTabs::openFile` unchanged, which tried to open it as a file path and failed with a generic, confusing I/O error dialog — not a clean, specific refusal.
-Wiring the actual fetch-then-open-a-virtual-tab path into the C++ editor widget (a real `csharp/metadata` round trip, a stable `TabId` per `(scheme, key)` reused across re-navigation, a read-only `QPlainTextEdit`, Save disabled) is deferred to a follow-up task — see "Consequences" below for exactly where the line falls and why.
+
+**C12-followup (2026-09-03)**: the fetch-then-open path is now wired. `resolve_definition`'s `NeedsMetadataFetch` arm (moved into `bridge/language/lsp_surface.rs` alongside this ADR's other C12 code, once `mod.rs` hit its file-size ceiling) calls `LspManager::fetch_metadata` on the worker thread with the *originating* document's language id (not derivable from the `csharp:/...` target itself), then `AppSession::open_virtual_document` on success and a new `LanguageService::virtualDocumentOpened(tabId, title, newlyOpened)` signal to tell the view. `EditorTabs` reuses `onTabOpened` — the same widget-building path `DocumentManager::tabOpened` already drives for a real file — for a new tab, then always focuses it via `focusTab`, mirroring `EditorTabs::openFile`'s own focus-regardless-of-new rule. A fetch failure (no `csharp/metadata` support, a timeout, a malformed response) reuses `definitionUnavailable` rather than a signal of its own. The read-only affordance this ADR's "Consequences" section flagged as still missing is wired too: `DocumentManager::tabIsReadOnly` (new) sets `CodeEditor::setReadOnly` in `onTabOpened`, and `EditorTabs::saveEditor` no-ops on `editor->isReadOnly()` before attempting a save — a disabled/no-op Save rather than a click that always fails against `AppSession::save_tab`'s own refusal.
+
+Still true: `csharp/metadata`'s wire shape remains unverified against a real csharp-ls process (see the paragraph above and "Consequences" below) — this task wired the attempt, not a live round trip.
 
 ## "Every tab is a file" — the assumption audit
 
@@ -71,9 +74,7 @@ Checked and found **already correct with no change needed**, because the seam al
 - The filesystem watcher (`AppSession::check_external_change`, tree rename/delete): keyed off `find_tab_by_path`, so a virtual tab (no path) is structurally unreachable from a tree mutation or a watcher event — never matched, never needs a special case.
 - Recent-files tracking: recorded from the caller-supplied `PathBuf` at the `open_file`/`open_project` call site, never derived from `Document::path()`.
 
-**Explicitly deferred, not fixed, with a reason**: the C++ editor widget has no `TabKind`/read-only affordance wired to `AppSession::tab_is_read_only` yet — the Save action's enablement and the `QPlainTextEdit`'s own read-only flag are not conditioned on it.
-This is safe today because nothing in `ui-shell` calls `open_virtual_document`; the guard above means a `NeedsMetadataFetch` outcome never reaches a tab at all yet.
-It stops being safe the day a follow-up task wires the real fetch-then-open path, and that task must not skip it — `AppSession::save_tab` already refuses cleanly at that point regardless (defence in depth: the FFI error path, not just an oversight), but a Save button the user can click that always fails is a worse experience than one that is disabled, and a widget the user can type into that never persists is worse still.
+**Was explicitly deferred, now wired (C12-followup, 2026-09-03)**: the C++ editor widget's read-only affordance is conditioned on `AppSession::tab_is_read_only` — see the fetch-then-open paragraph above. `AppSession::save_tab` still refuses cleanly regardless (defence in depth: the FFI error path, not just the view-side guard).
 
 ## Alternatives considered
 
@@ -88,9 +89,9 @@ It stops being safe the day a follow-up task wires the real fetch-then-open path
 
 - Positive: `Document`/`TabContent` no longer lie about having a path; every caller that reads one now has to (and does) say what happens when there isn't one, instead of that being an unstated assumption three call sites deep.
 - Positive: the C3-era gap — a `csharp:/` URI silently reaching `EditorTabs::openFile` and failing with a confusing generic I/O error — is closed by construction: `definition_outcome` never classifies a non-`file:` target as `Lsp`, so it can never reach the "open this path" call at all.
-- Positive: `fetch_metadata` and `open_virtual_document` are real, tested building blocks — a follow-up task wiring the C++ side is additive, not a redesign.
-- Negative / accepted trade-off: full go-to-definition-into-decompiled-source is not yet real for a user — today it shows a clean "cannot open yet" message where before it showed a confusing one. This is explicitly the scope line the plan authorized: a well-tested foundation over a rushed end-to-end path.
-- Negative / accepted trade-off: `csharp/metadata`'s wire shape is best-effort. If a real csharp-ls disagrees, `fetch_metadata` will resurface as `LspError::Protocol` (missing `"source"`) or a parse/timeout failure — both already flow through the same clean-refusal guard once the follow-up task wires the fetch attempt into it, so a wrong guess degrades to "cannot open yet" rather than a crash or a broken tab.
+- Positive: `fetch_metadata` and `open_virtual_document` were real, tested building blocks, which is why wiring them into the C++ side (C12-followup) was additive, not a redesign.
+- Positive: go-to-definition-into-decompiled-source is now real for a user, end to end, wherever csharp-ls's wire shape matches this client's best-effort guess.
+- Negative / accepted trade-off: `csharp/metadata`'s wire shape is still best-effort, unverified against a real csharp-ls process — this repo's Docker verification budget did not extend to a live decompiled-symbol round trip, and still does not (extending `csharp_conformance.rs` for it remains its own follow-up). If a real csharp-ls disagrees, `fetch_metadata` resurfaces as `LspError::Protocol` (missing `"source"`) or a parse/timeout failure, which now flows through the same clean-refusal guard the fetch attempt itself is wired behind, so a wrong guess degrades to "cannot open yet" rather than a crash or a broken tab.
 
 ## Related
 

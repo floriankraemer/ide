@@ -1367,6 +1367,15 @@ mod ffi {
         #[cxx_name = "tabContent"]
         fn tab_content(self: &DocumentManager, tab_id: u64) -> QString;
 
+        /// C12-followup: whether the tab is read-only — a virtual document
+        /// (decompiled/generated source with no backing file), a binary
+        /// tab, or a diff tab. `EditorTabs::onTabOpened` uses this to build
+        /// the `CodeEditor` with typing disabled rather than relying only
+        /// on `AppSession::save_tab`'s refusal at save time.
+        #[qinvokable]
+        #[cxx_name = "tabIsReadOnly"]
+        fn tab_is_read_only(self: &DocumentManager, tab_id: u64) -> bool;
+
         /// The tab's backing file name (`"main.rs"`, `"Dockerfile"`),
         /// empty when there is none — used to pick a highlighting language
         /// (Y2). File name, not extension: extensionless languages are
@@ -3143,6 +3152,24 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "definitionUnavailable"]
         fn definition_unavailable(self: Pin<&mut LanguageService>, message: QString);
+
+        /// C12-followup — the fetch `definitionUnavailable`'s doc comment
+        /// describes landed: `csharp/metadata` answered, and its text is now
+        /// open as a read-only virtual document with this `tab_id`.
+        /// `newly_opened` tells `EditorTabs` whether to build the tab widget
+        /// (via the same path `DocumentManager::tabOpened` drives) before
+        /// focusing it, or only focus the one already open for this
+        /// decompiled symbol. A fetch failure still emits
+        /// `definitionUnavailable` instead — never a signal of its own, so
+        /// the refusal message stays in one place.
+        #[qsignal]
+        #[cxx_name = "virtualDocumentOpened"]
+        fn virtual_document_opened(
+            self: Pin<&mut LanguageService>,
+            tab_id: u64,
+            title: QString,
+            newly_opened: bool,
+        );
 
         /// L5 — ask the server what could be typed at this position.
         /// `text_before_cursor` is the current line up to the caret, from
