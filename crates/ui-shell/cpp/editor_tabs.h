@@ -632,6 +632,20 @@ private:
 
     void onInlayHintsReady();
 
+    // C9-followup: ask for `editor`'s document's semantic tokens. A no-op
+    // when the file has no path (`LanguageService::requestSemanticTokens`
+    // itself already no-ops without a legend/server, so this only needs to
+    // guard the FFI call's own precondition). Called on document open and
+    // on the same debounce as `documentChanged`, matching every other
+    // per-edit LSP request.
+    void requestSemanticTokensFor(CodeEditor *editor);
+
+    // `LanguageService::semanticTokensReady(path)` — repaints whichever
+    // open editor has `path`, if any (unlike inlay hints/signature help,
+    // this signal carries its own path, so it is not limited to "whatever
+    // was last requested").
+    void onSemanticTokensReady(const QString &path);
+
     // F3-16: ask VcsService for `editor`'s hunks against `HEAD`, against its
     // live text. A no-op without a VcsService or for a file with no path
     // (an unsaved buffer has nothing in `HEAD` to gutter against).
