@@ -5374,6 +5374,7 @@ dependencies = [
  "plugin-api",
  "plugin-host",
  "serde",
+ "serde_json",
  "syntax-core",
  "tempfile",
  "toml 0.8.23",
