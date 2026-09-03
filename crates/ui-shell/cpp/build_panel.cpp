@@ -53,6 +53,32 @@ BuildPanel::BuildPanel(BuildService *buildService, QWidget *parent)
     connect(buildService_, &BuildService::buildFinished, this, &BuildPanel::onBuildFinished);
 }
 
+void BuildPanel::showExternalTask(const QString &label)
+{
+    // Not `currentBuild_`: a before-launch task has no build id, and
+    // claiming one would make `onBuildFinished` clear a header it never set.
+    header_->setText(tr("Before launch: %1").arg(label));
+    output_->clear();
+    output_->appendPlainText(QStringLiteral("$ %1").arg(label));
+    e2eMark(QStringLiteral("{\"ev\":\"before_launch_started\",\"label\":%1}").arg(e2eJson(label)));
+}
+
+void BuildPanel::appendExternalOutput(const QString &text)
+{
+    QTextCursor cursor = output_->textCursor();
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(text);
+    output_->setTextCursor(cursor);
+    output_->verticalScrollBar()->setValue(output_->verticalScrollBar()->maximum());
+}
+
+void BuildPanel::reportExternalFailure(const QString &message)
+{
+    header_->setText(message);
+    e2eMark(
+      QStringLiteral("{\"ev\":\"before_launch_failed\",\"message\":%1}").arg(e2eJson(message)));
+}
+
 void BuildPanel::buildProject()
 {
     report(buildService_->build());

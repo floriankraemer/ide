@@ -17,10 +17,12 @@ pub mod cargo_json;
 pub mod diagnostics;
 pub mod error;
 pub mod parser;
+pub mod runner;
 pub mod spec;
 pub mod text;
 
 pub use diagnostics::{BuildDiagnostic, Severity};
 pub use error::BuildError;
 pub use parser::DiagnosticParser;
+pub use runner::{BuildHandle, BuildOutcome, BuildSink};
 pub use spec::{buildable_toolchain, BuildKind, BuildSpec};

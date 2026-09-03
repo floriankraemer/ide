@@ -684,6 +684,11 @@ mod ffi {
         /// A second launch opens a second console instead of replacing the
         /// running one.
         allow_parallel: bool,
+        /// The before-launch tasks (B2-4), one per line, in order:
+        /// `build`, `run <configuration id>`, or `tool <program> [args…]`.
+        /// A `\n`-separated string for the same reason `env` is one — a
+        /// `Vec` field on a shared struct is not a shape cxx supports.
+        before_launch: QString,
     }
 
     /// `RunService::resolveLink`'s result. `found == false` means "no link
@@ -5308,6 +5313,25 @@ mod ffi {
         #[qsignal]
         #[cxx_name = "runFailed"]
         fn run_failed(self: Pin<&mut RunService>, config_id: QString, error: FfiResult);
+
+        /// A before-launch task started (B2-2). `label` is what it is —
+        /// "Build", another configuration's name, an external tool's
+        /// program — for the Build dock's header.
+        #[qsignal]
+        #[cxx_name = "beforeLaunchStarted"]
+        fn before_launch_started(self: Pin<&mut RunService>, config_id: QString, label: QString);
+
+        /// A chunk of a before-launch task's output, ANSI already stripped.
+        #[qsignal]
+        #[cxx_name = "beforeLaunchOutput"]
+        fn before_launch_output(self: Pin<&mut RunService>, config_id: QString, text: QString);
+
+        /// A before-launch task refused or failed, so the configuration was
+        /// never launched. The only signal that run gets: no console was
+        /// opened for it.
+        #[qsignal]
+        #[cxx_name = "beforeLaunchFailed"]
+        fn before_launch_failed(self: Pin<&mut RunService>, config_id: QString, error: FfiResult);
     }
 
     // Enables `self.qt_thread()` on `RunService` for its worker thread and

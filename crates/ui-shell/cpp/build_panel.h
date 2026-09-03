@@ -31,6 +31,14 @@ class BuildPanel : public QWidget
 public:
     BuildPanel(BuildService *buildService, QWidget *parent);
 
+    // A before-launch task (B2-2) runs outside `BuildService` — it is part
+    // of a launch, not of a build — but it is the same kind of output and
+    // belongs in the same dock. `RunService`'s before-launch signals are
+    // routed here rather than into a second panel.
+    void showExternalTask(const QString &label);
+    void appendExternalOutput(const QString &text);
+    void reportExternalFailure(const QString &message);
+
     // The targets of the global `build.*` shortcuts, so they act regardless
     // of which widget has focus — the same arrangement `RunConsolePanel`
     // has with the run shortcuts.

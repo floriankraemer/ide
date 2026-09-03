@@ -11,7 +11,9 @@
 //! row) — `crates/ui-shell`'s future `RunService` is the only thing that
 //! may call this crate from behind the FFI seam (ADR-0003).
 
+pub mod ansi;
 pub mod batching;
+pub mod before_launch;
 pub mod config;
 pub mod context;
 pub mod detect;
@@ -21,7 +23,9 @@ pub mod macros;
 pub mod supervisor;
 pub mod toolchain;
 
+pub use ansi::AnsiStripper;
 pub use batching::{BatchedOutput, OutputBatcher};
+pub use before_launch::{BeforeLaunchError, BeforeLaunchTask};
 pub use config::{ConsoleKind, LaunchSpec, RunConfig, RunConfigExt};
 pub use context::{config_for_file, remember_temporary, TEMPORARY_CAP};
 pub use detect::{detect, merge_detected};

@@ -153,6 +153,25 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// One entry in a run configuration's `before_launch` list (B2-1).
+///
+/// A string `kind` plus the fields each kind needs, rather than a tagged
+/// enum, for the same reason `RunConfigSetting::toolchain` is a string
+/// (ADR-0039): what a task *means* is `run-core`'s, and this crate depends
+/// on nothing. A kind this version does not know loses that one task
+/// instead of failing the whole settings file.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct BeforeLaunchSetting {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+}
+
 /// One `[[run_config]]` entry: a project-defined launch target (F4-4, ADR-0022).
 ///
 /// Lives in the project layer, not here — see [`project_settings`] — but the
@@ -203,6 +222,10 @@ pub struct RunConfigSetting {
     /// the running one.
     #[serde(default, skip_serializing_if = "is_false")]
     pub allow_parallel: bool,
+    /// What has to happen before this configuration's program starts
+    /// (B2-1), in order. Empty for a configuration with nothing to prepare.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub before_launch: Vec<BeforeLaunchSetting>,
 }
 
 /// Structured application settings, round-tripped to `settings.toml` in the

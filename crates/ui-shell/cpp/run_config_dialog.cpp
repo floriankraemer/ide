@@ -79,6 +79,10 @@ void showRunConfigDialog(QWidget *parent, RunConfigEditor *editor)
     auto *cwdEdit = new QLineEdit(&dialog);
     auto *envEdit = new QPlainTextEdit(&dialog);
     envEdit->setPlaceholderText(QObject::tr("KEY=VALUE, one per line"));
+    auto *beforeLaunchEdit = new QPlainTextEdit(&dialog);
+    beforeLaunchEdit->setPlaceholderText(
+      QObject::tr("One per line: build | run <configuration id> | tool <program> [args]"));
+    beforeLaunchEdit->setMaximumHeight(70);
     auto *parallelCheck =
       new QCheckBox(QObject::tr("Allow parallel run"), &dialog);
     parallelCheck->setToolTip(
@@ -97,6 +101,8 @@ void showRunConfigDialog(QWidget *parent, RunConfigEditor *editor)
     addRow(QObject::tr("Program:"), programEdit);
     addRow(QObject::tr("Arguments:"), argsEdit);
     addRow(QObject::tr("Working dir:"), cwdEdit);
+    form->addWidget(new QLabel(QObject::tr("Before launch:"), &dialog));
+    form->addWidget(beforeLaunchEdit);
     form->addWidget(parallelCheck);
     form->addWidget(new QLabel(QObject::tr("Environment:"), &dialog));
     form->addWidget(envEdit, 1);
@@ -130,6 +136,7 @@ void showRunConfigDialog(QWidget *parent, RunConfigEditor *editor)
         form.cwd = cwdEdit->text();
         form.env = envEdit->toPlainText();
         form.allow_parallel = parallelCheck->isChecked();
+        form.before_launch = beforeLaunchEdit->toPlainText();
         editor->updateConfiguration(static_cast<quint32>(index), form);
     };
 
@@ -140,6 +147,7 @@ void showRunConfigDialog(QWidget *parent, RunConfigEditor *editor)
         argsEdit->setEnabled(has);
         cwdEdit->setEnabled(has);
         envEdit->setEnabled(has);
+        beforeLaunchEdit->setEnabled(has);
         parallelCheck->setEnabled(has);
         removeButton->setEnabled(has);
         const FfiRunConfig config = has ? configAt(editor, index) : FfiRunConfig{};
@@ -148,6 +156,7 @@ void showRunConfigDialog(QWidget *parent, RunConfigEditor *editor)
         argsEdit->setText(config.args);
         cwdEdit->setText(config.cwd);
         envEdit->setPlainText(config.env);
+        beforeLaunchEdit->setPlainText(config.before_launch);
         parallelCheck->setChecked(config.allow_parallel);
     };
 
