@@ -146,6 +146,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "ui-shell",
+ "windows-sys 0.59.0",
  "winres",
 ]
 

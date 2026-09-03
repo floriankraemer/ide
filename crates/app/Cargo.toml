@@ -6,6 +6,9 @@ edition = "2021"
 [dependencies]
 ui-shell = { path = "../ui-shell" }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_UI_Shell"] }
+
 [build-dependencies]
 # Only actually invoked on the windows target (see build.rs); winres shells
 # out to `windres`/`rc.exe` rather than linking anything, so it costs nothing
