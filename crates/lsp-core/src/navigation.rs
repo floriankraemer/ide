@@ -73,6 +73,23 @@ pub enum DefinitionOutcome {
     NeedsMetadataFetch(String),
 }
 
+/// Split a [`DefinitionOutcome::NeedsMetadataFetch`] URI
+/// (`"csharp:/metadata/Projects/x/Console.cs"`) into the `(scheme, key)`
+/// pair [`app_core::AppSession::open_virtual_document`] takes — the inverse
+/// of csharp-ls's own `scheme:/key` convention for this URI, not a general
+/// URI parser. `None` for anything that does not have this shape, which
+/// should not happen for a URI that already passed `definition_outcome`'s
+/// "not `file://`" check, but a caller fetching over the network is exactly
+/// where "should not happen" still needs a typed answer instead of a panic.
+pub fn virtual_doc_key(uri: &str) -> Option<(String, String)> {
+    let (scheme, rest) = uri.split_once(':')?;
+    let key = rest.strip_prefix('/').unwrap_or(rest);
+    if scheme.is_empty() || key.is_empty() {
+        return None;
+    }
+    Some((scheme.to_string(), key.to_string()))
+}
+
 /// The precedence rule of ADR-0016: a running server's answer wins, and the
 /// index is the fallback for everything else — no server configured for the
 /// language, a server still starting or inside its restart backoff, a request
@@ -233,5 +250,23 @@ mod tests {
             definition_outcome(Some(Ok(targets))),
             DefinitionOutcome::NeedsMetadataFetch("csharp:/metadata/Console.cs".to_string())
         );
+    }
+
+    #[test]
+    fn a_metadata_uri_splits_into_its_scheme_and_key() {
+        assert_eq!(
+            virtual_doc_key("csharp:/metadata/Projects/x/Console.cs"),
+            Some((
+                "csharp".to_string(),
+                "metadata/Projects/x/Console.cs".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_uri_with_no_scheme_or_no_key_does_not_split() {
+        assert_eq!(virtual_doc_key("no-colon-here"), None);
+        assert_eq!(virtual_doc_key(":/metadata/Console.cs"), None);
+        assert_eq!(virtual_doc_key("csharp:/"), None);
     }
 }
