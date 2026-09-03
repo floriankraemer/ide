@@ -40,9 +40,9 @@ Task ids are stable; titles may change.
 | R1-2 — typed configurations: `toolchain` + `target` on `RunConfig`, back-compatible serde in `app-config` | done | this branch; a pair of strings rather than the enum this plan predicted, so `app-config` keeps depending on nothing |
 | R1-3 — `run_core::macros`: `$PROJECT_DIR$`, `$FILE_PATH$`, `$FILE_DIR$`, `$FILE_NAME$`, `$USER_HOME$` in cwd, args and env | done | this branch |
 | R1-4 — `run_core::context`: the configuration a file implies, temporary configurations with a cap | done | this branch |
-| R1-5 — `allow_parallel` policy on top of the existing N-session supervisor | blocked on R1-6 | field persisted with R1-2; enforcement is adapter-side |
-| R1-6 — adapter: `runContext`, `runCurrentFile`, per-kind editor fields | open |  |
-| R1-7 — view: gutter run icon, kind selector in the dialog, recent-first combo, new menu entries and keybindings | open |  |
+| R1-5 — `allow_parallel` policy on top of the existing N-session supervisor | done | this branch; enforced in `RunService::launch`, exposed as a checkbox in the run-configuration dialog |
+| R1-6 — adapter: `canRunFile`, `runContext`, toolchain/target/temporary/parallel across the FFI | done | this branch; one `runContext(path)` rather than a separate `runCurrentFile` — the menu action and the gutter icon are the same call |
+| R1-7 — view: gutter Run icon, `run.runContext` (Ctrl+Shift+F10), allow-parallel checkbox | done | this branch; the icon sits on the first line (naming the entry point needs the symbol index) and the recent-first combo ordering is deferred — it needs a recency the settings file does not record |
 | R1-8 — ADR-0039 + `layering.md` row amendment | open |  |
 | R1-9 — E2E: `e2e_run_from_gutter_creates_temporary_config` | open |  |
 

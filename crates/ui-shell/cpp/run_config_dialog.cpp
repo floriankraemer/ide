@@ -2,6 +2,7 @@
 
 #include "e2e_mark.h"
 
+#include <QCheckBox>
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QHBoxLayout>
@@ -78,6 +79,10 @@ void showRunConfigDialog(QWidget *parent, RunConfigEditor *editor)
     auto *cwdEdit = new QLineEdit(&dialog);
     auto *envEdit = new QPlainTextEdit(&dialog);
     envEdit->setPlaceholderText(QObject::tr("KEY=VALUE, one per line"));
+    auto *parallelCheck =
+      new QCheckBox(QObject::tr("Allow parallel run"), &dialog);
+    parallelCheck->setToolTip(
+      QObject::tr("Run this configuration again without stopping the running one"));
 
     auto *form = new QVBoxLayout();
     const auto addRow = [form, &dialog](const QString &label, QWidget *field) {
@@ -92,6 +97,7 @@ void showRunConfigDialog(QWidget *parent, RunConfigEditor *editor)
     addRow(QObject::tr("Program:"), programEdit);
     addRow(QObject::tr("Arguments:"), argsEdit);
     addRow(QObject::tr("Working dir:"), cwdEdit);
+    form->addWidget(parallelCheck);
     form->addWidget(new QLabel(QObject::tr("Environment:"), &dialog));
     form->addWidget(envEdit, 1);
 
@@ -117,9 +123,14 @@ void showRunConfigDialog(QWidget *parent, RunConfigEditor *editor)
         if (index < 0) {
             return;
         }
-        editor->updateConfiguration(static_cast<quint32>(index), nameEdit->text(),
-                                     programEdit->text(), argsEdit->text(), cwdEdit->text(),
-                                     envEdit->toPlainText());
+        FfiRunConfig form{};
+        form.name = nameEdit->text();
+        form.program = programEdit->text();
+        form.args = argsEdit->text();
+        form.cwd = cwdEdit->text();
+        form.env = envEdit->toPlainText();
+        form.allow_parallel = parallelCheck->isChecked();
+        editor->updateConfiguration(static_cast<quint32>(index), form);
     };
 
     const auto loadForm = [=](int index) {
@@ -129,6 +140,7 @@ void showRunConfigDialog(QWidget *parent, RunConfigEditor *editor)
         argsEdit->setEnabled(has);
         cwdEdit->setEnabled(has);
         envEdit->setEnabled(has);
+        parallelCheck->setEnabled(has);
         removeButton->setEnabled(has);
         const FfiRunConfig config = has ? configAt(editor, index) : FfiRunConfig{};
         nameEdit->setText(config.name);
@@ -136,6 +148,7 @@ void showRunConfigDialog(QWidget *parent, RunConfigEditor *editor)
         argsEdit->setText(config.args);
         cwdEdit->setText(config.cwd);
         envEdit->setPlainText(config.env);
+        parallelCheck->setChecked(config.allow_parallel);
     };
 
     QObject::connect(list, &QListWidget::currentRowChanged, &dialog, [=](int row) {

@@ -36,6 +36,10 @@ namespace {
 constexpr int kFoldMarkerWidth = 12;
 // F3-16: width of the change-marker strip, left of the fold triangle.
 constexpr int kChangeMarkerWidth = 4;
+// R1-7: width of the Run-icon column, leftmost — only added to the gutter's
+// width for a file that has a run target, so a file without one keeps
+// exactly the gutter it had before.
+constexpr int kRunMarkerWidth = 14;
 // F3-18: width of the blame column, right of the line-number digits — only
 // added to the gutter's width when blame is toggled on.
 constexpr int kBlameWidth = 220;
@@ -818,6 +822,23 @@ void CodeEditor::changeEvent(QEvent *event)
     }
 }
 
+int CodeEditor::runMarkerWidth() const
+{
+    return runnable_ ? kRunMarkerWidth : 0;
+}
+
+void CodeEditor::setRunnable(bool runnable)
+{
+    if (runnable_ == runnable) {
+        return;
+    }
+    runnable_ = runnable;
+    // The column is only there when the file is runnable, so the gutter has
+    // to be remeasured, not just repainted.
+    updateLineNumberAreaWidth(0);
+    lineNumberArea_->update();
+}
+
 int CodeEditor::lineNumberAreaWidth() const
 {
     int digits = 1;
@@ -826,7 +847,7 @@ int CodeEditor::lineNumberAreaWidth() const
         max /= 10;
         ++digits;
     }
-    return kChangeMarkerWidth + kFoldMarkerWidth + 3
+    return runMarkerWidth() + kChangeMarkerWidth + kFoldMarkerWidth + 3
       + fontMetrics().horizontalAdvance(QLatin1Char('9')) * digits
       + (blameEnabled_ ? kBlameWidth : 0);
 }
@@ -892,8 +913,9 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
 
             const QString number = QString::number(blockNumber + 1);
             painter.setPen(isCurrent ? currentDigitColor : digitColor);
-            painter.drawText(kChangeMarkerWidth + kFoldMarkerWidth, top,
-                              digitAreaWidth - kChangeMarkerWidth - kFoldMarkerWidth - 2,
+            painter.drawText(runMarkerWidth() + kChangeMarkerWidth + kFoldMarkerWidth, top,
+                              digitAreaWidth - runMarkerWidth() - kChangeMarkerWidth
+                                - kFoldMarkerWidth - 2,
                               fontMetrics().height(), Qt::AlignRight, number);
 
             if (blameEnabled_) {
@@ -910,7 +932,7 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
             FoldRange range;
             if (foldStartingAt(blockNumber, &range)) {
                 const bool collapsed = collapsedRanges_.contains(range);
-                const int cx = kChangeMarkerWidth + kFoldMarkerWidth / 2;
+                const int cx = runMarkerWidth() + kChangeMarkerWidth + kFoldMarkerWidth / 2;
                 const int cy = top + fontMetrics().height() / 2;
                 QPolygon triangle;
                 if (collapsed) {
@@ -927,10 +949,24 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
                 painter.drawPolygon(triangle);
             }
 
+            // ponytail: the icon sits on the first line, not on the entry
+            // point's own declaration — naming that line needs the symbol
+            // index, and "run this file" is what the click means either way.
+            if (runnable_ && blockNumber == 0) {
+                const int cx = kRunMarkerWidth / 2;
+                const int cy = top + fontMetrics().height() / 2;
+                QPolygon play;
+                play << QPoint(cx - 3, cy - 5) << QPoint(cx - 3, cy + 5) << QPoint(cx + 5, cy);
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(0x4c, 0xaf, 0x50));
+                painter.drawPolygon(play);
+                painter.setBrush(Qt::NoBrush);
+            }
+
             ChangeMarker marker;
             if (changeMarkerAt(blockNumber, &marker)) {
-                painter.fillRect(0, top, kChangeMarkerWidth, fontMetrics().height(),
-                                  changeMarkerColor(marker.kind));
+                painter.fillRect(runMarkerWidth(), top, kChangeMarkerWidth,
+                                  fontMetrics().height(), changeMarkerColor(marker.kind));
             }
         }
 
@@ -945,7 +981,9 @@ void CodeEditor::lineNumberAreaMousePressEvent(QMouseEvent *event)
 {
     const int clickX = static_cast<int>(event->position().x());
     const int clickY = static_cast<int>(event->position().y());
-    const bool onChangeMarkerStrip = clickX < kChangeMarkerWidth;
+    const bool onRunMarker = runnable_ && clickX < runMarkerWidth();
+    const bool onChangeMarkerStrip =
+      clickX >= runMarkerWidth() && clickX < runMarkerWidth() + kChangeMarkerWidth;
 
     QTextBlock block = firstVisibleBlock();
     int blockNumber = block.blockNumber();
@@ -954,6 +992,13 @@ void CodeEditor::lineNumberAreaMousePressEvent(QMouseEvent *event)
 
     while (block.isValid() && top <= clickY) {
         if (block.isVisible() && clickY >= top && clickY < bottom) {
+            if (onRunMarker) {
+                if (blockNumber == 0) {
+                    emit runRequested();
+                }
+                return;
+            }
+
             ChangeMarker marker;
             if (onChangeMarkerStrip && changeMarkerAt(blockNumber, &marker)) {
                 emit changeMarkerClicked(marker.hunkIndex,

@@ -669,6 +669,20 @@ mod ffi {
         args: QString,
         cwd: QString,
         env: QString,
+        /// The build tool this configuration belongs to
+        /// (`run_core::ToolchainId::as_str`), empty for a hand-written one.
+        /// A label for the view, never a decision it makes (R1-2).
+        toolchain: QString,
+        /// What that toolchain runs — a Cargo bin, an npm script, a Make
+        /// target. Empty for a hand-written configuration.
+        target: QString,
+        /// Created on the fly by running from context, and evicted once
+        /// `run_core::TEMPORARY_CAP` newer ones exist. The view shows these
+        /// differently, the way IntelliJ italicises a temporary entry.
+        temporary: bool,
+        /// A second launch opens a second console instead of replacing the
+        /// running one.
+        allow_parallel: bool,
     }
 
     /// `RunService::resolveLink`'s result. `found == false` means "no link
@@ -5211,6 +5225,24 @@ mod ffi {
         #[qinvokable]
         fn run(self: Pin<&mut RunService>, config_id: &QString) -> FfiResult;
 
+        /// Whether running `path` from the editor would launch anything —
+        /// what decides if the gutter shows a Run icon on that file (R1-6).
+        /// The rule is `run_core::context::config_for_file`'s, so the view
+        /// asks rather than deciding which files look runnable.
+        #[qinvokable]
+        #[cxx_name = "canRunFile"]
+        fn can_run_file(self: &RunService, path: &QString) -> bool;
+
+        /// Run `path` the way IntelliJ's gutter Run does: build the
+        /// configuration the file implies, remember it as a temporary one
+        /// (evicting the oldest past `run_core::TEMPORARY_CAP`), and launch
+        /// it. Answers via `configurationsChanged` and then the usual
+        /// `consoleStarted`; a file with no run target reports
+        /// `CODE_UNKNOWN_RUN_CONFIG` here rather than doing nothing.
+        #[qinvokable]
+        #[cxx_name = "runContext"]
+        fn run_context(self: Pin<&mut RunService>, path: &QString) -> FfiResult;
+
         /// Stop `console_id`: `kill_tree()`s its process on the worker
         /// thread, flushes whatever output was still pending, and answers
         /// via `consoleFinished` with `escaped = true` if
@@ -5308,19 +5340,17 @@ mod ffi {
         #[cxx_name = "removeConfiguration"]
         fn remove_configuration(self: &RunConfigEditor, index: u32);
 
-        /// Replace `configurations()[index]`'s fields. Out-of-range is a
-        /// no-op.
+        /// Replace `configurations()[index]`'s editable fields from `form`.
+        /// Out-of-range is a no-op.
+        ///
+        /// The whole struct rather than a field per argument: the form has
+        /// outgrown a readable parameter list, and `id`, `toolchain` and
+        /// `target` are read-only in the dialog — the draft keeps its own,
+        /// so a caller cannot rewrite a configuration's identity by filling
+        /// in the wrong field.
         #[qinvokable]
         #[cxx_name = "updateConfiguration"]
-        fn update_configuration(
-            self: &RunConfigEditor,
-            index: u32,
-            name: &QString,
-            program: &QString,
-            args: &QString,
-            cwd: &QString,
-            env: &QString,
-        );
+        fn update_configuration(self: &RunConfigEditor, index: u32, form: &FfiRunConfig);
 
         /// The first problem that would stop the dialog closing — an empty
         /// `program` (`run_core::RunError::InvalidConfig`'s own rule,

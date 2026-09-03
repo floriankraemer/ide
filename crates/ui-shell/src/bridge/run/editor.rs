@@ -65,33 +65,31 @@ impl ffi::RunConfigEditor {
         }
     }
 
-    pub fn update_configuration(
-        &self,
-        index: u32,
-        name: &QString,
-        program: &QString,
-        args: &QString,
-        cwd: &QString,
-        env: &QString,
-    ) {
+    pub fn update_configuration(&self, index: u32, form: &ffi::FfiRunConfig) {
         let mut draft = self.draft.borrow_mut();
         let Some(config) = draft.get_mut(index as usize) else {
             return;
         };
-        config.name = name.to_string();
-        config.program = program.to_string();
-        config.args = args
+        config.name = form.name.to_string();
+        config.program = form.program.to_string();
+        config.args = form
+            .args
             .to_string()
             .split_whitespace()
             .map(str::to_string)
             .collect();
-        let cwd = cwd.to_string();
+        let cwd = form.cwd.to_string();
         config.cwd = if cwd.trim().is_empty() {
             None
         } else {
             Some(cwd)
         };
-        config.env = env_from_string(&env.to_string());
+        config.env = env_from_string(&form.env.to_string());
+        config.allow_parallel = form.allow_parallel;
+        // Editing a temporary configuration is how IntelliJ's "Save
+        // configuration" works: once it has been through the dialog it is
+        // one the user meant to keep, so it stops being eviction fodder.
+        config.temporary = false;
     }
 
     /// The first problem that would stop the dialog closing — an empty

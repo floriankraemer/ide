@@ -36,6 +36,9 @@ class IntentionBulb;
 // ceiling.
 class EditorTabs;
 void wireVcsService(VcsService *vcsService, ProjectTreeModel *treeModel, EditorTabs *editorTabs);
+// R1-7: gives EditorTabs the RunService its gutter Run icon asks and acts
+// through (editor_tabs_run.cpp).
+void wireRunService(RunService *runService, EditorTabs *editorTabs);
 
 // app_core::TabKind's stable code for a binary tab (ADR-0020).
 constexpr int kTabKindBinary = 1;
@@ -426,6 +429,15 @@ public:
     // Git — every gutter/popup path below is a no-op without it, the same
     // "no server for this language" shape LanguageService's absence has.
     void setVcsService(VcsService *vcsService);
+    void setRunService(RunService *runService);
+
+    // R1-7: ask `RunService::canRunFile` whether an editor's file has a run
+    // target, and show or hide the gutter's Run icon accordingly.
+    void refreshRunMarker(CodeEditor *editor);
+    void refreshRunMarkers();
+    // The gutter Run icon (or `run.runContext`) fired: launch this editor's
+    // file through `RunService::runContext`.
+    void requestRunFor(CodeEditor *editor);
 
     // `VcsService::hunksChanged(path)`: push the hunks it now has for
     // `path` into that file's gutter, if it is open.
@@ -637,6 +649,7 @@ private:
     // (an unsaved buffer has nothing in `HEAD` to gutter against).
     void requestHunksFor(CodeEditor *editor);
 
+
     // The gutter's marker was clicked: build and show the popup for that
     // hunk (Revert / Show Diff / Stage File).
     void onChangeMarkerClicked(CodeEditor *editor, int hunkIndex, const QPoint &globalPos);
@@ -692,6 +705,7 @@ private:
     // F3-16: null for a project with no Git — set once, after construction,
     // the same retrofit shape setContextMenuCallback uses.
     VcsService *vcsService_ = nullptr;
+    RunService *runService_ = nullptr;
     // A monotonic counter bumped on every requestHunks call: `HunkCache`'s
     // cache key needs only "same edit state or not", never real history, so
     // one counter shared across every open file is enough (vcs-core's own

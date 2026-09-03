@@ -213,6 +213,9 @@ public:
     // pointer.
     void lineNumberAreaContextMenuEvent(QContextMenuEvent *event);
     int lineNumberAreaWidth() const;
+    // R1-7: the Run-icon column's width — `kRunMarkerWidth` when this file
+    // is runnable, otherwise zero.
+    int runMarkerWidth() const;
 
     // Task C: called by SyntaxHighlighter whenever its incremental tree
     // updates (the same revision-change hook that already drives
@@ -331,6 +334,13 @@ public:
     // setFoldRanges/setDiagnosticSpans.
     void setChangeMarkers(const QVector<ChangeMarker> &markers);
 
+    // R1-7: whether this file has a run target, decided by
+    // `RunService::canRunFile` and pushed in by EditorTabs — the gutter
+    // shows IntelliJ's Run icon on the first line when it does. The widget
+    // never asks what makes a file runnable.
+    void setRunnable(bool runnable);
+    bool runnable() const { return runnable_; }
+
     // F3-18: per-line blame text, off by default (vcs.annotate toggles it).
     // Replaces whatever was set before — the caller re-sends the whole file's
     // annotations on every `blameReady`, same as setChangeMarkers.
@@ -428,6 +438,10 @@ signals:
     // EditorTabs's job; this widget only reports the gesture.
     void changeMarkerClicked(int hunkIndex, const QPoint &globalPos);
 
+    // R1-7: the gutter's Run icon was clicked. What that runs is
+    // EditorTabs's business, via `RunService::runContext`.
+    void runRequested();
+
 protected:
     void resizeEvent(QResizeEvent *event) override;
     // F1-15: the secondary carets are drawn over whatever the base class
@@ -513,6 +527,9 @@ private:
     void refreshTabStopDistance();
 
     LineNumberArea *lineNumberArea_;
+    // R1-7: set from RunService::canRunFile; widens the gutter by one icon
+    // column and puts the Run triangle on the first line.
+    bool runnable_ = false;
     // F3-18: blame text keyed by block, and whether the gutter currently
     // widens to show it — same "empty means default, off by default"
     // arrangement inlay hints already use.
