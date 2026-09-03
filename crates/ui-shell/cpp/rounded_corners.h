@@ -14,10 +14,9 @@ namespace ui_shell {
 // tab strip — the rounding is painted straight over and the panel reads as
 // a hard square.
 //
-// Nor can `QWidget::setMask()`, which was the first answer: under xcb a
-// masked child stops every key and mouse event from reaching the
-// application at all (crates/app/tests/e2e.rs went dark for as long as it
-// shipped), and a mask is binary besides, clipping per whole pixel.
+// Nor can `QWidget::setMask()`, which was the first answer: a mask is
+// binary, clipping per whole pixel with no antialiasing, and it can paint
+// neither the border nor the shadow the card needs.
 //
 // What works is painting *last*: a mouse-transparent child raised above
 // its siblings fills the four corner slivers outside the rounded rectangle

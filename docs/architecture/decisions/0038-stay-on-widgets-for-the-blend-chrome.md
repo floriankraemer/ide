@@ -12,7 +12,7 @@ Landing it on Qt Widgets took three attempts, which raised the question this ADR
 What the Widgets attempts actually fought:
 
 - A QSS `border-radius` rounds only the background the styled widget paints itself, and a docked panel's children paint opaque rectangles over the corner.
-- `QWidget::setMask()` clips the child tree, but a masked child under xcb reads every key and mouse event as outside the mask, so the application went deaf for as long as that shipped.
+- `QWidget::setMask()` clips the child tree, but the clip is binary — no antialiasing — and a mask can paint neither a border nor a shadow, so the panel read as a bare cut-out.
 - Qt Advanced Docking System (ADS) installs a stylesheet of its own on the dock manager and pads its splitters, so some of its rules have to be overridden on that widget rather than on `qApp`.
 - One unused positional `%n` placeholder in a `QString::arg()` chain shifted every later argument and silently broke the whole sheet.
 
