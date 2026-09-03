@@ -1,5 +1,7 @@
 #include "theme.h"
 
+#include "ui_tokens.h"
+
 #include "DockManager.h"
 #include "IconProvider.h"
 
@@ -60,8 +62,9 @@ QString tabStyleSheet(const TabColors &colors)
     //     That rule stays margins-only on purpose: give the subcontrol a size,
     //     a background or a border and QStyleSheetStyle stops asking the
     //     platform style for the [x] glyph and draws an empty box instead.
-    //   * the top marker is reserved on every tab, selected or not, so
-    //     selecting one shifts no label by a pixel.
+    //   * the bottom accent marker is reserved on every tab, selected or
+    //     not, so selecting one shifts no label by a pixel. Bottom rather
+    //     than top per the blend spec's `inset 0 -2px 0 accent` marker.
     const QString paneBorder = colors.paneBorder.isValid()
         ? QStringLiteral("1px solid %1").arg(colors.paneBorder.name())
         : QStringLiteral("none");
@@ -80,15 +83,15 @@ QTabBar {
 QTabBar::tab {
     background-color: %4;
     color: %5;
-    padding: 6px 8px 6px 10px;
+    padding: %11px %11px %11px 10px;
     border: none;
-    border-top: 2px solid transparent;
+    border-bottom: 2px solid transparent;
 }
 
 QTabBar::tab:selected {
     background-color: %6;
     color: %7;
-    border-top: 2px solid %8;
+    border-bottom: 2px solid %8;
 }
 
 QTabBar::tab:hover:!selected {
@@ -103,7 +106,8 @@ QTabBar::close-button {
 )")
         .arg(colors.pane.name(), paneBorder, colors.bar.name(), colors.tab.name(),
              colors.tabText.name(), colors.selected.name(), colors.selectedText.name(),
-             colors.accent.name(), colors.hover.name(), colors.hoverText.name());
+             colors.accent.name(), colors.hover.name(), colors.hoverText.name())
+        .arg(tokens::kSp2);
 }
 
 QString dockStyleSheet(const TabColors &colors)
@@ -130,7 +134,13 @@ ads--CAutoHideSideBar[sideBarLocation="1"] { border-right: 1px solid %11; }
 ads--CAutoHideSideBar[sideBarLocation="2"] { border-left: 1px solid %11; }
 ads--CAutoHideSideBar[sideBarLocation="3"] { border-top: 1px solid %11; }
 
-ads--CDockAreaWidget, ads--CDockAreaTitleBar {
+ads--CDockAreaWidget {
+    background-color: %1;
+    border: none;
+    border-radius: %12px;
+}
+
+ads--CDockAreaTitleBar {
     background-color: %1;
     border: none;
 }
@@ -138,7 +148,7 @@ ads--CDockAreaWidget, ads--CDockAreaTitleBar {
 ads--CDockWidgetTab {
     background: %2;
     border: none;
-    border-top: 2px solid transparent;
+    border-bottom: 2px solid transparent;
     padding: 4px 8px 4px 4px;
 }
 
@@ -160,7 +170,7 @@ ads--CDockWidgetTab:hover QLabel {
 
 ads--CDockWidgetTab[activeTab="true"] {
     background: %6;
-    border-top: 2px solid %7;
+    border-bottom: 2px solid %7;
 }
 
 ads--CDockWidgetTab[activeTab="true"] QLabel {
@@ -179,7 +189,7 @@ ads--CDockWidgetTab #tabCloseButton {
 ads--CDockWidgetTab #tabCloseButton:hover {
     background: %9;
     border: none;
-    border-radius: 3px;
+    border-radius: %13px;
 }
 
 ads--CDockWidgetTab #tabCloseButton:pressed {
@@ -190,7 +200,9 @@ ads--CDockWidgetTab #tabCloseButton:pressed {
              colors.hoverText.name(), colors.selected.name(), colors.accent.name(),
              colors.selectedText.name())
         .arg(colors.closeHover.name(), tinted(colors.closeHover, 130, 115).name(),
-             colors.divider.name());
+             colors.divider.name())
+        .arg(tokens::kRadiusPanel)
+        .arg(tokens::kRadiusControl);
 }
 
 // Embedded as a compile-time string constant rather than a .qrc/rcc
@@ -199,6 +211,30 @@ ads--CDockWidgetTab #tabCloseButton:pressed {
 // docker/Dockerfile's artifact stages, so there is no asset-deployment step
 // to wire up, and no runtime path resolution to get wrong on Windows vs.
 // Linux. T2's light.qss follows the same pattern.
+// The blend spec's density/shape rules that apply identically in every
+// theme — only colour is theme-specific, so this is generated once and
+// appended to each of the three sheets below rather than repeated three
+// times with the numbers retyped.
+QString tokenStyleSheet()
+{
+    return QStringLiteral(R"(
+QMenu {
+    border-radius: %1px;
+}
+
+QPushButton, QComboBox, QLineEdit, QPlainTextEdit {
+    border-radius: %1px;
+}
+
+QTreeView::item, QListView::item, QListWidget::item {
+    min-height: %2px;
+    border-radius: %1px;
+}
+)")
+        .arg(tokens::kRadiusControl)
+        .arg(tokens::kRowHeight);
+}
+
 QString darculaStyleSheet()
 {
     return QStringLiteral(R"(
@@ -269,7 +305,7 @@ QLineEdit, QPlainTextEdit {
     color: #a9b7c6;
     border: 1px solid #3c3f41;
 }
-)") + tabStyleSheet(tabColorsForTheme(QStringLiteral("dark")));
+)") + tokenStyleSheet() + tabStyleSheet(tabColorsForTheme(QStringLiteral("dark")));
 }
 
 QString lightStyleSheet()
@@ -342,7 +378,7 @@ QLineEdit, QPlainTextEdit {
     color: #1a1a1a;
     border: 1px solid #d0d0d0;
 }
-)") + tabStyleSheet(tabColorsForTheme(QStringLiteral("light")));
+)") + tokenStyleSheet() + tabStyleSheet(tabColorsForTheme(QStringLiteral("light")));
 }
 
 // Dark+ (default dark) as VS Code ships it: the same selector set as the two
@@ -454,7 +490,7 @@ QLineEdit, QPlainTextEdit {
 QLineEdit:focus, QPlainTextEdit:focus {
     border: 1px solid #007fd4;
 }
-)") + tabStyleSheet(tabColorsForTheme(QStringLiteral("vscode-dark")));
+)") + tokenStyleSheet() + tabStyleSheet(tabColorsForTheme(QStringLiteral("vscode-dark")));
 }
 
 ThemeColors colorsForTheme(const QString &themeName)

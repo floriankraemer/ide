@@ -2,6 +2,7 @@
 
 #include "flow_layout.h"
 #include "theme.h"
+#include "ui_tokens.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include <QAbstractItemView>
@@ -240,7 +241,7 @@ AiChatPanel::AiChatPanel(AiChat *chat, SearchModel *searchModel, QWidget *parent
     // bookkeeping in an item view and free in a layout.
     transcriptBody_ = new QWidget;
     transcriptLayout_ = new QVBoxLayout(transcriptBody_);
-    transcriptLayout_->setContentsMargins(6, 6, 6, 6);
+    transcriptLayout_->setContentsMargins(tokens::kSp2, tokens::kSp2, tokens::kSp2, tokens::kSp2);
     transcriptLayout_->setSpacing(8);
     transcriptLayout_->addStretch(1);
 
@@ -295,7 +296,7 @@ AiChatPanel::AiChatPanel(AiChat *chat, SearchModel *searchModel, QWidget *parent
     splitter->setCollapsible(1, false);
 
     auto *root = new QVBoxLayout(this);
-    root->setContentsMargins(4, 4, 4, 4);
+    root->setContentsMargins(tokens::kSp1, tokens::kSp1, tokens::kSp1, tokens::kSp1);
     root->addLayout(header);
     root->addWidget(splitter, 1);
 
@@ -585,11 +586,12 @@ QFrame *AiChatPanel::makeBubbleFrame(const QString &role, QTextBrowser **browser
     auto *frame = new QFrame;
     frame->setFrameShape(QFrame::StyledPanel);
     frame->setStyleSheet(
-      QStringLiteral("QFrame { border: 1px solid %1; border-radius: 4px; }")
-        .arg(semanticColors().muted.name()));
+      QStringLiteral("QFrame { border: 1px solid %1; border-radius: %2px; }")
+        .arg(semanticColors().muted.name())
+        .arg(tokens::kRadiusControl));
 
     auto *layout = new QVBoxLayout(frame);
-    layout->setContentsMargins(8, 6, 8, 6);
+    layout->setContentsMargins(tokens::kSp2, tokens::kSp1, tokens::kSp2, tokens::kSp1);
     layout->setSpacing(2);
 
     auto *who = subordinateLabel(user ? tr("You") : tr("Assistant"), semanticColors().muted);
@@ -641,10 +643,11 @@ void AiChatPanel::appendErrorBubble(const QString &message)
     frame->setFrameShape(QFrame::StyledPanel);
     // Distinct styling rather than a modal: a failed request must not steal
     // the caret from someone mid-sentence.
-    frame->setStyleSheet(QStringLiteral("QFrame { border: 1px solid %1; border-radius: 4px; }")
-                           .arg(semanticColors().error.name()));
+    frame->setStyleSheet(QStringLiteral("QFrame { border: 1px solid %1; border-radius: %2px; }")
+                           .arg(semanticColors().error.name())
+                           .arg(tokens::kRadiusControl));
     auto *layout = new QVBoxLayout(frame);
-    layout->setContentsMargins(8, 6, 8, 6);
+    layout->setContentsMargins(tokens::kSp2, tokens::kSp1, tokens::kSp2, tokens::kSp1);
     // The wording is `ai-chat-core`'s — ChatError composes what a failure
     // means in English, this only picks the colour it is painted in.
     auto *label = subordinateLabel(message, semanticColors().error);
@@ -674,7 +677,7 @@ void AiChatPanel::appendCodeBlockRow(quint64 messageIndex)
 
     auto *row = new QWidget;
     auto *rows = new QVBoxLayout(row);
-    rows->setContentsMargins(8, 0, 8, 0);
+    rows->setContentsMargins(tokens::kSp2, 0, tokens::kSp2, 0);
     rows->setSpacing(2);
     for (std::size_t i = 0; i < blocks.size(); ++i) {
         const FfiCodeBlock &block = blocks[i];
@@ -833,10 +836,11 @@ void AiChatPanel::onToolCallPending(const FfiToolCall &call)
 
     auto *card = new QFrame;
     card->setFrameShape(QFrame::StyledPanel);
-    card->setStyleSheet(QStringLiteral("QFrame { border: 1px solid %1; border-radius: 4px; }")
-                          .arg(semanticColors().warning.name()));
+    card->setStyleSheet(QStringLiteral("QFrame { border: 1px solid %1; border-radius: %2px; }")
+                          .arg(semanticColors().warning.name())
+                          .arg(tokens::kRadiusControl));
     auto *layout = new QVBoxLayout(card);
-    layout->setContentsMargins(8, 6, 8, 6);
+    layout->setContentsMargins(tokens::kSp2, tokens::kSp1, tokens::kSp2, tokens::kSp1);
 
     // The sentence is `ai-chat-core`'s summary of the call, painted verbatim.
     auto *summary = new QLabel(call.summary, card);
@@ -969,8 +973,9 @@ void AiChatPanel::reloadAttachments()
 
         auto *chip = new QFrame(chipsBar_);
         chip->setFrameShape(QFrame::StyledPanel);
-        chip->setStyleSheet(QStringLiteral("QFrame { border: 1px solid %1; border-radius: 8px; }")
-                              .arg(semanticColors().muted.name()));
+        chip->setStyleSheet(QStringLiteral("QFrame { border: 1px solid %1; border-radius: %2px; }")
+                              .arg(semanticColors().muted.name())
+                              .arg(tokens::kRadiusPanel));
         auto *layout = new QHBoxLayout(chip);
         layout->setContentsMargins(6, 2, 4, 2);
         layout->setSpacing(4);

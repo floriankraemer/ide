@@ -61,12 +61,13 @@ void showSettingsDialog(QWidget *parent, const SettingsContext &context)
     categoryList->addItem(QObject::tr("AI Providers"));
     categoryList->addItem(QObject::tr("Plugins"));
     categoryList->addItem(QObject::tr("MCP"));
-    // Derived from the widest category rather than a fixed 150px: the
-    // interface font scale below can make "Language Servers" wider than any
-    // constant chosen for one font size, and a clipped category list is the
-    // first thing a user of the scale setting would see.
-    categoryList->setMaximumWidth(
-      categoryList->fontMetrics().horizontalAdvance(QObject::tr("Language Servers")) + 40);
+    // Derived from the widest category, floored at the blend spec's ~200px
+    // nav width: the interface font scale below can make "Language Servers"
+    // wider than 200px at large scales, and a clipped category list is the
+    // first thing a user of the scale setting would see, so the floor only
+    // ever grows the list, never shrinks it below what the spec asks for.
+    categoryList->setMaximumWidth(qMax(
+      200, categoryList->fontMetrics().horizontalAdvance(QObject::tr("Language Servers")) + 40));
 
     auto *pages = new QStackedWidget(&dialog);
 
@@ -107,8 +108,9 @@ void showSettingsDialog(QWidget *parent, const SettingsContext &context)
         [categoryList]() {
             // The dialog is scaling under its own feet: its category list
             // was sized for the font in force when it opened.
-            categoryList->setMaximumWidth(
-              categoryList->fontMetrics().horizontalAdvance(QObject::tr("Language Servers")) + 40);
+            categoryList->setMaximumWidth(qMax(
+              200,
+              categoryList->fontMetrics().horizontalAdvance(QObject::tr("Language Servers")) + 40));
         },
       });
     pages->addWidget(appearance.widget);
