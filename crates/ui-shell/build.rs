@@ -280,6 +280,7 @@ fn main() {
         // 0.9), so this is also the first place build.rs runs moc directly.
         .cpp_file("cpp/code_editor.h")
         .cpp_file("cpp/code_editor.cpp")
+        .cpp_file("cpp/code_editor_gutter.cpp")
         // F3-16: the change-marker colour/kind and the hunk popup. Free
         // functions and plain structs, no Q_OBJECT, so only the source is
         // listed — same as signature_tip.cpp.
@@ -301,9 +302,13 @@ fn main() {
         // leg of EditorTabs, same reasoning as the other three.
         .cpp_file("cpp/editor_tabs_vcs.cpp")
         .cpp_file("cpp/editor_tabs_run.cpp")
+        .cpp_file("cpp/editor_tabs_debug.cpp")
         .cpp_file("cpp/build_panel.h")
         .cpp_file("cpp/build_panel.cpp")
         .cpp_file("cpp/build_menu.cpp")
+        .cpp_file("cpp/debug_panel.h")
+        .cpp_file("cpp/debug_panel.cpp")
+        .cpp_file("cpp/debug_menu.cpp")
         // The two navigation docks and the QMainWindow subclass, likewise
         // Q_OBJECT-free (they subclass QWidget/QMainWindow but declare no
         // signals or slots of their own), so only the sources are listed.

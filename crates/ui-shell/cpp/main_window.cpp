@@ -6,6 +6,8 @@
 #include "appearance_page.h"
 #include "changes_panel.h"
 #include "build_menu.h"
+#include "debug_menu.h"
+#include "debug_panel.h"
 #include "build_panel.h"
 #include "class_view_panel.h"
 #include "code_editor.h"
@@ -134,6 +136,7 @@ struct CentralWidgets
     FileHistoryPanel *fileHistoryPanel;
     RunConsolePanel *runConsolePanel;
     BuildPanel *buildPanel;
+    DebugPanel *debugPanel;
     MarkdownPreviewPanel *previewPanel;
 };
 
@@ -142,7 +145,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                                    SearchModel *searchModel, TerminalSupervisor *terminalSupervisor,
                                    LanguageService *languageService, AiChat *aiChat,
                                    VcsService *vcsService, RunService *runService,
-                                   BuildService *buildService, PreviewProvider *previewProvider)
+                                   BuildService *buildService, DebugService *debugService,
+                                   PreviewProvider *previewProvider)
 {
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
@@ -186,7 +190,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // than inside the Run Console dock, where they were only visible once
     // that dock was opened. The Run Console panel still forwards the global
     // `run.*` shortcuts to it.
-    auto *runToolbar = new RunToolbar(runService, buildService, window);
+    auto *runToolbar = new RunToolbar(runService, buildService, debugService, window);
     QToolBar *toolBar = window->addToolBar(QObject::tr("Run"));
     toolBar->setObjectName(QStringLiteral("runToolBar"));
     toolBar->setMovable(false);
@@ -347,6 +351,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                         bottomArea);
     auto *runConsolePanel = buildRunConsoleDock(dockManager, docks, bottomArea, runToolbar, openAt);
     auto *buildPanel = buildBuildDock(dockManager, docks, bottomArea, buildService);
+    auto *debugPanel = buildDebugDock(dockManager, docks, bottomArea, debugService);
 
     // Class View tracks whatever tab is current: refresh on open, on
     // switch, and whenever a tab becomes clean. `tabModifiedChanged`
@@ -569,7 +574,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                            terminalPanel,    findUsagesPanel,  searchEverywhereDialog,
                            problemsPanel,    aiChatPanel,      changesPanel,
                            fileHistoryPanel, runConsolePanel,  buildPanel,
-                           previewPanel};
+                           debugPanel,       previewPanel};
 }
 
 // Menu structure per US-5 acceptance criteria. "Open Folder..." and the
@@ -642,6 +647,10 @@ void buildMainWindow(AppSettings *appSettings,
     // B1-6: one build adapter per window, like the others; it runs nothing
     // until asked and knows no project until one is open.
     auto *buildService = new BuildService(window);
+    // D3-1: one debug adapter per window. It owns the breakpoints, which
+    // exist with no session at all, so it is built before any project opens
+    // and told to load them when one does.
+    auto *debugService = new DebugService(window);
     auto *runConfigEditor = new RunConfigEditor(window);
     // ADR-0021: one AI chat session per window, alongside the other
     // per-window QObjects, plus the Settings > AI Providers draft — the same
@@ -664,10 +673,16 @@ void buildMainWindow(AppSettings *appSettings,
     const CentralWidgets central =
       buildCentralWidget(window, treeModel, docManager, appSettings, searchModel,
                           terminalSupervisor, languageService, aiChat, vcsService, runService,
-                          buildService, previewProvider);
+                          buildService, debugService, previewProvider);
     EditorTabs *editorTabs = central.editorTabs;
     wireVcsService(vcsService, treeModel, editorTabs); // F3-12a/F3-16
     wireRunService(runService, editorTabs);             // R1-7
+    wireDebugService(debugService, editorTabs);         // D2-5
+    // Breakpoints live under the project's `.ide/local/`, so they can only
+    // be read once a project is open — the same lifecycle hook run
+    // configuration detection uses.
+    QObject::connect(treeModel, &ProjectTreeModel::projectOpened, debugService,
+                      [debugService](const QString &) { debugService->loadBreakpoints(); });
 
     // Every path that shows the AI chat goes through here — see
     // DockRegistry::show (dock_layout.h) for why "re-add if homeless" runs
@@ -985,6 +1000,8 @@ void buildMainWindow(AppSettings *appSettings,
                  central.runConsolePanel, treeModel, editorTabs, central.buildPanel,
                  viewMenu);
     buildBuildMenu(window, central.buildPanel, appSettings, *actions, central.docks, viewMenu);
+    buildDebugMenu(window, debugService, central.debugPanel, central.runConsolePanel, editorTabs,
+                    appSettings, *actions, central.docks, viewMenu);
 
     buildNavigateMenu(window, languageService, searchModel, editorTabs, appSettings, *actions,
                        central.docks, central.findUsagesPanel);

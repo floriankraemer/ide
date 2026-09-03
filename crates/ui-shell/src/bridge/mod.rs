@@ -39,6 +39,7 @@
 pub mod ai;
 pub mod build;
 pub mod convert;
+pub mod debug;
 pub mod editor;
 pub mod editor_ops;
 pub mod errors;

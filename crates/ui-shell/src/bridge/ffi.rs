@@ -16,6 +16,7 @@
 use crate::bridge::ai::chat::AiChatRust;
 use crate::bridge::build::BuildServiceRust;
 use crate::bridge::convert::{new_syntax_highlighter, syntax_scope_names, SyntaxHighlighterHandle};
+use crate::bridge::debug::DebugServiceRust;
 use crate::bridge::editor::DocumentManagerRust;
 use crate::bridge::editor_ops::EditorOpsRust;
 use crate::bridge::icons::IconProviderRust;
@@ -689,6 +690,35 @@ mod ffi {
         /// A `\n`-separated string for the same reason `env` is one — a
         /// `Vec` field on a shared struct is not a shape cxx supports.
         before_launch: QString,
+    }
+
+    /// One frame of a stopped thread's stack (D3-3), 1:1 with
+    /// `dap_core::StackFrame`. `path` is empty for a frame the adapter knows
+    /// only by address — a runtime-internal frame — which the view shows
+    /// without offering to open it.
+    struct FfiStackFrame {
+        id: i64,
+        name: QString,
+        path: QString,
+        line: u32,
+        column: u32,
+    }
+
+    /// One of the debuggee's threads (D3-3).
+    struct FfiDebugThread {
+        id: i64,
+        name: QString,
+    }
+
+    /// One variable, or one child of one (D3-4). A non-zero
+    /// `variables_reference` means it has children to fetch on expansion —
+    /// the view asks for them with `expand`, so a deep object costs one
+    /// round trip per level the user actually opens.
+    struct FfiVariable {
+        name: QString,
+        value: QString,
+        type_name: QString,
+        variables_reference: i64,
     }
 
     /// `RunService::resolveLink`'s result. `found == false` means "no link
@@ -5411,6 +5441,242 @@ mod ffi {
     // Enables `self.qt_thread()` on `BuildService` for the thread each build
     // runs on.
     impl cxx_qt::Threading for BuildService {}
+
+    extern "RustQt" {
+        /// Debugging (D3-1): owns the breakpoints and whatever debug
+        /// sessions are running, and speaks DAP to each session's adapter.
+        ///
+        /// One QObject for N sessions, the ADR-0032 precedent. Translation
+        /// only: what a breakpoint is, which adapter a project uses and what
+        /// a launch body looks like are `dap-core`'s (ADR-0041).
+        #[qobject]
+        type DebugService = super::DebugServiceRust;
+
+        /// Start debugging `config_id` — the same configuration Run would
+        /// launch, started by the adapter instead. Answers via
+        /// `debugStarted` and then `debugStopped`/`debugTerminated`; a
+        /// missing adapter is reported here, with its install hint.
+        #[qinvokable]
+        fn debug(self: Pin<&mut DebugService>, config_id: &QString) -> FfiResult;
+
+        /// End the session: the adapter is asked to stop the debuggee, then
+        /// killed if it does not.
+        #[qinvokable]
+        fn stop(self: Pin<&mut DebugService>, session_id: u64);
+
+        #[qinvokable]
+        fn resume(self: Pin<&mut DebugService>, session_id: u64);
+
+        #[qinvokable]
+        fn pause(self: Pin<&mut DebugService>, session_id: u64);
+
+        #[qinvokable]
+        #[cxx_name = "stepOver"]
+        fn step_over(self: Pin<&mut DebugService>, session_id: u64);
+
+        #[qinvokable]
+        #[cxx_name = "stepInto"]
+        fn step_into(self: Pin<&mut DebugService>, session_id: u64);
+
+        #[qinvokable]
+        #[cxx_name = "stepOut"]
+        fn step_out(self: Pin<&mut DebugService>, session_id: u64);
+
+        /// Continue until `path:line` — a temporary breakpoint plus a
+        /// resume, which every adapter supports.
+        #[qinvokable]
+        #[cxx_name = "runToCursor"]
+        fn run_to_cursor(self: Pin<&mut DebugService>, session_id: u64, path: &QString, line: u32);
+
+        /// The stopped thread's frames, from the cache the last `stopped`
+        /// filled. Empty while running.
+        #[qinvokable]
+        fn frames(self: &DebugService) -> Vec<FfiStackFrame>;
+
+        /// Every thread the adapter reported at the last stop.
+        #[qinvokable]
+        fn threads(self: &DebugService) -> Vec<FfiDebugThread>;
+
+        /// Variables already fetched for `reference`; empty means "not
+        /// fetched yet", which `expand` answers.
+        #[qinvokable]
+        fn variables(self: &DebugService, reference: i64) -> Vec<FfiVariable>;
+
+        /// Fetch the children of `reference`; answers via
+        /// `variablesChanged`.
+        #[qinvokable]
+        fn expand(self: Pin<&mut DebugService>, session_id: u64, reference: i64);
+
+        /// Show a frame: its scopes are fetched and each scope expanded,
+        /// and later evaluations run in it.
+        #[qinvokable]
+        #[cxx_name = "selectFrame"]
+        fn select_frame(self: Pin<&mut DebugService>, session_id: u64, frame_id: i64);
+
+        /// Evaluate an expression in the selected frame; answers via
+        /// `evaluated`. A failed evaluation answers with its own message
+        /// rather than nothing.
+        #[qinvokable]
+        fn evaluate(self: Pin<&mut DebugService>, session_id: u64, expression: &QString);
+
+        /// Change a variable's value. Refused locally when the adapter said
+        /// it cannot, rather than sent and failed.
+        #[qinvokable]
+        #[cxx_name = "setVariable"]
+        fn set_variable(
+            self: Pin<&mut DebugService>,
+            session_id: u64,
+            reference: i64,
+            name: &QString,
+            value: &QString,
+        ) -> FfiResult;
+
+        /// Whether this session's adapter allows changing a variable — what
+        /// the Variables view enables its editing from.
+        #[qinvokable]
+        #[cxx_name = "canSetVariable"]
+        fn can_set_variable(self: &DebugService, session_id: u64) -> bool;
+
+        /// The watch expressions, newline-separated, and their last values
+        /// in the same order.
+        #[qinvokable]
+        fn watches(self: &DebugService) -> QString;
+
+        #[qinvokable]
+        #[cxx_name = "watchValues"]
+        fn watch_values(self: &DebugService) -> QString;
+
+        #[qinvokable]
+        #[cxx_name = "addWatch"]
+        fn add_watch(self: Pin<&mut DebugService>, expression: &QString);
+
+        #[qinvokable]
+        #[cxx_name = "removeWatch"]
+        fn remove_watch(self: Pin<&mut DebugService>, index: u32);
+
+        /// Toggle a line breakpoint, returning whether there is now one
+        /// there. Every running session is told.
+        #[qinvokable]
+        #[cxx_name = "toggleBreakpoint"]
+        fn toggle_breakpoint(self: Pin<&mut DebugService>, path: &QString, line: u32) -> bool;
+
+        /// The lines of `path` that have a breakpoint, newline-separated —
+        /// the gutter asks for a whole file at once rather than line by
+        /// line.
+        #[qinvokable]
+        #[cxx_name = "breakpointLines"]
+        fn breakpoint_lines(self: &DebugService, path: &QString) -> QString;
+
+        /// Give a breakpoint a condition or a log message, or enable and
+        /// disable it — the breakpoints dialog's whole job.
+        #[qinvokable]
+        #[cxx_name = "configureBreakpoint"]
+        fn configure_breakpoint(
+            self: Pin<&mut DebugService>,
+            path: &QString,
+            line: u32,
+            enabled: bool,
+            condition: &QString,
+            log_message: &QString,
+        );
+
+        /// Mute Breakpoints: the adapter is told there are none, and
+        /// unmuting brings back exactly what was there.
+        #[qinvokable]
+        fn muted(self: &DebugService) -> bool;
+
+        #[qinvokable]
+        #[cxx_name = "setMuted"]
+        fn set_muted(self: Pin<&mut DebugService>, muted: bool);
+
+        /// An edit moved lines in `path`. Driven from the buffer-edit seam
+        /// the editor already has, not from a hook of the debugger's own.
+        #[qinvokable]
+        #[cxx_name = "shiftBreakpoints"]
+        fn shift_breakpoints(self: Pin<&mut DebugService>, path: &QString, from: u32, delta: i64);
+
+        /// Load this project's breakpoints from `.ide/local/`.
+        #[qinvokable]
+        #[cxx_name = "loadBreakpoints"]
+        fn load_breakpoints(self: Pin<&mut DebugService>);
+
+        /// A session started.
+        #[qsignal]
+        #[cxx_name = "debugStarted"]
+        fn debug_started(self: Pin<&mut DebugService>, session_id: u64, config_id: QString);
+
+        /// The debuggee suspended. `path` and `line` are the top frame's, so
+        /// the editor can show the execution point without asking.
+        #[qsignal]
+        #[cxx_name = "debugStopped"]
+        fn debug_stopped(
+            self: Pin<&mut DebugService>,
+            session_id: u64,
+            reason: QString,
+            path: QString,
+            line: u32,
+        );
+
+        /// The debuggee is running again.
+        #[qsignal]
+        #[cxx_name = "debugResumed"]
+        fn debug_resumed(self: Pin<&mut DebugService>, session_id: u64);
+
+        /// Output from the debuggee or the adapter. `category` is DAP's —
+        /// `stdout`, `stderr`, `console` — shown, never branched on.
+        #[qsignal]
+        #[cxx_name = "debugOutput"]
+        fn debug_output(
+            self: Pin<&mut DebugService>,
+            session_id: u64,
+            category: QString,
+            text: QString,
+        );
+
+        /// The session ended.
+        #[qsignal]
+        #[cxx_name = "debugTerminated"]
+        fn debug_terminated(self: Pin<&mut DebugService>, session_id: u64, exit_code: i32);
+
+        /// The session could not start, or a request failed.
+        #[qsignal]
+        #[cxx_name = "debugFailed"]
+        fn debug_failed(self: Pin<&mut DebugService>, session_id: u64, error: FfiResult);
+
+        /// `variables(reference)` has a fresh answer.
+        #[qsignal]
+        #[cxx_name = "variablesChanged"]
+        fn variables_changed(self: Pin<&mut DebugService>, session_id: u64, reference: i64);
+
+        /// The selected frame's scopes, newline-separated by name, in the
+        /// order the adapter reported them.
+        #[qsignal]
+        #[cxx_name = "scopesChanged"]
+        fn scopes_changed(self: Pin<&mut DebugService>, session_id: u64, names: QString);
+
+        /// `evaluate` answered.
+        #[qsignal]
+        fn evaluated(
+            self: Pin<&mut DebugService>,
+            session_id: u64,
+            expression: QString,
+            value: QString,
+        );
+
+        /// The watch list or its values changed.
+        #[qsignal]
+        #[cxx_name = "watchesChanged"]
+        fn watches_changed(self: Pin<&mut DebugService>);
+
+        /// A breakpoint was added, removed, configured or moved.
+        #[qsignal]
+        #[cxx_name = "breakpointsChanged"]
+        fn breakpoints_changed(self: Pin<&mut DebugService>);
+    }
+
+    // Enables `self.qt_thread()` on `DebugService` for each session's reader
+    // thread and the short-lived threads its requests run on.
+    impl cxx_qt::Threading for DebugService {}
 
     extern "RustQt" {
         /// Settings-page draft for the project's run configurations (F4-10),

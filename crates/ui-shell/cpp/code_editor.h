@@ -3,6 +3,7 @@
 #include "vcs_gutter.h"
 
 #include <QColor>
+#include <QSet>
 #include <QHash>
 #include <QPlainTextEdit>
 #include <QSize>
@@ -334,6 +335,12 @@ public:
     // setFoldRanges/setDiagnosticSpans.
     void setChangeMarkers(const QVector<ChangeMarker> &markers);
 
+    // D2-5: which lines of this file have a breakpoint, and where execution
+    // is currently suspended (-1 for "not in this file"). Both are pushed in
+    // by EditorTabs from `DebugService`; the widget decides neither.
+    void setBreakpointLines(const QSet<int> &lines);
+    void setExecutionLine(int blockNumber);
+
     // R1-7: whether this file has a run target, decided by
     // `RunService::canRunFile` and pushed in by EditorTabs — the gutter
     // shows IntelliJ's Run icon on the first line when it does. The widget
@@ -438,6 +445,10 @@ signals:
     // EditorTabs's job; this widget only reports the gesture.
     void changeMarkerClicked(int hunkIndex, const QPoint &globalPos);
 
+    // D2-5: the breakpoint column was clicked on this line (0-based block).
+    // Whether that adds or removes one is `DebugService`'s answer.
+    void breakpointToggled(int blockNumber);
+
     // R1-7: the gutter's Run icon was clicked. What that runs is
     // EditorTabs's business, via `RunService::runContext`.
     void runRequested();
@@ -530,6 +541,9 @@ private:
     // R1-7: set from RunService::canRunFile; widens the gutter by one icon
     // column and puts the Run triangle on the first line.
     bool runnable_ = false;
+    // D2-5: breakpoints in this file, and the suspended line.
+    QSet<int> breakpointLines_;
+    int executionLine_ = -1;
     // F3-18: blame text keyed by block, and whether the gutter currently
     // widens to show it — same "empty means default, off by default"
     // arrangement inlay hints already use.

@@ -6662,6 +6662,7 @@ dependencies = [
  "cxx-qt",
  "cxx-qt-build",
  "cxx-qt-lib",
+ "dap-core",
  "edit-ops",
  "editor-core",
  "index-core",

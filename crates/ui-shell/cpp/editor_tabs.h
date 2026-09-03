@@ -39,6 +39,9 @@ void wireVcsService(VcsService *vcsService, ProjectTreeModel *treeModel, EditorT
 // R1-7: gives EditorTabs the RunService its gutter Run icon asks and acts
 // through (editor_tabs_run.cpp).
 void wireRunService(RunService *runService, EditorTabs *editorTabs);
+// D2-5/D3: gives EditorTabs the DebugService whose breakpoints its gutter
+// shows and toggles (editor_tabs_debug.cpp).
+void wireDebugService(DebugService *debugService, EditorTabs *editorTabs);
 
 // app_core::TabKind's stable code for a binary tab (ADR-0020).
 constexpr int kTabKindBinary = 1;
@@ -430,6 +433,17 @@ public:
     // "no server for this language" shape LanguageService's absence has.
     void setVcsService(VcsService *vcsService);
     void setRunService(RunService *runService);
+    void setDebugService(DebugService *debugService);
+
+    // D2-5: push this file's breakpoints into its gutter, and turn a gutter
+    // click into `DebugService::toggleBreakpoint`.
+    void refreshBreakpointsFor(CodeEditor *editor);
+    void refreshBreakpoints();
+    void toggleBreakpointAt(CodeEditor *editor, int blockNumber);
+    // D2-3: follow this editor's edits so its breakpoints move with them.
+    void watchLineCountFor(CodeEditor *editor);
+    // D3: show (or clear, with an empty path) the suspended line.
+    void showExecutionPoint(const QString &path, int line);
 
     // R1-7: ask `RunService::canRunFile` whether an editor's file has a run
     // target, and show or hide the gutter's Run icon accordingly.
@@ -706,6 +720,7 @@ private:
     // the same retrofit shape setContextMenuCallback uses.
     VcsService *vcsService_ = nullptr;
     RunService *runService_ = nullptr;
+    DebugService *debugService_ = nullptr;
     // A monotonic counter bumped on every requestHunks call: `HunkCache`'s
     // cache key needs only "same edit state or not", never real history, so
     // one counter shared across every open file is enough (vcs-core's own
