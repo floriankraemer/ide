@@ -26,5 +26,23 @@ fn main() {
         res.set_windres_path("x86_64-w64-mingw32-windres");
         res.set_ar_path("x86_64-w64-mingw32-ar");
         res.compile().expect("embedding app-icon.ico into the exe");
+
+        // winres links the compiled resource as a plain static lib
+        // (`cargo:rustc-link-lib=static=resource`, backed by
+        // `libresource.a` in OUT_DIR). That object defines no symbol
+        // anything else references, so GNU ld treats it as an unused
+        // archive member and drops it from the final .exe — the build
+        // succeeds and the resource is technically "embedded" in the
+        // intermediate .a, but it never reaches the linked binary. Explorer
+        // and the taskbar read the icon from the exe's resource table, so
+        // they show nothing/generic; Qt's runtime QIcon (main_window.cpp)
+        // still paints the titlebar fine, since that path never touches the
+        // exe resource at all — hence titlebar-only icon. Re-link the same
+        // archive with --whole-archive to force the object in.
+        let out_dir = std::env::var("OUT_DIR").unwrap();
+        println!("cargo:rustc-link-search=native={out_dir}");
+        println!("cargo:rustc-link-arg-bins=-Wl,--whole-archive");
+        println!("cargo:rustc-link-arg-bins=-l:libresource.a");
+        println!("cargo:rustc-link-arg-bins=-Wl,--no-whole-archive");
     }
 }
