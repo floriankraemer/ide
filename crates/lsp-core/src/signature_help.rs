@@ -14,6 +14,8 @@
 
 use serde_json::Value;
 
+use crate::manager::{position_params, LspError, SIGNATURE_HELP_TIMEOUT};
+
 /// One parameter of one signature.
 ///
 /// `range` is the parameter's extent **within its signature's label**, in
@@ -487,6 +489,34 @@ pub fn should_request(
 /// caret out of the call — is the dismissal. Escape is the view's own affair.
 pub fn should_dismiss(text: &str, caret: usize) -> bool {
     call_site_at(text, caret).is_none()
+}
+
+// C4-followup (#162): request-sending `LspManager` methods for this feature, moved out of
+// `manager.rs` once it crossed the file-size ceiling. This file already held the
+// parse/rule layer; this is the request-sending half `manager.rs`'s own module doc
+// pointed callers to.
+impl crate::manager::LspManager {
+    /// `textDocument/signatureHelp` for a position in an open document.
+    /// `Ok(None)` means the caret is not in a call the server recognises.
+    ///
+    /// The server's `activeParameter` describes the position it was asked
+    /// about; by the time the answer lands the caret may have moved, which
+    /// is what [`crate::signature_help::call_site_at`] exists to correct.
+    pub fn signature_help(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Option<SignatureHelp>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/signatureHelp",
+            position_params(uri, line, character),
+            SIGNATURE_HELP_TIMEOUT,
+        )?;
+        Ok(parse_signature_help(&result))
+    }
 }
 
 #[cfg(test)]
