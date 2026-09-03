@@ -69,6 +69,8 @@ struct ChromePalette
     QColor selection;  // --ide-selection: the selected tree/list row
     QColor statusBar;  // the status bar's own ground (== surface except vscode-dark)
     QString chevron;   // resource path of the combo box arrow, tinted textDim
+    QColor shadow;     // --panel-shadow ink (alpha ignored; see shadowOpacity)
+    double shadowOpacity; // --panel-shadow alpha at the card's edge
 };
 
 // Any name other than "light"/"vscode-dark" is the default dark theme —

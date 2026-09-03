@@ -20,6 +20,7 @@
 #include "keymap_page.h"
 #include "mcp_page.h"
 #include "navigate_menu.h"
+#include "panel_shadow.h"
 #include "search_everywhere_dialog.h"
 #include "problems_panel.h"
 #include "icon_decoration_proxy.h"
@@ -174,6 +175,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                          }
                          roundCorners(dockArea, tokens::kRadiusPanel);
                      });
+    addPanelShadows(dockManager, tokens::kRadiusPanel);
     auto *docks = new DockRegistry(dockManager);
 
     // The Run/Stop/Rerun cluster and the configuration picker, on a

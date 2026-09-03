@@ -39,7 +39,7 @@ Concretely, the Widgets answers this decision stands on:
 
 - Theme colours are one `ChromePalette` per theme (`theme.h`); every stylesheet and palette is generated from it by `chromeStyleSheet()` / `dockStyleSheet()` / `paletteForTheme()`, with `{name}` placeholders filled by `fillTokens()`, never positional `%n`.
 - Shape and density are the constants in `ui_tokens.h`, identical for every theme.
-- A panel's rounded card outline is painted by `roundCorners()` (`rounded_corners.cpp`) as the topmost, mouse-transparent child of each `ads::CDockAreaWidget`, not by a mask and not by QSS.
+- A panel's rounded card outline is painted by `roundCorners()` (`rounded_corners.cpp`) as the topmost, mouse-transparent child of each `ads::CDockAreaWidget`, not by a mask and not by QSS; its shadow by `addPanelShadows()` (`panel_shadow.cpp`) on a layer beneath every panel.
 - The run toolbar is a `QToolBar` on the main window; its icons are `QPainterPath` glyphs tinted from the palette.
 - The interface font is the bundled Inter (`resources/fonts`, SIL OFL), installed by `installInterfaceFont()` before the theme is applied.
 
@@ -47,6 +47,7 @@ Concretely, the Widgets answers this decision stands on:
 
 - Positive: no rewrite; the design lands on the code that already has tests around its rules and an E2E harness that drives it.
 - Positive: the four traps above are each documented at the point of the fix, so the next chrome change does not rediscover them.
-- Negative: no panel shadow. The mockup's `--panel-shadow` needs compositing outside the widget's rectangle, which Widgets cannot paint without a translucent toplevel; the 1px border and the canvas gap carry the separation instead.
+- Negative, mitigated: a widget cannot composite a shadow outside its own rectangle, so the mockup's `--panel-shadow` is faked — `panel_shadow.cpp` paints ring-blurred rounded rectangles on a layer at the bottom of the dock container, at each panel's geometry, and the splitter handles are transparent so it shows in the gaps.
+  It reads as a shadow at the 6px gap and fades to nothing where panels touch; a real Gaussian shadow would need Qt Quick.
 - Negative: rounded corners are painted per panel, so a widget that is not an ADS dock area (a floating dock, a dialog) does not get them unless `roundCorners()` is called for it.
 - Revisit when a feature needs animation, touch, or GPU effects the blend chrome does not — at that point the humble view swaps, per ADR-0002.

@@ -53,6 +53,8 @@ ChromePalette darkPalette()
     // A QSS `image:` can only be a file, so the one arrow glyph is a
     // resource per theme rather than a runtime-tinted mask (resources/icons).
     p.chevron = QStringLiteral(":/ui/icons/chevron_dark.png");
+    p.shadow = Qt::black;
+    p.shadowOpacity = 0.30;
     return p;
 }
 
@@ -74,6 +76,8 @@ ChromePalette lightPalette()
     // A QSS `image:` can only be a file, so the one arrow glyph is a
     // resource per theme rather than a runtime-tinted mask (resources/icons).
     p.chevron = QStringLiteral(":/ui/icons/chevron_light.png");
+    p.shadow = hex("#0f172a");
+    p.shadowOpacity = 0.18;
     return p;
 }
 
@@ -97,6 +101,8 @@ ChromePalette vscodeDarkPalette()
     // A QSS `image:` can only be a file, so the one arrow glyph is a
     // resource per theme rather than a runtime-tinted mask (resources/icons).
     p.chevron = QStringLiteral(":/ui/icons/chevron_vscode_dark.png");
+    p.shadow = Qt::black;
+    p.shadowOpacity = 0.30;
     return p;
 }
 
@@ -545,12 +551,13 @@ QString dockStyleSheet(const ChromePalette &c)
     // Qt gives a widget's own stylesheet priority over the application's,
     // and ADS installs one on the dock manager.
     return fillTokens(c, QStringLiteral(R"(
-/* The gap between two docked panels: `--panel-gap` wide and painted in the
-   canvas colour, so what separates two panels is empty ground rather than a
-   divider line. ADS has no C++ knob for inter-panel spacing — the splitter
-   handle it puts there anyway is the spacing, once it is given a width. */
+/* The gap between two docked panels: `--panel-gap` wide and see-through,
+   so what separates two panels is the canvas — and the panel shadows
+   panel_shadow.cpp paints on it — rather than a divider line. ADS has no
+   C++ knob for inter-panel spacing; the splitter handle it puts there
+   anyway is the spacing, once it is given a width. */
 ads--CDockContainerWidget ads--CDockSplitter::handle {
-    background: {canvas};
+    background: transparent;
     width: {panel-gap}px;
     height: {panel-gap}px;
 }
