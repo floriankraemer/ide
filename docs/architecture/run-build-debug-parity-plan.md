@@ -78,7 +78,7 @@ Task ids are stable; titles may change.
 | D1-3 — `session`: initialize → launch/attach → configurationDone, capability flags | done | this branch |
 | D1-4 — `catalog`: codelldb, debugpy, java-debug, `[[debug_adapter]]` overrides, install hints | done | this branch |
 | D1-5 — adapter lifecycle: spawn, reader thread, shutdown, every in-flight request failed on death | done | this branch; no separate `supervisor` module — the lifetime is the session's, and a second type for it would own nothing. Automatic respawn is deliberately not offered: a debug session that died has lost its debuggee, so restarting the adapter would attach to nothing |
-| D1-6 — `runInTerminal` handed back to `run-core`'s PTY supervisor | blocked on D4-1 | the hook exists, and `initialize` deliberately does **not** advertise the capability until something answers it — advertising it while answering with an empty body is what made debugpy's launcher time out |
+| D1-6 — `runInTerminal` handed back to `run-core`'s PTY supervisor | done | this branch; the capability is claimed and answered in the same commit, which is the only safe way to move those two |
 | D1-7 — ADR-0041 + `layering.md` rows for `dap-core` and `stdio-framing` + CI gate | done | this branch |
 
 ### D2 — breakpoints
@@ -101,7 +101,7 @@ Task ids are stable; titles may change.
 | D3-4 — Variables with lazy expansion, Set Value gated on the adapter's capability | done | this branch |
 | D3-5 — Watches, re-evaluated on every stop, and Evaluate in the console | done | this branch |
 | D3-6 — the debugger console, fed by DAP `output` events | done | this branch |
-| D3-7 — inline values from the current frame's scopes | blocked on D3-4 | deferred to D4: the values are already fetched, what is missing is painting them at the end of a line |
+| D3-7 — inline values from the current frame's scopes | open | the values are already fetched and cached; what is missing is painting them at the end of a line, which is an editor-paint change rather than a debugger one |
 | D3-8 — view: the Debug toolbar button, the "&Debug" menu, capability-gated enablement | done | this branch; the toolbar now has the whole cluster the mockup shows |
 | D3-9 — E2E: `e2e_debug_stops_at_a_breakpoint`, plus a real-adapter conformance test | done | this branch; found that debugpy holds the `launch` response until `configurationDone`, so a client that waits for it deadlocks |
 
@@ -109,12 +109,12 @@ Task ids are stable; titles may change.
 
 | Task | Status | Commit |
 |---|---|---|
-| D4-1 — attach to a local process | blocked on D3-1 |  |
-| D4-2 — remote `attach` configurations | blocked on D4-1 |  |
-| D4-3 — per-language exception breakpoints wired to the catalog | blocked on D2-2 |  |
-| D4-4 — reload changed classes where the adapter exposes it | blocked on D3-1 |  |
-| D4-5 — multiple simultaneous sessions with session tabs | blocked on D3-1 |  |
-| D4-6 — the four-toolchain debug matrix, recorded in this doc | blocked on D3-9 |  |
+| D4-1 — attach to a local process | done | this branch; the user gives the pid — enumerating processes portably is three implementations and a permissions story for a number they already have |
+| D4-2 — remote `attach` configurations | open | needs a persisted attach configuration (host, port, path mappings) that no adapter agrees on the shape of; deferred until a second toolchain needs it, so the schema is designed against two cases rather than one |
+| D4-3 — exception breakpoints, from the adapter's own filters | done | this branch; per adapter rather than per language — which exceptions can be broken on is something only the adapter knows, and it says so in `initialize` |
+| D4-4 — reload changed classes where the adapter exposes it | open | JVM-only in practice: none of the three shipped adapters declares a reload capability except java-debug, which needs the JVM toolchain matrix (D4-6) to be verifiable at all |
+| D4-5 — multiple simultaneous sessions, with a session picker | done | this branch; a picker rather than tabs — the dock already has four panes, and a second row of tabs above them buys nothing |
+| D4-6 — the four-toolchain debug matrix | open | Python is covered automatically (`dap-core/tests/debugpy.rs` + `e2e_debug_stops_at_a_breakpoint`). Cargo, CMake and the JVM need codelldb and java-debug installed in the builder image; that is an image change per adapter and a licence question for each, so it is a decision rather than a task |
 
 ### R2 — console and run-widget ergonomics
 

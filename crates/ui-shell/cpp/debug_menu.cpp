@@ -13,6 +13,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QPlainTextEdit>
+#include <QInputDialog>
 #include <QTextCursor>
 
 namespace ui_shell {
@@ -65,6 +66,23 @@ void buildDebugMenu(QMainWindow *window, DebugService *debugService, DebugPanel 
                           [debugPanel, method]() { (debugPanel->*method)(); });
     }
 
+    QAction *attachAction = registerAction(debugMenu, QStringLiteral("debug.attach"),
+                                           QObject::tr("Attach to Process..."), appSettings,
+                                           actions);
+    QObject::connect(attachAction, &QAction::triggered, window, [window, debugService, showDock]() {
+        bool accepted = false;
+        // A number, not a process list: enumerating processes portably is
+        // three implementations and a permissions story, and the pid is
+        // something the user already has in the terminal they got it from.
+        const int pid = QInputDialog::getInt(window, QObject::tr("Attach to Process"),
+                                              QObject::tr("Process id:"), 0, 1, 2147483647, 1,
+                                              &accepted);
+        if (accepted && pid > 0) {
+            showDock();
+            debugService->attach(static_cast<quint32>(pid));
+        }
+    });
+
     debugMenu->addSeparator();
 
     QAction *toggleBreakpoint = registerAction(debugMenu, QStringLiteral("debug.toggleBreakpoint"),
@@ -85,6 +103,38 @@ void buildDebugMenu(QMainWindow *window, DebugService *debugService, DebugPanel 
     muteBreakpoints->setChecked(debugService->muted());
     QObject::connect(muteBreakpoints, &QAction::toggled, debugService,
                       [debugService](bool muted) { debugService->setMuted(muted); });
+
+    // The adapter decides which exception classes exist, so the submenu is
+    // rebuilt from `exceptionFilters` each time it opens rather than being
+    // populated once from a list this view invented (D4-3).
+    QMenu *exceptionMenu = debugMenu->addMenu(QObject::tr("Exception Breakpoints"));
+    QObject::connect(exceptionMenu, &QMenu::aboutToShow, exceptionMenu,
+                      [exceptionMenu, debugService, debugPanel]() {
+                          exceptionMenu->clear();
+                          const QString filters =
+                            debugService->exceptionFilters(debugPanel->currentSession());
+                          if (filters.isEmpty()) {
+                              QAction *none = exceptionMenu->addAction(
+                                QObject::tr("No debug session, or the adapter offers none"));
+                              none->setEnabled(false);
+                              return;
+                          }
+                          for (const QString &line :
+                               filters.split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+                              const QStringList parts = line.split(QLatin1Char('\t'));
+                              if (parts.size() < 3) {
+                                  continue;
+                              }
+                              QAction *filter = exceptionMenu->addAction(parts.at(1));
+                              filter->setCheckable(true);
+                              filter->setChecked(parts.at(2) == QLatin1String("true"));
+                              const QString id = parts.at(0);
+                              QObject::connect(filter, &QAction::toggled, debugService,
+                                                [debugService, id](bool on) {
+                                                    debugService->setExceptionFilter(id, on);
+                                                });
+                          }
+                      });
 
     QAction *viewDebugAction = registerAction(viewMenu, QStringLiteral("view.debug"),
                                                QObject::tr("Debug"), appSettings, actions);

@@ -5,6 +5,7 @@
 #include <QString>
 #include <QWidget>
 
+class QComboBox;
 class QLineEdit;
 class QListWidget;
 class QPlainTextEdit;
@@ -43,6 +44,9 @@ public:
     void stepOut();
     void stopSession();
     bool hasSession() const { return sessionId_ != 0; }
+    // Which session the views are showing — what the Debug menu asks before
+    // listing an adapter's exception filters (D4-3/D4-5).
+    quint64 currentSession() const { return sessionId_; }
 
 private:
     void onStarted(quint64 sessionId, const QString &configId);
@@ -53,6 +57,7 @@ private:
     void onOutput(quint64 sessionId, const QString &category, const QString &text);
     void onVariablesChanged(quint64 sessionId, qint64 reference);
     void onWatchesChanged();
+    void refreshSessions();
     void refreshFrames();
     void refreshWatches();
     void expandItem(QTreeWidgetItem *item);
@@ -60,6 +65,7 @@ private:
 
     DebugService *debugService_;
     quint64 sessionId_ = 0;
+    QComboBox *sessionPicker_ = nullptr;
     QToolButton *resumeButton_ = nullptr;
     QToolButton *pauseButton_ = nullptr;
     QToolButton *stopButton_ = nullptr;
