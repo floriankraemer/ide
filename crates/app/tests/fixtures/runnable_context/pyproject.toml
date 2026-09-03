@@ -1,0 +1,5 @@
+# Marks this fixture as a Python project, which is what makes
+# `run_core::context` offer to run `main.py` from the editor (R1-9).
+[project]
+name = "runnable-context"
+version = "0.0.0"
