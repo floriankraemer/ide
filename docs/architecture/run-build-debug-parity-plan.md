@@ -36,11 +36,11 @@ Task ids are stable; titles may change.
 
 | Task | Status | Commit |
 |---|---|---|
-| R1-1 — `run_core::toolchain`: the toolchain table, `detect` rewritten on top of it | open |  |
-| R1-2 — `RunConfigKind` on `RunConfig`; back-compatible serde in `app-config` | open |  |
-| R1-3 — `run_core::macros`: `$PROJECT_DIR$`, `$FILE_PATH$`, `$FILE_DIR$`, `$FILE_NAME$`, `$USER_HOME$` in cwd, args and env | open |  |
-| R1-4 — temporary configurations with an LRU cap | open |  |
-| R1-5 — `allow_parallel` policy on top of the existing N-session supervisor | open |  |
+| R1-1 — `run_core::toolchain`: the toolchain table, `detect` rewritten on top of it | done | this branch |
+| R1-2 — typed configurations: `toolchain` + `target` on `RunConfig`, back-compatible serde in `app-config` | done | this branch; a pair of strings rather than the enum this plan predicted, so `app-config` keeps depending on nothing |
+| R1-3 — `run_core::macros`: `$PROJECT_DIR$`, `$FILE_PATH$`, `$FILE_DIR$`, `$FILE_NAME$`, `$USER_HOME$` in cwd, args and env | done | this branch |
+| R1-4 — `run_core::context`: the configuration a file implies, temporary configurations with a cap | done | this branch |
+| R1-5 — `allow_parallel` policy on top of the existing N-session supervisor | blocked on R1-6 | field persisted with R1-2; enforcement is adapter-side |
 | R1-6 — adapter: `runContext`, `runCurrentFile`, per-kind editor fields | open |  |
 | R1-7 — view: gutter run icon, kind selector in the dialog, recent-first combo, new menu entries and keybindings | open |  |
 | R1-8 — ADR-0039 + `layering.md` row amendment | open |  |

@@ -364,6 +364,7 @@ mod tests {
                 args: vec!["run".into()],
                 cwd: Some("$PROJECT_DIR".into()),
                 env: vec![("RUST_LOG".into(), "debug".into())],
+                ..Default::default()
             }]);
         })
         .unwrap();

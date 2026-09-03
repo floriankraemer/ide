@@ -2,6 +2,9 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::macros::{self, MacroContext};
+use crate::toolchain::ToolchainId;
+
 /// A project-defined launch target.
 ///
 /// This is exactly `app_config::RunConfigSetting` — the persisted shape —
@@ -40,45 +43,51 @@ pub struct LaunchSpec {
     pub console: ConsoleKind,
 }
 
-/// Token expanded in a [`RunConfig`]'s `cwd` and `env` values against the
-/// project root at launch time. Not expanded in `args` — nothing in the
-/// plan's test table asks for it there, and expanding a token inside an
-/// argument silently is a surprise a literal `$PROJECT_DIR` argument does
-/// not deserve.
-const PROJECT_DIR_TOKEN: &str = "$PROJECT_DIR";
-
-fn expand_project_dir(value: &str, project_root: &Path) -> String {
-    if value.contains(PROJECT_DIR_TOKEN) {
-        value.replace(PROJECT_DIR_TOKEN, &project_root.display().to_string())
-    } else {
-        value.to_string()
-    }
-}
-
 /// Methods on [`RunConfig`] — an extension trait rather than an inherent
 /// `impl` because `RunConfig` is a type alias for `app_config`'s struct.
 pub trait RunConfigExt {
     /// Turn this configuration into what it takes to launch it, expanding
-    /// `$PROJECT_DIR` in `cwd` and every env value against `project_root`.
+    /// every macro (see [`crate::macros`]) in `cwd`, `args` and env values
+    /// against `project_root`.
     fn to_launch_spec(&self, project_root: &Path) -> LaunchSpec;
+
+    /// The same, with the file a run-from-context launch started from, so
+    /// `$FILE_PATH$` and its siblings resolve.
+    fn to_launch_spec_in(&self, context: &MacroContext) -> LaunchSpec;
+
+    /// The build tool this configuration belongs to, or `None` for a
+    /// hand-written one or an identifier this version does not know.
+    fn toolchain(&self) -> Option<ToolchainId>;
 }
 
 impl RunConfigExt for RunConfig {
     fn to_launch_spec(&self, project_root: &Path) -> LaunchSpec {
+        self.to_launch_spec_in(&MacroContext::for_project(project_root))
+    }
+
+    fn to_launch_spec_in(&self, context: &MacroContext) -> LaunchSpec {
         LaunchSpec {
             program: self.program.clone(),
-            args: self.args.clone(),
+            args: self
+                .args
+                .iter()
+                .map(|arg| macros::expand(arg, context))
+                .collect(),
             cwd: self
                 .cwd
                 .as_deref()
-                .map(|cwd| PathBuf::from(expand_project_dir(cwd, project_root))),
+                .map(|cwd| PathBuf::from(macros::expand(cwd, context))),
             env: self
                 .env
                 .iter()
-                .map(|(k, v)| (k.clone(), expand_project_dir(v, project_root)))
+                .map(|(k, v)| (k.clone(), macros::expand(v, context)))
                 .collect(),
             console: ConsoleKind::Pty,
         }
+    }
+
+    fn toolchain(&self) -> Option<ToolchainId> {
+        self.toolchain.as_deref().and_then(ToolchainId::from_id)
     }
 }
 
@@ -92,8 +101,7 @@ mod tests {
             name: "cargo run".into(),
             program: "cargo".into(),
             args: vec!["run".into()],
-            cwd: None,
-            env: Vec::new(),
+            ..RunConfig::default()
         }
     }
 
@@ -143,6 +151,51 @@ mod tests {
         cfg.name = "a whole new name".into();
         cfg.program = "make".into();
         assert_eq!(cfg.id, id_before);
+    }
+
+    #[test]
+    fn macros_expand_in_arguments_too() {
+        let cfg = RunConfig {
+            args: vec!["--manifest-path".into(), "$PROJECT_DIR$/Cargo.toml".into()],
+            ..config()
+        };
+        let spec = cfg.to_launch_spec(Path::new("/home/me/project"));
+        assert_eq!(spec.args[1], "/home/me/project/Cargo.toml");
+    }
+
+    #[test]
+    fn file_macros_resolve_only_with_a_context_file() {
+        let cfg = RunConfig {
+            args: vec!["$FILE_PATH$".into()],
+            ..config()
+        };
+        let from_toolbar = cfg.to_launch_spec(Path::new("/p"));
+        assert_eq!(from_toolbar.args, vec!["$FILE_PATH$"]);
+
+        let from_context = cfg.to_launch_spec_in(&MacroContext::for_file("/p", "/p/src/main.rs"));
+        assert_eq!(from_context.args, vec!["/p/src/main.rs"]);
+    }
+
+    #[test]
+    fn a_known_toolchain_id_resolves_and_an_unknown_one_is_none() {
+        let cfg = RunConfig {
+            toolchain: Some("cargo".into()),
+            ..config()
+        };
+        assert_eq!(cfg.toolchain(), Some(ToolchainId::Cargo));
+
+        let cfg = RunConfig {
+            toolchain: Some("bazel".into()),
+            ..config()
+        };
+        assert_eq!(cfg.toolchain(), None);
+        assert_eq!(config().toolchain(), None);
+    }
+
+    #[test]
+    fn a_configuration_is_neither_temporary_nor_parallel_by_default() {
+        assert!(!config().temporary);
+        assert!(!config().allow_parallel);
     }
 
     #[test]

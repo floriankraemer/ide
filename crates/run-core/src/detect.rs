@@ -18,8 +18,14 @@ use std::fs;
 use std::path::Path;
 
 use crate::config::RunConfig;
+use crate::toolchain::{self, ToolchainId};
 
+/// A detected configuration, tagged with the toolchain that produced it and
+/// the target within it (R1-2) so build, debug and the editor's per-kind
+/// fields all know what they are looking at without re-parsing the name.
 fn make_config(
+    toolchain: ToolchainId,
+    target: impl Into<String>,
     id: impl Into<String>,
     name: impl Into<String>,
     program: &str,
@@ -30,8 +36,23 @@ fn make_config(
         name: name.into(),
         program: program.to_string(),
         args,
-        cwd: None,
-        env: Vec::new(),
+        toolchain: Some(toolchain.as_str().to_string()),
+        target: Some(target.into()),
+        ..RunConfig::default()
+    }
+}
+
+fn make_config_in_project_dir(
+    toolchain: ToolchainId,
+    target: impl Into<String>,
+    id: impl Into<String>,
+    name: impl Into<String>,
+    program: &str,
+    args: Vec<String>,
+) -> RunConfig {
+    RunConfig {
+        cwd: Some("$PROJECT_DIR".into()),
+        ..make_config(toolchain, target, id, name, program, args)
     }
 }
 
@@ -50,6 +71,8 @@ fn detect_cargo(project_root: &Path) -> Vec<RunConfig> {
         for bin in bins {
             if let Some(name) = bin.get("name").and_then(|n| n.as_str()) {
                 configs.push(make_config(
+                    ToolchainId::Cargo,
+                    name,
                     format!("cargo-bin-{name}"),
                     name,
                     "cargo",
@@ -77,6 +100,8 @@ fn detect_cargo(project_root: &Path) -> Vec<RunConfig> {
         names.sort();
         for name in names {
             configs.push(make_config(
+                ToolchainId::Cargo,
+                name.clone(),
                 format!("cargo-example-{name}"),
                 name.clone(),
                 "cargo",
@@ -103,13 +128,7 @@ fn detect_package_json(project_root: &Path) -> Vec<RunConfig> {
         return Vec::new();
     };
 
-    let runner = if project_root.join("yarn.lock").exists() {
-        "yarn"
-    } else if project_root.join("pnpm-lock.yaml").exists() {
-        "pnpm"
-    } else {
-        "npm"
-    };
+    let runner = toolchain::package_manager(project_root);
 
     let mut names: Vec<&String> = scripts.keys().collect();
     names.sort();
@@ -117,6 +136,8 @@ fn detect_package_json(project_root: &Path) -> Vec<RunConfig> {
         .into_iter()
         .map(|script| {
             make_config(
+                ToolchainId::Npm,
+                script.clone(),
                 format!("{runner}-{script}"),
                 script.clone(),
                 runner,
@@ -183,15 +204,140 @@ fn detect_makefile(project_root: &Path) -> Vec<RunConfig> {
 
     names
         .into_iter()
-        .map(|name| make_config(format!("make-{name}"), name.clone(), "make", vec![name]))
+        .map(|name| {
+            make_config(
+                ToolchainId::Make,
+                name.clone(),
+                format!("make-{name}"),
+                name.clone(),
+                "make",
+                vec![name],
+            )
+        })
         .collect()
 }
 
-/// Every launchable target this project's build files name. Order is
-/// Cargo bins, Cargo examples, npm/yarn/pnpm scripts, Makefile targets —
+/// `add_executable(<name> ...)` targets in the top-level `CMakeLists.txt`.
+///
+/// The binary lands wherever the generator puts it, which we cannot know
+/// without configuring the project, so the configuration runs `build/<name>`
+/// relative to the project root — CMake's own documented convention for an
+/// out-of-source build directory, and the same path
+/// [`ToolchainId::build_command`] builds into.
+fn detect_cmake(project_root: &Path) -> Vec<RunConfig> {
+    let Ok(text) = fs::read_to_string(project_root.join("CMakeLists.txt")) else {
+        return Vec::new();
+    };
+
+    let mut names: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.starts_with('#') {
+            continue;
+        }
+        let Some(rest) = line.strip_prefix("add_executable(") else {
+            continue;
+        };
+        let Some(name) = rest.split_whitespace().next() else {
+            continue;
+        };
+        let name = name.trim_end_matches(')');
+        // `add_executable(${PROJECT_NAME} ...)` names a variable we would
+        // have to evaluate CMake to resolve; skip rather than guess.
+        if name.is_empty() || name.contains('$') || names.iter().any(|n| n == name) {
+            continue;
+        }
+        names.push(name.to_string());
+    }
+
+    names
+        .into_iter()
+        .map(|name| {
+            make_config_in_project_dir(
+                ToolchainId::Cmake,
+                name.clone(),
+                format!("cmake-{name}"),
+                name.clone(),
+                &format!("build/{name}"),
+                Vec::new(),
+            )
+        })
+        .collect()
+}
+
+/// The conventional entry points of a Python project, in the order a reader
+/// would try them. Only the project root is scanned: a deeper search would
+/// have to guess which of several `main.py` files is the one meant.
+fn detect_python(project_root: &Path) -> Vec<RunConfig> {
+    if !ToolchainId::Python.is_present(project_root) {
+        return Vec::new();
+    }
+    ["main.py", "app.py", "manage.py", "__main__.py"]
+        .into_iter()
+        .filter(|name| project_root.join(name).is_file())
+        .map(|name| {
+            make_config_in_project_dir(
+                ToolchainId::Python,
+                name,
+                format!("python-{name}"),
+                name,
+                toolchain::python_program(),
+                vec![name.to_string()],
+            )
+        })
+        .collect()
+}
+
+/// One configuration per JVM build tool present. Neither `mvn exec:java` nor
+/// `gradle run` can be verified without invoking the tool — both need a
+/// plugin the project may not apply — but they are what a JVM project is run
+/// with when it is runnable at all, and an unusable default a user edits
+/// beats no entry to edit.
+fn detect_jvm(project_root: &Path) -> Vec<RunConfig> {
+    let mut configs = Vec::new();
+    for (toolchain, id, name, args) in [
+        (
+            ToolchainId::Maven,
+            "maven-exec",
+            "mvn exec:java",
+            vec!["exec:java".to_string()],
+        ),
+        (
+            ToolchainId::Gradle,
+            "gradle-run",
+            "gradle run",
+            vec!["run".to_string()],
+        ),
+    ] {
+        if !toolchain.is_present(project_root) {
+            continue;
+        }
+        // The build command's program is the wrapper-aware one; reuse it
+        // rather than re-deriving `./gradlew` vs `gradle` here.
+        let Some(command) = toolchain.build_command(project_root) else {
+            continue;
+        };
+        configs.push(make_config_in_project_dir(
+            toolchain,
+            args[0].clone(),
+            id,
+            name,
+            &command.program,
+            args.clone(),
+        ));
+    }
+    configs
+}
+
+/// Every launchable target this project's build files name. Order follows
+/// [`ToolchainId::ALL`] — Cargo bins and examples, CMake executables, Python
+/// entry points, JVM run tasks, npm/yarn/pnpm scripts, Makefile targets —
 /// stable so a re-scan producing the same targets produces the same list.
 pub fn detect(project_root: &Path) -> Vec<RunConfig> {
     let mut configs = detect_cargo(project_root);
+    configs.extend(detect_cmake(project_root));
+    configs.extend(detect_python(project_root));
+    configs.extend(detect_jvm(project_root));
     configs.extend(detect_package_json(project_root));
     configs.extend(detect_makefile(project_root));
     configs
@@ -280,6 +426,57 @@ mod tests {
         assert!(!names.contains(&"CFLAGS"), "{names:?}");
     }
 
+    fn project_with(files: &[(&str, &str)]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, contents) in files {
+            fs::write(dir.path().join(name), contents).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn cmake_executables_are_detected_and_run_out_of_the_build_dir() {
+        let dir = project_with(&[(
+            "CMakeLists.txt",
+            "cmake_minimum_required(VERSION 3.20)\n\
+             add_executable(app main.cpp)\n\
+             # add_executable(commented out.cpp)\n\
+             add_executable(tool tool.cpp)\n",
+        )]);
+        let configs = detect_cmake(dir.path());
+        let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["app", "tool"]);
+        assert_eq!(configs[0].program, "build/app");
+        assert_eq!(configs[0].cwd.as_deref(), Some("$PROJECT_DIR"));
+    }
+
+    #[test]
+    fn a_cmake_target_named_by_a_variable_is_skipped_rather_than_guessed() {
+        let dir = project_with(&[("CMakeLists.txt", "add_executable(${PROJECT_NAME} m.cpp)\n")]);
+        assert!(detect_cmake(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn python_entry_points_are_detected_only_beside_a_python_marker() {
+        let without_marker = project_with(&[("main.py", "")]);
+        assert!(detect_python(without_marker.path()).is_empty());
+
+        let dir = project_with(&[("pyproject.toml", ""), ("main.py", ""), ("app.py", "")]);
+        let configs = detect_python(dir.path());
+        let names: Vec<&str> = configs.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["main.py", "app.py"]);
+        assert_eq!(configs[0].args, vec!["main.py"]);
+    }
+
+    #[test]
+    fn jvm_projects_get_one_run_task_each_through_the_wrapper() {
+        let dir = project_with(&[("build.gradle", ""), ("gradlew", "")]);
+        let configs = detect_jvm(dir.path());
+        assert_eq!(configs.len(), 1);
+        assert_eq!(configs[0].program, "./gradlew");
+        assert_eq!(configs[0].args, vec!["run"]);
+    }
+
     #[test]
     fn a_workspace_with_no_build_files_yields_no_configs_and_no_error() {
         let dir = tempfile::tempdir().unwrap();
@@ -298,10 +495,12 @@ mod tests {
                 "main".into(),
                 "--release".into(),
             ],
-            cwd: None,
             env: vec![("EDITED".into(), "yes".into())],
+            ..RunConfig::default()
         }];
         let detected = vec![make_config(
+            ToolchainId::Cargo,
+            "main",
             "cargo-bin-main",
             "main",
             "cargo",
@@ -317,8 +516,22 @@ mod tests {
 
     #[test]
     fn merge_adds_new_names_and_leaves_others_untouched() {
-        let existing = vec![make_config("a", "a", "cargo", vec![])];
-        let detected = vec![make_config("b", "b", "cargo", vec![])];
+        let existing = vec![make_config(
+            ToolchainId::Cargo,
+            "a",
+            "a",
+            "a",
+            "cargo",
+            vec![],
+        )];
+        let detected = vec![make_config(
+            ToolchainId::Cargo,
+            "b",
+            "b",
+            "b",
+            "cargo",
+            vec![],
+        )];
         let merged = merge_detected(&existing, detected);
         let names: Vec<&str> = merged.iter().map(|c| c.name.as_str()).collect();
         assert_eq!(names, vec!["a", "b"]);

@@ -1,7 +1,11 @@
-//! Run configurations and console (F4): the run configuration model,
-//! project detection of launchable targets, process supervision, output
-//! batching for a run console, and `file:line` link resolution in console
-//! output.
+//! Run configurations and console (F4): the run configuration model, the
+//! toolchain table, project detection of launchable targets, process
+//! supervision, output batching for a run console, and `file:line` link
+//! resolution in console output.
+//!
+//! [`toolchain`] is the repo's single source of truth for which build tool a
+//! project uses; `build-core` and `dap-core` read it rather than detecting
+//! again (R1-1).
 //!
 //! Qt-free by design (see `docs/architecture/layering.md`'s `run-core`
 //! row) — `crates/ui-shell`'s future `RunService` is the only thing that
@@ -9,14 +13,20 @@
 
 pub mod batching;
 pub mod config;
+pub mod context;
 pub mod detect;
 pub mod error;
 pub mod links;
+pub mod macros;
 pub mod supervisor;
+pub mod toolchain;
 
 pub use batching::{BatchedOutput, OutputBatcher};
 pub use config::{ConsoleKind, LaunchSpec, RunConfig, RunConfigExt};
+pub use context::{config_for_file, remember_temporary, TEMPORARY_CAP};
 pub use detect::{detect, merge_detected};
 pub use error::RunError;
 pub use links::{resolve_link, ResolvedLink};
+pub use macros::{expand as expand_macros, MacroContext};
 pub use supervisor::{ConsoleId, Supervisor};
+pub use toolchain::{detect_toolchains, ToolCommand, ToolchainId};

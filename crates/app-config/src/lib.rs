@@ -149,6 +149,10 @@ pub struct AiToolPolicySetting {
     pub policy: String,
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// One `[[run_config]]` entry: a project-defined launch target (F4-4, ADR-0022).
 ///
 /// Lives in the project layer, not here — see [`project_settings`] — but the
@@ -176,6 +180,29 @@ pub struct RunConfigSetting {
     pub cwd: Option<String>,
     #[serde(default)]
     pub env: Vec<(String, String)>,
+    /// The build tool this configuration belongs to, as
+    /// `run_core::ToolchainId::as_str` spells it — `None` for a hand-written
+    /// one (R1-2).
+    ///
+    /// A plain string rather than the enum: the toolchain table is
+    /// `run-core`'s, and `docs/architecture/layering.md` has this crate
+    /// depending on nothing, so persistence stays dumb and `run-core` maps
+    /// the string back. An unknown value therefore loads as "no toolchain"
+    /// instead of failing the whole settings file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchain: Option<String>,
+    /// What the toolchain runs — a Cargo bin, an npm script, a Make target.
+    /// `None` for a hand-written configuration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// A configuration created on the fly by running from context, kept only
+    /// until the temporary cap evicts it. Never written by the editor.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub temporary: bool,
+    /// Whether a second launch opens a second console instead of replacing
+    /// the running one.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_parallel: bool,
 }
 
 /// Structured application settings, round-tripped to `settings.toml` in the
