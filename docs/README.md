@@ -43,6 +43,7 @@ ADR numbers 0006 and 0013–0015 were never used; the gaps are historical and in
 - [ADR-0035: semantic-tokens overlay](architecture/decisions/0035-semantic-tokens-overlay.md) — `lsp-core` takes a normal (not dev-only) dependency on `syntax-core` so C9's semantic-token mapping and overlay can reuse `Scope::resolve` and `HighlightSpan`, amending ADR-0018 without reopening the language-detection duplication it fixed.
 - [ADR-0036: read-only virtual documents](architecture/decisions/0036-virtual-documents.md) — `editor_core::DocumentSource::{File, Virtual}` for a document with no backing file (C12's decompiled `csharp:/` metadata), the systematic audit of "every tab is a file" call sites it amends ADR-0003 to close, and the clean-refusal guard that replaces a confusing generic I/O error.
 - [ADR-0037: async project open](architecture/decisions/0037-async-project-open.md) — `openFolder`/`reopenLastProject` become fire-and-forget, walking the directory tree on a worker thread and reporting through `projectOpened`/a new `projectOpenFailed` signal instead of blocking the Qt thread; the filesystem watcher's structural rebuild gets the same treatment.
+- [ADR-0038: stay on Widgets for the blend chrome](architecture/decisions/0038-stay-on-widgets-for-the-blend-chrome.md) — re-evaluates Qt Quick / QML for the blend design and keeps the chrome on Qt Widgets: one `ChromePalette` per theme feeding generated stylesheets, `ui_tokens.h` for shape, an overlay-painted panel card instead of a mask, Inter bundled as the interface font.
 
 ## Plans
 

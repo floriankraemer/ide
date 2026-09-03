@@ -9,207 +9,642 @@
 #include <QEvent>
 #include <QFile>
 #include <QFont>
+#include <QFontDatabase>
 #include <QImage>
 #include <QPixmap>
 #include <QWidget>
 
+#include <utility>
+
 namespace ui_shell {
 
-// Field order follows the declaration in theme.h: bar, tab, tabText,
-// selected, selectedText, hover, hoverText, accent, closeHover, pane,
-// paneBorder, divider. The values are the ones each theme's sheet already
-// used — `divider` repeats that theme's own `QSplitter::handle` shade, so a
-// docked pane's splitter and an ordinary one cannot drift apart; light's went
-// from #eeeeee to the #d0d0d0 it borders everything else with, because a
-// handle a shade off white separates nothing — plus the
-// hover and accent shades the two older themes never had.
-TabColors tabColorsForTheme(const QString &themeName)
+namespace {
+
+// `top` at `alpha` composited over `base`, as a solid colour — see the
+// ChromePalette comment in theme.h for why the spec's rgba() values are
+// flattened here rather than written into the stylesheet.
+QColor over(const QColor &base, const QColor &top, double alpha)
 {
-    if (themeName == QStringLiteral("light")) {
-        return TabColors{QColor(QStringLiteral("#e6e6e6")), QColor(QStringLiteral("#eeeeee")),
-                         QColor(QStringLiteral("#5f5f5f")), QColor(QStringLiteral("#ffffff")),
-                         QColor(QStringLiteral("#000000")), QColor(QStringLiteral("#e4e4e4")),
-                         QColor(QStringLiteral("#1a1a1a")), QColor(QStringLiteral("#4b6eaf")),
-                         QColor(QStringLiteral("#cfcfcf")), QColor(QStringLiteral("#ffffff")),
-                         QColor(QStringLiteral("#d0d0d0")), QColor(QStringLiteral("#d0d0d0")),
-                         panelCanvasForTheme(themeName)};
-    }
-    if (themeName == QStringLiteral("vscode-dark")) {
-        return TabColors{QColor(QStringLiteral("#252526")), QColor(QStringLiteral("#2d2d2d")),
-                         QColor(QStringLiteral("#969696")), QColor(QStringLiteral("#1e1e1e")),
-                         QColor(QStringLiteral("#ffffff")), QColor(QStringLiteral("#1f1f1f")),
-                         QColor(QStringLiteral("#cccccc")), QColor(QStringLiteral("#007acc")),
-                         QColor(QStringLiteral("#4f4f4f")), QColor(QStringLiteral("#1e1e1e")),
-                         QColor(), QColor(QStringLiteral("#2b2b2b")),
-                         panelCanvasForTheme(themeName)};
-    }
-    return TabColors{QColor(QStringLiteral("#3c3f41")), QColor(QStringLiteral("#3c3f41")),
-                     QColor(QStringLiteral("#a9b7c6")), QColor(QStringLiteral("#4e5254")),
-                     QColor(QStringLiteral("#ffffff")), QColor(QStringLiteral("#45484a")),
-                     QColor(QStringLiteral("#cbd6e2")), QColor(QStringLiteral("#4b6eaf")),
-                     QColor(QStringLiteral("#5e6060")), QColor(QStringLiteral("#2b2b2b")),
-                     QColor(QStringLiteral("#2b2b2b")), QColor(QStringLiteral("#3c3f41")),
-                     panelCanvasForTheme(themeName)};
+    auto mix = [alpha](int b, int t) { return static_cast<int>(b + (t - b) * alpha + 0.5); };
+    return QColor(mix(base.red(), top.red()), mix(base.green(), top.green()),
+                  mix(base.blue(), top.blue()));
 }
 
-QColor panelCanvasForTheme(const QString &themeName)
+QColor hex(const char *value)
 {
-    // Deliberately a long way from the panel colour. The panels carry no
-    // border and no shadow — a mask cannot paint one — so the *only* thing
-    // that makes a rounded corner and a 6px gap read as separation is this
-    // contrast. At a canvas one shade off the panel both are technically
-    // present and invisible at a normal viewing distance, which is what a
-    // first pass of this shipped as.
-    if (themeName == QStringLiteral("light")) {
-        return QColor(QStringLiteral("#d4d8dd"));
-    }
-    if (themeName == QStringLiteral("vscode-dark")) {
-        return QColor(QStringLiteral("#0d0d0d"));
-    }
-    return QColor(QStringLiteral("#141519"));
+    return QColor(QString::fromLatin1(value));
 }
 
-QString tabStyleSheet(const TabColors &colors)
+// The mockup's `#stage[data-mocktheme="dark"]` block, verbatim.
+ChromePalette darkPalette()
 {
-    // The metrics below are deliberately theme-independent — a tab is one
-    // shape in this product, and only its colours change with the theme.
-    //
-    // Two of them exist to fix what the default style does:
-    //   * Qt reserves a whole close-indicator width between the label and the
-    //     [x] and leaves nothing between the [x] and the tab's edge. Here the
-    //     close button's margins claw back most of that reserved gap on the
-    //     left (-3px) and push it off the tab's edge on the right (5px).
-    //     That rule stays margins-only on purpose: give the subcontrol a size,
-    //     a background or a border and QStyleSheetStyle stops asking the
-    //     platform style for the [x] glyph and draws an empty box instead.
-    //   * the bottom accent marker is reserved on every tab, selected or
-    //     not, so selecting one shifts no label by a pixel. Bottom rather
-    //     than top per the blend spec's `inset 0 -2px 0 accent` marker.
-    const QString paneBorder = colors.paneBorder.isValid()
-        ? QStringLiteral("1px solid %1").arg(colors.paneBorder.name())
-        : QStringLiteral("none");
+    ChromePalette p;
+    p.canvas = hex("#1e1f22");
+    p.surface = hex("#2b2d30");
+    p.surface2 = hex("#26282b");
+    p.raised = hex("#2f3136");
+    p.border = over(p.surface, Qt::white, 0.09);
+    p.text = hex("#dfe1e5");
+    p.textDim = hex("#8a8f98");
+    p.accent = hex("#3574f0");
+    p.accentInk = Qt::white;
+    p.selection = over(p.surface2, p.accent, 0.28);
+    p.statusBar = p.surface;
+    // A QSS `image:` can only be a file, so the one arrow glyph is a
+    // resource per theme rather than a runtime-tinted mask (resources/icons).
+    p.chevron = QStringLiteral(":/ui/icons/chevron_dark.png");
+    return p;
+}
 
-    return QStringLiteral(R"(
+// The mockup's `#stage[data-mocktheme="light"]` block, verbatim.
+ChromePalette lightPalette()
+{
+    ChromePalette p;
+    p.canvas = hex("#f7f8fa");
+    p.surface = Qt::white;
+    p.surface2 = hex("#f0f2f4");
+    p.raised = hex("#e6e9ed");
+    p.border = over(p.surface, hex("#0f172a"), 0.10);
+    p.text = hex("#1f2328");
+    p.textDim = hex("#6b7178");
+    p.accent = hex("#3574f0");
+    p.accentInk = Qt::white;
+    p.selection = over(p.surface2, p.accent, 0.14);
+    p.statusBar = p.surface;
+    // A QSS `image:` can only be a file, so the one arrow glyph is a
+    // resource per theme rather than a runtime-tinted mask (resources/icons).
+    p.chevron = QStringLiteral(":/ui/icons/chevron_light.png");
+    return p;
+}
+
+// Dark+ (default dark) as VS Code ships it, mapped onto the same roles so it
+// wears the blend chrome shape with its own colours — including the blue
+// status bar that makes it recognisable.
+ChromePalette vscodeDarkPalette()
+{
+    ChromePalette p;
+    p.canvas = hex("#1e1e1e");
+    p.surface = hex("#252526");
+    p.surface2 = hex("#252526");
+    p.raised = hex("#2a2d2e");
+    p.border = hex("#3c3c3c");
+    p.text = hex("#cccccc");
+    p.textDim = hex("#969696");
+    p.accent = hex("#007acc");
+    p.accentInk = Qt::white;
+    p.selection = hex("#264f78");
+    p.statusBar = hex("#007acc");
+    // A QSS `image:` can only be a file, so the one arrow glyph is a
+    // resource per theme rather than a runtime-tinted mask (resources/icons).
+    p.chevron = QStringLiteral(":/ui/icons/chevron_vscode_dark.png");
+    return p;
+}
+
+// `{name}` placeholders, filled by name. Not QString::arg(): with a
+// positional `%n` sheet, one placeholder left unused shifts every later
+// argument down a slot silently, and the sheet then fails to parse —
+// which Qt reports by styling nothing.
+QString fillTokens(const ChromePalette &c, QString sheet)
+{
+    const std::pair<const char *, QString> values[] = {
+        {"{canvas}", c.canvas.name()},
+        {"{surface}", c.surface.name()},
+        {"{surface2}", c.surface2.name()},
+        {"{raised}", c.raised.name()},
+        {"{border}", c.border.name()},
+        {"{text}", c.text.name()},
+        {"{textDim}", c.textDim.name()},
+        {"{accent}", c.accent.name()},
+        {"{accentInk}", c.accentInk.name()},
+        {"{selection}", c.selection.name()},
+        {"{statusBar}", c.statusBar.name()},
+        {"{chevron}", c.chevron},
+        {"{r-ctl}", QString::number(tokens::kRadiusControl)},
+        {"{r-panel}", QString::number(tokens::kRadiusPanel)},
+        {"{panel-gap}", QString::number(tokens::kPanelGap)},
+        {"{row-h}", QString::number(tokens::kRowHeight)},
+        {"{sp-1}", QString::number(tokens::kSp1)},
+        {"{sp-2}", QString::number(tokens::kSp2)},
+        {"{sp-3}", QString::number(tokens::kSp3)},
+        {"{toolbar-h}", QString::number(tokens::kToolbarHeight)},
+        {"{control-h}", QString::number(tokens::kToolbarHeight - 10)},
+    };
+    for (const auto &[key, value] : values) {
+        sheet.replace(QLatin1String(key), value);
+    }
+    return sheet;
+}
+
+} // namespace
+
+ChromePalette chromePaletteForTheme(const QString &themeName)
+{
+    if (themeName == QStringLiteral("light")) {
+        return lightPalette();
+    }
+    if (themeName == QStringLiteral("vscode-dark")) {
+        return vscodeDarkPalette();
+    }
+    return darkPalette();
+}
+
+// Embedded as a compile-time string rather than a .qrc/rcc resource or an
+// install-relative asset directory: the whole app ships as one binary per
+// docker/Dockerfile's artifact stages, so there is no asset-deployment step
+// to wire up, and no runtime path resolution to get wrong on Windows vs.
+// Linux.
+//
+// One sheet for every theme. The numbers are the blend spec's tokens
+// (ui_tokens.h) and the colours the palette's; nothing here is per-theme.
+QString chromeStyleSheet(const ChromePalette &c)
+{
+    // Positional %n arguments, grouped so a reader can find one:
+    //   {canvas} canvas  {surface} surface  {surface2} surface2  {raised} raised  {border} border
+    //   {text} text    {textDim} textDim  {accent} accent    {accentInk} accentInk {selection} selection
+    //   {statusBar} statusBar
+    //   {r-ctl} r-ctl  {row-h} row-h   {sp-1} sp-1     {sp-2} sp-2   {sp-3} sp-3
+    //   {toolbar-h} toolbar-h  {control-h} control-h (toolbar-h - 10)
+    return fillTokens(c, QStringLiteral(R"(
+/* ---- ground ------------------------------------------------------ */
+QWidget {
+    color: {text};
+    selection-background-color: {selection};
+    selection-color: {text};
+}
+
+QMainWindow {
+    background-color: {canvas};
+}
+
+QDialog, QMessageBox, QInputDialog, QFileDialog {
+    background-color: {surface};
+}
+
+QToolTip {
+    background-color: {surface};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: {r-ctl}px;
+    padding: {sp-1}px {sp-2}px;
+}
+
+/* ---- menu bar and menus ------------------------------------------ */
+QMenuBar {
+    background-color: {surface};
+    color: {textDim};
+    border-bottom: 1px solid {border};
+    padding: 2px {sp-2}px;
+}
+
+QMenuBar::item {
+    background: transparent;
+    padding: {sp-1}px {sp-2}px;
+    border-radius: {r-ctl}px;
+}
+
+QMenuBar::item:selected {
+    background-color: {surface2};
+    color: {text};
+}
+
+QMenu {
+    background-color: {surface};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: {r-ctl}px;
+    padding: {sp-1}px;
+}
+
+QMenu::item {
+    padding: 5px 24px 5px {sp-3}px;
+    border-radius: {r-ctl}px;
+}
+
+QMenu::item:selected {
+    background-color: {selection};
+}
+
+QMenu::item:disabled {
+    color: {textDim};
+}
+
+QMenu::separator {
+    height: 1px;
+    background: {border};
+    margin: {sp-1}px {sp-2}px;
+}
+
+/* ---- the toolbar under the menu bar ------------------------------ */
+QToolBar {
+    background-color: {surface};
+    border: none;
+    border-bottom: 1px solid {border};
+    padding: 0 {sp-2}px;
+    spacing: {sp-1}px;
+    min-height: {toolbar-h}px;
+    max-height: {toolbar-h}px;
+}
+
+QToolBar::separator {
+    width: 1px;
+    background: {border};
+    margin: 6px {sp-1}px;
+}
+
+/* ---- controls ---------------------------------------------------- */
+QToolButton {
+    background: transparent;
+    color: {textDim};
+    border: none;
+    border-radius: {r-ctl}px;
+    padding: 2px;
+}
+
+QToolButton:hover {
+    background-color: {raised};
+    color: {text};
+}
+
+QToolButton:pressed, QToolButton:checked {
+    background-color: {selection};
+    color: {text};
+}
+
+QToolButton:disabled {
+    background: transparent;
+    color: {textDim};
+}
+
+QPushButton {
+    background-color: {surface2};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: {r-ctl}px;
+    padding: 0 {sp-3}px;
+    min-height: {control-h}px;
+    max-height: {control-h}px;
+}
+
+QPushButton:hover {
+    background-color: {raised};
+}
+
+QPushButton:pressed {
+    background-color: {selection};
+}
+
+QPushButton:default {
+    background-color: {accent};
+    color: {accentInk};
+    border-color: {accent};
+}
+
+QPushButton:disabled {
+    color: {textDim};
+}
+
+QComboBox {
+    background-color: {surface2};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: {r-ctl}px;
+    padding: 0 {sp-2}px 0 {sp-3}px;
+    min-height: {control-h}px;
+    max-height: {control-h}px;
+    font-weight: 500;
+}
+
+QComboBox:hover {
+    background-color: {raised};
+}
+
+/* The pill has one border, its own: the platform style would otherwise
+   frame the arrow's sub-control as a second box inside it. */
+QComboBox::drop-down {
+    subcontrol-origin: padding;
+    subcontrol-position: center right;
+    width: 20px;
+    border: none;
+    background: transparent;
+}
+
+QComboBox::down-arrow {
+    image: url({chevron});
+    width: 10px;
+    height: 10px;
+}
+
+QComboBox QAbstractItemView {
+    background-color: {surface};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: {r-ctl}px;
+    selection-background-color: {selection};
+    selection-color: {text};
+    outline: 0;
+}
+
+QLineEdit {
+    background-color: {surface2};
+    color: {text};
+    border: 1px solid {border};
+    border-radius: {r-ctl}px;
+    padding: 0 {sp-2}px;
+    min-height: {control-h}px;
+    max-height: {control-h}px;
+}
+
+QLineEdit:focus {
+    border-color: {accent};
+}
+
+/* Multi-line inputs keep the palette's Base as their ground so the code
+   editor — itself a QPlainTextEdit — keeps the colours the user picked in
+   Settings; only the frame is styled here, and CodeEditor below sheds it. */
+QPlainTextEdit, QTextEdit {
+    border: 1px solid {border};
+    border-radius: {r-ctl}px;
+    padding: {sp-1}px {sp-2}px;
+}
+
+QPlainTextEdit:focus, QTextEdit:focus {
+    border-color: {accent};
+}
+
+ui_shell--CodeEditor, ui_shell--HexViewer {
+    border: none;
+    border-radius: 0;
+    padding: 0;
+}
+
+QCheckBox, QRadioButton {
+    spacing: 6px;
+}
+
+QProgressBar {
+    background-color: {surface2};
+    border: 1px solid {border};
+    border-radius: 4px;
+    max-height: 8px;
+}
+
+QProgressBar::chunk {
+    background-color: {accent};
+    border-radius: 3px;
+}
+
+/* ---- trees and lists --------------------------------------------- */
+QTreeView, QListView, QListWidget, QTreeWidget, QTableView {
+    background-color: {surface2};
+    alternate-background-color: {surface2};
+    color: {text};
+    border: none;
+    padding: 0 {sp-1}px {sp-2}px {sp-1}px;
+    outline: 0;
+}
+
+QTreeView::item, QListView::item, QListWidget::item {
+    min-height: {row-h}px;
+    padding: 0 {sp-1}px;
+    border-radius: {r-ctl}px;
+    border: none;
+}
+
+QTreeView::item:hover, QListView::item:hover, QListWidget::item:hover {
+    background-color: {raised};
+}
+
+QTreeView::item:selected, QListView::item:selected, QListWidget::item:selected {
+    background-color: {selection};
+    color: {text};
+}
+
+QHeaderView::section {
+    background: transparent;
+    color: {textDim};
+    border: none;
+    border-bottom: 1px solid {border};
+    padding: {sp-1}px {sp-2}px;
+}
+
+/* ---- editor tabs ------------------------------------------------- */
+QTabWidget {
+    background-color: {surface};
+}
+
 QTabWidget::pane {
-    background-color: %1;
-    border: %2;
+    background-color: {canvas};
+    border: none;
+    border-top: 1px solid {border};
 }
 
 QTabBar {
-    background-color: %3;
+    background-color: {surface};
     border: none;
 }
 
 QTabBar::tab {
-    background-color: %4;
-    color: %5;
-    padding: %11px %11px %11px 10px;
+    background-color: {surface};
+    color: {textDim};
+    padding: 0 {sp-3}px;
+    min-height: 32px;
     border: none;
+    border-right: 1px solid {border};
     border-bottom: 2px solid transparent;
 }
 
 QTabBar::tab:selected {
-    background-color: %6;
-    color: %7;
-    border-bottom: 2px solid %8;
+    background-color: {canvas};
+    color: {text};
+    border-bottom: 2px solid {accent};
 }
 
 QTabBar::tab:hover:!selected {
-    background-color: %9;
-    color: %10;
+    background-color: {raised};
+    color: {text};
 }
 
 QTabBar::close-button {
     subcontrol-position: right;
     margin: 0px 5px 0px -3px;
 }
-)")
-        .arg(colors.pane.name(), paneBorder, colors.bar.name(), colors.tab.name(),
-             colors.tabText.name(), colors.selected.name(), colors.selectedText.name(),
-             colors.accent.name(), colors.hover.name(), colors.hoverText.name())
-        .arg(tokens::kSp2);
+
+/* ---- splitters, scrollbars, status bar --------------------------- */
+QSplitter::handle {
+    background-color: {border};
 }
 
-QString dockStyleSheet(const TabColors &colors)
+QScrollBar:vertical {
+    background: transparent;
+    border: none;
+    width: 10px;
+    margin: 0;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    border: none;
+    height: 10px;
+    margin: 0;
+}
+
+QScrollBar::handle {
+    background: {border};
+    border-radius: 4px;
+    margin: 2px;
+}
+
+QScrollBar::handle:vertical {
+    min-height: 24px;
+}
+
+QScrollBar::handle:horizontal {
+    min-width: 24px;
+}
+
+QScrollBar::handle:hover {
+    background: {textDim};
+}
+
+QScrollBar::add-line, QScrollBar::sub-line {
+    height: 0px;
+    width: 0px;
+}
+
+QScrollBar::add-page, QScrollBar::sub-page {
+    background: transparent;
+}
+
+QStatusBar {
+    background-color: {statusBar};
+    color: {textDim};
+    border-top: 1px solid {border};
+    min-height: 26px;
+    padding: 0 {sp-1}px;
+}
+
+/* One flat strip: Qt frames every permanent widget by default, which reads
+   as a row of little boxes rather than a status line. */
+QStatusBar::item {
+    border: none;
+}
+
+QStatusBar QLabel, QStatusBar QProgressBar, QStatusBar QToolButton {
+    background: transparent;
+    color: {textDim};
+}
+)")
+    );
+}
+
+QString dockStyleSheet(const ChromePalette &c)
 {
     // Appended to the dock manager's own sheet by restyleDockManagers(), so
     // these repeat ADS's selectors verbatim and win on being later. That is
     // also the only way to reach the splitter handles between docked panes:
-    // ADS paints them in `palette(dark)`, which this application deliberately
-    // keeps *lighter* than the window (see darculaPalette()) so ADS's own tab
-    // labels stay readable — which left a pale grey bar across the chrome. Reaching
-    // them from qApp's sheet is not possible however specific the selector is
-    // made: Qt gives a widget's own stylesheet priority over the
-    // application's, and ADS installs one on the dock manager.
-    //
-    // Vertical padding is 4px rather than the 6px a QTabBar tab gets because
-    // an ADS tab lays its label out with margins of its own on top.
-    return QStringLiteral(R"(
+    // Qt gives a widget's own stylesheet priority over the application's,
+    // and ADS installs one on the dock manager.
+    return fillTokens(c, QStringLiteral(R"(
 /* The gap between two docked panels: `--panel-gap` wide and painted in the
    canvas colour, so what separates two panels is empty ground rather than a
    divider line. ADS has no C++ knob for inter-panel spacing — the splitter
    handle it puts there anyway is the spacing, once it is given a width. */
 ads--CDockContainerWidget ads--CDockSplitter::handle {
-    background: %14;
-    width: %15px;
-    height: %15px;
+    background: {canvas};
+    width: {panel-gap}px;
+    height: {panel-gap}px;
 }
 
 ads--CDockContainerWidget {
-    background: %14;
+    background: {canvas};
 }
 
-ads--CAutoHideSideBar[sideBarLocation="0"] { border-bottom: 1px solid %11; }
-ads--CAutoHideSideBar[sideBarLocation="1"] { border-right: 1px solid %11; }
-ads--CAutoHideSideBar[sideBarLocation="2"] { border-left: 1px solid %11; }
-ads--CAutoHideSideBar[sideBarLocation="3"] { border-top: 1px solid %11; }
+/* ADS's own sheet pads the splitters by a pixel and gives every dock
+   widget a palette(light) ground with a 1px top rule; both would show as
+   a stripe between the tab strip and the panel body, so the dock widget
+   is made see-through and the area behind it carries the colour. */
+ads--CDockContainerWidget > QSplitter {
+    padding: 0;
+}
 
-/* The rounded corner itself is a mask applied in rounded_corners.cpp, not
-   this radius: a QSS radius rounds only the background this widget paints,
-   and every child paints an opaque square over it. The radius stays so the
-   two agree wherever the mask has not been applied yet (first paint before
-   the initial resize). */
+ads--CDockWidget {
+    background: transparent;
+    border: none;
+}
+
+ads--CAutoHideSideBar[sideBarLocation="0"] { border-bottom: 1px solid {border}; }
+ads--CAutoHideSideBar[sideBarLocation="1"] { border-right: 1px solid {border}; }
+ads--CAutoHideSideBar[sideBarLocation="2"] { border-left: 1px solid {border}; }
+ads--CAutoHideSideBar[sideBarLocation="3"] { border-top: 1px solid {border}; }
+
+/* The panel card. Its rounded corners and 1px border are painted by
+   rounded_corners.cpp on top of the children — a QSS radius rounds only
+   what this widget paints itself, and every child paints an opaque square
+   over it. main_window.cpp gives the area's layout a 1px margin so no
+   child sits under the border line. Side panels sit on surface-2, the
+   editor column on surface, exactly as the mockup's `.sidebar` and
+   `.editor-col` do. */
 ads--CDockAreaWidget {
-    background-color: %1;
+    background-color: {surface2};
     border: none;
-    border-radius: %12px;
 }
 
+ads--CDockAreaWidget[centralArea="true"] {
+    background-color: {surface};
+}
+
+/* The tab strip: surface with the spec's 1px bottom rule, tabs 34px tall
+   with a 1px rule between them, the active one dropping to the canvas
+   colour with a 2px accent under it — the same rules QTabBar gets in
+   chromeStyleSheet(). */
 ads--CDockAreaTitleBar {
-    background-color: %1;
+    background-color: {surface};
     border: none;
+    border-bottom: 1px solid {border};
+    padding: 0;
+}
+
+ads--CDockAreaTitleBar QToolButton {
+    background: transparent;
+    border: none;
+    border-radius: {r-ctl}px;
+    padding: 2px;
+}
+
+ads--CDockAreaTitleBar QToolButton:hover {
+    background-color: {raised};
 }
 
 ads--CDockWidgetTab {
-    background: %2;
+    background: {surface};
     border: none;
+    border-right: 1px solid {border};
     border-bottom: 2px solid transparent;
-    padding: 4px 8px 4px 4px;
+    padding: 0 {sp-3}px 0 {sp-3}px;
+    min-height: 32px;
 }
 
 ads--CDockWidgetTab QLabel {
-    color: %3;
-    /* The global `QWidget { background-color: ... }` rule would otherwise
-       paint a box of the window colour behind every tab label. */
+    color: {textDim};
     background: transparent;
 }
 
 ads--CDockWidgetTab:hover {
-    background: %4;
+    background: {raised};
 }
 
 ads--CDockWidgetTab:hover QLabel {
-    color: %5;
+    color: {text};
     background: transparent;
 }
 
 ads--CDockWidgetTab[activeTab="true"] {
-    background: %6;
-    border-bottom: 2px solid %7;
+    background: {canvas};
+    border-bottom: 2px solid {accent};
 }
 
 ads--CDockWidgetTab[activeTab="true"] QLabel {
-    color: %8;
+    color: {text};
     background: transparent;
 }
 
@@ -222,356 +657,27 @@ ads--CDockWidgetTab #tabCloseButton {
 }
 
 ads--CDockWidgetTab #tabCloseButton:hover {
-    background: %9;
+    background: {raised};
     border: none;
-    border-radius: %13px;
+    border-radius: {r-ctl}px;
 }
 
 ads--CDockWidgetTab #tabCloseButton:pressed {
-    background: %10;
+    background: {selection};
 }
 )")
-        .arg(colors.bar.name(), colors.tab.name(), colors.tabText.name(), colors.hover.name(),
-             colors.hoverText.name(), colors.selected.name(), colors.accent.name(),
-             colors.selectedText.name())
-        .arg(colors.closeHover.name(), tinted(colors.closeHover, 130, 115).name(),
-             colors.divider.name())
-        .arg(tokens::kRadiusPanel)
-        .arg(tokens::kRadiusControl)
-        .arg(colors.canvas.name())
-        .arg(tokens::kPanelGap);
-}
-
-// Embedded as a compile-time string constant rather than a .qrc/rcc
-// resource or an install-relative asset directory (open question from the
-// plan doc, resolved here): the whole app ships as one binary per
-// docker/Dockerfile's artifact stages, so there is no asset-deployment step
-// to wire up, and no runtime path resolution to get wrong on Windows vs.
-// Linux. T2's light.qss follows the same pattern.
-// The blend spec's density/shape rules that apply identically in every
-// theme — only colour is theme-specific, so this is generated once and
-// appended to each of the three sheets below rather than repeated three
-// times with the numbers retyped.
-QString tokenStyleSheet(const QString &themeName)
-{
-    return QStringLiteral(R"(
-QMenu {
-    border-radius: %1px;
-}
-
-QPushButton, QComboBox, QLineEdit, QPlainTextEdit {
-    border-radius: %1px;
-}
-
-QTreeView::item, QListView::item, QListWidget::item {
-    min-height: %2px;
-    border-radius: %1px;
-}
-
-/* The ground the docked panels sit on, so the gap between two of them and
-   the margin around them read as empty space rather than as more panel. */
-QMainWindow {
-    background-color: %3;
-}
-
-/* The status bar is one flat strip in the blend spec. Qt frames every
-   permanent widget by default, and the global `QWidget` background paints
-   each of them as its own block on top of the strip — together that reads
-   as a row of little boxes rather than a status line. */
-QStatusBar::item {
-    border: none;
-}
-
-QStatusBar QLabel, QStatusBar QProgressBar, QStatusBar QToolButton {
-    background: transparent;
-}
-)")
-        .arg(tokens::kRadiusControl)
-        .arg(tokens::kRowHeight)
-        .arg(panelCanvasForTheme(themeName).name());
-}
-
-QString darculaStyleSheet()
-{
-    return QStringLiteral(R"(
-QWidget {
-    background-color: #2b2b2b;
-    color: #a9b7c6;
-    selection-background-color: #214283;
-    selection-color: #ffffff;
-}
-
-QMainWindow, QDialog {
-    background-color: #3c3f41;
-}
-
-QMenuBar {
-    background-color: #3c3f41;
-    color: #a9b7c6;
-}
-
-QMenuBar::item:selected {
-    background-color: #4b6eaf;
-}
-
-QMenu {
-    background-color: #3c3f41;
-    border: 1px solid #2b2b2b;
-}
-
-QMenu::item:selected {
-    background-color: #4b6eaf;
-}
-
-QTreeView, QAbstractItemView {
-    background-color: #2b2b2b;
-    alternate-background-color: #313335;
-    border: none;
-}
-
-QTreeView::item:selected, QAbstractItemView::item:selected {
-    background-color: #214283;
-}
-
-QSplitter::handle {
-    background-color: #3c3f41;
-}
-
-QStatusBar {
-    background-color: #3c3f41;
-    color: #a9b7c6;
-}
-
-QScrollBar:vertical, QScrollBar:horizontal {
-    background: #2b2b2b;
-    border: none;
-}
-
-QScrollBar::handle {
-    background: #5e6060;
-    border-radius: 3px;
-}
-
-QScrollBar::handle:hover {
-    background: #6e7070;
-}
-
-QLineEdit, QPlainTextEdit {
-    background-color: #2b2b2b;
-    color: #a9b7c6;
-    border: 1px solid #3c3f41;
-}
-)") + tokenStyleSheet(QStringLiteral("dark")) + tabStyleSheet(tabColorsForTheme(QStringLiteral("dark")));
-}
-
-QString lightStyleSheet()
-{
-    return QStringLiteral(R"(
-QWidget {
-    background-color: #fafafa;
-    color: #1a1a1a;
-    selection-background-color: #90caf9;
-    selection-color: #000000;
-}
-
-QMainWindow, QDialog {
-    background-color: #f2f2f2;
-}
-
-QMenuBar {
-    background-color: #f2f2f2;
-    color: #1a1a1a;
-}
-
-QMenuBar::item:selected {
-    background-color: #90caf9;
-}
-
-QMenu {
-    background-color: #ffffff;
-    border: 1px solid #d0d0d0;
-}
-
-QMenu::item:selected {
-    background-color: #90caf9;
-}
-
-QTreeView, QAbstractItemView {
-    background-color: #ffffff;
-    alternate-background-color: #f5f5f5;
-    border: none;
-}
-
-QTreeView::item:selected, QAbstractItemView::item:selected {
-    background-color: #90caf9;
-}
-
-QSplitter::handle {
-    background-color: #d0d0d0;
-}
-
-QStatusBar {
-    background-color: #f2f2f2;
-    color: #1a1a1a;
-}
-
-QScrollBar:vertical, QScrollBar:horizontal {
-    background: #f2f2f2;
-    border: none;
-}
-
-QScrollBar::handle {
-    background: #c0c0c0;
-    border-radius: 3px;
-}
-
-QScrollBar::handle:hover {
-    background: #a8a8a8;
-}
-
-QLineEdit, QPlainTextEdit {
-    background-color: #ffffff;
-    color: #1a1a1a;
-    border: 1px solid #d0d0d0;
-}
-)") + tokenStyleSheet(QStringLiteral("light")) + tabStyleSheet(tabColorsForTheme(QStringLiteral("light")));
-}
-
-// Dark+ (default dark) as VS Code ships it: the same selector set as the two
-// sheets above — leaving one out would let that surface render in the
-// platform style instead of the theme — with VS Code's flatter chrome shape
-// (square borderless tabs marked by a top accent, thin flat scrollbars).
-QString vscodeDarkStyleSheet()
-{
-    return QStringLiteral(R"(
-QWidget {
-    background-color: #1e1e1e;
-    color: #d4d4d4;
-    selection-background-color: #264f78;
-    selection-color: #ffffff;
-}
-
-QMainWindow, QDialog {
-    background-color: #333333;
-}
-
-QMenuBar {
-    background-color: #3c3c3c;
-    color: #cccccc;
-}
-
-QMenuBar::item:selected {
-    background-color: #094771;
-}
-
-QMenu {
-    background-color: #252526;
-    color: #cccccc;
-    border: 1px solid #454545;
-}
-
-QMenu::item:selected {
-    background-color: #094771;
-    color: #ffffff;
-}
-
-QTreeView, QAbstractItemView {
-    background-color: #252526;
-    /* VS Code's lists don't stripe: matching the base color kills the
-       banding a QTreeView would otherwise draw with alternating rows on. */
-    alternate-background-color: #252526;
-    color: #cccccc;
-    border: none;
-}
-
-QTreeView::item:selected, QAbstractItemView::item:selected {
-    background-color: #094771;
-    color: #ffffff;
-}
-
-QTreeView::item:hover, QAbstractItemView::item:hover {
-    background-color: #2a2d2e;
-}
-
-QSplitter::handle {
-    background-color: #2b2b2b;
-}
-
-QStatusBar {
-    background-color: #007acc;
-    color: #ffffff;
-}
-
-QStatusBar QLabel {
-    background-color: transparent;
-    color: #ffffff;
-}
-
-QScrollBar:vertical {
-    background: transparent;
-    border: none;
-    width: 14px;
-}
-
-QScrollBar:horizontal {
-    background: transparent;
-    border: none;
-    height: 14px;
-}
-
-QScrollBar::handle {
-    background: #4f4f4f;
-    border: none;
-}
-
-QScrollBar::handle:hover {
-    background: #646464;
-}
-
-QScrollBar::add-line, QScrollBar::sub-line {
-    height: 0px;
-    width: 0px;
-}
-
-QScrollBar::add-page, QScrollBar::sub-page {
-    background: transparent;
-}
-
-QLineEdit, QPlainTextEdit {
-    background-color: #3c3c3c;
-    color: #cccccc;
-    border: 1px solid #3c3c3c;
-}
-
-QLineEdit:focus, QPlainTextEdit:focus {
-    border: 1px solid #007fd4;
-}
-)") + tokenStyleSheet(QStringLiteral("vscode-dark")) + tabStyleSheet(tabColorsForTheme(QStringLiteral("vscode-dark")));
+    );
 }
 
 ThemeColors colorsForTheme(const QString &themeName)
 {
-    // The same values the stylesheets above use for the window chrome.
-    if (themeName == QStringLiteral("light")) {
-        return ThemeColors{QColor(QStringLiteral("#ffffff")),
-                           QColor(QStringLiteral("#1a1a1a")),
-                           QColor(QStringLiteral("#4b6eaf"))};
-    }
-    if (themeName == QStringLiteral("vscode-dark")) {
-        return ThemeColors{QColor(QStringLiteral("#1e1e1e")),
-                           QColor(QStringLiteral("#cccccc")),
-                           QColor(QStringLiteral("#007acc"))};
-    }
-    return ThemeColors{QColor(QStringLiteral("#3c3f41")),
-                       QColor(QStringLiteral("#a9b7c6")),
-                       QColor(QStringLiteral("#4b6eaf"))};
+    const ChromePalette c = chromePaletteForTheme(themeName);
+    return ThemeColors{c.surface, c.text, c.accent};
 }
 
 SemanticColors semanticColorsForTheme(const QString &themeName)
 {
-    // Darcula's own #6897bb info blue measures 4.50:1 on #2b2b2b — it passes
-    // by rounding and fails the moment a row lands on the alternating band,
-    // so it is not used here.
+    // Each value clears 4.5:1 on its theme's surface-2 (the list ground).
     if (themeName == QStringLiteral("light")) {
         return SemanticColors{QColor(QStringLiteral("#c62828")),
                               QColor(QStringLiteral("#8a6100")),
@@ -595,132 +701,13 @@ SemanticColors semanticColors()
 
 QString styleSheetForTheme(const QString &themeName)
 {
-    if (themeName == QStringLiteral("light")) {
-        return lightStyleSheet();
-    }
-    if (themeName == QStringLiteral("vscode-dark")) {
-        return vscodeDarkStyleSheet();
-    }
-    return darculaStyleSheet();
+    return chromeStyleSheet(chromePaletteForTheme(themeName));
 }
 
 namespace {
 
-QPalette darculaPalette()
-{
-    QPalette palette;
-    const QColor window(QStringLiteral("#3c3f41"));
-    const QColor text(QStringLiteral("#a9b7c6"));
-    const QColor base(QStringLiteral("#2b2b2b"));
-
-    palette.setColor(QPalette::Window, window);
-    palette.setColor(QPalette::WindowText, text);
-    palette.setColor(QPalette::Base, base);
-    palette.setColor(QPalette::AlternateBase, QColor(QStringLiteral("#313335")));
-    palette.setColor(QPalette::Text, text);
-    palette.setColor(QPalette::Button, window);
-    palette.setColor(QPalette::ButtonText, text);
-    palette.setColor(QPalette::ToolTipBase, window);
-    palette.setColor(QPalette::ToolTipText, text);
-    palette.setColor(QPalette::Highlight, QColor(QStringLiteral("#214283")));
-    palette.setColor(QPalette::HighlightedText, QColor(QStringLiteral("#ffffff")));
-    palette.setColor(QPalette::PlaceholderText, QColor(QStringLiteral("#7a7a7a")));
-
-    // ADS paints the active dock tab as a Window→Light gradient and the
-    // selected-tab body as Light, so Light has to read as "one step up from
-    // the chrome", not as literal white. Midlight and Mid fill the same role
-    // for its hover and separator shades.
-    palette.setColor(QPalette::Light, QColor(QStringLiteral("#4e5254")));
-    palette.setColor(QPalette::Midlight, QColor(QStringLiteral("#454749")));
-    palette.setColor(QPalette::Mid, QColor(QStringLiteral("#5e6060")));
-    // Deliberately *lighter* than Window rather than darker: ADS colors the
-    // inactive dock tab label with palette(dark), so a literally dark Dark
-    // would leave those labels unreadable on the dark chrome. It doubles as
-    // the splitter/side-bar separator shade, where a mid grey also reads
-    // correctly.
-    palette.setColor(QPalette::Dark, QColor(QStringLiteral("#8a9199")));
-    palette.setColor(QPalette::Shadow, QColor(QStringLiteral("#1e1e1e")));
-
-    palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(QStringLiteral("#6a6a6a")));
-    palette.setColor(QPalette::Disabled, QPalette::Text, QColor(QStringLiteral("#6a6a6a")));
-    palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(QStringLiteral("#6a6a6a")));
-    return palette;
-}
-
-QPalette lightPalette()
-{
-    QPalette palette;
-    const QColor window(QStringLiteral("#f2f2f2"));
-    const QColor text(QStringLiteral("#1a1a1a"));
-
-    palette.setColor(QPalette::Window, window);
-    palette.setColor(QPalette::WindowText, text);
-    palette.setColor(QPalette::Base, QColor(QStringLiteral("#ffffff")));
-    palette.setColor(QPalette::AlternateBase, QColor(QStringLiteral("#f5f5f5")));
-    palette.setColor(QPalette::Text, text);
-    palette.setColor(QPalette::Button, QColor(QStringLiteral("#eeeeee")));
-    palette.setColor(QPalette::ButtonText, text);
-    palette.setColor(QPalette::ToolTipBase, QColor(QStringLiteral("#ffffff")));
-    palette.setColor(QPalette::ToolTipText, text);
-    palette.setColor(QPalette::Highlight, QColor(QStringLiteral("#90caf9")));
-    palette.setColor(QPalette::HighlightedText, QColor(QStringLiteral("#000000")));
-    palette.setColor(QPalette::PlaceholderText, QColor(QStringLiteral("#8a8a8a")));
-
-    palette.setColor(QPalette::Light, QColor(QStringLiteral("#ffffff")));
-    palette.setColor(QPalette::Midlight, QColor(QStringLiteral("#f7f7f7")));
-    palette.setColor(QPalette::Mid, QColor(QStringLiteral("#c0c0c0")));
-    palette.setColor(QPalette::Dark, QColor(QStringLiteral("#6b6b6b")));
-    palette.setColor(QPalette::Shadow, QColor(QStringLiteral("#9e9e9e")));
-
-    palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(QStringLiteral("#a0a0a0")));
-    palette.setColor(QPalette::Disabled, QPalette::Text, QColor(QStringLiteral("#a0a0a0")));
-    palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(QStringLiteral("#a0a0a0")));
-    return palette;
-}
-
-QPalette vscodeDarkPalette()
-{
-    QPalette palette;
-    const QColor chrome(QStringLiteral("#333333"));
-    const QColor chromeText(QStringLiteral("#cccccc"));
-    const QColor editor(QStringLiteral("#1e1e1e"));
-    const QColor editorText(QStringLiteral("#d4d4d4"));
-
-    palette.setColor(QPalette::Window, chrome);
-    palette.setColor(QPalette::WindowText, chromeText);
-    // CodeEditor derives its gutter, current-line band and find-match tints
-    // from Base/Text, so the editor surface has to reach it through the
-    // palette and not only through the stylesheet.
-    palette.setColor(QPalette::Base, editor);
-    palette.setColor(QPalette::AlternateBase, QColor(QStringLiteral("#252526")));
-    palette.setColor(QPalette::Text, editorText);
-    palette.setColor(QPalette::Button, QColor(QStringLiteral("#3c3c3c")));
-    palette.setColor(QPalette::ButtonText, chromeText);
-    palette.setColor(QPalette::ToolTipBase, QColor(QStringLiteral("#252526")));
-    palette.setColor(QPalette::ToolTipText, chromeText);
-    palette.setColor(QPalette::Highlight, QColor(QStringLiteral("#264f78")));
-    palette.setColor(QPalette::HighlightedText, QColor(QStringLiteral("#ffffff")));
-    palette.setColor(QPalette::PlaceholderText, QColor(QStringLiteral("#6e7681")));
-
-    // Same ADS constraints as darculaPalette(): Light/Midlight/Mid feed the
-    // active dock tab's Window→Light gradient, its hover shade and the
-    // separators.
-    palette.setColor(QPalette::Light, QColor(QStringLiteral("#252526")));
-    palette.setColor(QPalette::Midlight, QColor(QStringLiteral("#2d2d2d")));
-    palette.setColor(QPalette::Mid, QColor(QStringLiteral("#3c3c3c")));
-    // Lighter than Window on purpose — ADS colors inactive dock-tab labels
-    // with palette(dark), which a literally dark Dark would make unreadable.
-    palette.setColor(QPalette::Dark, QColor(QStringLiteral("#969696")));
-    palette.setColor(QPalette::Shadow, QColor(QStringLiteral("#191919")));
-
-    palette.setColor(QPalette::Disabled, QPalette::WindowText, QColor(QStringLiteral("#6e6e6e")));
-    palette.setColor(QPalette::Disabled, QPalette::Text, QColor(QStringLiteral("#6e6e6e")));
-    palette.setColor(QPalette::Disabled, QPalette::ButtonText, QColor(QStringLiteral("#6e6e6e")));
-    return palette;
-}
-
-// Mirrors the fallback in styleSheetForTheme(): an unrecognized name is
-// Darcula, so that is what an un-applied theme reports too.
+// Mirrors the fallback in chromePaletteForTheme(): an unrecognized name is
+// the dark theme, so that is what an un-applied theme reports too.
 QString activeTheme = QStringLiteral("dark");
 
 // ADS keeps the stylesheet it installed on the dock manager here, so every
@@ -736,7 +723,7 @@ void restyleDockManager(QWidget *dockManager)
         dockManager->setProperty(kAdsBaseStyleSheet, dockManager->styleSheet());
     }
     dockManager->setStyleSheet(dockManager->property(kAdsBaseStyleSheet).toString()
-                               + dockStyleSheet(tabColorsForTheme(activeTheme)));
+                               + dockStyleSheet(chromePaletteForTheme(activeTheme)));
 }
 
 bool isDockManager(const QObject *object)
@@ -782,13 +769,44 @@ void restyleDockManagers()
 
 QPalette paletteForTheme(const QString &themeName)
 {
-    if (themeName == QStringLiteral("light")) {
-        return lightPalette();
-    }
-    if (themeName == QStringLiteral("vscode-dark")) {
-        return vscodeDarkPalette();
-    }
-    return darculaPalette();
+    const ChromePalette c = chromePaletteForTheme(themeName);
+    QPalette palette;
+    // Window is what a panel's plain-QWidget body paints (the project tree's
+    // container, the Changes and Search panels...), so it is the side-panel
+    // ground: the mockup's `.sidebar` surface-2. The surfaces that are
+    // `surface` — menu bar, toolbar, editor column, status bar — are each
+    // named in chromeStyleSheet().
+    palette.setColor(QPalette::Window, c.surface2);
+    palette.setColor(QPalette::WindowText, c.text);
+    // CodeEditor derives its gutter, current-line band and find-match tints
+    // from Base/Text, so the editor surface reaches it through the palette:
+    // the code area is the canvas colour, as in the mockup's `.code`.
+    palette.setColor(QPalette::Base, c.canvas);
+    palette.setColor(QPalette::AlternateBase, c.surface2);
+    palette.setColor(QPalette::Text, c.text);
+    palette.setColor(QPalette::Button, c.surface2);
+    palette.setColor(QPalette::ButtonText, c.text);
+    palette.setColor(QPalette::ToolTipBase, c.surface);
+    palette.setColor(QPalette::ToolTipText, c.text);
+    palette.setColor(QPalette::Highlight, c.selection);
+    palette.setColor(QPalette::HighlightedText, c.text);
+    palette.setColor(QPalette::PlaceholderText, c.textDim);
+    palette.setColor(QPalette::Link, c.accent);
+
+    // ADS's own sheet resolves its colours through these roles: Light is
+    // the selected-tab body, Midlight the hover shade, Mid the separators.
+    // Dark colours the inactive dock-tab label, so it has to be readable
+    // text on the chrome rather than a literally dark shade.
+    palette.setColor(QPalette::Light, c.raised);
+    palette.setColor(QPalette::Midlight, c.raised);
+    palette.setColor(QPalette::Mid, c.border);
+    palette.setColor(QPalette::Dark, c.textDim);
+    palette.setColor(QPalette::Shadow, c.canvas.darker(130));
+
+    palette.setColor(QPalette::Disabled, QPalette::WindowText, c.textDim);
+    palette.setColor(QPalette::Disabled, QPalette::Text, c.textDim);
+    palette.setColor(QPalette::Disabled, QPalette::ButtonText, c.textDim);
+    return palette;
 }
 
 QString activeThemeName()
@@ -808,7 +826,7 @@ QIcon tabCloseIcon()
     constexpr int kSide = 32;
     Q_ASSERT(mask.size() == kSide * kSide);
 
-    const QColor tint = tabColorsForTheme(activeThemeName()).tabText;
+    const QColor tint = chromePaletteForTheme(activeThemeName()).textDim;
     QImage image(kSide, kSide, QImage::Format_ARGB32_Premultiplied);
     image.fill(Qt::transparent);
     for (int y = 0; y < kSide; ++y) {
@@ -844,11 +862,25 @@ void applyTheme(const QString &themeName)
     ads::CDockManager::iconProvider().registerCustomIcon(ads::DockAreaCloseIcon, closeIcon);
 }
 
+void installInterfaceFont()
+{
+    for (const char *face : {"Inter-Regular", "Inter-Medium", "Inter-SemiBold"}) {
+        QFontDatabase::addApplicationFont(
+          QStringLiteral(":/ui/fonts/%1.ttf").arg(QLatin1String(face)));
+    }
+    // 12.5 CSS px at 96 dpi is 9.375pt; points rather than pixels so the
+    // platform's own display scaling applies to it like any other font.
+    QFont font(QStringLiteral("Inter"));
+    font.setPointSizeF(9.5);
+    qApp->setFont(font);
+}
+
 namespace {
 
-// The platform's own UI font, captured before anything scales it. Static
-// rather than re-read from qApp because applyUiFontScale() overwrites
-// qApp's font, so after the first call qApp no longer knows the original.
+// The interface font as installed at startup, captured before anything
+// scales it. Static rather than re-read from qApp because
+// applyUiFontScale() overwrites qApp's font, so after the first call qApp
+// no longer knows the original.
 QFont baseUiFont()
 {
     static const QFont base = QApplication::font();

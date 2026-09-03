@@ -17,7 +17,7 @@ In progress: an in-IDE AI assistant — a docked chat panel with attachable cont
 1. **Testability without a display.**
    All business logic lives in Qt-free crates and runs under plain `cargo test`, with no Qt runtime or display server.
 2. **View swappability.**
-   The view is Qt Widgets today; QML is the planned future view.
+   The view is Qt Widgets today; QML is the planned future view (re-evaluated and deferred for the blend chrome in ADR-0038).
    Because the view holds zero rules ([ADR-0002](decisions/0002-application-layer-and-humble-view.md)), swapping it must not touch `app-core` or the domain crates.
 3. **Performance** (from ADR-0001): typing latency and large-file handling drive the Rust-core decision.
 

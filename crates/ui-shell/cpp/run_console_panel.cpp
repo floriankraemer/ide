@@ -87,18 +87,18 @@ void appendLine(QPlainTextEdit *edit, const QString &text)
 
 } // namespace
 
-RunConsolePanel::RunConsolePanel(RunService *runService, OpenAt openAt, QWidget *parent)
+RunConsolePanel::RunConsolePanel(RunService *runService, RunToolbar *toolbar, OpenAt openAt,
+                                 QWidget *parent)
   : QWidget(parent)
   , runService_(runService)
   , openAt_(std::move(openAt))
+  , toolbar_(toolbar)
 {
-    toolbar_ = new RunToolbar(runService_, this);
     tabs_ = new QTabWidget(this);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
-    layout->addWidget(toolbar_);
     layout->addWidget(tabs_, 1);
 
     connect(runService_, &RunService::consoleStarted, this, &RunConsolePanel::onConsoleStarted);
@@ -207,10 +207,10 @@ void RunConsolePanel::focusConfigSelector()
 }
 
 RunConsolePanel *buildRunConsoleDock(ads::CDockManager *dockManager, DockRegistry *docks,
-                                     ads::CDockAreaWidget *relativeTo, RunService *runService,
+                                     ads::CDockAreaWidget *relativeTo, RunToolbar *toolbar,
                                      RunConsolePanel::OpenAt openAt)
 {
-    auto *panel = new RunConsolePanel(runService, std::move(openAt), dockManager);
+    auto *panel = new RunConsolePanel(toolbar->runService(), toolbar, std::move(openAt), dockManager);
     auto *dock = new ads::CDockWidget(dockManager, QObject::tr("Run"));
     dock->setWidget(panel);
     docks->registerDock(QStringLiteral("runConsole"), dock, ads::CenterDockWidgetArea, relativeTo);

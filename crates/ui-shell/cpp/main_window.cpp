@@ -28,6 +28,7 @@
 #include "refactor_controller.h"
 #include "run_console_panel.h"
 #include "run_menu.h"
+#include "run_toolbar.h"
 #include "search_results_panel.h"
 #include "settings_dialog.h"
 #include "splash_screen.h"
@@ -61,6 +62,8 @@
 #include <QMenuBar>
 #include <QPlainTextEdit>
 #include <QProxyStyle>
+#include <QStyle>
+#include <QToolBar>
 #include <QStringList>
 #include <QLayout>
 #include <QSplitter>
@@ -140,6 +143,16 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // Constructing with `window` (a QMainWindow) as parent makes the dock
     // manager install itself as the central widget automatically (ADS's own
     // CDockManager::CDockManager) — no explicit QMainWindow::setCentralWidget().
+    // Full tab titles: ADS's default is to elide every title in a strip
+    // that overflows ("Cl...", "AI...", "Ch...") and offer a menu instead;
+    // with eliding off the strip scrolls, and the titles stay readable.
+    ads::CDockManager::setConfigFlag(ads::CDockManager::DisableTabTextEliding, true);
+    // A tab strip carries the close button only: the undock and tabs-menu
+    // buttons the default configuration adds hold 50px of every strip for
+    // two affordances the mockup does not show, and a dock is still
+    // undocked by dragging its tab.
+    ads::CDockManager::setConfigFlag(ads::CDockManager::DockAreaHasUndockButton, false);
+    ads::CDockManager::setConfigFlag(ads::CDockManager::DockAreaHasTabsMenuButton, false);
     auto *dockManager = new ads::CDockManager(window);
     // --panel-gap (blend spec), the margin *around* the docked panels. It has
     // to go on the layout: ADS gives the dock manager a layout of its own in
@@ -151,16 +164,32 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
         managerLayout->setContentsMargins(tokens::kPanelGap, tokens::kPanelGap, tokens::kPanelGap,
                                           tokens::kPanelGap);
     }
-    // The rounded panel corner. It cannot be QSS: a `border-radius` rounds
-    // only the background the styled widget paints itself, and every child
-    // inside a dock paints an opaque square over it (this application sets a
-    // global `QWidget { background-color: ... }`). Masking the dock area
-    // clips its whole child tree, which is what makes the corner survive.
+    // The rounded panel card — see rounded_corners.h for why it is neither
+    // a QSS radius nor a mask. The 1px margin keeps the area's children off
+    // the border line it paints.
     QObject::connect(dockManager, &ads::CDockManager::dockAreaCreated, window,
                      [](ads::CDockAreaWidget *dockArea) {
+                         if (QLayout *areaLayout = dockArea->layout()) {
+                             areaLayout->setContentsMargins(1, 1, 1, 1);
+                         }
                          roundCorners(dockArea, tokens::kRadiusPanel);
                      });
     auto *docks = new DockRegistry(dockManager);
+
+    // The Run/Stop/Rerun cluster and the configuration picker, on a
+    // full-width strip under the menu bar — the mockup's `.toolbar` — rather
+    // than inside the Run Console dock, where they were only visible once
+    // that dock was opened. The Run Console panel still forwards the global
+    // `run.*` shortcuts to it.
+    auto *runToolbar = new RunToolbar(runService, window);
+    QToolBar *toolBar = window->addToolBar(QObject::tr("Run"));
+    toolBar->setObjectName(QStringLiteral("runToolBar"));
+    toolBar->setMovable(false);
+    toolBar->setFloatable(false);
+    toolBar->addWidget(runToolbar);
+    // The main window's own right-click menu only lists toolbars to hide,
+    // and hiding the only one is not a feature.
+    window->setContextMenuPolicy(Qt::PreventContextMenu);
 
     // The editor area is a QSplitter tree of tab groups (see EditorTabs) so
     // a tab can be split off into a second pane; ADS still sees the whole
@@ -173,6 +202,13 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // bottom panels keep their size hints instead of splitting the window
     // into equal shares and squeezing the editor down to nothing.
     auto *editorArea = dockManager->setCentralWidget(editorDock);
+    // dockStyleSheet() paints the editor column on `surface` and every side
+    // panel on `surface2`, the way the mockup's `.editor-col` and `.sidebar`
+    // differ; ADS exposes no selector for "the central area", so this
+    // property is the hook.
+    editorArea->setProperty("centralArea", true);
+    editorArea->style()->unpolish(editorArea);
+    editorArea->style()->polish(editorArea);
 
     const ProjectTreeDock projectTreeDock = createProjectTreeDock(dockManager, editorArea, treeModel, docks);
     QTreeView *treeView = projectTreeDock.view;
@@ -304,7 +340,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     terminalDock->setWidget(terminalPanel);
     docks->registerDock(QStringLiteral("terminal"), terminalDock, ads::CenterDockWidgetArea,
                         bottomArea);
-    auto *runConsolePanel = buildRunConsoleDock(dockManager, docks, bottomArea, runService, openAt);
+    auto *runConsolePanel = buildRunConsoleDock(dockManager, docks, bottomArea, runToolbar, openAt);
 
     // Class View tracks whatever tab is current: refresh on open, on
     // switch, and whenever a tab becomes clean. `tabModifiedChanged`
@@ -412,6 +448,10 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // tabbed there. Overridden by restoreState() below once a layout has
     // been saved.
     dockManager->setSplitterSizes(bottomArea, {520, 200});
+    // Likewise the right-hand column, which shares a splitter with the
+    // editor only (the tree is one level up): sized from its panels' hints
+    // it comes up narrower than the Changes panel's button row.
+    dockManager->setSplitterSizes(rightArea, {680, 360});
 
     // D4: restored after both dock widgets exist for this layout to apply
     // to (ADS matches saved widgets by their title/object name). Empty
@@ -572,7 +612,7 @@ void buildMainWindow(AppSettings *appSettings,
                              static_cast<int>(savedGeometry.width),
                              static_cast<int>(savedGeometry.height));
     } else {
-        window->resize(1024, 768);
+        window->resize(1280, 800);
     }
 
     progress(2, QObject::tr("Starting services..."));
@@ -1037,6 +1077,9 @@ int run_app()
     auto *appSettings = new AppSettings(nullptr);
     // Applying the theme (T2) before anything is shown means neither the
     // splash nor the main window ever flashes an unstyled frame.
+    // Inter before the theme: the sheet's metrics are polished against the
+    // application font, and applyUiFontScale() scales whatever is installed.
+    installInterfaceFont();
     applyTheme(appSettings->themeName());
     // The global half of the interface font scale, before the splash for the
     // same reason: no frame is ever painted at a size the user did not pick.

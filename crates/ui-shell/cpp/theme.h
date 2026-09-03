@@ -45,58 +45,47 @@ SemanticColors semanticColorsForTheme(const QString &themeName);
 // The same, for whatever theme is active — what a widget building rows wants.
 SemanticColors semanticColors();
 
-// The one definition of what a tab looks like. Every tab bar in the product
-// renders from the rules `tabStyleSheet()` and `dockStyleSheet()` emit —
-// the editor tab bar, the dock panel tabs and the Search Everywhere filter
-// strip — so a metric changed there changes all of them at once. Only the
-// colours differ per theme.
-struct TabColors
+// The colour roles of the blend design spec (`--ide-*` in the approved
+// mockup), one set per theme. Every stylesheet and palette in this file is
+// generated from one of these, so a theme is only a list of colours — the
+// shape of the chrome (radii, gaps, row heights) comes from ui_tokens.h and
+// is identical across themes.
+//
+// `border` and `selection` are solid colours pre-blended over `surface`
+// rather than the spec's rgba() values: a Qt stylesheet paints them over
+// whatever is behind the widget, and a translucent border over a masked,
+// rounded panel would show the canvas through its own corner.
+struct ChromePalette
 {
-    QColor bar;          // the strip behind the tabs
-    QColor tab;          // an unselected tab's body
-    QColor tabText;
-    QColor selected;     // the selected tab's body
-    QColor selectedText;
-    QColor hover;        // an unselected tab under the mouse
-    QColor hoverText;
-    QColor accent;       // the marker on the selected tab's top edge
-    QColor closeHover;   // the close button's hover square
-    QColor pane;         // the page area below the strip
-    QColor paneBorder;   // an invalid QColor means borderless
-    QColor divider;      // the splitter handles between docked panes
-    QColor canvas;       // the ground the panels sit on — see panelCanvasForTheme()
+    QColor canvas;     // --ide-bg: the ground the panels sit on, and the editor
+    QColor surface;    // --ide-surface: menu bar, toolbar, editor column, status bar
+    QColor surface2;   // --ide-surface-2: side panels, inputs, buttons
+    QColor raised;     // --ide-raised: a control under the mouse
+    QColor border;     // --ide-border: every 1px separator
+    QColor text;       // --ide-text
+    QColor textDim;    // --ide-text-dim: menu bar, status bar, inactive tabs
+    QColor accent;     // --ide-accent: active-tab marker, focus ring, progress
+    QColor accentInk;  // text on an accent-filled control
+    QColor selection;  // --ide-selection: the selected tree/list row
+    QColor statusBar;  // the status bar's own ground (== surface except vscode-dark)
+    QString chevron;   // resource path of the combo box arrow, tinted textDim
 };
 
-TabColors tabColorsForTheme(const QString &themeName);
+// Any name other than "light"/"vscode-dark" is the default dark theme —
+// the same fallback `Settings::theme_name()` resolves an unset theme to.
+ChromePalette chromePaletteForTheme(const QString &themeName);
 
-// The ground the docked panels sit on: what shows through the gaps between
-// them and in the margin around them, so each panel reads as its own card
-// rather than as one edge-to-edge surface. Deliberately a step away from
-// `TabColors::pane` — with the two equal there is a radius on the panels but
-// nothing behind them for it to be a corner *against*.
-QColor panelCanvasForTheme(const QString &themeName);
+// The whole application stylesheet for `palette`: chrome, tabs, tree,
+// inputs, scrollbars. Editor text colours are QPalette-driven, not QSS (A3).
+QString chromeStyleSheet(const ChromePalette &palette);
 
-// The QTabBar/QTabWidget half, concatenated into each theme's sheet below.
-QString tabStyleSheet(const TabColors &colors);
+// The same look in the docking system's own selectors. Qt gives a widget's
+// own stylesheet priority over the application's however specific the
+// latter is, and ADS installs one on its dock manager — so applyTheme()
+// appends these to that sheet rather than to qApp's.
+QString dockStyleSheet(const ChromePalette &palette);
 
-// The same look in the docking system's own selectors, plus the splitter
-// handles between its panes. Qt gives a widget's own stylesheet priority over
-// the application's however specific the latter is, and ADS installs one on
-// its dock manager — so applyTheme() appends these to that sheet rather than
-// to qApp's.
-QString dockStyleSheet(const TabColors &colors);
-
-// Chrome-wide stylesheets (menus, tabs, tree, scrollbars, splitter). Editor
-// text colors are QPalette-driven, not QSS (A3) — kept separate here.
-QString darculaStyleSheet();
-QString lightStyleSheet();
-QString vscodeDarkStyleSheet();
-
-// Picks the matching stylesheet for a theme name from `app-config::Settings`
-// (T2). Any name other than "light"/"vscode-dark" falls back to Darcula —
-// the same default `Settings::theme_name()` already resolves an unset theme
-// to, so an unrecognized value degrades to the default rather than an
-// unstyled window.
+// Picks the stylesheet for a theme name from `app-config::Settings` (T2).
 QString styleSheetForTheme(const QString &themeName);
 
 // The theme name last passed to applyTheme(). Widgets that pick colors in
@@ -119,7 +108,13 @@ QPalette paletteForTheme(const QString &themeName);
 // drift apart.
 void applyTheme(const QString &themeName);
 
-// The tab/dock close (x) glyph, tinted to the active theme's tab text color
+// Registers the bundled Inter faces (resources/fonts, SIL OFL) and makes
+// Inter the application font at the spec's 12.5px, before anything captures
+// the application font — applyUiFontScale() scales whatever this installed.
+// Falls back to the platform font, silently, if the resource cannot load.
+void installInterfaceFont();
+
+// The tab/dock close (x) glyph, tinted to the active theme's dim text color
 // (no Qt6Svg in this build, so the vendored ADS icon is rasterized to an
 // alpha mask once — see resources/ui_icons.qrc — and recolored here rather
 // than loaded as-is). Called by applyTheme() itself to keep both the plain
@@ -128,8 +123,8 @@ void applyTheme(const QString &themeName);
 QIcon tabCloseIcon();
 
 // Scales the whole application's default UI font to `percent` of the font
-// Qt picked for the platform (100 = unchanged). Widgets that were never
-// given a font of their own follow it; the two that were — see
+// installed at startup (100 = unchanged). Widgets that were never given a
+// font of their own follow it; the two that were — see
 // applyWidgetFontScale() — keep their own scale.
 //
 // Always relative to the font captured on the first call, so repeated live

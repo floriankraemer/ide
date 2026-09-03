@@ -11,8 +11,9 @@ class QToolButton;
 
 namespace ui_shell {
 
-// F4-12: the strip at the top of the Run Console dock — a configuration
-// picker plus Run/Stop/Rerun for whichever configuration is selected.
+// F4-12: the main window's toolbar strip under the menu bar — Run/Stop/Rerun
+// for whichever configuration is selected, and the configuration picker at
+// the strip's right end (the mockup's `.tbtn-text` pill).
 //
 // Humble view: what configurations exist is `RunService::configurations()`;
 // this widget only lists them and turns a button click into `run`/`stop`/
@@ -43,6 +44,8 @@ public:
     // Gives the configuration combo box keyboard focus — `run.
     // selectConfiguration`'s target.
     void focusConfigSelector();
+
+    RunService *runService() const { return runService_; }
 
 private:
     void refreshConfigurations();
