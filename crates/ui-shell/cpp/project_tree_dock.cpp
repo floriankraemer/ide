@@ -5,6 +5,7 @@
 #include "icon_cache.h"
 #include "icon_decoration_proxy.h"
 #include "keymap_page.h"
+#include "ui_tokens.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include "DockAreaWidget.h"
@@ -161,8 +162,8 @@ ProjectTreeDock createProjectTreeDock(ads::CDockManager *dockManager,
     // the dock is docked next to others and its title bar gets crowded.
     auto *toolbar = new QWidget();
     auto *toolbarLayout = new QHBoxLayout(toolbar);
-    toolbarLayout->setContentsMargins(4, 2, 4, 2);
-    toolbarLayout->setSpacing(2);
+    toolbarLayout->setContentsMargins(tokens::kSp1, tokens::kSp1 / 2, tokens::kSp1, tokens::kSp1 / 2);
+    toolbarLayout->setSpacing(tokens::kSp1 / 2);
 
     auto *sortAction = new QAction(toolbar);
     sortAction->setCheckable(true);

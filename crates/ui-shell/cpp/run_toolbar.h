@@ -7,7 +7,7 @@
 #include <QWidget>
 
 class QComboBox;
-class QPushButton;
+class QToolButton;
 
 namespace ui_shell {
 
@@ -20,6 +20,14 @@ namespace ui_shell {
 // running" itself, from `consoleStarted`/`consoleFinished`, so it can
 // enable/disable Run vs. Stop/Rerun without RunConsolePanel reaching back
 // into it.
+//
+// Buttons are icon-only 26x26 glyphs per the blend spec (Run/Stop/Rerun,
+// drawn at runtime — see run_toolbar.cpp's anonymous namespace). The
+// mockup this spec comes from also shows Debug and Build in the same
+// cluster, but neither has a backing command anywhere in this codebase
+// today (no `RunService` debug/build entry point, no menu action) — adding
+// icon buttons with nothing to wire them to would be UI for a feature that
+// doesn't exist, so this toolbar stays Run/Stop/Rerun until one does.
 class RunToolbar : public QWidget
 {
 public:
@@ -43,9 +51,9 @@ private:
 
     RunService *runService_;
     QComboBox *configCombo_ = nullptr;
-    QPushButton *runButton_ = nullptr;
-    QPushButton *stopButton_ = nullptr;
-    QPushButton *rerunButton_ = nullptr;
+    QToolButton *runButton_ = nullptr;
+    QToolButton *stopButton_ = nullptr;
+    QToolButton *rerunButton_ = nullptr;
 
     // ponytail: one running console tracked per configuration id, the
     // latest `run()` call for it. Running the same configuration a second

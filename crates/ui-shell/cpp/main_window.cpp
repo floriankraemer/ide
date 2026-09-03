@@ -35,6 +35,7 @@
 #include "syntax_highlighter.h"
 #include "terminal_sessions_panel.h"
 #include "theme.h"
+#include "ui_tokens.h"
 #include "vcs_menu.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
@@ -137,6 +138,15 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // manager install itself as the central widget automatically (ADS's own
     // CDockManager::CDockManager) — no explicit QMainWindow::setCentralWidget().
     auto *dockManager = new ads::CDockManager(window);
+    // --panel-gap (blend spec): Qt Advanced Docking System has no API for
+    // spacing *between* docked panels (checked DockAreaWidget/
+    // DockContainerWidget/DockManager — no margin/spacing knob exists), so
+    // the gap is applied as outer padding around the whole docking area
+    // instead. Combined with each dock area's rounded corner
+    // (dockStyleSheet()'s `ads--CDockAreaWidget` rule) that padding shows
+    // the window's own background between the docks' corners and the edge.
+    dockManager->setContentsMargins(tokens::kPanelGap, tokens::kPanelGap, tokens::kPanelGap,
+                                    tokens::kPanelGap);
     auto *docks = new DockRegistry(dockManager);
 
     // The editor area is a QSplitter tree of tab groups (see EditorTabs) so

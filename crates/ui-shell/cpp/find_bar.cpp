@@ -2,6 +2,7 @@
 
 #include "code_editor.h"
 #include "editor_tabs.h"
+#include "ui_tokens.h"
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 #include <QCheckBox>
@@ -22,7 +23,7 @@ namespace ui_shell {
 
 namespace {
 // Gap between the bar and the editor's top-right corner.
-constexpr int kMargin = 6;
+constexpr int kMargin = tokens::kPanelGap;
 // Below this the fields stop being usable; the bar keeps this width and lets
 // the editor clip it rather than collapsing to nothing.
 constexpr int kMinWidth = 340;
@@ -40,7 +41,8 @@ FindBar::FindBar(CodeEditor *editor, DocumentManager *documents)
     setAutoFillBackground(true);
     setAttribute(Qt::WA_StyledBackground, true);
     setStyleSheet(QStringLiteral("#findBar { background-color: palette(window);"
-                                 " border: 1px solid palette(mid); border-radius: 4px; }"));
+                                 " border: 1px solid palette(mid); border-radius: %1px; }")
+                    .arg(tokens::kRadiusPanel));
 
     queryEdit_ = new QLineEdit(this);
     queryEdit_->setPlaceholderText(tr("Find"));
@@ -85,7 +87,7 @@ FindBar::FindBar(CodeEditor *editor, DocumentManager *documents)
     replaceRow_->hide();
 
     auto *layout = new QVBoxLayout(this);
-    layout->setContentsMargins(6, 4, 6, 4);
+    layout->setContentsMargins(tokens::kSp2, tokens::kSp1, tokens::kSp2, tokens::kSp1);
     layout->addLayout(findRow);
     layout->addWidget(replaceRow_);
 
