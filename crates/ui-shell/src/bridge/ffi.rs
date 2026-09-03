@@ -943,16 +943,9 @@ mod ffi {
         /// everywhere else, per F0-16); this only carries its inputs and
         /// answer across the seam.
         ///
-        /// TODO(C9-followup): nothing in `cpp/syntax_highlighter.cpp` calls
-        /// this yet. `LanguageService::requestSemanticTokens`/
-        /// `semanticTokenSpans`/`semanticTokensReady` (see `ffi.rs`'s
-        /// `LanguageService` block) are wired and reachable end to end from
-        /// document open through to a fetchable merged-span answer; only
-        /// the second call site — `SyntaxHighlighter` re-running
-        /// `highlightBlock` with the overlaid spans once
-        /// `semanticTokensReady` fires — is left for follow-up, the same
-        /// allowance C9's plan gives when full C++ rendering wiring is not
-        /// worth the risk of an unfamiliar-file change under one task.
+        /// Called from `EditorTabs::onSemanticTokensReady` (C9-followup)
+        /// once `semanticTokensReady` fires, via
+        /// `SyntaxHighlighter::applySemanticTokens`.
         fn overlay_semantic_tokens(
             self: &SyntaxHighlighterHandle,
             semantic: Vec<FfiHighlightSpan>,

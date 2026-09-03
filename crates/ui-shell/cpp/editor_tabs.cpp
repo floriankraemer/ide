@@ -213,6 +213,8 @@ EditorTabs::EditorTabs(DocumentManager *docManager, LanguageService *languageSer
             &EditorTabs::onSignatureHelpReady);
     connect(languageService_, &LanguageService::inlayHintsReady, this,
             &EditorTabs::onInlayHintsReady);
+    connect(languageService_, &LanguageService::semanticTokensReady, this,
+            &EditorTabs::onSemanticTokensReady);
 
     activeGroup_ = makeGroup();
     root_->addWidget(activeGroup_);
@@ -640,6 +642,19 @@ void EditorTabs::refreshTabIcons()
                           docManager_->tabIsModified(tabId));
         }
     }
+}
+
+void EditorTabs::onSemanticTokensReady(const QString &path)
+{
+    CodeEditor *editor = editorForPath(path);
+    if (!editor) {
+        return;
+    }
+    auto *highlighter = highlighterOf(editor->document());
+    if (!highlighter) {
+        return;
+    }
+    highlighter->applySemanticTokens(languageService_->semanticTokenSpans(path));
 }
 
 void EditorTabs::refreshHighlighting()

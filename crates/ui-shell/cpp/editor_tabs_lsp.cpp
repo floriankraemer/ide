@@ -302,6 +302,15 @@ void EditorTabs::onInlayHintsReady()
     inlayHintsEditor_->setInlayHints(hints);
 }
 
+void EditorTabs::requestSemanticTokensFor(CodeEditor *editor)
+{
+    const QString path = editor->property("lspPath").toString();
+    if (path.isEmpty()) {
+        return;
+    }
+    languageService_->requestSemanticTokens(path, editor->toPlainText());
+}
+
 void EditorTabs::onIntentionsReady()
 {
     const bool wasPending = intentionsPending_;
@@ -776,6 +785,9 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
         // changes, exactly like an inlay hint's position is — same
         // debounce, same reasoning.
         requestHunksFor(editor);
+        // C9-followup: the server's last answer was for the previous
+        // revision, so ask again on the same settle tick.
+        requestSemanticTokensFor(editor);
     });
 
     // F3-16: a click on a change marker. `window_` (not `editor`) owns the
@@ -815,6 +827,7 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
     applyDiagnostics();
     requestInlayHintsFor(editor);
     requestHunksFor(editor);
+    requestSemanticTokensFor(editor);
 }
 
 } // namespace ui_shell
