@@ -30,7 +30,7 @@ Task ids are stable; titles may change.
 
 | Task | Status | Commit |
 |---|---|---|
-| R0-1 — this plan doc + `docs/README.md` index line | done | this branch |
+| R0-1 — this plan doc + `docs/README.md` index line | done | (#179) |
 
 ### R1 — typed run configurations, macros, run from context
 
