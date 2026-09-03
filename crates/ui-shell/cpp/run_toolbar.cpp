@@ -29,24 +29,13 @@ QToolButton *makeGlyphButton(const QString &accessibleName, const QString &toolt
 {
     auto *button = new QToolButton(parent);
     button->setFixedSize(kButtonSide, kButtonSide);
+    button->setIconSize(QSize(kIconSide, kIconSide));
     button->setToolTip(tooltip);
     button->setAccessibleName(accessibleName);
     button->setAutoRaise(true);
     button->setCursor(Qt::PointingHandCursor);
-    button->setStyleSheet(QStringLiteral(R"(
-QToolButton {
-    background: transparent;
-    border: none;
-    border-radius: %1px;
-}
-QToolButton:hover {
-    background-color: palette(midlight);
-}
-QToolButton:disabled {
-    background: transparent;
-}
-)")
-                            .arg(tokens::kRadiusControl));
+    // Transparent ground, `--r-ctl` hover tint: chromeStyleSheet()'s
+    // `QToolButton` rule, shared with every other icon button.
     return button;
 }
 
@@ -120,10 +109,12 @@ RunToolbar::RunToolbar(RunService *runService, QWidget *parent)
   : QWidget(parent)
   , runService_(runService)
 {
-    setFixedHeight(tokens::kToolbarHeight);
-
+    // Height and horizontal padding come from the QToolBar this sits in
+    // (chromeStyleSheet()'s `QToolBar` rule); this widget only orders the
+    // controls.
     configCombo_ = new QComboBox(this);
-    configCombo_->setMinimumWidth(200);
+    configCombo_->setMinimumWidth(120);
+    configCombo_->setSizeAdjustPolicy(QComboBox::AdjustToContents);
 
     const SemanticColors semantic = semanticColors();
     const QColor dim = palette().color(QPalette::PlaceholderText);
@@ -135,13 +126,13 @@ RunToolbar::RunToolbar(RunService *runService, QWidget *parent)
     rerunButton_->setIcon(rerunGlyph(dim));
 
     auto *layout = new QHBoxLayout(this);
-    layout->setContentsMargins(tokens::kSp1, tokens::kSp1, tokens::kSp1, tokens::kSp1);
+    layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(tokens::kSp1);
-    layout->addWidget(configCombo_);
     layout->addWidget(runButton_);
     layout->addWidget(stopButton_);
     layout->addWidget(rerunButton_);
     layout->addStretch(1);
+    layout->addWidget(configCombo_);
 
     connect(runService_, &RunService::configurationsChanged, this,
             &RunToolbar::refreshConfigurations);

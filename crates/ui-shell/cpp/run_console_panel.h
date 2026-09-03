@@ -37,7 +37,9 @@ class RunConsolePanel : public QWidget
 public:
     using OpenAt = std::function<void(const QString &, int, int)>;
 
-    RunConsolePanel(RunService *runService, OpenAt openAt, QWidget *parent);
+    // `toolbar` is the main window's run toolbar (built and owned there);
+    // this panel only forwards the `run.*` shortcuts to it.
+    RunConsolePanel(RunService *runService, RunToolbar *toolbar, OpenAt openAt, QWidget *parent);
 
     // Forwarded to the embedded RunToolbar — the targets of the global
     // `run.*` shortcuts, which must act on the toolbar's current selection
@@ -73,7 +75,7 @@ private:
 // wiring a new dock there costs one line, not five (the file sits at its
 // 1200-line ceiling, ADR-0025).
 RunConsolePanel *buildRunConsoleDock(ads::CDockManager *dockManager, DockRegistry *docks,
-                                     ads::CDockAreaWidget *relativeTo, RunService *runService,
+                                     ads::CDockAreaWidget *relativeTo, RunToolbar *toolbar,
                                      RunConsolePanel::OpenAt openAt);
 
 } // namespace ui_shell
