@@ -3497,14 +3497,10 @@ mod ffi {
         /// on the usual `refactorReady`/`refactorFailed` refactor-preview
         /// flow, not a signal of its own.
         ///
-        /// TODO(C10-followup): nothing in `cpp/editor_tabs_lsp.cpp` calls
-        /// `requestCodeLenses`/`codeLenses`/`runCodeLens` yet. The Rust
-        /// pipeline is wired and reachable end to end from document open
-        /// through fetch, resolve and gated execution (see
-        /// `stub_server_session.rs`'s C10 tests); only the C++ lens strip —
-        /// painting one row per `FfiCodeLens` above/on its line and
-        /// forwarding a click back by index — is left for follow-up, the
-        /// same allowance C9's own repaint call was given.
+        /// Called from `CodeEditor::codeLensClicked` via
+        /// `EditorTabs`'s connection to it (C10-followup): the lens strip
+        /// paints one pill per `FfiCodeLens` on its line and forwards a
+        /// click back by index.
         #[qinvokable]
         #[cxx_name = "runCodeLens"]
         fn run_code_lens(self: Pin<&mut LanguageService>, path: &QString, index: u32);
