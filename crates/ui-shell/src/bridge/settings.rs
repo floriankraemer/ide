@@ -822,7 +822,11 @@ impl ffi::LanguageServerEditor {
             },
             _ => app_config::load(&app_core::resolve_config_dir()).unwrap_or_default(),
         };
-        let draft = settings_model::ServerDraft::new(&settings, &server_page_languages());
+        let draft = settings_model::ServerDraft::new(
+            &settings,
+            &server_page_languages(),
+            &crate::bridge::language::plugin_servers(),
+        );
         *self.saved.borrow_mut() = Some(draft.clone());
         *self.draft.borrow_mut() = Some(draft);
     }

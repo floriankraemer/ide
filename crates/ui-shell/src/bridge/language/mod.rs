@@ -24,7 +24,7 @@ mod lsp_surface;
 /// `resolve_servers` understands. `ui-shell` already depends on
 /// `plugin-host` for icon themes (`bridge/icons.rs`), so this is the same
 /// pattern, not a new dependency.
-fn plugin_servers() -> Vec<lsp_core::PluginServer> {
+pub(crate) fn plugin_servers() -> Vec<lsp_core::PluginServer> {
     let registry = plugin_host::registry();
     registry
         .language_servers()
