@@ -3539,15 +3539,8 @@ mod ffi {
         /// module docs), so an unsupported server or empty answer simply
         /// leaves `callHierarchyItems` empty.
         ///
-        /// TODO(C11-followup): the Rust+FFI pipeline for call hierarchy and
-        /// type hierarchy below is wired and reachable end to end (see
-        /// `stub_server_session.rs`'s C11 tests for the LSP round trip and
-        /// `lsp_core::hierarchy`'s unit tests for the index-fallback
-        /// precedence); no `cpp/` dock consumes any of it yet. `ClassViewPanel`
-        /// and `FindUsagesPanel` are each a tree over one shape of this same
-        /// data and are the template to extend or sibling from, the same
-        /// allowance C9's semantic-token repaint and C10's lens strip were
-        /// given.
+        /// Consumed by `cpp/hierarchy_panel.cpp` (C11-followup), triggered
+        /// from Navigate > Show Call Hierarchy.
         #[qinvokable]
         #[cxx_name = "requestCallHierarchy"]
         fn request_call_hierarchy(
