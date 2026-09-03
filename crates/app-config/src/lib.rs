@@ -153,6 +153,24 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// One `[[debug_adapter]]` entry: what the user says about the debug adapter
+/// with this id (D1-4).
+///
+/// The same shape and the same job as [`LanguageServerSetting`]: replace the
+/// command of an adapter the IDE ships knowledge of, or introduce one it has
+/// never heard of. What an adapter *is* stays `dap-core`'s.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, Default)]
+pub struct DebugAdapterSetting {
+    /// Adapter id, e.g. `"codelldb"`. The key both the shipped catalog and
+    /// this table are keyed by.
+    #[serde(default)]
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+}
+
 /// One entry in a run configuration's `before_launch` list (B2-1).
 ///
 /// A string `kind` plus the fields each kind needs, rather than a tagged

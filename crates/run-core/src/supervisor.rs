@@ -160,6 +160,23 @@ impl Supervisor {
     }
 
     /// Whether `id` is still tracked (launched and not yet stopped/reaped).
+    /// Block until `id`'s process has exited, and report its exit code.
+    ///
+    /// [`Supervisor::exit_code`] asks without waiting, which is what a
+    /// console poll wants; a caller that has just read the process's output
+    /// to EOF needs this instead. The two are a hair apart in time and a
+    /// world apart in meaning: right after EOF the child is exiting but
+    /// usually not yet reaped, so `exit_code` answers `None` there — and a
+    /// caller that read that as "no failure" would report a failed build as
+    /// a successful one.
+    pub fn wait(&mut self, id: ConsoleId) -> Result<u32, RunError> {
+        let console = self.consoles.get_mut(&id).ok_or(RunError::UnknownConsole)?;
+        console
+            .pty_session
+            .wait()
+            .map_err(|err| RunError::Io(err.to_string()))
+    }
+
     pub fn is_running(&self, id: ConsoleId) -> bool {
         self.consoles.contains_key(&id)
     }
@@ -350,5 +367,28 @@ mod tests {
         let mut supervisor = Supervisor::new();
         let result = supervisor.stop(ConsoleId(999));
         assert!(matches!(result, Err(RunError::UnknownConsole)));
+    }
+
+    #[test]
+    fn wait_reports_the_exit_code_a_poll_right_after_eof_would_miss() {
+        let mut supervisor = Supervisor::new();
+        let spec = LaunchSpec {
+            program: "sh".into(),
+            args: vec!["-c".into(), "exit 3".into()],
+            cwd: Some(std::env::temp_dir()),
+            env: Vec::new(),
+            console: ConsoleKind::Pty,
+        };
+        let id = supervisor.launch("waiter", &spec).unwrap();
+        assert_eq!(supervisor.wait(id).unwrap(), 3);
+    }
+
+    #[test]
+    fn waiting_on_an_unknown_console_is_reported_not_panicked() {
+        let mut supervisor = Supervisor::new();
+        assert!(matches!(
+            supervisor.wait(ConsoleId(99)),
+            Err(RunError::UnknownConsole)
+        ));
     }
 }

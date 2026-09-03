@@ -1,0 +1,20 @@
+[package]
+name = "dap-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# The wire framing, shared with `lsp-core` (ADR-0041).
+stdio-framing = { path = "../stdio-framing" }
+# `LaunchSpec` and the toolchain table: which adapter a project's programs
+# are debugged with is `run_core::toolchain`'s answer, not a second one
+# (ADR-0039).
+run-core = { path = "../run-core" }
+# The adapter catalog's user overrides live in the project's settings file,
+# the same place run configurations do.
+app-config = { path = "../app-config" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+# Content-Length framing, shared with `dap-core` (ADR-0041).
+stdio-framing = { path = "../stdio-framing" }
 # F3-15: the refactor-preview dialog's diff panel needs `editor_core::diff`
 # to turn a pending `DocumentEdits`' before/after text into hunks. See
 # `docs/architecture/layering.md`'s `lsp-core` row.

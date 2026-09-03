@@ -5,7 +5,7 @@ Hexagonal-lite with a humble Qt view: logic in Qt-free Rust, the view only displ
 
 ## Layers
 
-The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `edit-ops`, `vcs-core`, `pty-core`, `terminal-core`, `run-core`, `build-core`, `mcp-server`, `plugin-api`, `plugin-host`, `icon-theme`, `markdown-preview`), adapter + view (`ui-shell`), and the `app` binary.
+The layers are: domain (`editor-core`, `project-model`), application (`app-core`), support (`app-config`, `syntax-core`, `index-core`, `lsp-core`, `settings-model`, `edit-ops`, `vcs-core`, `pty-core`, `terminal-core`, `run-core`, `build-core`, `dap-core`, `stdio-framing`, `mcp-server`, `plugin-api`, `plugin-host`, `icon-theme`, `markdown-preview`), adapter + view (`ui-shell`), and the `app` binary.
 The building-block diagram lives in [overview.md §3](overview.md#3-building-block-view) — one diagram, one place.
 
 ## Allowed imports
@@ -19,7 +19,7 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `mcp-server` | `index-core`, `editor-core` (+ std, serde, serde_json, tokio, axum) | **No** |
 | `pty-core` | (std, portable-pty) | **No** |
 | `terminal-core` | (std, alacritty_terminal) | **No** |
-| `lsp-core` | `editor-core` (+ std, lsp-types, serde, serde_json, globset, notify); `syntax-core` as a normal dependency (ADR-0035, amending ADR-0018) for `semantic_tokens`'s LSP-token-to-`Scope` mapping and its tree-sitter-span overlay — ADR-0018's ban on `lsp-core` re-deciding file-to-language detection still holds, nothing here parses an extension or a language id. Stays free of `plugin-api`/`plugin-host`: `catalog::PluginServer` is a plain data type `lsp-core` defines for itself, and `ui-shell`/`settings-model` (which already depend on `plugin-host`) map `LanguageServerContribution` onto it at the call site. Also stays free of `project-model`: C5's `watched_files::FileChangeKind` converts from `notify::EventKind` directly rather than pulling in the domain crate for one enum. | **No** |
+| `lsp-core` | `editor-core`, `stdio-framing` (+ std, lsp-types, serde, serde_json, globset, notify); `syntax-core` as a normal dependency (ADR-0035, amending ADR-0018) for `semantic_tokens`'s LSP-token-to-`Scope` mapping and its tree-sitter-span overlay — ADR-0018's ban on `lsp-core` re-deciding file-to-language detection still holds, nothing here parses an extension or a language id. Stays free of `plugin-api`/`plugin-host`: `catalog::PluginServer` is a plain data type `lsp-core` defines for itself, and `ui-shell`/`settings-model` (which already depend on `plugin-host`) map `LanguageServerContribution` onto it at the call site. Also stays free of `project-model`: C5's `watched_files::FileChangeKind` converts from `notify::EventKind` directly rather than pulling in the domain crate for one enum. | **No** |
 | `index-core` | `syntax-core`, `editor-core` (+ std, tantivy, grep-searcher, grep-regex, grep-matcher, ignore, rayon, nucleo-matcher, fs4, dirs) | **No** |
 | `plugin-api` | (std, serde, toml) — a leaf on purpose, see [ADR-0026](decisions/0026-plugin-host.md) | **No** |
 | `plugin-host` | `plugin-api` (+ std, wasmtime) — discovery, the registry and the built-ins ([ADR-0026](decisions/0026-plugin-host.md)), plus the sandboxed wasm tier ([ADR-0028](decisions/0028-wasm-plugin-tier.md)); `icon-theme` as a **dev**-dependency only, to check the vendored Material pack through the real load path | **No** |
@@ -30,6 +30,8 @@ The building-block diagram lives in [overview.md §3](overview.md#3-building-blo
 | `vcs-core` | `editor-core` (+ std, gix, serde) | **No** |
 | `run-core` | `pty-core`, `app-config`, `terminal-core` (+ std, serde, toml, serde_json, regex) | **No** |
 | `build-core` | `run-core` (+ std, serde_json, regex) | **No** |
+| `dap-core` | `run-core`, `app-config`, `stdio-framing` (+ std, serde, serde_json) | **No** |
+| `stdio-framing` | (std only) | **No** |
 | `app-core` | `editor-core`, `project-model`, `plugin-host`, `icon-theme`, `syntax-core`, `markdown-preview` — the last four only for the icon-theme and previews joins, see below | **No** |
 | `ai-chat-core` | `lsp-core` (+ std, serde, serde_json, base64, tiktoken-rs, reqwest/rustls) | **No** |
 | `ui-shell` | `app-core`, `editor-core`, `edit-ops`, `project-model`, `app-config`, `settings-model`, `syntax-core`, `mcp-server`, `index-core`, `lsp-core`, `ai-chat-core`, `pty-core`, `terminal-core`, `plugin-host`, `vcs-core`, `run-core`, `markdown-preview` (+ tokio, cxx, cxx-qt, cxx-qt-lib) | Yes (adapter + view live here) |
@@ -109,6 +111,13 @@ That test target is the one place `app-config` may be read from a test rather th
   Its diagnostics are deliberately the shape the Problems dock already renders for `lsp_core::DiagnosticStore`: one question, one place to look.
   Its text patterns overlap `run_core::links`' catalogue and stay separate on purpose — a link resolver wants a location, a build wants the severity and message too, and one table serving both would satisfy neither.
 
+- **How a debugger is driven** lives in `dap-core` (ADR-0041): the Debug Adapter Protocol's envelope, the session handshake, the adapter catalog and, from D2, the breakpoint store.
+  It reads `run_core::toolchain` for which adapter a project implies rather than keeping a second mapping, and it types only the protocol bodies something actually reads a field out of.
+  A capability the adapter did not declare is unsupported: the view disables an action because the adapter said so, never because C++ guessed.
+  It owns no editor buffer — a breakpoint's line is shifted from the existing buffer-edit seam in `ui-shell`, not from a new hook in the editor.
+- **The `Content-Length` framing both protocols use** lives in `stdio-framing`, and in no other crate.
+  `lsp-core` and `dap-core` frame their messages with the same bytes, so this is the one thing they share; anything that merely resembles the other stays separate, exactly as `build-core`'s diagnostic patterns do beside `run_core::links`.
+
 - **Which language a file is** is answered in exactly one place, `syntax-core`'s registry (ADR-0018).
   `lsp-core` owns only what the protocol owns — the server command per language id, and the few ids LSP names differently from the grammar (`tsx` -> `typescriptreact`) — and `ui-shell` joins the two, which is translation and so allowed in the adapter.
   No crate may grow a second file-extension table.
@@ -160,6 +169,9 @@ cargo tree -p markdown-preview -e normal | grep -i qt  # must be empty
 cargo tree -p run-core -e normal | grep -i qt        # must be empty
 cargo tree -p build-core -e normal | grep -i qt      # must be empty
 cargo tree -p build-core -e normal | grep -i tokio   # must be empty
+cargo tree -p dap-core -e normal | grep -i qt        # must be empty
+cargo tree -p dap-core -e normal | grep -i tokio     # must be empty
+cargo tree -p stdio-framing -e normal | grep -i qt   # must be empty
 ```
 
 ## Known debt at time of writing
