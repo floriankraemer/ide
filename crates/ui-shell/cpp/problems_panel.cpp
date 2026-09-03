@@ -1,5 +1,7 @@
 #include "problems_panel.h"
 
+#include "e2e_mark.h"
+
 #include "icon_cache.h"
 #include "theme.h"
 
@@ -328,6 +330,14 @@ void ProblemsPanel::applyFilter()
     infosButton_->setEnabled(infos > 0);
 
     updateStatus(shown, total);
+
+    // The only way anything outside the process can know the dock has caught
+    // up with a build or a language server — an E2E flow asserting a
+    // compile error reached it would otherwise race the signal that put it
+    // there (B1-9).
+    e2eMark(QStringLiteral("{\"ev\":\"problems_refreshed\",\"shown\":%1,\"total\":%2}")
+              .arg(shown)
+              .arg(total));
 }
 
 void ProblemsPanel::updateStatus(int shown, int total)

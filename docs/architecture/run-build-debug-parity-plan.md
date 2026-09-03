@@ -58,7 +58,7 @@ Task ids are stable; titles may change.
 | B1-6 — adapter: `BuildServiceRust`, one QObject for N builds, a thread per build | done | this branch |
 | B1-7 — view: Build dock, the "&Build" menu, the Build toolbar button, build rows in the Problems dock | done | this branch; the Problems dock already had a Source column, so build rows only had to be a second source |
 | B1-8 — ADR-0040 + `layering.md` row, verification gates, CI layering gate | done | this branch; the gate also gained the `run-core` rows it never had |
-| B1-9 — E2E: `e2e_build_failure_populates_problems_dock` | blocked on B1-7 |  |
+| B1-9 — E2E: `e2e_build_failure_populates_problems_dock` | done | this branch; found the carriage-return progress-redraw bug that made a real Cargo build produce no diagnostics at all |
 
 ### B2 — before-launch tasks
 

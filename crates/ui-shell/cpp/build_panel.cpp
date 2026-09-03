@@ -105,6 +105,12 @@ void BuildPanel::onBuildOutput(quint64 buildId, const QString &text)
     cursor.insertText(text);
     output_->setTextCursor(cursor);
     output_->verticalScrollBar()->setValue(output_->verticalScrollBar()->maximum());
+
+    // What the build actually printed, for an E2E flow asserting on it —
+    // the same marker `RunConsolePanel` emits for console output.
+    e2eMark(QStringLiteral("{\"ev\":\"build_output\",\"build_id\":%1,\"text\":%2}")
+              .arg(buildId)
+              .arg(e2eJson(text)));
 }
 
 void BuildPanel::onBuildFinished(quint64 buildId, int exitCode)
