@@ -77,7 +77,9 @@ pub use manager::{
     INLAY_HINT_TIMEOUT, INTENTION_TIMEOUT, REFACTOR_TIMEOUT, SEMANTIC_TOKENS_TIMEOUT,
     SIGNATURE_HELP_TIMEOUT,
 };
-pub use navigation::{definition_outcome, parse_definition, DefinitionOutcome, DefinitionTarget};
+pub use navigation::{
+    definition_outcome, parse_definition, virtual_doc_key, DefinitionOutcome, DefinitionTarget,
+};
 pub use progress::{ProgressTracker, ServerActivity};
 pub use registration::{Registration, Registrations, Watcher};
 pub use rename::{

@@ -309,11 +309,15 @@ fn main() {
         .cpp_file("cpp/debug_panel.h")
         .cpp_file("cpp/debug_panel.cpp")
         .cpp_file("cpp/debug_menu.cpp")
+        .cpp_file("cpp/build_panel.h")
+        .cpp_file("cpp/build_panel.cpp")
+        .cpp_file("cpp/build_menu.cpp")
         // The two navigation docks and the QMainWindow subclass, likewise
         // Q_OBJECT-free (they subclass QWidget/QMainWindow but declare no
         // signals or slots of their own), so only the sources are listed.
         .cpp_file("cpp/class_view_panel.cpp")
         .cpp_file("cpp/find_usages_panel.cpp")
+        .cpp_file("cpp/hierarchy_panel.cpp")
         .cpp_file("cpp/ide_main_window.cpp")
         // The refactoring and Go-to-Declaration controllers, likewise
         // Q_OBJECT-free: they subclass QObject for parent ownership and

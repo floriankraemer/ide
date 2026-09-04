@@ -4,6 +4,7 @@
 #include "dock_layout.h"
 #include "editor_tabs.h"
 #include "find_usages_panel.h"
+#include "hierarchy_panel.h"
 #include "keymap_page.h"
 
 #include <QAction>
@@ -16,7 +17,7 @@ namespace ui_shell {
 void buildNavigateMenu(QMainWindow *window, LanguageService *languageService,
                         SearchModel *searchModel, EditorTabs *editorTabs, AppSettings *appSettings,
                         QHash<QString, QAction *> &actions, DockRegistry *docks,
-                        FindUsagesPanel *findUsagesPanel)
+                        FindUsagesPanel *findUsagesPanel, HierarchyPanel *hierarchyPanel)
 {
     // N8: code navigation. The Ctrl+Click gesture and every action below
     // route through the one DeclarationNavigator, so there is a single
@@ -69,6 +70,39 @@ void buildNavigateMenu(QMainWindow *window, LanguageService *languageService,
         }
         docks->show(QStringLiteral("findUsages"));
         findUsagesPanel->findSupertypes(name);
+    });
+
+    // C11-followup: the caret's own file and LSP position — same convention
+    // requestIntentions/requestSignatureHelp already send.
+    auto atCaret = [editorTabs]() {
+        return editorTabs->lspPositionAt(editorTabs->caretPosition());
+    };
+    QAction *callHierarchyAction =
+      registerAction(navigateMenu, QStringLiteral("navigate.showCallHierarchy"),
+                      QObject::tr("Show Call Hierarchy"), appSettings, actions);
+    QObject::connect(callHierarchyAction, &QAction::triggered, window,
+                      [docks, hierarchyPanel, editorTabs, atCaret]() {
+        const QString path = editorTabs->currentPath();
+        if (path.isEmpty()) {
+            return;
+        }
+        const auto at = atCaret();
+        docks->show(QStringLiteral("hierarchy"));
+        hierarchyPanel->showCallHierarchyAt(path, at.first, at.second);
+    });
+
+    QAction *typeHierarchyAction =
+      registerAction(navigateMenu, QStringLiteral("navigate.showTypeHierarchy"),
+                      QObject::tr("Show Type Hierarchy"), appSettings, actions);
+    QObject::connect(typeHierarchyAction, &QAction::triggered, window,
+                      [docks, hierarchyPanel, editorTabs, atCaret]() {
+        const QString path = editorTabs->currentPath();
+        if (path.isEmpty()) {
+            return;
+        }
+        const auto at = atCaret();
+        docks->show(QStringLiteral("hierarchy"));
+        hierarchyPanel->showTypeHierarchyAt(path, at.first, at.second);
     });
 
     navigateMenu->addSeparator();
