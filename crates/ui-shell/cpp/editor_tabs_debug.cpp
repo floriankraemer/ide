@@ -11,6 +11,7 @@
 #include "editor_tabs.h"
 
 #include "code_editor.h"
+#include "e2e_mark.h"
 
 #include <QPlainTextEdit>
 #include <QTextBlock>
@@ -67,7 +68,14 @@ void EditorTabs::refreshBreakpointsFor(CodeEditor *editor)
     if (path.isEmpty()) {
         return;
     }
-    editor->setBreakpointLines(blocksFromLines(debugService_->breakpointLines(path)));
+    const QSet<int> lines = blocksFromLines(debugService_->breakpointLines(path));
+    editor->setBreakpointLines(lines);
+    // The only way anything outside the process can know the gutter has
+    // caught up with a toggle — an E2E flow that starts a session right
+    // after setting a breakpoint would otherwise race it (D3-9).
+    e2eMark(QStringLiteral("{\"ev\":\"breakpoints_applied\",\"path\":%1,\"count\":%2}")
+              .arg(e2eJson(path))
+              .arg(lines.size()));
 }
 
 void EditorTabs::refreshBreakpoints()

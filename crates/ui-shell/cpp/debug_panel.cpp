@@ -244,7 +244,9 @@ void DebugPanel::onFailed(quint64 sessionId, const FfiResult &error)
     // "codelldb could not be started: … install it from …" is the answer to
     // the question the user just asked.
     console_->appendPlainText(QString(error.message));
-    e2eMark(QStringLiteral("{\"ev\":\"debug_failed\",\"code\":%1}").arg(error.code));
+    e2eMark(QStringLiteral("{\"ev\":\"debug_failed\",\"code\":%1,\"message\":%2}")
+              .arg(error.code)
+              .arg(e2eJson(QString(error.message))));
 }
 
 void DebugPanel::onOutput(quint64 sessionId, const QString &category, const QString &text)

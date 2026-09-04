@@ -27,7 +27,9 @@ pub fn arguments(adapter_id: &str, spec: &LaunchSpec) -> Value {
         "codelldb" => {
             arguments.insert("type".into(), json!("lldb"));
             arguments.insert("request".into(), json!("launch"));
-            arguments.insert("terminal".into(), json!("integrated"));
+            // Same reason as debugpy's `console`: the adapter starts the
+            // debuggee, and its output arrives as `output` events.
+            arguments.insert("terminal".into(), json!("console"));
         }
         // debugpy runs a *module or file*, and calls the working directory
         // `cwd` like everyone else. `console` decides where the debuggee's
@@ -35,7 +37,11 @@ pub fn arguments(adapter_id: &str, spec: &LaunchSpec) -> Value {
         "debugpy" => {
             arguments.insert("type".into(), json!("python"));
             arguments.insert("request".into(), json!("launch"));
-            arguments.insert("console".into(), json!("integratedTerminal"));
+            // `internalConsole`: the adapter starts the debuggee itself and
+            // reports its output as DAP `output` events, which is what the
+            // debugger console shows. `integratedTerminal` would ask the
+            // client to start it — see `session::initialize`.
+            arguments.insert("console".into(), json!("internalConsole"));
             // `program` for debugpy is the script, which for a Python run
             // configuration is the first argument rather than the
             // interpreter this crate was handed.

@@ -40,9 +40,13 @@ Launch arguments are deliberately passed through unmodelled: every adapter docum
 
 Every field of `Capabilities` defaults to false, which is the specification's own rule. The consequence for the view is the one that matters: an action is disabled because the adapter said it cannot do it, never because C++ guessed. That is the same humble-view rule the rest of the IDE follows, applied to a protocol that hands us the answer.
 
-### 5. A reverse request is answered
+### 5. A reverse request is answered, and `runInTerminal` is not claimed until it is
 
-DAP is bidirectional. An adapter that cannot start the debuggee itself sends `runInTerminal` *to the client*, and an unanswered reverse request leaves the adapter waiting forever. The session hands those to its listener, which answers by starting the program through `run-core`'s supervisor — the same PTY console a plain Run uses, so a debugged program's output appears where a run's does.
+DAP is bidirectional, and an unanswered reverse request leaves the adapter waiting forever. The session hands those to its listener rather than ignoring them.
+
+The specific one that matters is `runInTerminal`: an adapter that cannot start the debuggee itself asks the client to. Until the client really does start it through `run-core`'s supervisor, **`initialize` does not advertise the capability** — and every launch asks the adapter to use its own console instead.
+
+That is not a hypothetical piece of caution. Advertising it while answering with an empty body made debugpy hand the launch to a launcher that never connected, and the session failed with "Timed out waiting for launcher to connect" — a failure the unit tests could not see, because what was wrong was a claim made to a third party.
 
 ### 6. `ConsoleKind::Pipes`, at last
 

@@ -785,7 +785,12 @@ fn handshake(
     breakpoints: &BreakpointStore,
 ) -> Result<(), DapError> {
     session.initialize()?;
+    // Launch is not awaited, and the breakpoints wait for the adapter's
+    // `initialized` event: an adapter may hold the launch response until
+    // `configurationDone`, which a client blocked on launch can never send
+    // (see `DapSession::launch`).
     session.launch(dap_core::launch::arguments(adapter_id, spec))?;
+    session.wait_for_initialized(std::time::Duration::from_secs(10))?;
     for path in breakpoints.files() {
         let _ = session.request(
             "setBreakpoints",

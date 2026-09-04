@@ -58,11 +58,28 @@ baseline() {
 	# (ADR-0037); install_opened_project/install_rebuilt_tree and their tests
 	# live in app-core/src/project_open.rs rather than in here.
 	crates/app-core/src/lib.rs) echo 1595 ;;           # no split planned; ratcheted so it cannot grow
+	# 1442 -> 2052 across the C1-C12 csharp-ls chain: registerCapability
+	# (C4), didChangeWatchedFiles (C5), workspace/configuration (C6),
+	# completionItem/resolve (C7), semantic tokens (C9), code lens (C10)
+	# and call/type hierarchy (C11) each added a request method and a
+	# dispatch arm here. A split into per-feature request modules is a
+	# real follow-up (tracked separately), not attempted in this chain.
+	crates/lsp-core/src/manager.rs) echo 2052 ;;
+	# 1363 -> 2328 over the same chain: one integration test module per
+	# stub_server mode added by C4/C6/C7/C9/C10/C11. Splitting by feature
+	# is the obvious fix; deferred as a follow-up alongside manager.rs.
+	crates/lsp-core/tests/stub_server_session.rs) echo 2328 ;;
+	# 1371 -> 1686: the bridge-side call sites for the same feature chain
+	# (C5 watched files, C7 completion resolve, C9-C11 FFI methods).
+	crates/ui-shell/src/bridge/language/mod.rs) echo 1686 ;;
 	# Raised from 1446 by 91 lines for issue #164's regression test: a
 	# second-commit git fixture, opening File History via Find Action, and
 	# driving the fixed context-menu interaction end to end. No split
 	# planned; this suite is already one flow per test.
-	crates/app/tests/e2e.rs) echo 1369 ;; # ratcheted down: the run flows moved to e2e_run.rs (R1-9)
+	# Ratcheted down from 1537 when the run flows moved to e2e_run.rs (R1-9),
+	# then up by 13 for the comment explaining why the file-history flow
+	# matches on a path suffix (D3-9). Still 155 below where it started.
+	crates/app/tests/e2e.rs) echo 1382 ;;
 	esac
 }
 
