@@ -540,6 +540,30 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "",
     },
     ActionDef {
+        id: "build.build",
+        label: "Build Project",
+        category: "Build",
+        default_shortcut: "Ctrl+F9",
+    },
+    ActionDef {
+        id: "build.rebuild",
+        label: "Rebuild Project",
+        category: "Build",
+        default_shortcut: "Ctrl+Shift+F9",
+    },
+    ActionDef {
+        id: "build.stop",
+        label: "Stop Build",
+        category: "Build",
+        default_shortcut: "",
+    },
+    ActionDef {
+        id: "view.build",
+        label: "Build",
+        category: "View",
+        default_shortcut: "",
+    },
+    ActionDef {
         id: "run.run",
         label: "Run",
         category: "Run",

@@ -42,6 +42,7 @@ So each error type owns a **range**, and a code identifies its kind on its own:
 | 0 | — | success, and only success |
 | 1–99 | `app-core` | `AppError` |
 | 100–199 | `ai-chat-core` | `ChatError` |
+| 200–299 | `build-core` | `BuildError` (claimed by ADR-0040 out of the headroom below) |
 | 600–699 | `lsp-core` | `LspError`, `EditError` |
 | 700–799 | `vcs-core` | `VcsError` |
 | 800–899 | `run-core` | `RunError` |
@@ -51,6 +52,7 @@ So each error type owns a **range**, and a code identifies its kind on its own:
 `AppError` keeps its existing 1–10 rather than moving into a new range: those numbers are the oldest part of the contract, nothing else has claimed them, and renumbering them would buy nothing.
 `ChatError` is renumbered from 1–20 into 100–120, which is the only renumbering this amendment performs.
 The 200–599 gap is deliberate headroom for the crates between the two, so a future error type does not have to squeeze in beside an existing one.
+`build-core` took 200–299 out of it (ADR-0040), which is exactly what the headroom was for; 300–599 remains free.
 
 **The adapter range exists because the adapter has refusals of its own.**
 "No project is open", "unknown run configuration", "unknown console" and "the settings file could not be written" are not domain errors — no Qt-free crate has an opinion about them — and inventing a domain variant to carry each one would push view-shaped conditions down into the domain to satisfy a numbering scheme.

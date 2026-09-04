@@ -95,7 +95,7 @@ mod tests {
         // without the reader also knowing which QObject produced it. One
         // sample per owner is enough — each crate's own test covers the
         // rest of its block.
-        let owners: [(&str, i32, i32, i32); 8] = [
+        let owners: [(&str, i32, i32, i32); 9] = [
             ("app-core", app_core::AppError::CODE_RESOURCE_OP, 1, 99),
             (
                 "ai-chat-core",
@@ -115,6 +115,12 @@ mod tests {
                 vcs_core::VcsError::CODE_GIT_NOT_INSTALLED,
                 700,
                 799,
+            ),
+            (
+                "build-core",
+                build_core::BuildError::CODE_NO_BUILDABLE_TOOLCHAIN,
+                200,
+                299,
             ),
             ("run-core", run_core::RunError::CODE_SPAWN, 800, 899),
             (

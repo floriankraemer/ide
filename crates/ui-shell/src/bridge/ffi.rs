@@ -14,6 +14,7 @@
 // here, next to the bridge, and defined in the feature module that owns
 // them.
 use crate::bridge::ai::chat::AiChatRust;
+use crate::bridge::build::BuildServiceRust;
 use crate::bridge::convert::{new_syntax_highlighter, syntax_scope_names, SyntaxHighlighterHandle};
 use crate::bridge::editor::DocumentManagerRust;
 use crate::bridge::editor_ops::EditorOpsRust;
@@ -5321,6 +5322,80 @@ mod ffi {
     // Enables `self.qt_thread()` on `RunService` for its worker thread and
     // the per-console reader threads it spawns.
     impl cxx_qt::Threading for RunService {}
+
+    extern "RustQt" {
+        /// Building the project (B1-6): runs the project's own build tool
+        /// on a thread of its own and publishes what it said — output for
+        /// the Build dock, diagnostics for the Problems dock.
+        ///
+        /// Translation only, per `docs/architecture/layering.md`: which
+        /// steps a build runs, and what a line of its output means, are
+        /// `build-core`'s (ADR-0040).
+        #[qobject]
+        type BuildService = super::BuildServiceRust;
+
+        /// Build the project with whichever toolchain it uses. Answers via
+        /// `buildStarted` and then `buildFinished`; a project with nothing
+        /// to build is reported here rather than as a silent no-op.
+        #[qinvokable]
+        fn build(self: Pin<&mut BuildService>) -> FfiResult;
+
+        /// The tool's own clean, then its build. Refused for a toolchain
+        /// with no clean step rather than doing half of it.
+        #[qinvokable]
+        fn rebuild(self: Pin<&mut BuildService>) -> FfiResult;
+
+        /// Build one named target, spelled the way this toolchain spells
+        /// one. A toolchain with no spelling for a target builds everything.
+        #[qinvokable]
+        #[cxx_name = "buildTarget"]
+        fn build_target(self: Pin<&mut BuildService>, target: &QString) -> FfiResult;
+
+        /// Kill `build_id`'s process tree. Not its direct child alone:
+        /// `cargo` spawns `rustc` and `gradle` spawns a daemon.
+        #[qinvokable]
+        fn stop(self: Pin<&mut BuildService>, build_id: u64);
+
+        /// Whether any build is running — what the toolbar's Build/Stop
+        /// enablement asks, rather than the view tracking it from signals.
+        #[qinvokable]
+        #[cxx_name = "isBuilding"]
+        fn is_building(self: &BuildService) -> bool;
+
+        /// What the last build said, in the shape the Problems dock already
+        /// renders for a language server's diagnostics; `source` names the
+        /// build tool, so the two are never confused. Cleared when a new
+        /// build starts.
+        #[qinvokable]
+        fn diagnostics(self: &BuildService) -> Vec<FfiDiagnostic>;
+
+        /// A build started. `command` is what is being run, for the dock's
+        /// header.
+        #[qsignal]
+        #[cxx_name = "buildStarted"]
+        fn build_started(self: Pin<&mut BuildService>, build_id: u64, command: QString);
+
+        /// A chunk of the build's output, ANSI already stripped.
+        #[qsignal]
+        #[cxx_name = "buildOutput"]
+        fn build_output(self: Pin<&mut BuildService>, build_id: u64, text: QString);
+
+        /// The build ended. `exit_code` is the failing step's, or `-1` when
+        /// a step could not be started at all.
+        #[qsignal]
+        #[cxx_name = "buildFinished"]
+        fn build_finished(self: Pin<&mut BuildService>, build_id: u64, exit_code: i32);
+
+        /// `diagnostics()` has a fresh answer — emitted while the build is
+        /// still running, so the Problems dock fills as it goes.
+        #[qsignal]
+        #[cxx_name = "diagnosticsChanged"]
+        fn diagnostics_changed(self: Pin<&mut BuildService>);
+    }
+
+    // Enables `self.qt_thread()` on `BuildService` for the thread each build
+    // runs on.
+    impl cxx_qt::Threading for BuildService {}
 
     extern "RustQt" {
         /// Settings-page draft for the project's run configurations (F4-10),

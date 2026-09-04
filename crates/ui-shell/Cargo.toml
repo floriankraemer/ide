@@ -28,6 +28,8 @@ terminal-core = { path = "../terminal-core" }
 # — `RunService`/`RunConfigEditor` are thin adapters over this crate's own
 # types, never `pty-core` directly.
 run-core = { path = "../run-core" }
+# B1-6: the Build dock and the Problems dock's build rows.
+build-core = { path = "../build-core" }
 mcp-server = { path = "../mcp-server" }
 ai-chat-core = { path = "../ai-chat-core" }
 # The Plugins page: scanning for the page (which must see the plugins the

@@ -6641,6 +6641,7 @@ dependencies = [
  "ai-chat-core",
  "app-config",
  "app-core",
+ "build-core",
  "cxx",
  "cxx-qt",
  "cxx-qt-build",

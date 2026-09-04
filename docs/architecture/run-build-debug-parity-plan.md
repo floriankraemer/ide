@@ -55,8 +55,8 @@ Task ids are stable; titles may change.
 | B1-3 — text diagnostic parsers (javac/Maven/Gradle, CMake/gcc/clang) + the streaming `DiagnosticParser` | done | this branch; its own table rather than `run_core::links`' — the two want different fields out of the same text |
 | B1-4 — `BuildDiagnostic` in the shape `problems_panel` already renders | done | this branch |
 | B1-5 — Build, Rebuild, build one target | done | this branch; "build file" dropped — no toolchain here addresses a single source file, they address targets |
-| B1-6 — adapter: `BuildServiceRust`, one QObject for N build sessions | blocked on B1-5 |  |
-| B1-7 — view: Build dock, the Build toolbar button, Problems source column | blocked on B1-6 |  |
+| B1-6 — adapter: `BuildServiceRust`, one QObject for N builds, a thread per build | done | this branch |
+| B1-7 — view: Build dock, the "&Build" menu, the Build toolbar button, build rows in the Problems dock | done | this branch; the Problems dock already had a Source column, so build rows only had to be a second source |
 | B1-8 — ADR-0040 + `layering.md` row, verification gates, CI layering gate | done | this branch; the gate also gained the `run-core` rows it never had |
 | B1-9 — E2E: `e2e_build_failure_populates_problems_dock` | blocked on B1-7 |  |
 
