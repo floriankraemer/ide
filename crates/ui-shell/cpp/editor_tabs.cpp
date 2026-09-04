@@ -213,6 +213,21 @@ EditorTabs::EditorTabs(DocumentManager *docManager, LanguageService *languageSer
             &EditorTabs::onSignatureHelpReady);
     connect(languageService_, &LanguageService::inlayHintsReady, this,
             &EditorTabs::onInlayHintsReady);
+    connect(languageService_, &LanguageService::semanticTokensReady, this,
+            &EditorTabs::onSemanticTokensReady);
+    connect(languageService_, &LanguageService::codeLensesReady, this,
+            &EditorTabs::onCodeLensesReady);
+    // C12-followup: a decompiled/generated source fetch landed. Reuses
+    // onTabOpened — the same build-the-widget path DocumentManager::tabOpened
+    // drives for a normal file — for a new tab, then always focuses it
+    // (mirroring EditorTabs::openFile's own focus-regardless-of-new rule).
+    connect(languageService_, &LanguageService::virtualDocumentOpened, this,
+            [this](quint64 tabId, const QString &title, bool newlyOpened) {
+                if (newlyOpened) {
+                    onTabOpened(tabId, title);
+                }
+                focusTab(tabId);
+            });
 
     activeGroup_ = makeGroup();
     root_->addWidget(activeGroup_);
@@ -642,6 +657,33 @@ void EditorTabs::refreshTabIcons()
     }
 }
 
+void EditorTabs::onSemanticTokensReady(const QString &path)
+{
+    CodeEditor *editor = editorForPath(path);
+    if (!editor) {
+        return;
+    }
+    auto *highlighter = highlighterOf(editor->document());
+    if (!highlighter) {
+        return;
+    }
+    highlighter->applySemanticTokens(languageService_->semanticTokenSpans(path));
+}
+
+void EditorTabs::onCodeLensesReady(const QString &path)
+{
+    CodeEditor *editor = editorForPath(path);
+    if (!editor) {
+        return;
+    }
+    QVector<CodeLensSpan> lenses;
+    for (const FfiCodeLens &lens : languageService_->codeLenses(path)) {
+        lenses.append(
+          CodeLensSpan{ static_cast<int>(lens.line), QString(lens.label), lens.clickable });
+    }
+    editor->setCodeLenses(lenses);
+}
+
 void EditorTabs::refreshHighlighting()
 {
     forEachEditor([](QPlainTextEdit *editor) {
@@ -722,6 +764,12 @@ bool EditorTabs::saveTab(QTabWidget *group, int index)
 
 bool EditorTabs::saveEditor(quint64 tabId, CodeEditor *codeEditor, QPlainTextEdit *editor)
 {
+    // C12-followup: a read-only tab (virtual document, hex, diff) has
+    // nothing to save — Save is a no-op rather than a click that always
+    // fails against `AppSession::save_tab`'s own refusal.
+    if (editor->isReadOnly()) {
+        return true;
+    }
     // F1-11: trim, final newline and line-ending normalisation, applied
     // *before* the file is read for writing — so they are one undo entry,
     // separate from whatever the user's last edit was, and the caret lands

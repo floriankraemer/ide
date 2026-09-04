@@ -12,8 +12,8 @@
 
 use serde_json::Value;
 
-use crate::manager::LspError;
-use crate::workspace_edit::DocumentEdits;
+use crate::manager::{position_params, LspError, REFACTOR_TIMEOUT};
+use crate::workspace_edit::{parse_workspace_edit, DocumentEdits};
 
 /// What the server said about renaming the symbol under the caret, from
 /// `textDocument/prepareRename`.
@@ -129,6 +129,58 @@ pub fn rename_outcome(response: Option<Result<Vec<DocumentEdits>, LspError>>) ->
     match response {
         Some(Ok(documents)) if !documents.is_empty() => RenameOutcome::Lsp(documents),
         _ => RenameOutcome::Index,
+    }
+}
+
+// C4-followup (#162): request-sending `LspManager` methods for this feature, moved out of
+// `manager.rs` once it crossed the file-size ceiling. This file already held the
+// parse/rule layer; this is the request-sending half `manager.rs`'s own module doc
+// pointed callers to.
+impl crate::manager::LspManager {
+    /// `textDocument/prepareRename`: may the symbol at this position be
+    /// renamed, and what should the input be prefilled with?
+    ///
+    /// `Ok(None)` is the server saying "not this element" — a refusal — while
+    /// an `Err` is it saying nothing at all, which most servers do because
+    /// they do not implement the request. [`crate::rename::prepare_outcome`]
+    /// is what tells those two apart.
+    pub fn prepare_rename(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Option<PrepareRename>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/prepareRename",
+            position_params(uri, line, character),
+            REFACTOR_TIMEOUT,
+        )?;
+        Ok(parse_prepare_rename(&result))
+    }
+    /// `textDocument/rename`, parsed into the documents it changes.
+    ///
+    /// An empty result means the server had no answer; whether that falls
+    /// back to the name-based index is
+    /// [`crate::rename::rename_outcome`]'s decision, not this method's.
+    pub fn rename(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+        new_name: &str,
+    ) -> Result<Vec<DocumentEdits>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let mut params = position_params(uri, line, character);
+        params["newName"] = Value::String(new_name.to_string());
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/rename",
+            params,
+            REFACTOR_TIMEOUT,
+        )?;
+        parse_workspace_edit(&result).map_err(|e| LspError::Protocol(e.to_string()))
     }
 }
 
