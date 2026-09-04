@@ -97,6 +97,11 @@ That test target is the one place `app-config` may be read from a test rather th
 
 - **Where multi-caret state lives** (ADR-0023): the `SelectionSet`, the expand/shrink history and the auto-close pair tracker are kept in `ui-shell`'s `EditorOps`, keyed by `TabId` — not on `editor_core::Document` (stale, refreshed only on save) and not in `app_core::AppSession` (which has no reason to know about carets). `EditorOps` computes every operation as one `Transaction` over the live buffer text and hands the seam one `Vec<FfiTextEdit>`, spliced through the same `EditorTabs::applyBufferEdits` path a refactoring already uses — the rule that one keystroke is one undo step lives in `editor-core`, not in `cpp/`.
 - **Which files a workspace edit creates, renames or deletes** is parsed and ordered by `lsp-core` (`ResourceOp`, `WorkspaceChanges`); *performing* one — and retargeting an open tab whose file moved — is `app-core`'s, as `FileOp` (ADR-0029). `ui-shell` maps one type to the other and decides nothing else; every resource operation runs, all-or-nothing, before any of the same edit's text edits are written.
+- **Which build tool a project uses** is answered in exactly one place, `run_core::toolchain` (ADR-0039): the marker files that identify a toolchain, its build and clean invocations, the JS package manager or JVM wrapper to prefer, and the debug adapter it implies.
+  `run_core::detect` is written on top of it, and `build-core` and `dap-core` read it rather than detecting again — the same single-table rule ADR-0018 established for languages and ADR-0027 for icon art.
+  Detection is marker-file presence only; nothing here runs the build tool to find out.
+  What a run configuration's macros mean (`run_core::macros`) and what running a file would launch (`run_core::context`) live beside it, and the view asks rather than deciding which files look runnable.
+
 - **Which language a file is** is answered in exactly one place, `syntax-core`'s registry (ADR-0018).
   `lsp-core` owns only what the protocol owns — the server command per language id, and the few ids LSP names differently from the grammar (`tsx` -> `typescriptreact`) — and `ui-shell` joins the two, which is translation and so allowed in the adapter.
   No crate may grow a second file-extension table.

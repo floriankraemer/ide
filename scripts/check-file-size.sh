@@ -62,7 +62,7 @@ baseline() {
 	# second-commit git fixture, opening File History via Find Action, and
 	# driving the fixed context-menu interaction end to end. No split
 	# planned; this suite is already one flow per test.
-	crates/app/tests/e2e.rs) echo 1537 ;;
+	crates/app/tests/e2e.rs) echo 1369 ;; # ratcheted down: the run flows moved to e2e_run.rs (R1-9)
 	esac
 }
 

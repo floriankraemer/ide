@@ -127,7 +127,13 @@ fn temporary(
 /// [`RunConfig::temporary`] are, which is what makes "save this temporary
 /// configuration" mean "stop it being thrown away".
 pub fn remember_temporary(configs: &mut Vec<RunConfig>, config: RunConfig) {
-    configs.retain(|existing| existing.id != config.id);
+    // An entry for this target already exists — detection found it, or the
+    // user saved it, or an earlier gutter click created it. Leave it alone:
+    // replacing it would silently turn a saved configuration back into an
+    // evictable one, and discard whatever the user edited into it.
+    if configs.iter().any(|existing| existing.id == config.id) {
+        return;
+    }
     configs.push(config);
 
     let mut excess = configs.iter().filter(|c| c.temporary).count();
@@ -225,6 +231,21 @@ mod tests {
         remember_temporary(&mut configs, temp("a"));
         remember_temporary(&mut configs, temp("a"));
         assert_eq!(configs.len(), 1);
+    }
+
+    #[test]
+    fn an_existing_saved_entry_for_the_same_target_is_not_downgraded() {
+        let saved = RunConfig {
+            id: "python-main.py".into(),
+            name: "main.py".into(),
+            args: vec!["main.py".into(), "--verbose".into()],
+            ..RunConfig::default()
+        };
+        let mut configs = vec![saved];
+        remember_temporary(&mut configs, temp("python-main.py"));
+        assert_eq!(configs.len(), 1);
+        assert!(!configs[0].temporary, "a saved entry stayed saved");
+        assert_eq!(configs[0].args, vec!["main.py", "--verbose"]);
     }
 
     #[test]

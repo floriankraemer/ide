@@ -43,8 +43,8 @@ Task ids are stable; titles may change.
 | R1-5 — `allow_parallel` policy on top of the existing N-session supervisor | done | this branch; enforced in `RunService::launch`, exposed as a checkbox in the run-configuration dialog |
 | R1-6 — adapter: `canRunFile`, `runContext`, toolchain/target/temporary/parallel across the FFI | done | this branch; one `runContext(path)` rather than a separate `runCurrentFile` — the menu action and the gutter icon are the same call |
 | R1-7 — view: gutter Run icon, `run.runContext` (Ctrl+Shift+F10), allow-parallel checkbox | done | this branch; the icon sits on the first line (naming the entry point needs the symbol index) and the recent-first combo ordering is deferred — it needs a recency the settings file does not record |
-| R1-8 — ADR-0039 + `layering.md` row amendment | open |  |
-| R1-9 — E2E: `e2e_run_from_gutter_creates_temporary_config` | open |  |
+| R1-8 — ADR-0039 + `layering.md` bullet + `docs/README.md` index line | done | this branch |
+| R1-9 — E2E: `e2e_run_from_context_creates_a_temporary_configuration` | done | this branch; the run flows moved to their own `e2e_run.rs` binary because `e2e.rs` is at its size ceiling, and the flow drives `run.runContext` rather than a pixel-located gutter click |
 
 ### B1 — `build-core` and the Build dock
 
