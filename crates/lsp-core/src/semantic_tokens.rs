@@ -14,8 +14,10 @@
 //! answered yet at all, so [`overlay`] never lets "waiting for the server"
 //! mean "no colour at all" for text that already had some a moment ago.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use syntax_core::{HighlightSpan, Scope};
+
+use crate::manager::{LspError, SEMANTIC_TOKENS_TIMEOUT};
 
 /// The LSP 3.17 standard semantic token types, in the order this client
 /// advertises them in `textDocument.semanticTokens.tokenTypes`
@@ -351,6 +353,32 @@ pub fn overlay(tree_sitter: &[HighlightSpan], semantic: &[MappedSpan]) -> Vec<Hi
         }
     }
     out
+}
+
+// C4-followup (#162): request-sending `LspManager` methods for this feature, moved out of
+// `manager.rs` once it crossed the file-size ceiling. This file already held the
+// parse/rule layer; this is the request-sending half `manager.rs`'s own module doc
+// pointed callers to.
+impl crate::manager::LspManager {
+    /// `textDocument/semanticTokens/full` for a whole open document, raw —
+    /// decoding the response and mapping it onto `syntax_core`'s taxonomy is
+    /// `crate::semantic_tokens`'s job, not this method's, the same
+    /// convention [`Self::resolve_completion_item`] and
+    /// [`Self::execute_command`] follow for a server's raw JSON.
+    ///
+    /// Whether it is worth calling at all is
+    /// [`Self::semantic_tokens_legend`]'s answer, not this method's — C9
+    /// only ever sends the full request, never
+    /// `textDocument/semanticTokens/full/delta`, so there is no `previous_result_id`
+    /// parameter to thread through yet.
+    pub fn semantic_tokens(&self, language_id: &str, uri: &str) -> Result<Value, LspError> {
+        self.request_with_timeout(
+            language_id,
+            "textDocument/semanticTokens/full",
+            json!({"textDocument": {"uri": uri}}),
+            SEMANTIC_TOKENS_TIMEOUT,
+        )
+    }
 }
 
 #[cfg(test)]
