@@ -1,6 +1,7 @@
 //! F2-8/F2-9: the LSP surface beyond diagnostics, hover, completion and
 //! refactoring — intentions, organize imports, signature help, document
-//! highlights and inlay hints.
+//! highlights, inlay hints, and (C12-followup) go-to-definition plus the
+//! decompiled-metadata fetch it can lead to.
 //!
 //! Split out of `mod.rs` once it crossed the file-size ceiling
 //! (`scripts/check-file-size.sh`), the way `ai/agent.rs` splits out of
@@ -646,6 +647,127 @@ impl ffi::LanguageService {
             .iter()
             .map(to_ffi_hierarchy_item)
             .collect()
+    }
+
+    pub fn resolve_definition(mut self: Pin<&mut Self>, path: &QString, line: u32, character: u32) {
+        let path_string = path.to_string();
+        let uri = lsp_core::uri_from_path(&path_string);
+        // C12-followup: the language the *originating* document is in —
+        // `fetch_metadata` needs it to pick the same server that answered
+        // `manager.definition`, and it is not derivable from a metadata
+        // target's own `csharp:/...` URI the way `manager.definition`
+        // derives a normal target's language from an open document's path.
+        let language_id = self.config_for_path(&path_string).map(|c| c.language_id);
+        let qt_thread = self.as_mut().qt_thread();
+        let queued = self.push_job(move |manager| {
+            let outcome =
+                lsp_core::definition_outcome(Some(manager.definition(&uri, line, character)));
+            let _ = qt_thread.queue(move |service: Pin<&mut Self>| {
+                service.apply_definition_outcome(outcome, language_id)
+            });
+        });
+        if !queued {
+            // No worker at all (no project open), which is one more case of
+            // "no server answered" — the same rule decides it.
+            self.apply_definition_outcome(lsp_core::definition_outcome(None), None);
+        }
+    }
+
+    /// Turn the outcome into signals. The branch is which signal, never
+    /// which source: `definition_outcome` already chose that. `language_id`
+    /// is only used by the `NeedsMetadataFetch` arm.
+    fn apply_definition_outcome(
+        mut self: Pin<&mut Self>,
+        outcome: lsp_core::DefinitionOutcome,
+        language_id: Option<String>,
+    ) {
+        match outcome {
+            lsp_core::DefinitionOutcome::Lsp(targets) => {
+                for target in targets {
+                    self.as_mut().definition_found(ffi::FfiDefinition {
+                        path: QString::from(target.path.as_str()),
+                        line: target.line,
+                        column: target.column,
+                    });
+                }
+                self.as_mut().definition_finished();
+            }
+            lsp_core::DefinitionOutcome::Index => self.as_mut().definition_fallback(),
+            // C12: the server pointed at decompiled/generated source (a
+            // non-`file:` URI). With the language known, fetch and open it
+            // as a read-only virtual document (`apply_metadata_fetch`);
+            // with no language (no server ever answered `manager.definition`
+            // for a path with no configured server, which cannot actually
+            // happen alongside a real `Lsp`/`NeedsMetadataFetch` answer, but
+            // a typed `Option` beats assuming it away) refuse cleanly rather
+            // than treating the raw URI as a path.
+            lsp_core::DefinitionOutcome::NeedsMetadataFetch(uri) => match language_id {
+                Some(language_id) => self.fetch_and_open_metadata(language_id, uri),
+                None => self.as_mut().definition_unavailable(QString::from(
+                    "Go to Definition landed in decompiled framework code, \
+                     which this IDE cannot open yet.",
+                )),
+            },
+        }
+    }
+
+    /// C12-followup: `csharp/metadata` for `uri`, on the worker thread like
+    /// every other request, and apply whatever it answers with back on the
+    /// Qt thread.
+    fn fetch_and_open_metadata(mut self: Pin<&mut Self>, language_id: String, uri: String) {
+        let qt_thread = self.as_mut().qt_thread();
+        let queued = self.push_job(move |manager| {
+            let result = manager.fetch_metadata(&language_id, &uri);
+            let _ = qt_thread
+                .queue(move |service: Pin<&mut Self>| service.apply_metadata_fetch(uri, result));
+        });
+        if !queued {
+            self.as_mut().definition_unavailable(QString::from(
+                "Go to Definition landed in decompiled framework code, \
+                 which this IDE cannot open yet.",
+            ));
+        }
+    }
+
+    /// C12-followup: `csharp/metadata`'s answer — open it as a read-only
+    /// virtual document (`app_core::AppSession::open_virtual_document`,
+    /// which itself dedups a re-navigation onto the tab it already opened)
+    /// and tell `EditorTabs` via `virtualDocumentOpened`, the same
+    /// build-the-widget-then-focus split `DocumentManager::tabOpened` and
+    /// `EditorTabs::focusTab` already follow for a normal file. A fetch
+    /// failure — no `csharp/metadata` support, a timeout, a malformed
+    /// response — reuses `definitionUnavailable` rather than a signal of
+    /// its own, so the refusal message stays in one place.
+    fn apply_metadata_fetch(
+        mut self: Pin<&mut Self>,
+        uri: String,
+        result: Result<String, lsp_core::LspError>,
+    ) {
+        let text = match result {
+            Ok(text) => text,
+            Err(err) => {
+                self.as_mut().definition_unavailable(QString::from(
+                    format!("Fetching decompiled source failed: {err}").as_str(),
+                ));
+                return;
+            }
+        };
+        let Some((scheme, key)) = lsp_core::virtual_doc_key(&uri) else {
+            self.as_mut().definition_unavailable(QString::from(
+                "Go to Definition landed in decompiled framework code, \
+                 which this IDE cannot open yet.",
+            ));
+            return;
+        };
+        let opened = self
+            .session
+            .borrow_mut()
+            .open_virtual_document(&scheme, &key, &text);
+        self.as_mut().virtual_document_opened(
+            opened.id.raw(),
+            QString::from(opened.title.as_str()),
+            opened.newly_opened,
+        );
     }
 }
 
