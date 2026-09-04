@@ -17,7 +17,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
-use crate::config::RunConfig;
+use crate::config::{RunConfig, RunConfigExt};
 use crate::toolchain::{self, ToolchainId};
 
 /// A detected configuration, tagged with the toolchain that produced it and
@@ -340,6 +340,22 @@ pub fn detect(project_root: &Path) -> Vec<RunConfig> {
     configs.extend(detect_jvm(project_root));
     configs.extend(detect_package_json(project_root));
     configs.extend(detect_makefile(project_root));
+
+    // A detected configuration whose run command does not compile first
+    // gets a Build before-launch task, which is what makes Run on a CMake
+    // or Maven project run the code the user just wrote (B2-1). A toolchain
+    // whose run already builds gets none: two compiles per run is worse
+    // than the convenience is worth.
+    for config in &mut configs {
+        let toolchain = config.toolchain();
+        let needs_build = toolchain
+            .map(|t| t.build_command(project_root).is_some() && !t.builds_before_running())
+            .unwrap_or(false);
+        config.before_launch = crate::before_launch::default_tasks(config, needs_build)
+            .iter()
+            .map(crate::before_launch::BeforeLaunchTask::to_setting)
+            .collect();
+    }
     configs
 }
 
@@ -475,6 +491,23 @@ mod tests {
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].program, "./gradlew");
         assert_eq!(configs[0].args, vec!["run"]);
+    }
+
+    #[test]
+    fn a_cmake_target_is_built_before_it_runs_and_a_cargo_bin_is_not() {
+        let dir = project_with(&[("CMakeLists.txt", "add_executable(app main.cpp)\n")]);
+        let cmake = detect(dir.path());
+        assert_eq!(
+            cmake[0].before_launch.len(),
+            1,
+            "running `build/app` has to build it first"
+        );
+
+        let cargo = detect(&fixture("cargo_project"));
+        assert!(
+            cargo[0].before_launch.is_empty(),
+            "`cargo run` already compiles; a Build task would compile twice"
+        );
     }
 
     #[test]

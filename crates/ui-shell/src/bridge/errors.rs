@@ -44,6 +44,11 @@ pub const CODE_ATTACHMENT_IO: i32 = 1006;
 /// nothing branches on which one it was.
 pub const CODE_REFUSED: i32 = 1007;
 
+/// A before-launch task refused or failed: a cycle in the task graph, a task
+/// naming a configuration that no longer exists, or a build that came back
+/// non-zero (B2-2).
+pub const CODE_BEFORE_LAUNCH: i32 = 1008;
+
 /// A failure with an adapter code and a finished sentence.
 pub fn failure(code: i32, message: impl AsRef<str>) -> FfiResult {
     debug_assert!(
@@ -71,6 +76,7 @@ mod tests {
             CODE_TERMINAL,
             CODE_ATTACHMENT_IO,
             CODE_REFUSED,
+            CODE_BEFORE_LAUNCH,
         ];
         for code in codes {
             assert!(

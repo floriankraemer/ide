@@ -127,6 +127,22 @@ impl ToolchainId {
         }
     }
 
+    /// Whether this toolchain's *run* command compiles first.
+    ///
+    /// `cargo run` and `gradle run` do; a CMake project's run configuration
+    /// starts an already-built binary and a `mvn exec:java` run does not
+    /// recompile changed sources. That distinction is what decides whether a
+    /// detected configuration is given a Build before-launch task: adding
+    /// one where the tool already builds would compile twice per run (B2-1).
+    pub fn builds_before_running(self) -> bool {
+        match self {
+            ToolchainId::Cargo | ToolchainId::Gradle | ToolchainId::Npm => true,
+            ToolchainId::Cmake | ToolchainId::Maven | ToolchainId::Python | ToolchainId::Make => {
+                false
+            }
+        }
+    }
+
     /// The debug adapter this toolchain's programs are debugged with, by
     /// catalog id. `None` means "we do not ship a default for this one" —
     /// the user can still name an adapter explicitly.
@@ -302,6 +318,14 @@ mod tests {
             vec!["clean"]
         );
         assert!(ToolchainId::Npm.clean_command(dir.path()).is_none());
+    }
+
+    #[test]
+    fn only_the_toolchains_whose_run_does_not_compile_need_a_build_first() {
+        assert!(ToolchainId::Cargo.builds_before_running());
+        assert!(ToolchainId::Gradle.builds_before_running());
+        assert!(!ToolchainId::Cmake.builds_before_running());
+        assert!(!ToolchainId::Maven.builds_before_running());
     }
 
     #[test]

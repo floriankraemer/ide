@@ -38,7 +38,7 @@ use std::sync::mpsc::Sender;
 
 use cxx_qt::{CxxQtThread, Threading};
 use cxx_qt_lib::QString;
-use run_core::RunConfigExt;
+use run_core::{AnsiStripper, RunConfigExt};
 
 use crate::bridge::errors;
 use crate::bridge::ffi;
@@ -92,127 +92,6 @@ struct ConsoleState {
     /// tab open for exactly that review — so the cache it reads from has to
     /// outlive the process it was collected from.
     finished: bool,
-}
-
-/// Removes ANSI/VT escape sequences (SGR color codes, cursor moves, OSC
-/// hyperlinks/titles) from streamed process output, byte-by-byte and
-/// statefully: a batch boundary can split a sequence mid-way — the same
-/// concern `run_core::batching`'s "ansi state survives a batch boundary"
-/// test covers for `resolve_link` — so an unterminated sequence's state
-/// carries over to the next `feed` call instead of leaking stray bytes into
-/// the visible text or corrupting the next chunk's parse.
-///
-/// Scans byte-by-byte rather than char-by-char, but this never splits a
-/// multi-byte UTF-8 character: every byte this parser treats specially
-/// (ESC, `[`, `]`, BEL, `\`, and the CSI final-byte range `0x40..=0x7E`) is
-/// ASCII (< 0x80), and UTF-8 continuation bytes are always >= 0x80, so they
-/// are never mistaken for one of these markers and always fall through
-/// untouched in `Normal` state.
-#[derive(Default)]
-pub(crate) struct AnsiStripper {
-    state: AnsiState,
-}
-
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
-enum AnsiState {
-    #[default]
-    Normal,
-    /// Saw ESC; the next byte says what kind of sequence follows.
-    Escape,
-    /// Inside a CSI (`ESC [ ... final`) sequence, awaiting the final byte.
-    Csi,
-    /// Inside an OSC (`ESC ] ... terminator`) sequence, awaiting BEL or ST
-    /// (`ESC \`).
-    Osc,
-    /// Inside an OSC sequence, just saw ESC — one more byte says whether
-    /// this is ST (`\`) or an unrelated ESC that keeps the OSC going.
-    OscEscape,
-}
-
-impl AnsiStripper {
-    pub(crate) fn feed(&mut self, text: &str) -> String {
-        let mut out = Vec::with_capacity(text.len());
-        for &byte in text.as_bytes() {
-            self.state = match (self.state, byte) {
-                (AnsiState::Normal, 0x1B) => AnsiState::Escape,
-                (AnsiState::Normal, _) => {
-                    out.push(byte);
-                    AnsiState::Normal
-                }
-                (AnsiState::Escape, b'[') => AnsiState::Csi,
-                (AnsiState::Escape, b']') => AnsiState::Osc,
-                // Any other byte after a lone ESC is a two-byte sequence
-                // (e.g. `ESC M`) — fully consumed by this one byte.
-                (AnsiState::Escape, _) => AnsiState::Normal,
-                (AnsiState::Csi, 0x40..=0x7E) => AnsiState::Normal,
-                (AnsiState::Csi, _) => AnsiState::Csi,
-                (AnsiState::Osc, 0x07) => AnsiState::Normal,
-                (AnsiState::Osc, 0x1B) => AnsiState::OscEscape,
-                (AnsiState::Osc, _) => AnsiState::Osc,
-                (AnsiState::OscEscape, b'\\') => AnsiState::Normal,
-                (AnsiState::OscEscape, _) => AnsiState::Osc,
-            };
-        }
-        // Safe: every dropped byte belonged to an escape sequence, and every
-        // sequence marker is ASCII (see the struct's doc comment), so `out`
-        // is a concatenation of untouched, already-valid UTF-8 spans.
-        String::from_utf8(out).unwrap_or_default()
-    }
-}
-
-#[cfg(test)]
-mod ansi_strip_tests {
-    use super::AnsiStripper;
-
-    #[test]
-    fn passes_plain_text_through_unchanged() {
-        assert_eq!(AnsiStripper::default().feed("hello\nworld"), "hello\nworld");
-    }
-
-    #[test]
-    fn strips_an_sgr_color_sequence() {
-        assert_eq!(
-            AnsiStripper::default().feed("\x1b[31merror\x1b[0m: oops"),
-            "error: oops"
-        );
-    }
-
-    #[test]
-    fn strips_a_two_byte_escape() {
-        assert_eq!(AnsiStripper::default().feed("a\x1bMb"), "ab");
-    }
-
-    #[test]
-    fn strips_an_osc_hyperlink_terminated_by_bel() {
-        assert_eq!(
-            AnsiStripper::default().feed("\x1b]8;;file:///x\x07link\x1b]8;;\x07"),
-            "link"
-        );
-    }
-
-    #[test]
-    fn strips_an_osc_sequence_terminated_by_string_terminator() {
-        assert_eq!(
-            AnsiStripper::default().feed("\x1b]0;title\x1b\\visible"),
-            "visible"
-        );
-    }
-
-    #[test]
-    fn a_sequence_split_across_two_batches_is_still_stripped() {
-        let mut stripper = AnsiStripper::default();
-        let mut visible = stripper.feed("before\x1b[3");
-        visible.push_str(&stripper.feed("1mafter"));
-        assert_eq!(visible, "beforeafter");
-    }
-
-    #[test]
-    fn preserves_non_ascii_text_around_a_stripped_sequence() {
-        assert_eq!(
-            AnsiStripper::default().feed("caf\u{e9} \x1b[1mbold\x1b[0m \u{1F600}"),
-            "caf\u{e9} bold \u{1F600}"
-        );
-    }
 }
 
 /// Rust side of the `RunService` QObject.
@@ -280,6 +159,50 @@ fn unknown_run_config(message: &str) -> ffi::FfiResult {
     }
 }
 
+/// The before-launch list as the dialog shows and accepts it: one task per
+/// line. Parsing it back is `tasks_from_string`; both live here rather than
+/// in `run-core` because the *text* is a dialog affordance, not a rule.
+fn tasks_to_string(config: &run_core::RunConfig) -> String {
+    run_core::before_launch::tasks_of(config)
+        .iter()
+        .map(|task| match task {
+            run_core::BeforeLaunchTask::Build => "build".to_string(),
+            run_core::BeforeLaunchTask::RunConfiguration(id) => format!("run {id}"),
+            run_core::BeforeLaunchTask::ExternalTool { program, args } => {
+                let mut line = format!("tool {program}");
+                for arg in args {
+                    line.push(' ');
+                    line.push_str(arg);
+                }
+                line
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// The inverse. A line this version cannot read is dropped rather than
+/// guessed at, the same rule the persisted form follows.
+fn tasks_from_string(text: &str) -> Vec<app_config::BeforeLaunchSetting> {
+    text.lines()
+        .filter_map(|line| {
+            let mut words = line.split_whitespace();
+            let task = match (words.next()?, words) {
+                ("build", _) => run_core::BeforeLaunchTask::Build,
+                ("run", mut rest) => {
+                    run_core::BeforeLaunchTask::RunConfiguration(rest.next()?.to_string())
+                }
+                ("tool", mut rest) => run_core::BeforeLaunchTask::ExternalTool {
+                    program: rest.next()?.to_string(),
+                    args: rest.map(str::to_string).collect(),
+                },
+                _ => return None,
+            };
+            Some(task.to_setting())
+        })
+        .collect()
+}
+
 fn to_ffi_run_config(config: &run_core::RunConfig) -> ffi::FfiRunConfig {
     ffi::FfiRunConfig {
         id: QString::from(config.id.as_str()),
@@ -292,6 +215,7 @@ fn to_ffi_run_config(config: &run_core::RunConfig) -> ffi::FfiRunConfig {
         target: QString::from(config.target.clone().unwrap_or_default().as_str()),
         temporary: config.temporary,
         allow_parallel: config.allow_parallel,
+        before_launch: QString::from(tasks_to_string(config).as_str()),
     }
 }
 
@@ -349,6 +273,144 @@ fn emit_events(
 /// on `read()` in a loop, feeding every chunk back into the job queue as a
 /// `read_output` call, until EOF (the process exited) or the channel is
 /// gone (the app is shutting down).
+/// Run one configuration's before-launch tasks, in order, stopping at the
+/// first failure. Returns whether the launch may proceed.
+///
+/// Every task is a process run to completion, which is exactly what
+/// `build_core::runner` does — including a Build task, whose steps come from
+/// the same `BuildSpec` the Build dock uses. There is no second way to run a
+/// build in this codebase (ADR-0040).
+fn run_before_launch(
+    tasks: &[run_core::BeforeLaunchTask],
+    config_id: &str,
+    root: &Path,
+    configs: &[run_core::RunConfig],
+    qt_thread: &CxxQtThread<ffi::RunService>,
+) -> bool {
+    for task in tasks {
+        let (label, steps, toolchain) = match resolve_task(task, root, configs) {
+            Ok(resolved) => resolved,
+            Err(message) => {
+                fail_before_launch(qt_thread, config_id, &message);
+                return false;
+            }
+        };
+
+        let started_id = config_id.to_string();
+        let started_label = label.clone();
+        let started_thread = qt_thread.clone();
+        let _ = started_thread.queue(move |mut service: Pin<&mut ffi::RunService>| {
+            service.as_mut().before_launch_started(
+                QString::from(started_id.as_str()),
+                QString::from(started_label.as_str()),
+            );
+        });
+
+        let mut sink = BeforeLaunchSink {
+            config_id: config_id.to_string(),
+            qt_thread: qt_thread.clone(),
+        };
+        let handle = build_core::BuildHandle::new();
+        let outcome = build_core::runner::run(&handle, &steps, toolchain, root, &mut sink);
+        if !outcome.succeeded() {
+            fail_before_launch(
+                qt_thread,
+                config_id,
+                &format!("{label} failed (exit {})", outcome.exit_code),
+            );
+            return false;
+        }
+    }
+    true
+}
+
+/// What one task actually runs: a label for the dock, the steps, and the
+/// toolchain whose diagnostics the output is read as.
+type ResolvedTask = (String, Vec<run_core::LaunchSpec>, run_core::ToolchainId);
+
+fn resolve_task(
+    task: &run_core::BeforeLaunchTask,
+    root: &Path,
+    configs: &[run_core::RunConfig],
+) -> Result<ResolvedTask, String> {
+    match task {
+        run_core::BeforeLaunchTask::Build => {
+            let toolchain = build_core::buildable_toolchain(root).map_err(|err| err.to_string())?;
+            let steps = build_core::BuildSpec::new(toolchain, build_core::BuildKind::Build, root)
+                .steps()
+                .map_err(|err| err.to_string())?;
+            Ok(("Build".to_string(), steps, toolchain))
+        }
+        run_core::BeforeLaunchTask::RunConfiguration(id) => {
+            let config = configs
+                .iter()
+                .find(|c| &c.id == id)
+                .ok_or_else(|| format!("unknown run configuration \"{id}\""))?;
+            let mut spec = config.to_launch_spec(root);
+            spec.cwd = Some(spec.cwd.clone().unwrap_or_else(|| root.to_path_buf()));
+            Ok((config.name.clone(), vec![spec], tool_for_output(root)))
+        }
+        run_core::BeforeLaunchTask::ExternalTool { program, args } => {
+            let spec = run_core::LaunchSpec {
+                program: program.clone(),
+                args: args.clone(),
+                cwd: Some(root.to_path_buf()),
+                env: Vec::new(),
+                console: run_core::ConsoleKind::Pty,
+            };
+            Ok((program.clone(), vec![spec], tool_for_output(root)))
+        }
+    }
+}
+
+/// Which parser a non-build task's output is read with. The project's own
+/// toolchain, so a script that runs the compiler still produces recognisable
+/// diagnostics; `Make` (the text table) when the project has no build tool,
+/// because guessing Cargo's JSON for arbitrary output would find nothing.
+fn tool_for_output(root: &Path) -> run_core::ToolchainId {
+    build_core::buildable_toolchain(root).unwrap_or(run_core::ToolchainId::Make)
+}
+
+fn fail_before_launch(qt_thread: &CxxQtThread<ffi::RunService>, config_id: &str, message: &str) {
+    let config_id = config_id.to_string();
+    let message = message.to_string();
+    let _ = qt_thread.queue(move |mut service: Pin<&mut ffi::RunService>| {
+        service.as_mut().before_launch_failed(
+            QString::from(config_id.as_str()),
+            ffi::FfiResult {
+                code: errors::CODE_BEFORE_LAUNCH,
+                message: QString::from(message.as_str()),
+            },
+        );
+    });
+}
+
+/// Streams a before-launch task's output to the Build dock. Diagnostics are
+/// deliberately dropped: the Problems dock is fed by `BuildService`, and a
+/// second writer to it from here would leave rows nothing clears. The
+/// errors themselves are still visible — they are in the output.
+struct BeforeLaunchSink {
+    config_id: String,
+    qt_thread: CxxQtThread<ffi::RunService>,
+}
+
+impl build_core::BuildSink for BeforeLaunchSink {
+    fn output(&mut self, text: &str) {
+        let config_id = self.config_id.clone();
+        let text = text.to_string();
+        let _ = self
+            .qt_thread
+            .queue(move |mut service: Pin<&mut ffi::RunService>| {
+                service.as_mut().before_launch_output(
+                    QString::from(config_id.as_str()),
+                    QString::from(text.as_str()),
+                );
+            });
+    }
+
+    fn diagnostics(&mut self, _diagnostics: Vec<build_core::BuildDiagnostic>) {}
+}
+
 fn spawn_reader_thread(
     console_id: u64,
     mut reader: Box<dyn std::io::Read + Send>,
@@ -604,10 +666,34 @@ impl ffi::RunService {
         // to start from.
         spec.cwd = Some(cwd.clone());
 
+        // Before-launch tasks are validated here, on the Qt thread, before
+        // anything runs: a cycle discovered halfway through would already
+        // have started processes the user then has to kill one at a time
+        // (B2-3).
+        let configs = app_config::project_settings::load(&root)
+            .unwrap_or_default()
+            .run_configs
+            .unwrap_or_default();
+        if let Err(err) = run_core::before_launch::validate(&config_id, &configs) {
+            return ffi::FfiResult {
+                code: errors::CODE_BEFORE_LAUNCH,
+                message: QString::from(err.to_string().as_str()),
+            };
+        }
+        let tasks = run_core::before_launch::tasks_of(&config);
+
         let tx = self.as_mut().ensure_worker();
         let qt_thread = self.qt_thread();
         let launch_config_id = config_id.clone();
+        let task_root = root.clone();
         let _ = tx.send(Box::new(move |worker: &mut RunWorker| {
+            // Sequential and fail-fast, on the worker thread: a run whose
+            // build failed must not start, and the user finds out in the
+            // Build dock rather than by reading a program's output for
+            // errors that are not its own (B2-2).
+            if !run_before_launch(&tasks, &launch_config_id, &task_root, &configs, &qt_thread) {
+                return;
+            }
             match worker.supervisor.launch(launch_config_id.clone(), &spec) {
                 Ok(id) => {
                     let reader = worker.supervisor.take_reader(id);

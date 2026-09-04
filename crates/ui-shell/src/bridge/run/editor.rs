@@ -86,6 +86,7 @@ impl ffi::RunConfigEditor {
         };
         config.env = env_from_string(&form.env.to_string());
         config.allow_parallel = form.allow_parallel;
+        config.before_launch = super::tasks_from_string(&form.before_launch.to_string());
         // Editing a temporary configuration is how IntelliJ's "Save
         // configuration" works: once it has been through the dialog it is
         // one the user meant to keep, so it stops being eviction fodder.

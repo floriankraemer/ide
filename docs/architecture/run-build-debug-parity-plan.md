@@ -64,10 +64,10 @@ Task ids are stable; titles may change.
 
 | Task | Status | Commit |
 |---|---|---|
-| B2-1 — `BeforeLaunchTask` in `run-core`; persistence in `.ide/settings.toml` | blocked on B1-1 |  |
-| B2-2 — sequential fail-fast execution; a failed build cancels the launch | blocked on B2-1 |  |
-| B2-3 — cycle detection for `RunAnotherConfiguration` | blocked on B2-1 |  |
-| B2-4 — view: the Before launch list in the run-configuration dialog | blocked on B2-2 |  |
+| B2-1 — `BeforeLaunchTask` in `run-core`; persistence; a Build task by default only where the run command does not already compile | done | this branch |
+| B2-2 — sequential fail-fast execution; a failed task cancels the launch | done | this branch; the shared runner moved into `build_core::runner` so the Build task and the Build dock cannot drift, and `run_core::ansi` now holds the one ANSI stripper both need |
+| B2-3 — cycle detection, validated before the first task runs | done | this branch |
+| B2-4 — view: the Before launch list in the dialog, and a task's output in the Build dock | done | this branch; a one-task-per-line text field rather than an add/remove/reorder list — the same shape the environment field already uses, and a `Vec` is not a cxx-shareable field |
 
 ### D1 — `dap-core` foundation
 

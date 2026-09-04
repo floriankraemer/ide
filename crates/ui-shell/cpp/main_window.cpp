@@ -997,7 +997,8 @@ void buildMainWindow(AppSettings *appSettings,
     buildVcsMenu(window, vcsService, appSettings, *actions, editorTabs, central.docks,
                  central.fileHistoryPanel, viewMenu);
     buildRunMenu(window, runService, runConfigEditor, appSettings, *actions, central.docks,
-                 central.runConsolePanel, treeModel, editorTabs, viewMenu);
+                 central.runConsolePanel, treeModel, editorTabs, central.buildPanel,
+                 viewMenu);
     buildBuildMenu(window, central.buildPanel, appSettings, *actions, central.docks, viewMenu);
 
     buildNavigateMenu(window, languageService, searchModel, editorTabs, appSettings, *actions,

@@ -1,5 +1,6 @@
 #include "run_menu.h"
 
+#include "build_panel.h"
 #include "dock_layout.h"
 #include "e2e_mark.h"
 #include "keymap_page.h"
@@ -18,7 +19,8 @@ namespace ui_shell {
 void buildRunMenu(QMainWindow *window, RunService *runService, RunConfigEditor *runConfigEditor,
                    AppSettings *appSettings, QHash<QString, QAction *> &actions,
                    DockRegistry *docks, RunConsolePanel *runConsolePanel,
-                   ProjectTreeModel *treeModel, EditorTabs *editorTabs, QMenu *viewMenu)
+                   ProjectTreeModel *treeModel, EditorTabs *editorTabs, BuildPanel *buildPanel,
+                   QMenu *viewMenu)
 {
     // Detect run configurations (Cargo.toml, package.json, Makefile) the
     // moment a project opens, same lifecycle hook LanguageService and the
@@ -33,6 +35,23 @@ void buildRunMenu(QMainWindow *window, RunService *runService, RunConfigEditor *
     QObject::connect(runService, &RunService::consoleStarted, window,
                       [docks](quint64, const QString &) {
                           docks->show(QStringLiteral("runConsole"));
+                      });
+
+    // A before-launch task's output belongs in the Build dock: it is a
+    // build (or a tool run like one), and a second place to look for it
+    // would be a second place to look (B2-2).
+    QObject::connect(runService, &RunService::beforeLaunchStarted, buildPanel,
+                      [docks, buildPanel](const QString &, const QString &label) {
+                          docks->show(QStringLiteral("build"));
+                          buildPanel->showExternalTask(label);
+                      });
+    QObject::connect(runService, &RunService::beforeLaunchOutput, buildPanel,
+                      [buildPanel](const QString &, const QString &text) {
+                          buildPanel->appendExternalOutput(text);
+                      });
+    QObject::connect(runService, &RunService::beforeLaunchFailed, buildPanel,
+                      [buildPanel](const QString &, const FfiResult &error) {
+                          buildPanel->reportExternalFailure(QString(error.message));
                       });
 
     QMenu *runMenu = window->menuBar()->addMenu(QObject::tr("&Run"));
