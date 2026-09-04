@@ -50,14 +50,14 @@ Task ids are stable; titles may change.
 
 | Task | Status | Commit |
 |---|---|---|
-| B1-1 — new crate `build-core`: `BuildSpec` → `LaunchSpec` with `ConsoleKind::Pipes`, first real user of that variant | blocked on R1-1 |  |
-| B1-2 — Cargo diagnostics via `--message-format=json` | blocked on B1-1 |  |
-| B1-3 — text diagnostic parsers: javac/Maven/Gradle, CMake/gcc/clang, Python tracebacks, seeded from `run_core::links` | blocked on B1-1 |  |
-| B1-4 — `BuildDiagnostic` mapped onto the shape `problems_panel` already renders for `lsp_core::DiagnosticStore` | blocked on B1-2 |  |
-| B1-5 — Build, Rebuild, Build file, Stop build | blocked on B1-1 |  |
+| B1-1 — new crate `build-core`: `BuildSpec` → the steps a request runs | done | this branch; over a PTY rather than `ConsoleKind::Pipes` — only the PTY transport can kill a build's process tree, so `Pipes` stays reserved for `dap-core` |
+| B1-2 — Cargo diagnostics via `--message-format=json` | done | this branch |
+| B1-3 — text diagnostic parsers (javac/Maven/Gradle, CMake/gcc/clang) + the streaming `DiagnosticParser` | done | this branch; its own table rather than `run_core::links`' — the two want different fields out of the same text |
+| B1-4 — `BuildDiagnostic` in the shape `problems_panel` already renders | done | this branch |
+| B1-5 — Build, Rebuild, build one target | done | this branch; "build file" dropped — no toolchain here addresses a single source file, they address targets |
 | B1-6 — adapter: `BuildServiceRust`, one QObject for N build sessions | blocked on B1-5 |  |
 | B1-7 — view: Build dock, the Build toolbar button, Problems source column | blocked on B1-6 |  |
-| B1-8 — ADR-0040 + `layering.md` row for `build-core` | blocked on B1-1 |  |
+| B1-8 — ADR-0040 + `layering.md` row, verification gates, CI layering gate | done | this branch; the gate also gained the `run-core` rows it never had |
 | B1-9 — E2E: `e2e_build_failure_populates_problems_dock` | blocked on B1-7 |  |
 
 ### B2 — before-launch tasks
