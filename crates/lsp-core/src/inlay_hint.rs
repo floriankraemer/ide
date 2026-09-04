@@ -8,7 +8,9 @@
 //! viewport that shows fifty. So the range is the caller's viewport, and
 //! [`line_range`] is where that is stated once instead of at every call site.
 
-use serde_json::Value;
+use serde_json::{json, Value};
+
+use crate::manager::{LspError, INLAY_HINT_TIMEOUT};
 
 /// What a hint is telling the reader. `Other` is the honest bucket for a
 /// missing or unknown `kind`: the label is still worth painting, it just
@@ -113,6 +115,34 @@ fn label(value: &Value) -> Option<String> {
             (!text.is_empty()).then_some(text)
         }
         _ => None,
+    }
+}
+
+// C4-followup (#162): request-sending `LspManager` methods for this feature, moved out of
+// `manager.rs` once it crossed the file-size ceiling. This file already held the
+// parse/rule layer; this is the request-sending half `manager.rs`'s own module doc
+// pointed callers to.
+impl crate::manager::LspManager {
+    /// `textDocument/inlayHint` for the visible lines, inclusive.
+    ///
+    /// The line range is the request's whole point (see
+    /// [`crate::inlay_hint`]): there is no whole-document form of this
+    /// method, because a 10,000-line file must not be asked for 10,000
+    /// hints to paint fifty.
+    pub fn inlay_hints(
+        &self,
+        uri: &str,
+        first_line: u32,
+        last_line: u32,
+    ) -> Result<Vec<InlayHint>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/inlayHint",
+            json!({"textDocument": {"uri": uri}, "range": line_range(first_line, last_line)}),
+            INLAY_HINT_TIMEOUT,
+        )?;
+        Ok(parse_inlay_hints(&result))
     }
 }
 

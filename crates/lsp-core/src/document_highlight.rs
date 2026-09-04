@@ -11,6 +11,7 @@
 use serde_json::Value;
 
 use crate::completion::TextRange;
+use crate::manager::{position_params, LspError, DOCUMENT_HIGHLIGHT_TIMEOUT};
 
 /// What the occurrence does to the symbol.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -68,6 +69,32 @@ fn range(value: &Value) -> Option<TextRange> {
 
 fn position(value: &Value, field: &str) -> Option<u32> {
     value.get(field)?.as_u64().map(|n| n as u32)
+}
+
+// C4-followup (#162): request-sending `LspManager` methods for this feature, moved out of
+// `manager.rs` once it crossed the file-size ceiling. This file already held the
+// parse/rule layer; this is the request-sending half `manager.rs`'s own module doc
+// pointed callers to.
+impl crate::manager::LspManager {
+    /// `textDocument/documentHighlight`: the occurrences of the symbol under
+    /// the caret in this file, each with what it does to the symbol. An
+    /// empty vector means the caret is not on a symbol, which is not an
+    /// error.
+    pub fn document_highlights(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<DocumentHighlight>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/documentHighlight",
+            position_params(uri, line, character),
+            DOCUMENT_HIGHLIGHT_TIMEOUT,
+        )?;
+        Ok(parse_document_highlights(&result))
+    }
 }
 
 #[cfg(test)]

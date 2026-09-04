@@ -14,10 +14,11 @@
 //! clickable. What that looks like on screen is `ui-shell`'s call, not this
 //! module's.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::code_action::{command_ref, CommandRef};
 use crate::completion::TextRange;
+use crate::manager::{LspError, CODE_LENS_TIMEOUT, DEFAULT_REQUEST_TIMEOUT};
 
 /// One entry of a `textDocument/codeLens` response.
 ///
@@ -92,6 +93,40 @@ pub fn is_offered(init_result: &Value) -> bool {
     init_result
         .pointer("/capabilities/codeLensProvider")
         .is_some()
+}
+
+// C4-followup (#162): request-sending `LspManager` methods for this feature, moved out of
+// `manager.rs` once it crossed the file-size ceiling. This file already held the
+// parse/rule layer; this is the request-sending half `manager.rs`'s own module doc
+// pointed callers to.
+impl crate::manager::LspManager {
+    /// `textDocument/codeLens` for a whole open document.
+    ///
+    /// Whether it is worth calling at all is
+    /// [`Self::code_lenses_supported`]'s answer, not this method's — same
+    /// convention [`Self::semantic_tokens`] follows for the same reason.
+    pub fn code_lenses(&self, language_id: &str, uri: &str) -> Result<Vec<CodeLensItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "textDocument/codeLens",
+            json!({"textDocument": {"uri": uri}}),
+            CODE_LENS_TIMEOUT,
+        )?;
+        Ok(parse_code_lenses(&result))
+    }
+    /// `codeLens/resolve` for a lens the server sent without a `command`
+    /// (csharp-ls resolves lazily, per the plan). `lens` is sent back
+    /// exactly as the server gave it, same convention
+    /// [`Self::resolve_code_action`] follows for its own `data`-bearing
+    /// items.
+    pub fn resolve_code_lens(&self, language_id: &str, lens: &Value) -> Result<Value, LspError> {
+        self.request_with_timeout(
+            language_id,
+            "codeLens/resolve",
+            lens.clone(),
+            DEFAULT_REQUEST_TIMEOUT,
+        )
+    }
 }
 
 #[cfg(test)]
