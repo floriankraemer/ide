@@ -280,6 +280,7 @@ fn main() {
         // 0.9), so this is also the first place build.rs runs moc directly.
         .cpp_file("cpp/code_editor.h")
         .cpp_file("cpp/code_editor.cpp")
+        .cpp_file("cpp/code_editor_gutter.cpp")
         // F3-16: the change-marker colour/kind and the hunk popup. Free
         // functions and plain structs, no Q_OBJECT, so only the source is
         // listed — same as signature_tip.cpp.
