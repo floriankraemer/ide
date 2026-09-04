@@ -14,11 +14,13 @@
 //! `dap-core` row): long work runs on a `std::thread` and results reach the
 //! UI through `CxxQtThread::queue()`, never an ambient runtime.
 
+pub mod breakpoints;
 pub mod catalog;
 pub mod error;
 pub mod protocol;
 pub mod session;
 
+pub use breakpoints::{Breakpoint, BreakpointStore, SuspendPolicy};
 pub use catalog::Adapter;
 pub use error::DapError;
 pub use protocol::{Capabilities, Message, Scope, StackFrame, Stopped, Thread, Variable};

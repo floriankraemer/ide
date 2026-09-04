@@ -85,11 +85,11 @@ Task ids are stable; titles may change.
 
 | Task | Status | Commit |
 |---|---|---|
-| D2-1 — `BreakpointStore`: line, enabled, condition, hit condition, log message, temporary, suspend policy, dependent | blocked on D1-3 |  |
-| D2-2 — function breakpoints, data breakpoints, exception filters | blocked on D2-1 |  |
-| D2-3 — `shift_lines` driven from the existing buffer-edit seam | blocked on D2-1 |  |
-| D2-4 — persistence under `.ide/local/` | blocked on D2-1 |  |
-| D2-5 — view: gutter toggle, breakpoints dialog, Mute Breakpoints | blocked on D2-2 |  |
+| D2-1 — `BreakpointStore`: line, enabled, condition, hit condition, log message, temporary, suspend policy, dependent | done | this branch |
+| D2-2 — function breakpoints, data breakpoints, exception filters, Mute Breakpoints | done | this branch |
+| D2-3 — `shift_lines`, with a deleted line taking its breakpoint with it | done | this branch; the seam that drives it is wired in D3 |
+| D2-4 — persistence under `.ide/local/breakpoints.toml` | done | this branch; temporary breakpoints are deliberately not persisted |
+| D2-5 — view: gutter toggle, breakpoints dialog, Mute Breakpoints | blocked on D3-1 | the view needs the QObject that owns the store, which arrives with the debug adapter |
 
 ### D3 — the debug session and its tool window
 
