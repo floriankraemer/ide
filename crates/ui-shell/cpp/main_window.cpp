@@ -16,6 +16,7 @@
 #include "file_history_panel.h"
 #include "find_bar.h"
 #include "find_usages_panel.h"
+#include "hierarchy_panel.h"
 #include "hex_viewer.h"
 #include "icon_cache.h"
 #include "ide_main_window.h"
@@ -127,6 +128,7 @@ struct CentralWidgets
     ClassViewPanel *classViewPanel;
     TerminalSessionsPanel *terminalPanel;
     FindUsagesPanel *findUsagesPanel;
+    HierarchyPanel *hierarchyPanel;
     SearchEverywhereDialog *searchEverywhereDialog;
     ProblemsPanel *problemsPanel;
     AiChatPanel *aiChatPanel;
@@ -245,6 +247,16 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     auto *findUsagesDock = new ads::CDockWidget(dockManager, QObject::tr("Find Usages"));
     findUsagesDock->setWidget(findUsagesPanel);
     docks->registerDock(QStringLiteral("findUsages"), findUsagesDock, ads::CenterDockWidgetArea,
+                        bottomArea);
+
+    // C11-followup: tabbed alongside Find Usages — same "asked about a
+    // symbol, results stream into a dock" shape, just a lazy tree instead
+    // of a flat list (a hierarchy walk can go arbitrarily deep, a location
+    // list cannot).
+    auto *hierarchyPanel = new HierarchyPanel(languageService, editorTabs, dockManager);
+    auto *hierarchyDock = new ads::CDockWidget(dockManager, QObject::tr("Hierarchy"));
+    hierarchyDock->setWidget(hierarchyPanel);
+    docks->registerDock(QStringLiteral("hierarchy"), hierarchyDock, ads::CenterDockWidgetArea,
                         bottomArea);
 
     // Task D: right-side dock panel, matching where JetBrains-style IDEs
@@ -566,7 +578,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
 
     return CentralWidgets{editorTabs,       dockManager,      docks,
                            treeView,         searchResultsPanel, classViewPanel,
-                           terminalPanel,    findUsagesPanel,  searchEverywhereDialog,
+                           terminalPanel,    findUsagesPanel,  hierarchyPanel,
+                           searchEverywhereDialog,
                            problemsPanel,    aiChatPanel,      changesPanel,
                            fileHistoryPanel, runConsolePanel,  buildPanel,
                            previewPanel};
@@ -909,6 +922,8 @@ void buildMainWindow(AppSettings *appSettings,
         menu->addSeparator();
         append(QStringLiteral("navigate.goToDeclaration"));
         append(QStringLiteral("navigate.findUsages"));
+        append(QStringLiteral("navigate.showCallHierarchy"));
+        append(QStringLiteral("navigate.showTypeHierarchy"));
         menu->addSeparator();
         append(QStringLiteral("refactor.rename"));
         append(QStringLiteral("refactor.extractMethod"));
@@ -986,7 +1001,7 @@ void buildMainWindow(AppSettings *appSettings,
     buildBuildMenu(window, central.buildPanel, appSettings, *actions, central.docks, viewMenu);
 
     buildNavigateMenu(window, languageService, searchModel, editorTabs, appSettings, *actions,
-                       central.docks, central.findUsagesPanel);
+                       central.docks, central.findUsagesPanel, central.hierarchyPanel);
 
     buildAiMenu(window, aiChat, editorTabs, appSettings, *actions, central.docks,
                 central.aiChatPanel);

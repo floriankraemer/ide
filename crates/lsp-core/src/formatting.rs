@@ -15,8 +15,9 @@
 //!
 //! Rules, so not `bridge.rs` and not `cpp/` (`docs/architecture/layering.md`).
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
+use crate::manager::{LspError, FORMATTING_TIMEOUT, METHOD_NOT_FOUND};
 use crate::workspace_edit::TextEdit;
 
 /// What a formatting request produced.
@@ -157,6 +158,83 @@ pub(crate) fn text_edit(value: &Value) -> Option<TextEdit> {
         end_character: end.get("character")?.as_u64()? as u32,
         new_text: value.get("newText")?.as_str()?.to_string(),
     })
+}
+
+// C4-followup (#162): request-sending `LspManager` methods for this feature, moved out of
+// `manager.rs` once it crossed the file-size ceiling. This file already held the
+// parse/rule layer; this is the request-sending half `manager.rs`'s own module doc
+// pointed callers to.
+impl crate::manager::LspManager {
+    /// `textDocument/formatting` for a whole open document.
+    ///
+    /// A server that does not implement formatting answers with
+    /// `MethodNotFound` rather than an empty list, so that is mapped to
+    /// [`FormattingOutcome::Unsupported`] here: from the user's side
+    /// "there is no formatter for this language" and "the file is already
+    /// formatted" are different messages, and only one of them is a
+    /// disappointment worth explaining.
+    pub fn format(
+        &self,
+        uri: &str,
+        options: &FormattingOptions,
+    ) -> Result<FormattingOutcome, LspError> {
+        let language_id = self.language_of(uri)?;
+        let params = json!({
+            "textDocument": {"uri": uri},
+            "options": options.to_json(),
+        });
+        match self.request_with_timeout(
+            &language_id,
+            "textDocument/formatting",
+            params,
+            FORMATTING_TIMEOUT,
+        ) {
+            Ok(result) => Ok(parse_formatting(&result)),
+            Err(LspError::Response { code, .. }) if code == METHOD_NOT_FOUND => {
+                Ok(FormattingOutcome::Unsupported)
+            }
+            Err(err) => Err(err),
+        }
+    }
+    /// `textDocument/rangeFormatting` for a selection.
+    ///
+    /// Servers commonly implement one of the two and not the other, so this
+    /// falls back to whole-document formatting when the range variant is
+    /// unsupported — reformatting more than was asked is a better answer
+    /// than reformatting nothing, and the preview shows what changed either
+    /// way.
+    pub fn format_range(
+        &self,
+        uri: &str,
+        start: (u32, u32),
+        end: (u32, u32),
+        options: &FormattingOptions,
+    ) -> Result<FormattingOutcome, LspError> {
+        let language_id = self.language_of(uri)?;
+        let params = json!({
+            "textDocument": {"uri": uri},
+            "range": {
+                "start": {"line": start.0, "character": start.1},
+                "end": {"line": end.0, "character": end.1},
+            },
+            "options": options.to_json(),
+        });
+        match self.request_with_timeout(
+            &language_id,
+            "textDocument/rangeFormatting",
+            params,
+            FORMATTING_TIMEOUT,
+        ) {
+            Ok(result) => match parse_formatting(&result) {
+                FormattingOutcome::Unsupported => self.format(uri, options),
+                outcome => Ok(outcome),
+            },
+            Err(LspError::Response { code, .. }) if code == METHOD_NOT_FOUND => {
+                self.format(uri, options)
+            }
+            Err(err) => Err(err),
+        }
+    }
 }
 
 #[cfg(test)]
