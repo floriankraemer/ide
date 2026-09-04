@@ -1,0 +1,2 @@
+# `cargo build` runs inside a copy of this fixture during the E2E flow.
+target/

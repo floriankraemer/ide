@@ -51,11 +51,19 @@ impl DiagnosticParser {
 
     /// Feed the next chunk of output; returns whatever complete lines in it
     /// were diagnostics.
+    ///
+    /// A bare carriage return ends a line here just as a newline does. Build
+    /// tools attached to a terminal redraw a progress bar by returning to
+    /// the start of the line — `cargo` does it several times a second, and
+    /// Gradle does the same — so a parser that only split on `\n` would glue
+    /// the progress text onto the front of the next real line and fail to
+    /// read it. That is not hypothetical: it is why the first version of
+    /// this parser found no diagnostics at all in a real Cargo build.
     pub fn feed(&mut self, chunk: &str) -> Vec<BuildDiagnostic> {
         self.pending.push_str(chunk);
         let mut diagnostics = Vec::new();
-        while let Some(newline) = self.pending.find('\n') {
-            let line: String = self.pending.drain(..=newline).collect();
+        while let Some(end) = self.pending.find(['\n', '\r']) {
+            let line: String = self.pending.drain(..=end).collect();
             if let Some(diagnostic) = self.parse_line(line.trim_end_matches(['\n', '\r'])) {
                 diagnostics.push(diagnostic);
             }
@@ -145,6 +153,18 @@ mod tests {
         parser.feed("a.cpp:9:1: error: boom");
         assert_eq!(parser.finish().len(), 1);
         assert!(parser.finish().is_empty());
+    }
+
+    #[test]
+    fn a_progress_redraw_does_not_swallow_the_line_after_it() {
+        // What a real Cargo build over a PTY looks like: a progress bar
+        // rewritten in place with a bare carriage return, then the JSON.
+        let mut parser = DiagnosticParser::new(ToolchainId::Cargo, "/p");
+        let diagnostics = parser.feed(&format!(
+            "    Building [==>      ] 0/1: broken-build(bin)   \r{CARGO_ERROR}\n"
+        ));
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(diagnostics[0].line, 4);
     }
 
     #[test]

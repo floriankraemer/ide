@@ -1,5 +1,6 @@
-//! End-to-end flows for running (F4, R1): the console, the run-configuration
-//! dialog, and running a file from the editor.
+//! End-to-end flows for running and building (F4, R1, B1): the console, the
+//! run-configuration dialog, running a file from the editor, and a failing
+//! build reaching the Problems dock.
 //!
 //! Their own test binary rather than more of `e2e.rs`, which sits at its
 //! ratcheted size ceiling (`scripts/check-file-size.sh`). `make e2e` runs
@@ -287,4 +288,51 @@ fn e2e_run_from_context_creates_a_temporary_configuration() {
     assert_eq!(configs[0].id, "python-scripts/etl.py");
     assert!(configs[0].temporary, "a context configuration is temporary");
     assert_eq!(configs[0].target.as_deref(), Some("scripts/etl.py"));
+}
+
+/// B1-9: a build's diagnostics reach the Problems dock.
+///
+/// The fixture is a one-file crate with a type error and no dependencies, so
+/// `cargo build` needs no network and finishes in about a second. What no
+/// unit test can reach: `build.build` starting a real build, its output
+/// crossing from the build's own thread to the dock, `build-core`'s JSON
+/// parsing turning it into a diagnostic, and the Problems dock — whose only
+/// source until now was a language server — showing it.
+#[test]
+#[ignore = "E2E: needs an X server; run via `make e2e`"]
+fn e2e_build_failure_populates_problems_dock() {
+    let name = "e2e_build_failure_populates_problems_dock";
+    let mut ide = Ide::launch(name, APP, fixture("broken_build"));
+    ide.wait_for_ev(Mark::start(), "project_opened");
+
+    let mark = ide.mark();
+    ide.key("ctrl+F9"); // build.build
+    let started = ide.wait_for_event(mark, "the build to start", |e| e["ev"] == "build_started");
+    let build_id = started["build_id"].as_u64().expect("build_id");
+
+    let finished = ide.wait_for_event(mark, "the build to finish", |e| {
+        e["ev"] == "build_finished" && e["build_id"].as_u64() == Some(build_id)
+    });
+
+    // The dock fills while the build runs, so the diagnostic may already be
+    // there; waiting after the exit covers both orders. The build's own
+    // output goes into the failure message, because "no problem arrived" is
+    // unreadable without knowing what the tool actually said.
+    let output: String = ide
+        .events_since_of(mark, "build_output")
+        .into_iter()
+        .filter_map(|e| e["text"].as_str().map(str::to_string))
+        .collect();
+    ide.wait_for_event(
+        mark,
+        &format!("a problem to reach the Problems dock; the build said:\n{output}"),
+        |e| e["ev"] == "problems_refreshed" && e["total"].as_u64().unwrap_or(0) > 0,
+    );
+    assert_ne!(
+        finished["exit_code"].as_i64(),
+        Some(0),
+        "the fixture is supposed to fail to compile"
+    );
+
+    assert_eq!(ide.quit(), 0);
 }

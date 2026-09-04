@@ -1,0 +1,8 @@
+# A crate that does not compile, and depends on nothing so `cargo build`
+# needs no network and finishes in about a second (B1-9).
+[package]
+name = "broken-build"
+version = "0.0.0"
+edition = "2021"
+
+[workspace]
