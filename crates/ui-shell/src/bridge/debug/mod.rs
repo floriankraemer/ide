@@ -102,12 +102,78 @@ impl SessionListener for QtListener {
             });
     }
 
-    fn reverse_request(&mut self, command: &str, _arguments: &Value) -> Option<Value> {
-        // `runInTerminal` is answered so the adapter is not left waiting.
-        // Running the debuggee in the IDE's own PTY console (D1-6) is D4's;
-        // until then the honest answer is "started by the adapter", which is
-        // what an empty body means.
-        (command == "runInTerminal").then(|| json!({}))
+    fn reverse_request(&mut self, command: &str, arguments: &Value) -> Option<Value> {
+        // D1-6: `runInTerminal` means the adapter cannot start the debuggee
+        // itself and is asking us to. Started through `run-core`'s
+        // supervisor — the same PTY a plain Run uses — so a debugged
+        // program's output looks like a run's, and so this client can
+        // honestly claim the capability (ADR-0041).
+        if command != "runInTerminal" {
+            return None;
+        }
+        let argv: Vec<String> = arguments
+            .get("args")?
+            .as_array()?
+            .iter()
+            .filter_map(|value| value.as_str().map(str::to_string))
+            .collect();
+        let (program, args) = argv.split_first()?;
+        let spec = run_core::LaunchSpec {
+            program: program.clone(),
+            args: args.to_vec(),
+            cwd: arguments
+                .get("cwd")
+                .and_then(Value::as_str)
+                .map(PathBuf::from),
+            env: arguments
+                .get("env")
+                .and_then(Value::as_object)
+                .map(|env| {
+                    env.iter()
+                        .filter_map(|(key, value)| Some((key.clone(), value.as_str()?.to_string())))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            console: run_core::ConsoleKind::Pty,
+        };
+
+        let session_id = self.session_id;
+        let qt_thread = self.qt_thread.clone();
+        let mut supervisor = run_core::Supervisor::new();
+        let id = supervisor
+            .launch(format!("debug-{session_id}"), &spec)
+            .ok()?;
+        let process_id = supervisor.process_id(id);
+        if let Ok(mut reader) = supervisor.take_reader(id) {
+            // The debuggee's own output, streamed into the debugger console
+            // where the adapter's `output` events already go.
+            std::thread::spawn(move || {
+                let mut buffer = [0u8; 4096];
+                let mut ansi = run_core::AnsiStripper::default();
+                while let Ok(read) = std::io::Read::read(&mut reader, &mut buffer) {
+                    if read == 0 {
+                        break;
+                    }
+                    let text = ansi.feed(&String::from_utf8_lossy(&buffer[..read]));
+                    let _ = qt_thread.queue(move |mut service: Pin<&mut ffi::DebugService>| {
+                        service.as_mut().debug_output(
+                            session_id,
+                            QString::from("stdout"),
+                            QString::from(text.as_str()),
+                        );
+                    });
+                }
+                // Held until the process ends: dropping the supervisor kills
+                // the PTY, and the debuggee with it.
+                drop(supervisor);
+            });
+        }
+
+        // The adapter attaches to this process, so it needs the id.
+        Some(match process_id {
+            Some(pid) => json!({ "processId": pid }),
+            None => json!({}),
+        })
     }
 
     fn disconnected(&mut self) {
@@ -210,6 +276,145 @@ impl ffi::DebugService {
             }
         });
         ffi::FfiResult::default()
+    }
+
+    /// Attach to a process that is already running (D4-1).
+    ///
+    /// Which adapter: the project's toolchain, the same answer `debug` uses.
+    /// The process id is the user's — this IDE does not enumerate processes,
+    /// because doing it portably means three implementations and a
+    /// permissions story, and every debugger's attach dialog is a list the
+    /// user searches for a number they already know.
+    pub fn attach(mut self: Pin<&mut Self>, pid: u32) -> ffi::FfiResult {
+        let Some(root) = current_project_root() else {
+            return no_project();
+        };
+        let settings = app_config::project_settings::load(&root).unwrap_or_default();
+        let toolchain = run_core::detect_toolchains(&root).first().copied();
+        let Some(adapter) = toolchain.and_then(|toolchain| {
+            dap_core::catalog::for_toolchain(
+                toolchain,
+                &settings.debug_adapters.unwrap_or_default(),
+            )
+        }) else {
+            return to_ffi_result(&DapError::NoAdapter("this project".to_string()));
+        };
+
+        let session_id = self.next_id.get() + 1;
+        self.next_id.set(session_id);
+        let qt_thread = self.as_mut().qt_thread();
+        let session = match DapSession::start(
+            &adapter,
+            Some(&root),
+            Box::new(QtListener {
+                session_id,
+                qt_thread: qt_thread.clone(),
+            }),
+        ) {
+            Ok(session) => session,
+            Err(err) => return to_ffi_result(&err),
+        };
+
+        self.sessions.borrow_mut().insert(
+            session_id,
+            SessionState {
+                session: Arc::clone(&session),
+                stopped_thread: 0,
+                current_frame: 0,
+                frames: Vec::new(),
+                threads: Vec::new(),
+                variables: HashMap::new(),
+            },
+        );
+        self.as_mut()
+            .debug_started(session_id, QString::from(format!("attach {pid}").as_str()));
+
+        let adapter_id = adapter.id.clone();
+        let breakpoints = self.breakpoints.borrow().clone();
+        std::thread::spawn(move || {
+            let result = (|| -> Result<(), DapError> {
+                session.initialize()?;
+                session.attach(dap_core::launch::attach_arguments(&adapter_id, pid))?;
+                session.wait_for_initialized(std::time::Duration::from_secs(10))?;
+                send_configuration(&session, &breakpoints);
+                session.configuration_done()
+            })();
+            if let Err(err) = result {
+                let failure = (err.code(), err.to_string());
+                let _ = qt_thread.queue(move |mut service: Pin<&mut ffi::DebugService>| {
+                    service.as_mut().debug_failed(
+                        session_id,
+                        ffi::FfiResult {
+                            code: failure.0,
+                            message: QString::from(failure.1.as_str()),
+                        },
+                    );
+                    service.as_mut().finish_session(session_id, -1);
+                });
+            }
+        });
+        ffi::FfiResult::default()
+    }
+
+    /// The exception filters this session's adapter offers, as
+    /// `id\tlabel\tenabled` lines (D4-3).
+    ///
+    /// Per adapter, not per language: which exceptions can be broken on is
+    /// something only the adapter knows, and it says so in its `initialize`
+    /// response. A view that hard-coded "caught" and "uncaught" would be
+    /// wrong for at least one of the three adapters shipped here.
+    pub fn exception_filters(&self, session_id: u64) -> QString {
+        let sessions = self.sessions.borrow();
+        let Some(state) = sessions.get(&session_id) else {
+            return QString::from("");
+        };
+        let enabled = self.breakpoints.borrow();
+        let lines: Vec<String> = state
+            .session
+            .capabilities()
+            .exception_filters
+            .iter()
+            .map(|(id, label)| {
+                let on = enabled.exception_filters().iter().any(|f| f == id);
+                format!("{id}\t{label}\t{on}")
+            })
+            .collect();
+        QString::from(lines.join("\n").as_str())
+    }
+
+    /// Break on this class of exception, or stop doing so (D4-3).
+    pub fn set_exception_filter(mut self: Pin<&mut Self>, filter: &QString, enabled: bool) {
+        self.breakpoints
+            .borrow_mut()
+            .set_exception_filter(&filter.to_string(), enabled);
+        self.as_mut().persist_breakpoints();
+
+        let filters = self.breakpoints.borrow().exception_arguments();
+        let sessions: Vec<Arc<DapSession>> = self
+            .sessions
+            .borrow()
+            .values()
+            .map(|state| Arc::clone(&state.session))
+            .collect();
+        for session in sessions {
+            let filters = filters.clone();
+            std::thread::spawn(move || {
+                let _ = session.request("setExceptionBreakpoints", json!({ "filters": filters }));
+            });
+        }
+        self.as_mut().breakpoints_changed();
+    }
+
+    /// Every running session, as `id\tlabel` lines — what the Debug dock's
+    /// session picker lists (D4-5).
+    pub fn sessions(&self) -> QString {
+        let lines: Vec<String> = self
+            .sessions
+            .borrow()
+            .keys()
+            .map(|id| format!("{id}\tSession {id}"))
+            .collect();
+        QString::from(lines.join("\n").as_str())
     }
 
     /// End a session: ask the adapter to stop the debuggee, then make sure
@@ -791,6 +996,14 @@ fn handshake(
     // (see `DapSession::launch`).
     session.launch(dap_core::launch::arguments(adapter_id, spec))?;
     session.wait_for_initialized(std::time::Duration::from_secs(10))?;
+    send_configuration(session, breakpoints);
+    session.configuration_done()
+}
+
+/// The breakpoints and exception filters a session starts with, sent between
+/// `initialized` and `configurationDone` — which is the window DAP gives for
+/// exactly this.
+fn send_configuration(session: &Arc<DapSession>, breakpoints: &BreakpointStore) {
     for path in breakpoints.files() {
         let _ = session.request(
             "setBreakpoints",
@@ -806,7 +1019,6 @@ fn handshake(
             json!({ "filters": breakpoints.exception_arguments() }),
         );
     }
-    session.configuration_done()
 }
 
 /// One evaluation, reduced to the string the view shows. A failed

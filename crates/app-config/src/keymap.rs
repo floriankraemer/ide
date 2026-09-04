@@ -585,6 +585,12 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "",
     },
     ActionDef {
+        id: "debug.attach",
+        label: "Attach to Process...",
+        category: "Debug",
+        default_shortcut: "",
+    },
+    ActionDef {
         id: "debug.toggleBreakpoint",
         label: "Toggle Breakpoint",
         category: "Debug",

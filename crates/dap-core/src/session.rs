@@ -165,12 +165,12 @@ impl DapSession {
                 "linesStartAt1": true,
                 "columnsStartAt1": true,
                 "pathFormat": "path",
-                // Deliberately *not* claiming `supportsRunInTerminalRequest`.
-                // An adapter that believes the client can start the debuggee
-                // will ask it to and then wait: debugpy's launcher timed out
-                // exactly that way when this was advertised without being
-                // implemented. Claim it in D1-6, when `run-core`'s console
-                // actually answers it.
+                // Claimed, and answered: `SessionListener::reverse_request`
+                // starts the program the adapter asks for and reports its
+                // process id (D1-6). The claim and the implementation have
+                // to move together — advertising this while answering with
+                // an empty body is what made debugpy's launcher time out.
+                "supportsRunInTerminalRequest": true,
             }),
         )?;
         let capabilities = Capabilities::from_body(&body);

@@ -7,12 +7,14 @@
 #include "DockManager.h"
 #include "DockWidget.h"
 
+#include <QComboBox>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPlainTextEdit>
 #include <QScrollBar>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -48,7 +50,14 @@ DebugPanel::DebugPanel(DebugService *debugService, QWidget *parent)
     stepIntoButton_ = makeButton(tr("Into"), tr("Step Into"), this);
     stepOutButton_ = makeButton(tr("Out"), tr("Step Out"), this);
 
+    // D4-5: several sessions can run at once — a debugged test suite while
+    // a server stays suspended — so which one the views show is a choice,
+    // not an assumption.
+    sessionPicker_ = new QComboBox(this);
+    sessionPicker_->setMinimumWidth(120);
+
     auto *toolbar = new QHBoxLayout();
+    toolbar->addWidget(sessionPicker_);
     for (QToolButton *button :
          {resumeButton_, pauseButton_, stepOverButton_, stepIntoButton_, stepOutButton_,
           stopButton_}) {
@@ -96,6 +105,16 @@ DebugPanel::DebugPanel(DebugService *debugService, QWidget *parent)
     layout->addLayout(toolbar);
     layout->addWidget(splitter, 1);
 
+    connect(sessionPicker_, &QComboBox::currentIndexChanged, this, [this](int index) {
+        if (index < 0) {
+            return;
+        }
+        const quint64 chosen = sessionPicker_->itemData(index).toULongLong();
+        if (chosen != 0 && chosen != sessionId_) {
+            sessionId_ = chosen;
+            refreshFrames();
+        }
+    });
     connect(resumeButton_, &QToolButton::clicked, this, &DebugPanel::resume);
     connect(pauseButton_, &QToolButton::clicked, this, &DebugPanel::pause);
     connect(stopButton_, &QToolButton::clicked, this, &DebugPanel::stopSession);
@@ -194,6 +213,7 @@ void DebugPanel::onStarted(quint64 sessionId, const QString &configId)
     variables_->clear();
     setRunning(true);
     stopButton_->setEnabled(true);
+    refreshSessions();
     e2eMark(QStringLiteral("{\"ev\":\"debug_started\",\"session_id\":%1}").arg(sessionId));
 }
 
@@ -232,6 +252,7 @@ void DebugPanel::onTerminated(quint64 sessionId, int exitCode)
         button->setEnabled(false);
     }
     console_->appendPlainText(tr("Process finished with exit code %1").arg(exitCode));
+    refreshSessions();
     e2eMark(QStringLiteral("{\"ev\":\"debug_terminated\",\"session_id\":%1,\"exit_code\":%2}")
               .arg(sessionId)
               .arg(exitCode));
@@ -318,6 +339,23 @@ void DebugPanel::onVariablesChanged(quint64 sessionId, qint64 reference)
 void DebugPanel::onWatchesChanged()
 {
     refreshWatches();
+}
+
+void DebugPanel::refreshSessions()
+{
+    const QSignalBlocker blocker(sessionPicker_);
+    sessionPicker_->clear();
+    for (const QString &line :
+         debugService_->sessions().split(QLatin1Char('\n'), Qt::SkipEmptyParts)) {
+        const QStringList parts = line.split(QLatin1Char('\t'));
+        if (parts.size() < 2) {
+            continue;
+        }
+        sessionPicker_->addItem(parts.at(1), parts.at(0).toULongLong());
+        if (parts.at(0).toULongLong() == sessionId_) {
+            sessionPicker_->setCurrentIndex(sessionPicker_->count() - 1);
+        }
+    }
 }
 
 void DebugPanel::refreshFrames()

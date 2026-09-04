@@ -160,6 +160,15 @@ impl Supervisor {
     }
 
     /// Whether `id` is still tracked (launched and not yet stopped/reaped).
+    /// The operating system's id for `id`'s process.
+    ///
+    /// Needed by exactly one caller: a debug adapter that asked the client
+    /// to start the debuggee (`runInTerminal`) has to be told which process
+    /// to attach to, and the answer is the pid (D1-6).
+    pub fn process_id(&self, id: ConsoleId) -> Option<u32> {
+        self.consoles.get(&id)?.pty_session.process_id()
+    }
+
     /// Block until `id`'s process has exited, and report its exit code.
     ///
     /// [`Supervisor::exit_code`] asks without waiting, which is what a
@@ -367,6 +376,22 @@ mod tests {
         let mut supervisor = Supervisor::new();
         let result = supervisor.stop(ConsoleId(999));
         assert!(matches!(result, Err(RunError::UnknownConsole)));
+    }
+
+    #[test]
+    fn a_running_console_reports_a_process_id_and_an_unknown_one_reports_none() {
+        let mut supervisor = Supervisor::new();
+        let spec = LaunchSpec {
+            program: "sh".into(),
+            args: vec!["-c".into(), "sleep 1".into()],
+            cwd: Some(std::env::temp_dir()),
+            env: Vec::new(),
+            console: ConsoleKind::Pty,
+        };
+        let id = supervisor.launch("pid", &spec).unwrap();
+        assert!(supervisor.process_id(id).is_some());
+        assert!(supervisor.process_id(ConsoleId(99)).is_none());
+        let _ = supervisor.stop(id);
     }
 
     #[test]

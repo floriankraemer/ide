@@ -5468,6 +5468,30 @@ mod ffi {
         #[qinvokable]
         fn debug(self: Pin<&mut DebugService>, config_id: &QString) -> FfiResult;
 
+        /// Attach to a process that is already running (D4-1). The pid is
+        /// the user's: this IDE does not enumerate processes, because doing
+        /// it portably is three implementations and a permissions story for
+        /// a number the user already knows.
+        #[qinvokable]
+        fn attach(self: Pin<&mut DebugService>, pid: u32) -> FfiResult;
+
+        /// The exception filters this session's adapter offers, as
+        /// `id\tlabel\tenabled` lines. Per adapter, because which
+        /// exceptions can be broken on is something only the adapter knows.
+        #[qinvokable]
+        #[cxx_name = "exceptionFilters"]
+        fn exception_filters(self: &DebugService, session_id: u64) -> QString;
+
+        /// Break on this class of exception, or stop doing so.
+        #[qinvokable]
+        #[cxx_name = "setExceptionFilter"]
+        fn set_exception_filter(self: Pin<&mut DebugService>, filter: &QString, enabled: bool);
+
+        /// Every running session, as `id\tlabel` lines — the Debug dock's
+        /// session picker (D4-5).
+        #[qinvokable]
+        fn sessions(self: &DebugService) -> QString;
+
         /// End the session: the adapter is asked to stop the debuggee, then
         /// killed if it does not.
         #[qinvokable]
