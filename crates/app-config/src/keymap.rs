@@ -411,6 +411,20 @@ pub const ACTIONS: &[ActionDef] = &[
         category: "Navigate",
         default_shortcut: "Ctrl+Alt+U",
     },
+    // C11-followup: call/type hierarchy dock. JetBrains' own defaults —
+    // Ctrl+Alt+H for the call hierarchy, Ctrl+H for the type hierarchy.
+    ActionDef {
+        id: "navigate.showCallHierarchy",
+        label: "Show Call Hierarchy",
+        category: "Navigate",
+        default_shortcut: "Ctrl+Alt+H",
+    },
+    ActionDef {
+        id: "navigate.showTypeHierarchy",
+        label: "Show Type Hierarchy",
+        category: "Navigate",
+        default_shortcut: "Ctrl+H",
+    },
     ActionDef {
         id: "navigate.back",
         label: "Back",

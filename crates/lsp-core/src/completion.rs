@@ -13,6 +13,8 @@ use std::str::Chars;
 
 use serde_json::Value;
 
+use crate::manager::{position_params, LspError, COMPLETION_TIMEOUT, DEFAULT_REQUEST_TIMEOUT};
+
 /// How many identifier characters must be typed before completion is asked
 /// for unprompted. One character matches nearly everything the server knows,
 /// so the popup would be noise; two is enough to be a guess.
@@ -549,6 +551,57 @@ impl CompletionResolveTracker {
     /// Is this response still the current one?
     pub fn accept(&self, token: u64) -> bool {
         self.0.accept(token)
+    }
+}
+
+// C4-followup (#162): request-sending `LspManager` methods for this feature, moved out of
+// `manager.rs` once it crossed the file-size ceiling. This file already held the
+// parse/rule layer; this is the request-sending half `manager.rs`'s own module doc
+// pointed callers to.
+impl crate::manager::LspManager {
+    /// `textDocument/completion` for a position in an open document, parsed
+    /// across both response shapes. Ordering and filtering are the caller's
+    /// next step ([`crate::completion::filter`]), not the manager's.
+    pub fn completion(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<CompletionList, LspError> {
+        let language_id = self.language_of(uri)?;
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/completion",
+            position_params(uri, line, character),
+            COMPLETION_TIMEOUT,
+        )?;
+        Ok(parse_completion(&result))
+    }
+    /// `completionItem/resolve`: ask the server to fill in what it left out
+    /// of the initial list — most importantly `additionalTextEdits`, the
+    /// `using` an unimported type's completion brings with it (C7).
+    ///
+    /// `item` is sent back exactly as the server gave it
+    /// ([`CompletionItem::raw`]); the protocol's own contract for this
+    /// request is "the item you handed me", not a reconstruction from the
+    /// reduced fields the rest of this client works with.
+    ///
+    /// Whether it is worth calling at all — [`LspEvent::ServerReady::completion_resolve_supported`]
+    /// — is the caller's decision, not this method's: a server that never
+    /// advertised `resolveProvider` is never asked, so this sends the
+    /// request unconditionally on the assumption that check already
+    /// happened.
+    pub fn resolve_completion_item(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Value, LspError> {
+        self.request_with_timeout(
+            language_id,
+            "completionItem/resolve",
+            item.clone(),
+            DEFAULT_REQUEST_TIMEOUT,
+        )
     }
 }
 

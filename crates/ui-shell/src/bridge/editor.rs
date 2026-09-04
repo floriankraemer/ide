@@ -221,6 +221,16 @@ impl ffi::DocumentManager {
             .unwrap_or_default()
     }
 
+    /// C12-followup: whether `tab_id` is read-only (a virtual document, a
+    /// binary tab, or a diff tab) — `false` for an unknown tab, matching
+    /// every other `tab_id`-keyed accessor's "not found" answer.
+    pub fn tab_is_read_only(&self, tab_id: u64) -> bool {
+        self.session
+            .borrow()
+            .tab_is_read_only(TabId::from_raw(tab_id))
+            .unwrap_or(false)
+    }
+
     pub fn tab_file_name(&self, tab_id: u64) -> QString {
         self.session
             .borrow()

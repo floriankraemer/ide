@@ -115,6 +115,19 @@ struct InlayHintSpan
     bool paddingRight;
 };
 
+// One code lens (C10-followup), 1:1 with `FfiCodeLens` — `line` is a
+// 0-based block number, matching every other LSP-sourced line this widget
+// already takes (see InlayHintSpan's own `position`, resolved the same
+// way). `clickable` is false for a lens the server hasn't resolved a
+// command for yet (`lsp_core::CodeLensItem::needs_resolve`); it still
+// paints, since its range is real even before its label is.
+struct CodeLensSpan
+{
+    int line;
+    QString label;
+    bool clickable;
+};
+
 // One classified space/tab character (show-whitespace-characters task),
 // view-local for the same reason FoldRange and DiagnosticSpan are:
 // converted from FfiWhitespaceSpan by whoever owns the mapping (EditorTabs),
@@ -269,6 +282,12 @@ public:
     void setInlayHints(const QVector<InlayHintSpan> &hints);
     void setInlayHintsEnabled(bool enabled);
     bool inlayHintsEnabled() const { return inlayHintsEnabled_; }
+
+    // C10-followup: the code lens strip for this document's whole visible
+    // range. Always on, unlike inlay hints — a lens is a fetched fact
+    // ("3 references", "Run Test"), not a guess the editor is inventing
+    // inline with the code.
+    void setCodeLenses(const QVector<CodeLensSpan> &lenses);
 
     // Show-whitespace-characters task: what to paint. `paintEvent` re-asks
     // `whitespaceClassifier_` for the visible blocks whenever the document
@@ -452,6 +471,11 @@ signals:
     // R1-7: the gutter's Run icon was clicked. What that runs is
     // EditorTabs's business, via `RunService::runContext`.
     void runRequested();
+    // C10-followup: a click landed on lens `index` (into the last vector
+    // `setCodeLenses` was given). Only ever emitted for a `clickable` one —
+    // running it, and what its answer means, is EditorTabs's job via
+    // `LanguageService::runCodeLens`.
+    void codeLensClicked(int index);
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -567,6 +591,12 @@ private:
     QVector<OccurrenceSpan> occurrenceSpans_;
     QVector<InlayHintSpan> inlayHints_;
     bool inlayHintsEnabled_ = false;
+    QVector<CodeLensSpan> codeLenses_;
+    // Screen rects the last paintEvent drew each of codeLenses_'s clickable
+    // entries at, parallel to codeLenses_ by index — mousePressEvent hit-
+    // tests against this rather than recomputing layout, the same
+    // paint-then-hit-test split the gutter's change-marker strip uses.
+    QHash<int, QRect> codeLensClickRects_;
     WhitespaceOptions whitespaceOptions_;
     WhitespaceClassifier whitespaceClassifier_;
     // Simple "recompute if the document revision or the visible block
