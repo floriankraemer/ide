@@ -10,6 +10,8 @@
 
 use serde_json::Value;
 
+use crate::manager::{position_params, LspError, HOVER_TIMEOUT};
+
 /// Hover text as the server sent it, normalised to one string.
 ///
 /// `markdown` distinguishes `MarkupContent { kind: "plaintext" }` (which must
@@ -224,6 +226,31 @@ impl HoverTracker {
     /// Is this response still the current one?
     pub fn accept(&self, token: u64) -> bool {
         self.0.accept(token)
+    }
+}
+
+// C4-followup (#162): request-sending `LspManager` methods for this feature, moved out of
+// `manager.rs` once it crossed the file-size ceiling. This file already held the
+// parse/rule layer; this is the request-sending half `manager.rs`'s own module doc
+// pointed callers to.
+impl crate::manager::LspManager {
+    /// `textDocument/hover` for a position in an open document, already
+    /// reduced to the one text the tooltip shows. `Ok(None)` means the server
+    /// has nothing to say here, which is not an error.
+    pub fn hover(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Option<HoverText>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/hover",
+            position_params(uri, line, character),
+            HOVER_TIMEOUT,
+        )?;
+        Ok(parse_hover(&result))
     }
 }
 

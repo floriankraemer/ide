@@ -161,6 +161,29 @@ rust::Box<SyntaxHighlighterHandle> makeHighlighter(const QString &fileName)
 
 } // namespace
 
+void SyntaxHighlighter::applySemanticTokens(const rust::Vec<FfiHighlightSpan> &semantic)
+{
+    if (!hasParsedOnce_) {
+        // Nothing has been parsed for this revision yet — the next
+        // highlightBlock() will set_text() and there is nothing to
+        // overlay onto.
+        return;
+    }
+    const rust::Vec<FfiHighlightSpan> merged = highlighter_->overlay_semantic_tokens(semantic);
+
+    cachedSpans_.clear();
+    cachedSpans_.reserve(static_cast<int>(merged.size()));
+    cachedSpanMaxEnd_.clear();
+    cachedSpanMaxEnd_.reserve(merged.size());
+    std::size_t maxEnd = 0;
+    for (const auto &span : merged) {
+        cachedSpans_.append(span);
+        maxEnd = std::max(maxEnd, span.end);
+        cachedSpanMaxEnd_.push_back(maxEnd);
+    }
+    rehighlight();
+}
+
 SyntaxHighlighter::SyntaxHighlighter(QTextDocument *document, QString fileName,
                                       CodeEditor *editor)
   : QSyntaxHighlighter(document)
