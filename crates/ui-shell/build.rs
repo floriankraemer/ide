@@ -306,6 +306,7 @@ fn main() {
         // signals or slots of their own), so only the sources are listed.
         .cpp_file("cpp/class_view_panel.cpp")
         .cpp_file("cpp/find_usages_panel.cpp")
+        .cpp_file("cpp/hierarchy_panel.cpp")
         .cpp_file("cpp/ide_main_window.cpp")
         // The refactoring and Go-to-Declaration controllers, likewise
         // Q_OBJECT-free: they subclass QObject for parent ownership and

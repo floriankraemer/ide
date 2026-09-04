@@ -57,6 +57,18 @@ public:
     // until the tab is reopened. Follow with rehighlight().
     void reloadLanguage();
 
+    // C9-followup: overlays `semantic` — a server's freshly decoded
+    // semantic-token spans for this document — onto the tree-sitter spans
+    // from the last set_text/apply_edit, and repaints from the merged
+    // result. `semantic` is dropped again on the next revision reparse
+    // (the caller re-requests tokens on every debounced change, matching
+    // how the tree-sitter spans themselves are only ever current for one
+    // revision) — this only makes the *current* revision's colouring
+    // match what the server actually resolved instead of tree-sitter's
+    // guess (F0-16: never worse than tree-sitter alone, since the merge
+    // keeps tree-sitter wherever semantic doesn't cover).
+    void applySemanticTokens(const rust::Vec<FfiHighlightSpan> &semantic);
+
 protected:
     void highlightBlock(const QString &text) override;
 

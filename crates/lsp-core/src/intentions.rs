@@ -16,7 +16,8 @@
 
 use serde_json::Value;
 
-use crate::code_action::{kind_matches, CodeActionItem};
+use crate::code_action::{filter_by_kind, kind_matches, needs_unfiltered_retry, CodeActionItem};
+use crate::manager::{LspError, INTENTION_TIMEOUT, REFACTOR_TIMEOUT};
 
 /// Which section of the popup an action belongs in.
 ///
@@ -231,6 +232,74 @@ const UNRESOLVED_MESSAGES: &[&str] = &[
     "unresolved",
     "not found in this scope",
 ];
+
+// C4-followup (#162): request-sending `LspManager` methods for this feature, moved out of
+// `manager.rs` once it crossed the file-size ceiling. This file already held the
+// parse/rule layer; this is the request-sending half `manager.rs`'s own module doc
+// pointed callers to.
+impl crate::manager::LspManager {
+    /// Everything that can be done at the caret: the list Alt+Enter shows.
+    ///
+    /// Two requests, merged by [`crate::intentions::assemble`] — one scoped
+    /// to `diagnostics` (the diagnostics under the caret, handed back
+    /// verbatim as the protocol requires) and one to the range alone. A
+    /// quick fix for the error under the cursor and a refactoring available
+    /// at that position are both "things I can do here", and the user should
+    /// not have to choose which kind they meant before asking.
+    ///
+    /// Neither request carries an `only` filter, so there is nothing for
+    /// [`crate::code_action::needs_unfiltered_retry`] to retry: an empty
+    /// answer to an unfiltered request really does mean the server has
+    /// nothing. The retry exists for [`Self::organize_imports`], which does
+    /// filter.
+    ///
+    /// A failure of the diagnostic-scoped request is not a failure of the
+    /// whole list — a server that rejects a diagnostic payload it does not
+    /// recognise should still get to offer its refactorings — so only the
+    /// range-scoped request can fail this method.
+    pub fn intentions(
+        &self,
+        uri: &str,
+        start: (u32, u32),
+        end: (u32, u32),
+        diagnostics: &[Value],
+    ) -> Result<Vec<Intention>, LspError> {
+        let diagnostic_scoped = if diagnostics.is_empty() {
+            Vec::new()
+        } else {
+            self.code_action_scoped(uri, start, end, &[], diagnostics, INTENTION_TIMEOUT)
+                .unwrap_or_default()
+        };
+        let range_scoped = self.code_action_scoped(uri, start, end, &[], &[], INTENTION_TIMEOUT)?;
+        Ok(assemble(&diagnostic_scoped, &range_scoped))
+    }
+    /// The `source.organizeImports` action for a whole document, if the
+    /// server has one.
+    ///
+    /// Asked with an `only` filter first, because a whole-document code
+    /// action request is expensive and there is exactly one action wanted.
+    /// An empty answer to that filtered request proves nothing — servers
+    /// disagree about whether `only` is a filter or a hint, and some answer
+    /// nothing at all for a kind they do not recognise — so
+    /// [`crate::code_action::needs_unfiltered_retry`] sends it again
+    /// unfiltered and the taxonomy is applied here, where it is understood.
+    pub fn organize_imports(
+        &self,
+        uri: &str,
+        last_line: u32,
+    ) -> Result<Option<CodeActionItem>, LspError> {
+        let (start, end) = ((0, 0), (last_line, u32::MAX));
+        let filtered =
+            self.code_action_scoped(uri, start, end, &[ORGANIZE_IMPORTS], &[], REFACTOR_TIMEOUT)?;
+        let items = if needs_unfiltered_retry(&filtered) {
+            let all = self.code_action_scoped(uri, start, end, &[], &[], REFACTOR_TIMEOUT)?;
+            filter_by_kind(&all, ORGANIZE_IMPORTS)
+        } else {
+            filter_by_kind(&filtered, ORGANIZE_IMPORTS)
+        };
+        Ok(items.into_iter().next())
+    }
+}
 
 #[cfg(test)]
 mod tests {
