@@ -47,7 +47,7 @@ ADR numbers 0006 and 0013–0015 were never used; the gaps are historical and in
 
 ## Plans
 
-All plan documents are complete except the next-five-features plan and the plugin-host-and-icon-themes plan, which are the two currently being delivered; the rest remain as historical records of how each feature phase was delivered.
+All plan documents are complete except the plugin-host-and-icon-themes plan and the run-build-debug parity plan, which are the two currently being delivered; the rest remain as historical records of how each feature phase was delivered.
 (An earlier version of this line called the index-performance and large-files plans incomplete. Both of their Progress tables are fully `done`; the claim was stale.)
 
 - [MVP implementation plan](architecture/mvp-implementation-plan.md) — MVP editor shell; marked historical.
@@ -62,6 +62,7 @@ All plan documents are complete except the next-five-features plan and the plugi
 - [Large files and the binary viewer plan](architecture/large-files-and-binary-viewer-plan.md) — no-wrap default, highlighting size ceilings, O(1) fold lookup, read-only hex view for binary files.
 - [Next five features plan](architecture/next-five-features-plan.md) — the current roadmap: verification foundation, editor ergonomics, Alt+Enter intentions, Git v1, run configurations. Carries the living Progress table.
 - [Plugin host and icon themes plan](architecture/plugin-host-and-icon-themes-plan.md) — a two-tier plugin host and the Material icon themes built on it; in delivery, carries its own Progress table.
+- [Run, build and debug parity plan](architecture/run-build-debug-parity-plan.md) — IntelliJ-parity roadmap for running, compiling and debugging: typed run configurations, a delegated build with parsed diagnostics, and a DAP debugger; in delivery, carries its own Progress table.
 - [Markdown and Mermaid preview plan](architecture/markdown-preview-plan.md) — the plugin host's third contribution point and its first content-returning wasm export; comrak + merman + resvg rendering.
 
 - [LSP conformance](architecture/lsp-conformance.md) — checking the LSP client against a real rust-analyzer; the executable expectations file and why it is not a per-PR gate.
