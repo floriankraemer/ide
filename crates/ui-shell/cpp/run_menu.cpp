@@ -4,6 +4,8 @@
 #include "e2e_mark.h"
 #include "keymap_page.h"
 #include "run_config_dialog.h"
+#include "code_editor.h"
+#include "editor_tabs.h"
 #include "run_console_panel.h"
 
 #include <QAction>
@@ -16,7 +18,7 @@ namespace ui_shell {
 void buildRunMenu(QMainWindow *window, RunService *runService, RunConfigEditor *runConfigEditor,
                    AppSettings *appSettings, QHash<QString, QAction *> &actions,
                    DockRegistry *docks, RunConsolePanel *runConsolePanel,
-                   ProjectTreeModel *treeModel, QMenu *viewMenu)
+                   ProjectTreeModel *treeModel, EditorTabs *editorTabs, QMenu *viewMenu)
 {
     // Detect run configurations (Cargo.toml, package.json, Makefile) the
     // moment a project opens, same lifecycle hook LanguageService and the
@@ -47,6 +49,15 @@ void buildRunMenu(QMainWindow *window, RunService *runService, RunConfigEditor *
                                         appSettings, actions);
     QObject::connect(runAction, &QAction::triggered, runConsolePanel,
                       [runConsolePanel]() { runConsolePanel->runSelected(); });
+
+    // IntelliJ's "run context configuration": run whatever the focused
+    // editor's file is, the keyboard door onto the same gutter icon
+    // `editor_tabs_run.cpp` wires up.
+    QAction *runContextAction = registerAction(runMenu, QStringLiteral("run.runContext"),
+                                                QObject::tr("Run File"), appSettings, actions);
+    QObject::connect(runContextAction, &QAction::triggered, editorTabs, [editorTabs]() {
+        editorTabs->requestRunFor(qobject_cast<CodeEditor *>(editorTabs->currentEditor()));
+    });
 
     QAction *stopAction = registerAction(runMenu, QStringLiteral("run.stop"), QObject::tr("Stop"),
                                          appSettings, actions);

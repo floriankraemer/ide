@@ -32,7 +32,7 @@
 //! `move` into the worker thread's closure below, not asserted separately.
 
 use std::cell::RefCell;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::mpsc::Sender;
 
@@ -266,6 +266,20 @@ fn env_from_string(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
+fn no_project() -> ffi::FfiResult {
+    ffi::FfiResult {
+        code: errors::CODE_NO_PROJECT,
+        message: QString::from("no project is open"),
+    }
+}
+
+fn unknown_run_config(message: &str) -> ffi::FfiResult {
+    ffi::FfiResult {
+        code: errors::CODE_UNKNOWN_RUN_CONFIG,
+        message: QString::from(message),
+    }
+}
+
 fn to_ffi_run_config(config: &run_core::RunConfig) -> ffi::FfiRunConfig {
     ffi::FfiRunConfig {
         id: QString::from(config.id.as_str()),
@@ -274,6 +288,10 @@ fn to_ffi_run_config(config: &run_core::RunConfig) -> ffi::FfiRunConfig {
         args: QString::from(config.args.join(" ").as_str()),
         cwd: QString::from(config.cwd.clone().unwrap_or_default().as_str()),
         env: QString::from(env_to_string(&config.env).as_str()),
+        toolchain: QString::from(config.toolchain.clone().unwrap_or_default().as_str()),
+        target: QString::from(config.target.clone().unwrap_or_default().as_str()),
+        temporary: config.temporary,
+        allow_parallel: config.allow_parallel,
     }
 }
 
@@ -498,23 +516,83 @@ impl ffi::RunService {
     pub fn run(mut self: Pin<&mut Self>, config_id: &QString) -> ffi::FfiResult {
         let config_id = config_id.to_string();
         let Some(root) = current_project_root() else {
-            return ffi::FfiResult {
-                code: errors::CODE_NO_PROJECT,
-                message: QString::from("no project is open"),
-            };
+            return no_project();
         };
         let configs = app_config::project_settings::load(&root)
             .unwrap_or_default()
             .run_configs
             .unwrap_or_default();
         let Some(config) = configs.into_iter().find(|c| c.id == config_id) else {
-            return ffi::FfiResult {
-                code: errors::CODE_UNKNOWN_RUN_CONFIG,
-                message: QString::from("unknown run configuration"),
-            };
+            return unknown_run_config("unknown run configuration");
         };
 
-        let mut spec = config.to_launch_spec(&root);
+        let context = run_core::MacroContext::for_project(&root);
+        self.as_mut().launch(config, &root, &context)
+    }
+
+    pub fn can_run_file(&self, path: &QString) -> bool {
+        let Some(root) = current_project_root() else {
+            return false;
+        };
+        run_core::config_for_file(&root, Path::new(&path.to_string())).is_some()
+    }
+
+    pub fn run_context(mut self: Pin<&mut Self>, path: &QString) -> ffi::FfiResult {
+        let Some(root) = current_project_root() else {
+            return no_project();
+        };
+        let file = PathBuf::from(path.to_string());
+        let Some(config) = run_core::config_for_file(&root, &file) else {
+            return unknown_run_config("this file has no run target");
+        };
+
+        // Persist before launching: the toolbar's combo, the console tab and
+        // a later rerun all key on a configuration the settings file knows
+        // about, so a temporary one that never reached disk would run once
+        // and then be unrerunnable.
+        let remembered = {
+            let config = config.clone();
+            app_config::project_settings::update(&root, move |settings| {
+                let mut configs = settings.run_configs.clone().unwrap_or_default();
+                run_core::remember_temporary(&mut configs, config.clone());
+                settings.run_configs = Some(configs);
+            })
+        };
+        if remembered.is_ok() {
+            self.as_mut().configurations_changed();
+        }
+
+        let context = run_core::MacroContext::for_file(&root, &file);
+        self.as_mut().launch(config, &root, &context)
+    }
+
+    /// Launch `config`, honouring its parallel-run policy: unless the
+    /// configuration allows parallel runs, its still-running consoles are
+    /// stopped first, which is IntelliJ's default ("Allow multiple
+    /// instances" off) and the reason a second Run does not quietly leave
+    /// two servers holding the same port.
+    fn launch(
+        mut self: Pin<&mut Self>,
+        config: run_core::RunConfig,
+        root: &Path,
+        context: &run_core::MacroContext,
+    ) -> ffi::FfiResult {
+        let config_id = config.id.clone();
+        if !config.allow_parallel {
+            let running: Vec<u64> = self
+                .consoles
+                .borrow()
+                .iter()
+                .filter(|(_, state)| !state.finished && state.config_id == config_id)
+                .map(|(id, _)| *id)
+                .collect();
+            for console_id in running {
+                self.as_mut().stop(console_id);
+            }
+        }
+
+        let root = root.to_path_buf();
+        let mut spec = config.to_launch_spec_in(context);
         let cwd = spec.cwd.clone().unwrap_or_else(|| root.clone());
         // `to_launch_spec` leaves `cwd` as `None` for a configuration with
         // no explicit working directory (`run_core::config::to_launch_spec`

@@ -853,6 +853,8 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
     applyDiagnostics();
     requestInlayHintsFor(editor);
     requestHunksFor(editor);
+    refreshRunMarker(editor);
+    connect(editor, &CodeEditor::runRequested, this, [this, editor]() { requestRunFor(editor); });
     requestSemanticTokensFor(editor);
     requestCodeLensesFor(editor);
 }

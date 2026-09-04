@@ -546,6 +546,12 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "Shift+F10",
     },
     ActionDef {
+        id: "run.runContext",
+        label: "Run File",
+        category: "Run",
+        default_shortcut: "Ctrl+Shift+F10",
+    },
+    ActionDef {
         id: "run.stop",
         label: "Stop",
         category: "Run",

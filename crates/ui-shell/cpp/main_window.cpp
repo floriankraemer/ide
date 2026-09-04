@@ -672,6 +672,7 @@ void buildMainWindow(AppSettings *appSettings,
                           previewProvider);
     EditorTabs *editorTabs = central.editorTabs;
     wireVcsService(vcsService, treeModel, editorTabs); // F3-12a/F3-16
+    wireRunService(runService, editorTabs);             // R1-7
 
     // Every path that shows the AI chat goes through here — see
     // DockRegistry::show (dock_layout.h) for why "re-add if homeless" runs
@@ -988,7 +989,7 @@ void buildMainWindow(AppSettings *appSettings,
     buildVcsMenu(window, vcsService, appSettings, *actions, editorTabs, central.docks,
                  central.fileHistoryPanel, viewMenu);
     buildRunMenu(window, runService, runConfigEditor, appSettings, *actions, central.docks,
-                 central.runConsolePanel, treeModel, viewMenu);
+                 central.runConsolePanel, treeModel, editorTabs, viewMenu);
 
     buildNavigateMenu(window, languageService, searchModel, editorTabs, appSettings, *actions,
                        central.docks, central.findUsagesPanel, central.hierarchyPanel);

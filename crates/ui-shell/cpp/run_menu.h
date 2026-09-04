@@ -12,6 +12,7 @@ class QMenu;
 namespace ui_shell {
 
 class DockRegistry;
+class EditorTabs;
 class RunConsolePanel;
 
 // F4-12: the "&Run" menu (`run.run`/`run.stop`/`run.rerun`/
@@ -29,6 +30,6 @@ class RunConsolePanel;
 void buildRunMenu(QMainWindow *window, RunService *runService, RunConfigEditor *runConfigEditor,
                    AppSettings *appSettings, QHash<QString, QAction *> &actions,
                    DockRegistry *docks, RunConsolePanel *runConsolePanel,
-                   ProjectTreeModel *treeModel, QMenu *viewMenu);
+                   ProjectTreeModel *treeModel, EditorTabs *editorTabs, QMenu *viewMenu);
 
 } // namespace ui_shell
