@@ -11,7 +11,11 @@
 //! same shape `syntax_core::Scope::resolve` uses for capture names — and
 //! never an equality test against a hardcoded list.
 
-use serde_json::Value;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+
+use crate::manager::{LspError, REFACTOR_TIMEOUT};
 
 /// A `Command`: something the server does itself when asked, rather than an
 /// edit it hands over.
@@ -204,6 +208,102 @@ pub fn filter_by_kind(items: &[CodeActionItem], filter: &str) -> Vec<CodeActionI
 /// it stands.
 pub fn needs_unfiltered_retry(filtered: &[CodeActionItem]) -> bool {
     filtered.is_empty()
+}
+
+// C4-followup (#162): request-sending `LspManager` methods for this feature, moved out of
+// `manager.rs` once it crossed the file-size ceiling. This file already held the
+// parse/rule layer; this is the request-sending half `manager.rs`'s own module doc
+// pointed callers to.
+impl crate::manager::LspManager {
+    /// `textDocument/codeAction` for a range of an open document.
+    ///
+    /// `only` narrows the request to a kind family (`refactor.extract`), or
+    /// is empty for "everything you have". It is only ever a hint — see
+    /// [`crate::code_action::needs_unfiltered_retry`] for what an empty
+    /// answer to a filtered request does and does not prove.
+    pub fn code_action(
+        &self,
+        uri: &str,
+        start: (u32, u32),
+        end: (u32, u32),
+        only: &[&str],
+    ) -> Result<Vec<CodeActionItem>, LspError> {
+        self.code_action_scoped(uri, start, end, only, &[], REFACTOR_TIMEOUT)
+    }
+    /// One `textDocument/codeAction` request, with both of the things that
+    /// scope it: a kind filter and the diagnostics the answer should address.
+    ///
+    /// Handing the diagnostics back in `context.diagnostics` is not optional
+    /// decoration — several servers return their quick fixes *only* for
+    /// diagnostics they were given, because a fix is computed from the
+    /// diagnostic's own `data`.
+    pub(crate) fn code_action_scoped(
+        &self,
+        uri: &str,
+        start: (u32, u32),
+        end: (u32, u32),
+        only: &[&str],
+        diagnostics: &[Value],
+        timeout: Duration,
+    ) -> Result<Vec<CodeActionItem>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let mut context = json!({"diagnostics": diagnostics});
+        if !only.is_empty() {
+            context["only"] = json!(only);
+        }
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/codeAction",
+            json!({
+                "textDocument": {"uri": uri},
+                "range": {
+                    "start": {"line": start.0, "character": start.1},
+                    "end": {"line": end.0, "character": end.1},
+                },
+                "context": context,
+            }),
+            timeout,
+        )?;
+        Ok(parse_code_actions(&result))
+    }
+    /// `codeAction/resolve` for an item the server sent without an edit.
+    ///
+    /// The item goes back exactly as it arrived — its `data` is the server's
+    /// own bookkeeping, and editing it would break the round trip.
+    pub fn resolve_code_action(
+        &self,
+        language_id: &str,
+        item: &CodeActionItem,
+    ) -> Result<Vec<CodeActionItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "codeAction/resolve",
+            item.raw.clone(),
+            REFACTOR_TIMEOUT,
+        )?;
+        Ok(parse_code_actions(&json!([result])))
+    }
+    /// `workspace/executeCommand`: ask the server to carry out a command a
+    /// code action or a code lens (C10) named — both hand this the same
+    /// [`CommandRef`], so there is exactly one execution path for either.
+    ///
+    /// This is the request during which a server may ask us to apply an edit
+    /// (`crate::apply_edit`), so the caller must be holding a
+    /// [`LspManager::begin_refactor`] guard — without one the edit that
+    /// results is refused as unsolicited, and the refactoring quietly does
+    /// nothing.
+    pub fn execute_command(
+        &self,
+        language_id: &str,
+        command: &CommandRef,
+    ) -> Result<Value, LspError> {
+        self.request_with_timeout(
+            language_id,
+            "workspace/executeCommand",
+            json!({"command": command.command, "arguments": command.arguments}),
+            REFACTOR_TIMEOUT,
+        )
+    }
 }
 
 #[cfg(test)]

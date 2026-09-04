@@ -25,10 +25,10 @@
 //! function exactly what step 5 asks for: Qt-free and unit-testable with no
 //! LSP process and no index running, because every input is already computed.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use crate::completion::TextRange;
-use crate::manager::LspError;
+use crate::manager::{position_params, LspError, HIERARCHY_TIMEOUT};
 
 /// One entry of a call-hierarchy or type-hierarchy response. The two LSP
 /// types are structurally identical, so this is shared rather than
@@ -184,6 +184,124 @@ pub fn type_hierarchy_outcome(
     match response {
         Some(Ok(items)) if !items.is_empty() => TypeHierarchyOutcome::Lsp(items),
         _ => TypeHierarchyOutcome::Index(index_fallback),
+    }
+}
+
+// C4-followup (#162): request-sending `LspManager` methods for this feature, moved out of
+// `manager.rs` once it crossed the file-size ceiling. This file already held the
+// parse/rule layer; this is the request-sending half `manager.rs`'s own module doc
+// pointed callers to.
+impl crate::manager::LspManager {
+    /// `textDocument/prepareCallHierarchy`: the call-hierarchy item(s) at a
+    /// position, the starting point `incomingCalls`/`outgoingCalls` walk
+    /// from. Whether it is worth calling at all is
+    /// [`Self::call_hierarchy_supported`]'s answer, not this method's — same
+    /// convention [`Self::code_lenses_supported`] follows.
+    ///
+    /// C11: call hierarchy has no `index-core` fallback (see `crate::hierarchy`
+    /// module docs) — an empty answer here is final, not a signal to fall
+    /// back to anything.
+    pub fn prepare_call_hierarchy(
+        &self,
+        language_id: &str,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<HierarchyItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "textDocument/prepareCallHierarchy",
+            position_params(uri, line, character),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(parse_hierarchy_items(&result))
+    }
+    /// `callHierarchy/incomingCalls`: everything that calls the item
+    /// `prepare_call_hierarchy` returned. `item` is sent back exactly as the
+    /// server gave it, same convention [`Self::resolve_code_lens`] follows
+    /// for its own `data`-bearing items.
+    pub fn incoming_calls(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Vec<IncomingCall>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "callHierarchy/incomingCalls",
+            json!({"item": item}),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(parse_incoming_calls(&result))
+    }
+    /// `callHierarchy/outgoingCalls`: everything the item
+    /// `prepare_call_hierarchy` returned calls. An empty answer here is a
+    /// real leaf function, not a hint to fall back — see the module docs on
+    /// [`crate::hierarchy`].
+    pub fn outgoing_calls(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Vec<OutgoingCall>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "callHierarchy/outgoingCalls",
+            json!({"item": item}),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(parse_outgoing_calls(&result))
+    }
+    /// `textDocument/prepareTypeHierarchy`: the type-hierarchy item(s) at a
+    /// position, the starting point `supertypes`/`subtypes` walk from.
+    /// Whether it is worth calling at all is
+    /// [`Self::type_hierarchy_supported`]'s answer.
+    ///
+    /// Unlike call hierarchy, an empty or missing answer here is
+    /// `crate::hierarchy::type_hierarchy_outcome`'s cue to fall back to
+    /// `index-core`'s supertype-edge data — see the module docs.
+    pub fn prepare_type_hierarchy(
+        &self,
+        language_id: &str,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<HierarchyItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "textDocument/prepareTypeHierarchy",
+            position_params(uri, line, character),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(parse_hierarchy_items(&result))
+    }
+    /// `typeHierarchy/supertypes`: every supertype of the item
+    /// `prepare_type_hierarchy` returned, as the server sees it.
+    pub fn supertypes(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Vec<HierarchyItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "typeHierarchy/supertypes",
+            json!({"item": item}),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(parse_hierarchy_items(&result))
+    }
+    /// `typeHierarchy/subtypes`: every subtype of the item
+    /// `prepare_type_hierarchy` returned, as the server sees it.
+    pub fn subtypes(
+        &self,
+        language_id: &str,
+        item: &Value,
+    ) -> Result<Vec<HierarchyItem>, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "typeHierarchy/subtypes",
+            json!({"item": item}),
+            HIERARCHY_TIMEOUT,
+        )?;
+        Ok(parse_hierarchy_items(&result))
     }
 }
 

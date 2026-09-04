@@ -13,6 +13,7 @@ namespace ui_shell {
 class DockRegistry;
 class EditorTabs;
 class FindUsagesPanel;
+class HierarchyPanel;
 
 // N8: the "&Navigate" menu — Go to Declaration/Implementation/Interface,
 // Find Usages, and the Back/Forward jump history. Every entry routes
@@ -23,6 +24,6 @@ class FindUsagesPanel;
 void buildNavigateMenu(QMainWindow *window, LanguageService *languageService,
                         SearchModel *searchModel, EditorTabs *editorTabs, AppSettings *appSettings,
                         QHash<QString, QAction *> &actions, DockRegistry *docks,
-                        FindUsagesPanel *findUsagesPanel);
+                        FindUsagesPanel *findUsagesPanel, HierarchyPanel *hierarchyPanel);
 
 } // namespace ui_shell

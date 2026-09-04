@@ -6,8 +6,10 @@
 //! for a language with no default is selecting its row and typing a
 //! command.
 
+use std::collections::HashMap;
+
 use app_config::{LanguageServerSetting, Settings};
-use lsp_core::{default_server, resolve_servers, ServerOverride};
+use lsp_core::{resolve_servers, PluginServer, ServerOverride};
 
 /// What the Status column says before the live state is known — the part
 /// that is a property of the configuration rather than of a running
@@ -86,17 +88,29 @@ pub fn can_have_server(language: syntax_core::Language) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerDraft {
     rows: Vec<ServerRow>,
+    /// Per-language `(command, args)` each row is diffed against by
+    /// `override_for` — the shipped catalog's default, or the contributing
+    /// plugin's own default when a plugin supplies this language's server
+    /// (see `resolve_servers`'s precedence). Absent for a language with
+    /// neither: only a user-typed command created that row, so everything
+    /// about it is theirs.
+    baselines: HashMap<String, (String, Vec<String>)>,
 }
 
 impl ServerDraft {
-    /// Build the rows from the saved settings and the languages the editor
-    /// knows about.
+    /// Build the rows from the saved settings, the languages the editor
+    /// knows about, and the live plugin registry's server contributions.
     ///
     /// `languages` is `(lsp language id, display name)`; every entry gets a
-    /// row even with no server configured, and every catalog or user entry
-    /// gets one even for a language the editor cannot highlight. Sorted by
-    /// display name, stably, so a live status change never moves a row.
-    pub fn new(settings: &Settings, languages: &[(String, String)]) -> Self {
+    /// row even with no server configured, and every catalog, plugin, or
+    /// user entry gets one even for a language the editor cannot
+    /// highlight. Sorted by display name, stably, so a live status change
+    /// never moves a row.
+    pub fn new(
+        settings: &Settings,
+        languages: &[(String, String)],
+        plugin_servers: &[PluginServer],
+    ) -> Self {
         let overrides: Vec<ServerOverride> = settings
             .language_servers
             .iter()
@@ -117,13 +131,16 @@ impl ServerDraft {
                 .unwrap_or_else(|| language_id.to_string())
         };
 
-        // TODO(C3-followup): wire in the plugin registry's language-server
-        // contributions once `override_for` below can diff a saved row
-        // against a plugin's default instead of only `default_server`
-        // (the const catalog) — otherwise every plugin-backed row would
-        // look "changed from nothing" and get persisted as a full override
-        // on every save, even untouched.
-        let mut rows: Vec<ServerRow> = resolve_servers(&overrides, &[])
+        // The baseline every row is diffed against: the catalog/plugin
+        // default *before* any user override, which is exactly what
+        // `resolve_servers` builds when given no overrides at all.
+        let baselines: HashMap<String, (String, Vec<String>)> =
+            resolve_servers(&[], plugin_servers)
+                .into_iter()
+                .map(|config| (config.language_id, (config.command, config.args)))
+                .collect();
+
+        let mut rows: Vec<ServerRow> = resolve_servers(&overrides, plugin_servers)
             .into_iter()
             .map(|config| ServerRow {
                 language_name: name_of(&config.language_id),
@@ -148,7 +165,7 @@ impl ServerDraft {
         }
 
         rows.sort_by_key(|row| row.language_name.to_lowercase());
-        Self { rows }
+        Self { rows, baselines }
     }
 
     pub fn rows(&self) -> &[ServerRow] {
@@ -160,12 +177,12 @@ impl ServerDraft {
     }
 
     pub fn set_command(&mut self, language_id: &str, command: &str) {
-        let has_default = default_server(language_id).is_some();
+        let has_default = self.baselines.contains_key(language_id);
         if let Some(row) = self.row_mut(language_id) {
             row.command = command.trim().to_string();
-            // A language with no shipped default only has a row at all
-            // because the user typed a command into it — they typed it to
-            // use it, not to leave it switched off.
+            // A language with no shipped or plugin-contributed default only
+            // has a row at all because the user typed a command into it —
+            // they typed it to use it, not to leave it switched off.
             if !row.command.is_empty() && !has_default {
                 row.enabled = true;
             }
@@ -185,11 +202,15 @@ impl ServerDraft {
     }
 
     /// The `[[language_server]]` entries worth writing: only what differs
-    /// from the shipped catalog, and only the fields that differ, so
-    /// changing a shipped default still reaches a user who never touched
+    /// from each row's baseline (the shipped catalog's or the contributing
+    /// plugin's own default), and only the fields that differ, so changing
+    /// a shipped or plugin default still reaches a user who never touched
     /// it — the same rule the keymap follows.
     pub fn overrides(&self) -> Vec<LanguageServerSetting> {
-        self.rows.iter().filter_map(override_for).collect()
+        self.rows
+            .iter()
+            .filter_map(|row| override_for(row, self.baselines.get(&row.language_id)))
+            .collect()
     }
 
     /// Commit the draft into settings.
@@ -204,15 +225,17 @@ impl ServerDraft {
     }
 }
 
-fn override_for(row: &ServerRow) -> Option<LanguageServerSetting> {
+fn override_for(
+    row: &ServerRow,
+    baseline: Option<&(String, Vec<String>)>,
+) -> Option<LanguageServerSetting> {
     let args: Vec<String> = row.args.split_whitespace().map(str::to_string).collect();
     let command = row.command.trim();
 
-    match default_server(&row.language_id) {
-        Some(def) => {
-            let command_differs = command != def.command;
-            let default_args: Vec<String> = def.args.iter().map(|a| (*a).to_string()).collect();
-            let args_differ = args != default_args;
+    match baseline {
+        Some((default_command, default_args)) => {
+            let command_differs = command != default_command;
+            let args_differ = &args != default_args;
             if !command_differs && !args_differ && row.enabled {
                 return None;
             }
@@ -224,8 +247,8 @@ fn override_for(row: &ServerRow) -> Option<LanguageServerSetting> {
                 enabled: (!row.enabled).then_some(false),
             })
         }
-        // No catalog entry: the row only exists once the user typed a
-        // command, and then everything about it is theirs.
+        // No catalog or plugin entry: the row only exists once the user
+        // typed a command, and then everything about it is theirs.
         None if command.is_empty() => None,
         None => Some(LanguageServerSetting {
             language_id: row.language_id.clone(),
@@ -249,7 +272,7 @@ mod tests {
     }
 
     fn draft() -> ServerDraft {
-        ServerDraft::new(&Settings::default(), &languages())
+        ServerDraft::new(&Settings::default(), &languages(), &[])
     }
 
     #[test]
@@ -326,6 +349,49 @@ mod tests {
         );
     }
 
+    fn csharp_plugin() -> PluginServer {
+        PluginServer {
+            plugin_id: "csharp".to_string(),
+            language_id: "csharp".to_string(),
+            name: "csharp-ls".to_string(),
+            command: "csharp-ls".to_string(),
+            args: vec!["--stdio".to_string()],
+            settings_section: None,
+            settings: serde_json::Value::Null,
+        }
+    }
+
+    #[test]
+    fn an_untouched_plugin_backed_row_persists_nothing() {
+        let draft = ServerDraft::new(
+            &Settings::default(),
+            &languages(),
+            std::slice::from_ref(&csharp_plugin()),
+        );
+        let row = draft.row("csharp").expect("row");
+        assert_eq!(row.command, "csharp-ls");
+        assert!(draft.overrides().is_empty());
+    }
+
+    #[test]
+    fn a_plugin_backed_row_only_persists_what_the_user_changed() {
+        let mut draft = ServerDraft::new(
+            &Settings::default(),
+            &languages(),
+            std::slice::from_ref(&csharp_plugin()),
+        );
+        draft.set_enabled("csharp", false);
+        let overrides = draft.overrides();
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].language_id, "csharp");
+        assert_eq!(overrides[0].enabled, Some(false));
+        // The command/args the plugin shipped were never touched, so they
+        // are not written even though `default_server("csharp")` (the const
+        // catalog) knows nothing about this row at all.
+        assert_eq!(overrides[0].command, None);
+        assert_eq!(overrides[0].args, None);
+    }
+
     #[test]
     fn a_draft_round_trips_through_settings() {
         let mut settings = Settings::default();
@@ -335,7 +401,7 @@ mod tests {
         draft.set_command("nim", "zls");
         draft.apply_to(&mut settings);
 
-        let reloaded = ServerDraft::new(&settings, &languages());
+        let reloaded = ServerDraft::new(&settings, &languages(), &[]);
         assert_eq!(reloaded.row("rust").expect("row").command, "/opt/ra");
         assert!(!reloaded.row("go").expect("row").enabled);
         assert_eq!(reloaded.row("nim").expect("row").command, "zls");
