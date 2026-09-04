@@ -2,6 +2,7 @@
 
 #include "ai_providers_page.h"
 #include "appearance_page.h"
+#include "e2e_mark.h"
 #include "editor_page.h"
 #include "editing_page.h"
 #include "editor_tabs.h"
@@ -22,9 +23,12 @@
 #include <QLabel>
 #include <QListWidget>
 #include <QObject>
+#include <QPushButton>
+#include <QSpinBox>
 #include <QStackedWidget>
 #include <QStandardItemModel>
 #include <QString>
+#include <QTimer>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -267,12 +271,87 @@ void showSettingsDialog(QWidget *parent, const SettingsContext &context)
           staleServers->deleteLater();
 
           pages->setCurrentIndex(current);
+
+          // #143: the scope switch just replaced the Editing page's widget
+          // tree, so the `tab_width_rect` `dialog_shown` gave the flow is
+          // stale — the spinner it named was just `deleteLater()`d. A
+          // fresh rect for whichever one now exists, once laid out.
+          //
+          // `size()` here is not the spinner's final, settled width — it
+          // reads as the full form column's width until a later layout
+          // pass narrows it to the spinner's own size hint (confirmed
+          // against a screenshot, not guessed; a second nested
+          // `singleShot(0, ...)` did not change it either, so this is not
+          // a one-more-event-loop-turn problem). `topLeft()` is stable
+          // from the first turn, though, and it is all a click needs: the
+          // flow focuses the spinner with a click near its left edge, then
+          // edits the value with the keyboard (select-all, type, Tab)
+          // rather than clicking the up/down arrows at its right edge,
+          // which is what would have needed the width.
+          QTimer::singleShot(0, &dialog, [pages, editingIndex]() {
+              auto *tabWidthSpin = pages->widget(editingIndex)->findChild<QSpinBox *>(
+                QStringLiteral("editingTabWidth"));
+              if (!tabWidthSpin) {
+                  return;
+              }
+              const QPoint topLeft = tabWidthSpin->mapToGlobal(QPoint(0, 0));
+              e2eMark(QStringLiteral("{\"ev\":\"settings_scope_switched\","
+                                      "\"tab_width_top_left\":[%1,%2]}")
+                        .arg(topLeft.x())
+                        .arg(topLeft.y()));
+          });
       });
 
     auto *mainLayout = new QVBoxLayout(&dialog);
     mainLayout->addLayout(scopeRow);
     mainLayout->addLayout(bodyLayout);
     mainLayout->addWidget(buttons);
+
+    // #143: `dialog_shown`/`dialog_closed`, the same convention
+    // `run_config_dialog.cpp` marks itself with — a modal `exec()` blocks
+    // here, so `dialog_shown` has to fire once the dialog is actually up,
+    // from a zero-delay timer inside `exec()`'s own modal loop (tried
+    // ahead of `exec()`, reverted: the dialog showed but never took X
+    // input focus). The rects an E2E flow needs to drive the per-project
+    // settings scenario without guessing a tab order: the scope combo, the
+    // "Editing" category row, the Editing page's own tab-width spinner
+    // (found by object name — `editing_page.cpp`'s own `RowFields` shape
+    // is otherwise anonymous), and OK. The tab-width spinner is inside a
+    // `QStackedWidget` page that need not be current yet: `QStackedWidget`
+    // lays out every page to the same geometry as soon as the dialog
+    // itself has been shown, current or not, so its rect is already valid
+    // here.
+    QTimer::singleShot(0, &dialog, [=]() {
+        const auto rectJson = [](const QRect &rect) {
+            return QStringLiteral("[%1,%2,%3,%4]")
+              .arg(rect.x())
+              .arg(rect.y())
+              .arg(rect.width())
+              .arg(rect.height());
+        };
+        const QRect scopeRect(scopeBox->mapToGlobal(QPoint(0, 0)), scopeBox->size());
+        const QRect editingCategoryRect(
+          categoryList->mapToGlobal(categoryList->visualItemRect(categoryList->item(2)).topLeft()),
+          categoryList->visualItemRect(categoryList->item(2)).size());
+        auto *tabWidthSpin = pages->widget(editingIndex)->findChild<QSpinBox *>(
+          QStringLiteral("editingTabWidth"));
+        const QRect tabWidthRect = tabWidthSpin
+          ? QRect(tabWidthSpin->mapToGlobal(QPoint(0, 0)), tabWidthSpin->size())
+          : QRect();
+        QPushButton *okButton = buttons->button(QDialogButtonBox::Ok);
+        const QRect okRect(okButton->mapToGlobal(QPoint(0, 0)), okButton->size());
+        e2eMark(QStringLiteral("{\"ev\":\"dialog_shown\",\"name\":\"settings_dialog\","
+                                "\"scope_rect\":%1,\"editing_category_rect\":%2,"
+                                "\"tab_width_rect\":%3,\"ok_rect\":%4}")
+                  .arg(rectJson(scopeRect), rectJson(editingCategoryRect), rectJson(tabWidthRect),
+                       rectJson(okRect)));
+    });
+    QObject::connect(&dialog, &QDialog::finished, &dialog, [](int result) {
+        e2eMark(QStringLiteral("{\"ev\":\"dialog_closed\",\"name\":\"settings_dialog\","
+                                "\"accepted\":%1}")
+                  .arg(result == QDialog::Accepted ? QLatin1String("true")
+                                                    : QLatin1String("false")));
+    });
 
     if (dialog.exec() == QDialog::Accepted) {
         appearance.commit();

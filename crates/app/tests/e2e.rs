@@ -1333,6 +1333,101 @@ fn e2e_file_history_lists_commits_and_survives_the_context_menu() {
     assert_eq!(ide.quit(), 0);
 }
 
+/// F0-10/ADR-0022, driven end to end rather than only through
+/// `settings-model`'s unit tests (#143): switch the Settings dialog's
+/// scope to "This project", change the tab width, OK, and check that
+/// exactly one field reached `<project>/.ide/settings.toml` — not the
+/// whole `[editing]` section re-serialised, and not the global file. Then
+/// a cold relaunch picks the override back up.
+///
+/// This is also the regression test for the bug walking this checklist by
+/// hand actually found: the origin badge (`AppSettings::fieldOrigin`) used
+/// to answer "which layer does the *effective* value come from" regardless
+/// of which layer's page was open, so the Global page showed "from
+/// project" over its own, unrelated value the moment any project override
+/// existed anywhere. `settings-model::scope`'s own unit tests
+/// (`viewing_global_never_reports_a_project_override_that_is_not_on_screen`)
+/// cover the fix directly; this flow is the proof the dialog really wires
+/// the corrected function in, through the real Qt widgets.
+#[test]
+#[ignore = "E2E: needs an X server; run via `make e2e`"]
+fn e2e_project_scope_settings_write_only_what_changed() {
+    let mut ide = Ide::launch(
+        "e2e_project_scope_settings_write_only_what_changed",
+        APP,
+        fixture("tiny"),
+    );
+    ide.wait_for_ev(Mark::start(), "project_opened");
+
+    let mark = ide.mark();
+    ide.key("ctrl+comma");
+    let shown = ide.wait_for_event(mark, "the Settings dialog to open", |e| {
+        e["ev"] == "dialog_shown" && e["name"] == "settings_dialog"
+    });
+
+    // "Editing" in the category list, then the scope combo: Down selects
+    // "This project" (index 1) from whichever item — "All projects
+    // (global)" — a freshly launched dialog starts on.
+    let (category_x, category_y) = rect_centre(&shown["editing_category_rect"]);
+    ide.click_at(category_x, category_y, 1);
+
+    let (scope_x, scope_y) = rect_centre(&shown["scope_rect"]);
+    ide.click_at(scope_x, scope_y, 1);
+    ide.key("Down");
+    ide.key("Return");
+    let switched = ide.wait_for_event(mark, "the Editing page to rebuild for project scope", |e| {
+        e["ev"] == "settings_scope_switched"
+    });
+
+    // A `QSpinBox`'s own up/down arrows are too narrow a target to trust
+    // without the width `settings_dialog.cpp`'s own comment explains is
+    // not settled yet at this point — clicking near the field's left edge
+    // and editing with the keyboard needs only its (already-settled)
+    // top-left corner.
+    let top_left = switched["tab_width_top_left"]
+        .as_array()
+        .expect("tab_width_top_left is a [x, y] pair");
+    let field_x = top_left[0].as_i64().unwrap() as i32 + 10;
+    let field_y = top_left[1].as_i64().unwrap() as i32 + 10;
+    ide.click_at(field_x, field_y, 1);
+    ide.key("ctrl+a");
+    ide.type_text("2");
+    ide.key("Tab");
+
+    let (ok_x, ok_y) = rect_centre(&shown["ok_rect"]);
+    ide.click_at(ok_x, ok_y, 1);
+    ide.wait_for_event(mark, "the dialog to accept", |e| {
+        e["ev"] == "dialog_closed" && e["name"] == "settings_dialog" && e["accepted"] == true
+    });
+    ide.focus_main();
+
+    assert_eq!(ide.quit(), 0);
+
+    // The app's own types, never a regex (this file's own rule) — and the
+    // whole point of the check: only `tab_width` is a real value, the
+    // rest stay at the "inherit" sentinel (`app_config::editing`'s own
+    // empty-means-unset convention), because nothing else was touched.
+    let root = ide.project_root().to_path_buf();
+    let settings = app_config::project_settings::load(&root).expect("settings just committed");
+    let editing = settings
+        .editing
+        .expect("the dialog wrote an [editing] override");
+    assert_eq!(editing.tab_width, 2);
+    assert_eq!(editing.use_spaces, None);
+    assert_eq!(editing.trim_trailing_whitespace, None);
+    assert_eq!(editing.insert_final_newline, None);
+
+    // A cold second process reads the override straight back — the same
+    // relaunch-and-reread proof `e2e_run_config_dialog_persists_across_relaunch`
+    // gives its own persisted state.
+    ide.relaunch();
+    ide.wait_for_ev(Mark::start(), "project_opened");
+    let reloaded = app_config::project_settings::load(ide.project_root())
+        .expect("settings survive a cold relaunch");
+    assert_eq!(reloaded.editing.expect("still overridden").tab_width, 2);
+
+    assert_eq!(ide.quit(), 0);
+}
 /// The Preview dock (ADR-0033): opens a Markdown file, toggles the dock,
 /// waits for the first render, edits the buffer, and waits for a second,
 /// later revision — proving the debounce fires and a stale render is not

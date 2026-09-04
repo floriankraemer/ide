@@ -74,12 +74,15 @@ baseline() {
 	crates/ui-shell/src/bridge/language/mod.rs) echo 1686 ;;
 	# Raised from 1446 by 91 lines for issue #164's regression test: a
 	# second-commit git fixture, opening File History via Find Action, and
-	# driving the fixed context-menu interaction end to end. No split
+	# driving the fixed context-menu interaction end to end. Ratcheted down
+	# from 1537 when the run flows moved to e2e_run.rs (R1-9), then up by 13
+	# for the comment explaining why the file-history flow matches on a path
+	# suffix (D3-9). Raised again for issue #143's regression test: switches
+	# the Settings dialog to project scope, edits the tab width, and checks
+	# only that field reached .ide/settings.toml — the flow that found and
+	# proves the fix for the origin-badge bug #143 walked into. No split
 	# planned; this suite is already one flow per test.
-	# Ratcheted down from 1537 when the run flows moved to e2e_run.rs (R1-9),
-	# then up by 13 for the comment explaining why the file-history flow
-	# matches on a path suffix (D3-9). Still 155 below where it started.
-	crates/app/tests/e2e.rs) echo 1382 ;;
+	crates/app/tests/e2e.rs) echo 1477 ;;
 	esac
 }
 
