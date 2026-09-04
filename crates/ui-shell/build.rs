@@ -302,6 +302,13 @@ fn main() {
         // leg of EditorTabs, same reasoning as the other three.
         .cpp_file("cpp/editor_tabs_vcs.cpp")
         .cpp_file("cpp/editor_tabs_run.cpp")
+        .cpp_file("cpp/editor_tabs_debug.cpp")
+        .cpp_file("cpp/build_panel.h")
+        .cpp_file("cpp/build_panel.cpp")
+        .cpp_file("cpp/build_menu.cpp")
+        .cpp_file("cpp/debug_panel.h")
+        .cpp_file("cpp/debug_panel.cpp")
+        .cpp_file("cpp/debug_menu.cpp")
         .cpp_file("cpp/build_panel.h")
         .cpp_file("cpp/build_panel.cpp")
         .cpp_file("cpp/build_menu.cpp")

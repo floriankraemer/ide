@@ -17,6 +17,7 @@
 pub mod breakpoints;
 pub mod catalog;
 pub mod error;
+pub mod launch;
 pub mod protocol;
 pub mod session;
 

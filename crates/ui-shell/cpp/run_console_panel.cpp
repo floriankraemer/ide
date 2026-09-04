@@ -201,6 +201,11 @@ void RunConsolePanel::rerunSelected()
     toolbar_->rerunSelected();
 }
 
+void RunConsolePanel::debugSelected()
+{
+    toolbar_->debugSelected();
+}
+
 void RunConsolePanel::focusConfigSelector()
 {
     toolbar_->focusConfigSelector();

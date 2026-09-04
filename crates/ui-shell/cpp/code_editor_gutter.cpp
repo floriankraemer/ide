@@ -2,10 +2,10 @@
 // means.
 //
 // Its own translation unit because `code_editor.cpp` reached its 1200-line
-// ceiling (ADR-0025) when the Run-icon column arrived, and because the
-// gutter is a self-contained strip: the Run icon, the VCS change markers,
-// the fold triangles and the line numbers, plus the blame area — each pushed
-// in from outside and none of them decided here.
+// ceiling (ADR-0025) when the breakpoint column arrived, and because the
+// gutter is a self-contained strip: five columns — Run icon, breakpoints,
+// VCS change markers, fold triangles, line numbers — and one blame area,
+// each pushed in from outside and none of them decided here.
 
 #include "code_editor.h"
 
@@ -31,6 +31,10 @@ constexpr int kChangeMarkerWidth = 4;
 // width for a file that has a run target, so a file without one keeps
 // exactly the gutter it had before.
 constexpr int kRunMarkerWidth = 14;
+// D2-5: the breakpoint column, always present. Unlike the Run icon this one
+// does not come and go: a gutter whose width depends on whether a file has
+// breakpoints would reflow the text every time one is set.
+constexpr int kBreakpointWidth = 14;
 // F3-18: width of the blame column, right of the line-number digits — only
 // added to the gutter's width when blame is toggled on.
 constexpr int kBlameWidth = 220;
@@ -39,6 +43,25 @@ constexpr int kBlameWidth = 220;
 int CodeEditor::runMarkerWidth() const
 {
     return runnable_ ? kRunMarkerWidth : 0;
+}
+
+void CodeEditor::setBreakpointLines(const QSet<int> &lines)
+{
+    if (breakpointLines_ == lines) {
+        return;
+    }
+    breakpointLines_ = lines;
+    lineNumberArea_->update();
+}
+
+void CodeEditor::setExecutionLine(int blockNumber)
+{
+    if (executionLine_ == blockNumber) {
+        return;
+    }
+    executionLine_ = blockNumber;
+    lineNumberArea_->update();
+    viewport()->update();
 }
 
 void CodeEditor::setRunnable(bool runnable)
@@ -61,7 +84,7 @@ int CodeEditor::lineNumberAreaWidth() const
         max /= 10;
         ++digits;
     }
-    return runMarkerWidth() + kChangeMarkerWidth + kFoldMarkerWidth + 3
+    return runMarkerWidth() + kBreakpointWidth + kChangeMarkerWidth + kFoldMarkerWidth + 3
       + fontMetrics().horizontalAdvance(QLatin1Char('9')) * digits
       + (blameEnabled_ ? kBlameWidth : 0);
 }
@@ -127,9 +150,11 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
 
             const QString number = QString::number(blockNumber + 1);
             painter.setPen(isCurrent ? currentDigitColor : digitColor);
-            painter.drawText(runMarkerWidth() + kChangeMarkerWidth + kFoldMarkerWidth, top,
-                              digitAreaWidth - runMarkerWidth() - kChangeMarkerWidth
-                                - kFoldMarkerWidth - 2,
+            painter.drawText(runMarkerWidth() + kBreakpointWidth + kChangeMarkerWidth
+                                + kFoldMarkerWidth,
+                              top,
+                              digitAreaWidth - runMarkerWidth() - kBreakpointWidth
+                                - kChangeMarkerWidth - kFoldMarkerWidth - 2,
                               fontMetrics().height(), Qt::AlignRight, number);
 
             if (blameEnabled_) {
@@ -146,7 +171,8 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
             FoldRange range;
             if (foldStartingAt(blockNumber, &range)) {
                 const bool collapsed = collapsedRanges_.contains(range);
-                const int cx = runMarkerWidth() + kChangeMarkerWidth + kFoldMarkerWidth / 2;
+                const int cx = runMarkerWidth() + kBreakpointWidth + kChangeMarkerWidth
+                  + kFoldMarkerWidth / 2;
                 const int cy = top + fontMetrics().height() / 2;
                 QPolygon triangle;
                 if (collapsed) {
@@ -177,9 +203,32 @@ void CodeEditor::lineNumberAreaPaintEvent(QPaintEvent *event)
                 painter.setBrush(Qt::NoBrush);
             }
 
+            if (breakpointLines_.contains(blockNumber)) {
+                const int cx = runMarkerWidth() + kBreakpointWidth / 2;
+                const int cy = top + fontMetrics().height() / 2;
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(0xe5, 0x39, 0x35));
+                painter.drawEllipse(QPoint(cx, cy), 5, 5);
+                painter.setBrush(Qt::NoBrush);
+            }
+
+            if (blockNumber == executionLine_) {
+                // The execution point sits on top of the breakpoint that
+                // stopped it, which is what IntelliJ shows too: the
+                // interesting fact is where the program *is*.
+                const int cx = runMarkerWidth() + kBreakpointWidth / 2;
+                const int cy = top + fontMetrics().height() / 2;
+                QPolygon arrow;
+                arrow << QPoint(cx - 4, cy - 4) << QPoint(cx + 5, cy) << QPoint(cx - 4, cy + 4);
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(QColor(0xff, 0xc1, 0x07));
+                painter.drawPolygon(arrow);
+                painter.setBrush(Qt::NoBrush);
+            }
+
             ChangeMarker marker;
             if (changeMarkerAt(blockNumber, &marker)) {
-                painter.fillRect(runMarkerWidth(), top, kChangeMarkerWidth,
+                painter.fillRect(runMarkerWidth() + kBreakpointWidth, top, kChangeMarkerWidth,
                                   fontMetrics().height(), changeMarkerColor(marker.kind));
             }
         }
@@ -196,8 +245,11 @@ void CodeEditor::lineNumberAreaMousePressEvent(QMouseEvent *event)
     const int clickX = static_cast<int>(event->position().x());
     const int clickY = static_cast<int>(event->position().y());
     const bool onRunMarker = runnable_ && clickX < runMarkerWidth();
+    const bool onBreakpointColumn =
+      clickX >= runMarkerWidth() && clickX < runMarkerWidth() + kBreakpointWidth;
     const bool onChangeMarkerStrip =
-      clickX >= runMarkerWidth() && clickX < runMarkerWidth() + kChangeMarkerWidth;
+      clickX >= runMarkerWidth() + kBreakpointWidth
+      && clickX < runMarkerWidth() + kBreakpointWidth + kChangeMarkerWidth;
 
     QTextBlock block = firstVisibleBlock();
     int blockNumber = block.blockNumber();
@@ -210,6 +262,11 @@ void CodeEditor::lineNumberAreaMousePressEvent(QMouseEvent *event)
                 if (blockNumber == 0) {
                     emit runRequested();
                 }
+                return;
+            }
+
+            if (onBreakpointColumn) {
+                emit breakpointToggled(blockNumber);
                 return;
             }
 

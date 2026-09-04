@@ -30,8 +30,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    load_toml, save_toml, update_toml, ConfigError, EditingSettings, LanguageServerSetting,
-    RunConfigSetting,
+    load_toml, save_toml, update_toml, ConfigError, DebugAdapterSetting, EditingSettings,
+    LanguageServerSetting, RunConfigSetting,
 };
 
 /// Directory holding a project's IDE files, inside the project root.
@@ -101,6 +101,17 @@ pub struct ProjectSettings {
     )]
     pub run_configs: Option<Vec<RunConfigSetting>>,
 
+    /// Debug adapter overrides (D1-4): replace the command of an adapter
+    /// the IDE ships knowledge of, or introduce one it has never heard of.
+    /// Sparse like the rest — `None` is "this project says nothing about
+    /// adapters", which is not the same as explicitly overriding none.
+    #[serde(
+        default,
+        rename = "debug_adapter",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub debug_adapters: Option<Vec<DebugAdapterSetting>>,
+
     /// Gitignore-syntax patterns the project index skips, on top of the
     /// `.gitignore` rules the walker already honours (ADR-0022's fourth
     /// project-scoped area).
@@ -135,6 +146,7 @@ impl ProjectSettings {
         self.language_servers.is_none()
             && self.editing.is_none()
             && self.run_configs.is_none()
+            && self.debug_adapters.is_none()
             && self.index_excludes.is_none()
             && self.unknown.is_empty()
     }

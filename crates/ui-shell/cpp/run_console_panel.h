@@ -47,6 +47,9 @@ public:
     void runSelected();
     void stopSelected();
     void rerunSelected();
+    // D3-8: Debug the selected configuration, forwarded like the others so
+    // the shortcut works regardless of focus.
+    void debugSelected();
     void focusConfigSelector();
 
 private:

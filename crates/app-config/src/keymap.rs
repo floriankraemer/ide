@@ -510,16 +510,19 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "",
     },
     ActionDef {
+        // Was F7/Shift+F7, which is IntelliJ's Step Into and its inverse.
+        // The debugger has the stronger claim on those (D3-8), and these two
+        // move to the keys IntelliJ actually gives them.
         id: "vcs.nextChange",
         label: "Next Change",
         category: "Git",
-        default_shortcut: "F7",
+        default_shortcut: "Ctrl+Alt+Shift+Down",
     },
     ActionDef {
         id: "vcs.previousChange",
         label: "Previous Change",
         category: "Git",
-        default_shortcut: "Shift+F7",
+        default_shortcut: "Ctrl+Alt+Shift+Up",
     },
     ActionDef {
         id: "vcs.annotate",
@@ -536,6 +539,66 @@ pub const ACTIONS: &[ActionDef] = &[
     ActionDef {
         id: "view.vcsHistory",
         label: "File History",
+        category: "View",
+        default_shortcut: "",
+    },
+    ActionDef {
+        id: "debug.debug",
+        label: "Debug",
+        category: "Debug",
+        default_shortcut: "Shift+F9",
+    },
+    ActionDef {
+        id: "debug.resume",
+        label: "Resume Program",
+        category: "Debug",
+        default_shortcut: "F9",
+    },
+    ActionDef {
+        id: "debug.pause",
+        label: "Pause Program",
+        category: "Debug",
+        default_shortcut: "",
+    },
+    ActionDef {
+        id: "debug.stepOver",
+        label: "Step Over",
+        category: "Debug",
+        default_shortcut: "F8",
+    },
+    ActionDef {
+        id: "debug.stepInto",
+        label: "Step Into",
+        category: "Debug",
+        default_shortcut: "F7",
+    },
+    ActionDef {
+        id: "debug.stepOut",
+        label: "Step Out",
+        category: "Debug",
+        default_shortcut: "Shift+F8",
+    },
+    ActionDef {
+        id: "debug.stop",
+        label: "Stop Debugging",
+        category: "Debug",
+        default_shortcut: "",
+    },
+    ActionDef {
+        id: "debug.toggleBreakpoint",
+        label: "Toggle Breakpoint",
+        category: "Debug",
+        default_shortcut: "Ctrl+F8",
+    },
+    ActionDef {
+        id: "debug.muteBreakpoints",
+        label: "Mute Breakpoints",
+        category: "Debug",
+        default_shortcut: "",
+    },
+    ActionDef {
+        id: "view.debug",
+        label: "Debug",
         category: "View",
         default_shortcut: "",
     },

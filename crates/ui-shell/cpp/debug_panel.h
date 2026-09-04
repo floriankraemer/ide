@@ -1,0 +1,82 @@
+#pragma once
+
+#include "ui-shell/src/bridge/ffi.cxxqt.h"
+
+#include <QString>
+#include <QWidget>
+
+class QLineEdit;
+class QListWidget;
+class QPlainTextEdit;
+class QToolButton;
+class QTreeWidget;
+class QTreeWidgetItem;
+
+namespace ads {
+class CDockAreaWidget;
+class CDockManager;
+} // namespace ads
+
+namespace ui_shell {
+
+class DockRegistry;
+
+// The Debug dock (D3): frames, variables, watches and the debugger console
+// for the running session, with the stepping controls above them.
+//
+// Humble view: every action is one `DebugService` call, every row comes from
+// one of its cached answers, and each button's enabled state comes from the
+// session's state or the adapter's declared capabilities — never from this
+// widget deciding what a debugger can do (ADR-0041).
+class DebugPanel : public QWidget
+{
+public:
+    DebugPanel(DebugService *debugService, QWidget *parent);
+
+    // The targets of the global `debug.*` shortcuts, so they act regardless
+    // of which widget has focus — the same arrangement the run and build
+    // shortcuts have.
+    void resume();
+    void pause();
+    void stepOver();
+    void stepInto();
+    void stepOut();
+    void stopSession();
+    bool hasSession() const { return sessionId_ != 0; }
+
+private:
+    void onStarted(quint64 sessionId, const QString &configId);
+    void onStopped(quint64 sessionId, const QString &reason, const QString &path, quint32 line);
+    void onResumed(quint64 sessionId);
+    void onTerminated(quint64 sessionId, int exitCode);
+    void onFailed(quint64 sessionId, const FfiResult &error);
+    void onOutput(quint64 sessionId, const QString &category, const QString &text);
+    void onVariablesChanged(quint64 sessionId, qint64 reference);
+    void onWatchesChanged();
+    void refreshFrames();
+    void refreshWatches();
+    void expandItem(QTreeWidgetItem *item);
+    void setRunning(bool running);
+
+    DebugService *debugService_;
+    quint64 sessionId_ = 0;
+    QToolButton *resumeButton_ = nullptr;
+    QToolButton *pauseButton_ = nullptr;
+    QToolButton *stopButton_ = nullptr;
+    QToolButton *stepOverButton_ = nullptr;
+    QToolButton *stepIntoButton_ = nullptr;
+    QToolButton *stepOutButton_ = nullptr;
+    QListWidget *frames_ = nullptr;
+    QTreeWidget *variables_ = nullptr;
+    QListWidget *watches_ = nullptr;
+    QLineEdit *watchInput_ = nullptr;
+    QPlainTextEdit *console_ = nullptr;
+    QLineEdit *evaluateInput_ = nullptr;
+};
+
+// Builds the panel, wraps it in a dock widget and registers it under id
+// `"debug"` — the same one-call pattern the run console and build docks use.
+DebugPanel *buildDebugDock(ads::CDockManager *dockManager, DockRegistry *docks,
+                            ads::CDockAreaWidget *relativeTo, DebugService *debugService);
+
+} // namespace ui_shell

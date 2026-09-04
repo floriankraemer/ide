@@ -854,7 +854,11 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
     requestInlayHintsFor(editor);
     requestHunksFor(editor);
     refreshRunMarker(editor);
+    refreshBreakpointsFor(editor);
+    watchLineCountFor(editor);
     connect(editor, &CodeEditor::runRequested, this, [this, editor]() { requestRunFor(editor); });
+    connect(editor, &CodeEditor::breakpointToggled, this,
+            [this, editor](int blockNumber) { toggleBreakpointAt(editor, blockNumber); });
     requestSemanticTokensFor(editor);
     requestCodeLensesFor(editor);
 }

@@ -120,12 +120,32 @@ QIcon buildGlyph(QColor color)
     });
 }
 
+// Debug — the mockup's bug silhouette, reduced to a body and two legs. At
+// 16px anything more detailed reads as a smudge.
+QIcon debugGlyph(QColor color)
+{
+    return glyphIcon(color, [](QPainter &painter, QColor tint) {
+        QPen pen(tint, 1.4);
+        pen.setCapStyle(Qt::RoundCap);
+        painter.setPen(pen);
+        painter.drawLine(QPointF(2.5, 6.5), QPointF(5.0, 7.5));
+        painter.drawLine(QPointF(13.5, 6.5), QPointF(11.0, 7.5));
+        painter.drawLine(QPointF(2.5, 11.5), QPointF(5.0, 10.5));
+        painter.drawLine(QPointF(13.5, 11.5), QPointF(11.0, 10.5));
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(tint);
+        painter.drawEllipse(QRectF(5.0, 4.0, 6.0, 9.0));
+    });
+}
+
 } // namespace
 
-RunToolbar::RunToolbar(RunService *runService, BuildService *buildService, QWidget *parent)
+RunToolbar::RunToolbar(RunService *runService, BuildService *buildService,
+                        DebugService *debugService, QWidget *parent)
   : QWidget(parent)
   , runService_(runService)
   , buildService_(buildService)
+  , debugService_(debugService)
 {
     // Height and horizontal padding come from the QToolBar this sits in
     // (chromeStyleSheet()'s `QToolBar` rule); this widget only orders the
@@ -144,6 +164,8 @@ RunToolbar::RunToolbar(RunService *runService, BuildService *buildService, QWidg
     rerunButton_->setIcon(rerunGlyph(dim));
     buildButton_ = makeGlyphButton(tr("Build"), tr("Build Project"), this);
     buildButton_->setIcon(buildGlyph(dim));
+    debugButton_ = makeGlyphButton(tr("Debug"), tr("Debug"), this);
+    debugButton_->setIcon(debugGlyph(dim));
 
     auto *layout = new QHBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -152,6 +174,7 @@ RunToolbar::RunToolbar(RunService *runService, BuildService *buildService, QWidg
     layout->addWidget(stopButton_);
     layout->addWidget(rerunButton_);
     layout->addWidget(buildButton_);
+    layout->addWidget(debugButton_);
     layout->addStretch(1);
     layout->addWidget(configCombo_);
 
@@ -165,6 +188,7 @@ RunToolbar::RunToolbar(RunService *runService, BuildService *buildService, QWidg
     // decides anything about the build (ADR-0040).
     connect(buildButton_, &QToolButton::clicked, this,
             [this]() { buildService_->build(); });
+    connect(debugButton_, &QToolButton::clicked, this, &RunToolbar::debugSelected);
 
     connect(runService_, &RunService::consoleStarted, this,
             [this](quint64 consoleId, const QString &configId) {
@@ -244,6 +268,16 @@ void RunToolbar::stopSelected()
     const auto it = runningConsoleIdByConfig_.constFind(configId);
     if (it != runningConsoleIdByConfig_.constEnd()) {
         runService_->stop(it.value());
+    }
+}
+
+void RunToolbar::debugSelected()
+{
+    const QString configId = selectedConfigId();
+    if (!configId.isEmpty()) {
+        // Whether an adapter exists for it, and what a launch body looks
+        // like, are `DebugService`'s answers (ADR-0041).
+        debugService_->debug(configId);
     }
 }
 

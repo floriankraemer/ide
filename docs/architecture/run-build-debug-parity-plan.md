@@ -89,20 +89,20 @@ Task ids are stable; titles may change.
 | D2-2 — function breakpoints, data breakpoints, exception filters, Mute Breakpoints | done | this branch |
 | D2-3 — `shift_lines`, with a deleted line taking its breakpoint with it | done | this branch; the seam that drives it is wired in D3 |
 | D2-4 — persistence under `.ide/local/breakpoints.toml` | done | this branch; temporary breakpoints are deliberately not persisted |
-| D2-5 — view: gutter toggle, breakpoints dialog, Mute Breakpoints | blocked on D3-1 | the view needs the QObject that owns the store, which arrives with the debug adapter |
+| D2-5 — view: gutter breakpoint column, `debug.toggleBreakpoint`, Mute Breakpoints | done | this branch; the conditions/log-message editor is `configureBreakpoint` on the seam with no dialog in front of it yet — D4 |
 
 ### D3 — the debug session and its tool window
 
 | Task | Status | Commit |
 |---|---|---|
-| D3-1 — adapter: `DebugServiceRust`, one QObject for N sessions | blocked on D1-5 |  |
-| D3-2 — stepping: over, into, force into, out, run to cursor, smart step into, resume, pause, stop | blocked on D3-1 |  |
-| D3-3 — Threads and Frames views | blocked on D3-1 |  |
-| D3-4 — Variables with lazy expansion, Set Value | blocked on D3-3 |  |
-| D3-5 — Watches and Evaluate Expression | blocked on D3-4 |  |
-| D3-6 — the debugger console | blocked on D3-1 |  |
+| D3-1 — adapter: `DebugServiceRust`, one QObject for N sessions | done | this branch |
+| D3-2 — stepping: over, into, out, run to cursor, resume, pause, stop | done | this branch; force step into and smart step into need `stepInTargets`, which is D4 rather than buttons that do nothing |
+| D3-3 — Threads and Frames | done | this branch |
+| D3-4 — Variables with lazy expansion, Set Value gated on the adapter's capability | done | this branch |
+| D3-5 — Watches, re-evaluated on every stop, and Evaluate in the console | done | this branch |
+| D3-6 — the debugger console, fed by DAP `output` events | done | this branch |
 | D3-7 — inline values from the current frame's scopes | blocked on D3-4 |  |
-| D3-8 — view: the Debug toolbar button, `run.debug`, capability-gated action enablement | blocked on D3-2 |  |
+| D3-8 — view: the Debug toolbar button, the "&Debug" menu, capability-gated enablement | done | this branch; the toolbar now has the whole cluster the mockup shows |
 | D3-9 — E2E: `e2e_breakpoint_hits_and_variables_populate` | blocked on D3-4 |  |
 
 ### D4 — the remaining debugger surface
