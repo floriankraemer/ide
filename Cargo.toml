@@ -20,6 +20,8 @@ members = [
     "crates/vcs-core",
     "crates/run-core",
     "crates/build-core",
+    "crates/stdio-framing",
+    "crates/dap-core",
     "crates/app-core",
     "crates/ui-shell",
     "crates/app",

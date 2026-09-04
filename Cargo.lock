@@ -1089,6 +1089,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "dap-core"
+version = "0.1.0"
+dependencies = [
+ "app-config",
+ "run-core",
+ "serde",
+ "serde_json",
+ "stdio-framing",
+ "tempfile",
+]
+
+[[package]]
 name = "darling"
 version = "0.24.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3606,6 +3618,7 @@ dependencies = [
  "notify",
  "serde",
  "serde_json",
+ "stdio-framing",
  "syntax-core",
  "tempfile",
  "toml 0.8.23",
@@ -5548,6 +5561,10 @@ name = "static_assertions"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
+
+[[package]]
+name = "stdio-framing"
+version = "0.1.0"
 
 [[package]]
 name = "str_indices"

@@ -144,10 +144,13 @@ fn run_step(
         .supervisor
         .lock()
         .map_err(|_| "build lock poisoned")?;
-    // A stopped build has had its console removed by `Supervisor::stop`, so
-    // there is no exit code to ask for; that is a failure, not a success.
-    let code = supervisor.exit_code(id).map_err(|_| "build stopped")?;
-    Ok(code.unwrap_or(0) as i32)
+    // `wait`, not `exit_code`: reaching EOF on the output means the process
+    // is exiting, not that it has been reaped, so a poll here answers `None`
+    // often enough to report a failed build as a successful one. A stopped
+    // build has had its console removed by `Supervisor::stop` and errors
+    // instead, which is also a failure rather than a success.
+    let code = supervisor.wait(id).map_err(|_| "build stopped")?;
+    Ok(code as i32)
 }
 
 /// Read one step's output until the process closes it. The blocking read

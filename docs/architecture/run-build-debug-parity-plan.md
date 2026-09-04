@@ -73,13 +73,13 @@ Task ids are stable; titles may change.
 
 | Task | Status | Commit |
 |---|---|---|
-| D1-1 — new crate `dap-core`: `framing` over stdio, shaped like `lsp-core`'s | blocked on R1-1 |  |
-| D1-2 — `protocol`: typed requests, responses and events | blocked on D1-1 |  |
-| D1-3 — `session`: initialize → launch/attach → configurationDone, capability flags | blocked on D1-2 |  |
-| D1-4 — `catalog`: codelldb, debugpy, java-debug, plus user overrides | blocked on D1-3 |  |
-| D1-5 — `supervisor`: adapter lifecycle, restart, crash containment | blocked on D1-3 |  |
-| D1-6 — `runInTerminal` handed back to `run-core`'s PTY supervisor | blocked on D1-5 |  |
-| D1-7 — ADR-0041 + `layering.md` row for `dap-core` | blocked on D1-1 |  |
+| D1-1 — the framing, extracted into `stdio-framing` and shared with `lsp-core` | done | this branch; extracted rather than copied — the two protocols frame with the same bytes, which is what the plan's risk 5 said to check |
+| D1-2 — `protocol`: the envelope, capabilities, and the five bodies something reads | done | this branch; the rest stays `serde_json::Value` on purpose |
+| D1-3 — `session`: initialize → launch/attach → configurationDone, capability flags | done | this branch |
+| D1-4 — `catalog`: codelldb, debugpy, java-debug, `[[debug_adapter]]` overrides, install hints | done | this branch |
+| D1-5 — adapter lifecycle: spawn, reader thread, shutdown, every in-flight request failed on death | done | this branch; no separate `supervisor` module — the lifetime is the session's, and a second type for it would own nothing. Automatic respawn is deliberately not offered: a debug session that died has lost its debuggee, so restarting the adapter would attach to nothing |
+| D1-6 — `runInTerminal` handed back to `run-core`'s PTY supervisor | blocked on D3-1 | the reverse-request hook exists in `SessionListener`; what answers it is the adapter, which arrives with D3 |
+| D1-7 — ADR-0041 + `layering.md` rows for `dap-core` and `stdio-framing` + CI gate | done | this branch |
 
 ### D2 — breakpoints
 
