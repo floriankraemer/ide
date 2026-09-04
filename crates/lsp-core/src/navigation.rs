@@ -8,8 +8,10 @@
 
 use serde_json::Value;
 
+use serde_json::json;
+
 use crate::diagnostics::path_from_uri;
-use crate::manager::LspError;
+use crate::manager::{position_params, LspError, DEFINITION_TIMEOUT, METADATA_TIMEOUT};
 
 /// One place a definition was found, addressed the way the editor jumps:
 /// `line` 1-based, `column` 0-based, both in UTF-16 code units.
@@ -73,6 +75,23 @@ pub enum DefinitionOutcome {
     NeedsMetadataFetch(String),
 }
 
+/// Split a [`DefinitionOutcome::NeedsMetadataFetch`] URI
+/// (`"csharp:/metadata/Projects/x/Console.cs"`) into the `(scheme, key)`
+/// pair [`app_core::AppSession::open_virtual_document`] takes — the inverse
+/// of csharp-ls's own `scheme:/key` convention for this URI, not a general
+/// URI parser. `None` for anything that does not have this shape, which
+/// should not happen for a URI that already passed `definition_outcome`'s
+/// "not `file://`" check, but a caller fetching over the network is exactly
+/// where "should not happen" still needs a typed answer instead of a panic.
+pub fn virtual_doc_key(uri: &str) -> Option<(String, String)> {
+    let (scheme, rest) = uri.split_once(':')?;
+    let key = rest.strip_prefix('/').unwrap_or(rest);
+    if scheme.is_empty() || key.is_empty() {
+        return None;
+    }
+    Some((scheme.to_string(), key.to_string()))
+}
+
 /// The precedence rule of ADR-0016: a running server's answer wins, and the
 /// index is the fallback for everything else — no server configured for the
 /// language, a server still starting or inside its restart backoff, a request
@@ -97,6 +116,67 @@ pub fn definition_outcome(
             }
         }
         _ => DefinitionOutcome::Index,
+    }
+}
+
+// C4-followup (#162): request-sending `LspManager` methods for this feature, moved out of
+// `manager.rs` once it crossed the file-size ceiling. This file already held the
+// parse/rule layer; this is the request-sending half `manager.rs`'s own module doc
+// pointed callers to.
+impl crate::manager::LspManager {
+    /// `textDocument/definition` for a position in an open document. An empty
+    /// vector means the server had no answer; whether that falls back to the
+    /// index is [`crate::navigation::definition_outcome`]'s decision.
+    pub fn definition(
+        &self,
+        uri: &str,
+        line: u32,
+        character: u32,
+    ) -> Result<Vec<DefinitionTarget>, LspError> {
+        let language_id = self.language_of(uri)?;
+        let result = self.request_with_timeout(
+            &language_id,
+            "textDocument/definition",
+            position_params(uri, line, character),
+            DEFINITION_TIMEOUT,
+        )?;
+        Ok(parse_definition(&result))
+    }
+    /// C12: csharp-ls's custom `csharp/metadata` request — fetches the
+    /// decompiled/generated source text a `csharp:/...` definition target
+    /// points at (see [`crate::navigation::DefinitionOutcome::NeedsMetadataFetch`]),
+    /// so it can be opened as a read-only virtual document instead of a
+    /// broken tab.
+    ///
+    /// `language_id` is passed explicitly rather than derived from `uri` via
+    /// `language_of` (as [`LspManager::definition`] does): `uri` here is a
+    /// definition *target* the client has never opened, so it is not in the
+    /// open-documents table `language_of` reads.
+    ///
+    /// This is not a method in the LSP base specification — csharp-ls
+    /// documents it (`Custom Request: csharp/metadata`) but publishes no
+    /// formal schema, so the request/response shape below is a best-effort
+    /// reconstruction from the common `{textDocument: {uri}}` request /
+    /// `{source: string, ...}` response shape other LSP metadata extensions
+    /// (e.g. OmniSharp's own predecessor of this request) use, and is
+    /// **unverified against a real csharp-ls process** — this repo's Docker
+    /// verification budget did not extend to a live decompiled-symbol round
+    /// trip. `stub_server`'s `csharp/metadata` mode exercises the wire
+    /// shape this code expects, not what a real server actually sends.
+    pub fn fetch_metadata(&self, language_id: &str, uri: &str) -> Result<String, LspError> {
+        let result = self.request_with_timeout(
+            language_id,
+            "csharp/metadata",
+            json!({"textDocument": {"uri": uri}}),
+            METADATA_TIMEOUT,
+        )?;
+        result
+            .get("source")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                LspError::Protocol(format!("csharp/metadata for {uri} had no \"source\" field"))
+            })
     }
 }
 
@@ -233,5 +313,23 @@ mod tests {
             definition_outcome(Some(Ok(targets))),
             DefinitionOutcome::NeedsMetadataFetch("csharp:/metadata/Console.cs".to_string())
         );
+    }
+
+    #[test]
+    fn a_metadata_uri_splits_into_its_scheme_and_key() {
+        assert_eq!(
+            virtual_doc_key("csharp:/metadata/Projects/x/Console.cs"),
+            Some((
+                "csharp".to_string(),
+                "metadata/Projects/x/Console.cs".to_string()
+            ))
+        );
+    }
+
+    #[test]
+    fn a_uri_with_no_scheme_or_no_key_does_not_split() {
+        assert_eq!(virtual_doc_key("no-colon-here"), None);
+        assert_eq!(virtual_doc_key(":/metadata/Console.cs"), None);
+        assert_eq!(virtual_doc_key("csharp:/"), None);
     }
 }

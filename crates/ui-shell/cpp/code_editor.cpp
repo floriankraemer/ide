@@ -467,6 +467,40 @@ void CodeEditor::paintEvent(QPaintEvent *event)
         }
     }
 
+    // C10-followup: one pill per lens, after its line's text. Rebuilt every
+    // paint, keyed by index into codeLenses_ for mousePressEvent's hit test.
+    codeLensClickRects_.clear();
+    if (!codeLenses_.isEmpty()) {
+        QPainter painter(viewport());
+        QFont lensFont = font();
+        lensFont.setPointSizeF(lensFont.pointSizeF() * 0.85);
+        painter.setFont(lensFont);
+        const QColor lensColor = tinted(palette().color(QPalette::Text), 100, 100);
+        const QColor lensBg = tinted(palette().color(QPalette::Base), 100, 108);
+        const int maxBlock = document()->blockCount() - 1;
+        for (int i = 0; i < codeLenses_.size(); ++i) {
+            const CodeLensSpan &lens = codeLenses_.at(i);
+            if (lens.line < 0 || lens.line > maxBlock) {
+                continue;
+            }
+            const QTextBlock block = document()->findBlockByNumber(lens.line);
+            if (!block.isValid() || !block.isVisible()) {
+                continue;
+            }
+            const QRect lineRect = blockBoundingGeometry(block).translated(contentOffset()).toRect();
+            const int textEnd = lineRect.left() + fontMetrics().horizontalAdvance(block.text());
+            const QString text = QStringLiteral(" ") + lens.label + QStringLiteral(" ");
+            const QRect textRect(textEnd + 12, lineRect.top(),
+                                 painter.fontMetrics().horizontalAdvance(text), lineRect.height());
+            painter.fillRect(textRect, lensBg);
+            painter.setPen(lensColor);
+            painter.drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, text);
+            if (lens.clickable) {
+                codeLensClickRects_.insert(i, textRect);
+            }
+        }
+    }
+
     // Show-whitespace-characters task: off by default, like inlay hints
     // above, and for the same reason — a glyph that isn't in the file
     // should cost nothing to a user who never turned it on.
@@ -503,6 +537,16 @@ void CodeEditor::cancelHover()
 
 void CodeEditor::mousePressEvent(QMouseEvent *event)
 {
+    // C10-followup: checked first so a lens click can't also place a caret.
+    for (auto it = codeLensClickRects_.cbegin();
+         event->button() == Qt::LeftButton && it != codeLensClickRects_.cend(); ++it) {
+        if (it.value().contains(event->pos())) {
+            event->accept();
+            emit codeLensClicked(it.key());
+            return;
+        }
+    }
+
     // F1-15. Checked before Ctrl+Click so the two gestures cannot both fire
     // on an Alt+Ctrl+Click; adding a caret is the more specific one.
     if (event->button() == Qt::LeftButton && event->modifiers().testFlag(Qt::AltModifier)) {
@@ -587,6 +631,12 @@ void CodeEditor::setInlayHints(const QVector<InlayHintSpan> &hints)
 void CodeEditor::setInlayHintsEnabled(bool enabled)
 {
     inlayHintsEnabled_ = enabled;
+    viewport()->update();
+}
+
+void CodeEditor::setCodeLenses(const QVector<CodeLensSpan> &lenses)
+{
+    codeLenses_ = lenses;
     viewport()->update();
 }
 

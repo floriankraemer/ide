@@ -943,16 +943,9 @@ mod ffi {
         /// everywhere else, per F0-16); this only carries its inputs and
         /// answer across the seam.
         ///
-        /// TODO(C9-followup): nothing in `cpp/syntax_highlighter.cpp` calls
-        /// this yet. `LanguageService::requestSemanticTokens`/
-        /// `semanticTokenSpans`/`semanticTokensReady` (see `ffi.rs`'s
-        /// `LanguageService` block) are wired and reachable end to end from
-        /// document open through to a fetchable merged-span answer; only
-        /// the second call site — `SyntaxHighlighter` re-running
-        /// `highlightBlock` with the overlaid spans once
-        /// `semanticTokensReady` fires — is left for follow-up, the same
-        /// allowance C9's plan gives when full C++ rendering wiring is not
-        /// worth the risk of an unfamiliar-file change under one task.
+        /// Called from `EditorTabs::onSemanticTokensReady` (C9-followup)
+        /// once `semanticTokensReady` fires, via
+        /// `SyntaxHighlighter::applySemanticTokens`.
         fn overlay_semantic_tokens(
             self: &SyntaxHighlighterHandle,
             semantic: Vec<FfiHighlightSpan>,
@@ -1373,6 +1366,15 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "tabContent"]
         fn tab_content(self: &DocumentManager, tab_id: u64) -> QString;
+
+        /// C12-followup: whether the tab is read-only — a virtual document
+        /// (decompiled/generated source with no backing file), a binary
+        /// tab, or a diff tab. `EditorTabs::onTabOpened` uses this to build
+        /// the `CodeEditor` with typing disabled rather than relying only
+        /// on `AppSession::save_tab`'s refusal at save time.
+        #[qinvokable]
+        #[cxx_name = "tabIsReadOnly"]
+        fn tab_is_read_only(self: &DocumentManager, tab_id: u64) -> bool;
 
         /// The tab's backing file name (`"main.rs"`, `"Dockerfile"`),
         /// empty when there is none — used to pick a highlighting language
@@ -3151,6 +3153,24 @@ mod ffi {
         #[cxx_name = "definitionUnavailable"]
         fn definition_unavailable(self: Pin<&mut LanguageService>, message: QString);
 
+        /// C12-followup — the fetch `definitionUnavailable`'s doc comment
+        /// describes landed: `csharp/metadata` answered, and its text is now
+        /// open as a read-only virtual document with this `tab_id`.
+        /// `newly_opened` tells `EditorTabs` whether to build the tab widget
+        /// (via the same path `DocumentManager::tabOpened` drives) before
+        /// focusing it, or only focus the one already open for this
+        /// decompiled symbol. A fetch failure still emits
+        /// `definitionUnavailable` instead — never a signal of its own, so
+        /// the refusal message stays in one place.
+        #[qsignal]
+        #[cxx_name = "virtualDocumentOpened"]
+        fn virtual_document_opened(
+            self: Pin<&mut LanguageService>,
+            tab_id: u64,
+            title: QString,
+            newly_opened: bool,
+        );
+
         /// L5 — ask the server what could be typed at this position.
         /// `text_before_cursor` is the current line up to the caret, from
         /// which `lsp_core::completion` derives both the word being typed
@@ -3504,14 +3524,10 @@ mod ffi {
         /// on the usual `refactorReady`/`refactorFailed` refactor-preview
         /// flow, not a signal of its own.
         ///
-        /// TODO(C10-followup): nothing in `cpp/editor_tabs_lsp.cpp` calls
-        /// `requestCodeLenses`/`codeLenses`/`runCodeLens` yet. The Rust
-        /// pipeline is wired and reachable end to end from document open
-        /// through fetch, resolve and gated execution (see
-        /// `stub_server_session.rs`'s C10 tests); only the C++ lens strip —
-        /// painting one row per `FfiCodeLens` above/on its line and
-        /// forwarding a click back by index — is left for follow-up, the
-        /// same allowance C9's own repaint call was given.
+        /// Called from `CodeEditor::codeLensClicked` via
+        /// `EditorTabs`'s connection to it (C10-followup): the lens strip
+        /// paints one pill per `FfiCodeLens` on its line and forwards a
+        /// click back by index.
         #[qinvokable]
         #[cxx_name = "runCodeLens"]
         fn run_code_lens(self: Pin<&mut LanguageService>, path: &QString, index: u32);
@@ -3523,15 +3539,8 @@ mod ffi {
         /// module docs), so an unsupported server or empty answer simply
         /// leaves `callHierarchyItems` empty.
         ///
-        /// TODO(C11-followup): the Rust+FFI pipeline for call hierarchy and
-        /// type hierarchy below is wired and reachable end to end (see
-        /// `stub_server_session.rs`'s C11 tests for the LSP round trip and
-        /// `lsp_core::hierarchy`'s unit tests for the index-fallback
-        /// precedence); no `cpp/` dock consumes any of it yet. `ClassViewPanel`
-        /// and `FindUsagesPanel` are each a tree over one shape of this same
-        /// data and are the template to extend or sibling from, the same
-        /// allowance C9's semantic-token repaint and C10's lens strip were
-        /// given.
+        /// Consumed by `cpp/hierarchy_panel.cpp` (C11-followup), triggered
+        /// from Navigate > Show Call Hierarchy.
         #[qinvokable]
         #[cxx_name = "requestCallHierarchy"]
         fn request_call_hierarchy(
