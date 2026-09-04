@@ -107,10 +107,11 @@ impl ffi::AppSettings {
             // come from the global layer or a default.
             return QString::from(settings_model::Scope::Global.label());
         };
-        let origin = settings_model::origin(
+        let origin = settings_model::origin_for_view(
             field,
             &crate::bridge::convert::load_settings(),
             &crate::bridge::convert::load_project_settings(),
+            *self.scope.borrow(),
         );
         QString::from(origin.label())
     }

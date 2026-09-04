@@ -124,6 +124,13 @@ QWidget *buildEditingPage(QWidget *parent, EditingEditor *editor)
     auto *globalBox = new QGroupBox(QObject::tr("All languages"), page);
     auto *globalForm = new QFormLayout(globalBox);
     const RowFields globalFields = addRowFields(globalForm);
+    // #143: the one widget an E2E flow needs a stable handle to — found by
+    // `settings_dialog.cpp` via `findChild` for the `dialog_shown` mark's
+    // rect, the same convention `run_config_dialog.cpp` uses for its own
+    // Add/Program/Save widgets. Only the "All languages" row needs a name:
+    // the "Language override" row's own `tabWidth` (same `RowFields`
+    // shape, `languageFields` below) is never the flow's target.
+    globalFields.tabWidth->setObjectName(QStringLiteral("editingTabWidth"));
 
     auto *encodingEdit = new QLineEdit(globalBox);
     encodingEdit->setPlaceholderText(QObject::tr("utf-8"));
