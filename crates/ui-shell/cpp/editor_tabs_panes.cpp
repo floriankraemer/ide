@@ -4,6 +4,11 @@
 #include "hex_viewer.h"
 
 #include <QAction>
+#include <QByteArray>
+#include <QDrag>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
 #include <QIcon>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -11,6 +16,8 @@
 #include <QJsonValue>
 #include <QList>
 #include <QMenu>
+#include <QMimeData>
+#include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QPoint>
 #include <QSplitter>
@@ -20,7 +27,144 @@
 #include <QVariant>
 #include <QWidget>
 
+#include <functional>
+
 namespace ui_shell {
+namespace {
+
+// Carries a dragged tab's TabId. Process-private on purpose: a TabId means
+// nothing outside the session that issued it.
+const QLatin1String kTabMimeType("application/x-ide-editor-tab");
+
+// A tab strip a tab can be dragged out of and dropped into.
+//
+// Qt's own setMovable() reorders within one strip and stops dead at its
+// edge, which is why a tab could not previously reach another pane. The
+// gesture continues here as a QDrag, started only once the pointer leaves
+// the strip — so as long as it stays inside, the built-in reorder still
+// owns the whole interaction and behaves exactly as before.
+//
+// No Q_OBJECT: like EditorTabs itself it hands out std::function hooks
+// instead of signals, so it needs no moc target.
+class PaneTabBar : public QTabBar
+{
+public:
+    explicit PaneTabBar(QWidget *parent)
+      : QTabBar(parent)
+    {
+        setAcceptDrops(true);
+    }
+
+    // Both set by EditorTabs::makeGroup; the bar itself decides nothing
+    // about what a tab is or where it may land.
+    std::function<quint64(int index)> tabIdAt_;
+    std::function<void(quint64 tabId, int index)> tabDropped_;
+
+protected:
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        if (event->button() == Qt::LeftButton && tabIdAt_) {
+            // The id, not the index: a reorder inside the strip moves the
+            // tab before the pointer ever leaves it.
+            dragTabId_ = tabIdAt_(tabAt(event->position().toPoint()));
+        }
+        QTabBar::mousePressEvent(event);
+    }
+
+    void mouseReleaseEvent(QMouseEvent *event) override
+    {
+        dragTabId_ = 0;
+        QTabBar::mouseReleaseEvent(event);
+    }
+
+    void mouseMoveEvent(QMouseEvent *event) override
+    {
+        if (!(event->buttons() & Qt::LeftButton) || dragTabId_ == 0
+            || rect().contains(event->position().toPoint())) {
+            QTabBar::mouseMoveEvent(event);
+            return;
+        }
+        startDrag(event);
+    }
+
+    void dragEnterEvent(QDragEnterEvent *event) override { acceptTab(event); }
+
+    void dragMoveEvent(QDragMoveEvent *event) override { acceptTab(event); }
+
+    void dropEvent(QDropEvent *event) override
+    {
+        if (!event->mimeData()->hasFormat(kTabMimeType)) {
+            return;
+        }
+        event->acceptProposedAction();
+        if (tabDropped_) {
+            // tabAt() answers -1 past the last tab, which is the drop
+            // "after everything" this strip should append.
+            tabDropped_(event->mimeData()->data(kTabMimeType).toULongLong(),
+                        tabAt(event->position().toPoint()));
+        }
+    }
+
+private:
+    void acceptTab(QDragMoveEvent *event)
+    {
+        if (event->mimeData()->hasFormat(kTabMimeType)) {
+            event->acceptProposedAction();
+        }
+    }
+
+    int indexOfTab(quint64 tabId) const
+    {
+        for (int i = 0; i < count(); ++i) {
+            if (tabIdAt_(i) == tabId) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    void startDrag(QMouseEvent *event)
+    {
+        const quint64 tabId = dragTabId_;
+        dragTabId_ = 0;
+        const int index = indexOfTab(tabId);
+        if (index < 0) {
+            return;
+        }
+
+        // End QTabBar's own reorder before taking the pointer off it: a
+        // QDrag runs its own event loop, and the strip would otherwise sit
+        // stuck mid-move for the rest of the gesture.
+        QMouseEvent release(QEvent::MouseButtonRelease, event->position(),
+                            event->globalPosition(), Qt::LeftButton, Qt::NoButton,
+                            Qt::NoModifier);
+        QTabBar::mouseReleaseEvent(&release);
+
+        auto *mime = new QMimeData;
+        mime->setData(kTabMimeType, QByteArray::number(tabId));
+        auto *drag = new QDrag(this);
+        drag->setMimeData(mime);
+        drag->setPixmap(grab(tabRect(index)));
+        drag->exec(Qt::MoveAction);
+    }
+
+    quint64 dragTabId_ = 0;
+};
+
+// A tab group whose strip is a PaneTabBar. QTabWidget::setTabBar is
+// protected, so installing one takes a subclass — this is the whole reason
+// this class exists.
+class PaneTabWidget : public QTabWidget
+{
+public:
+    explicit PaneTabWidget(QWidget *parent)
+      : QTabWidget(parent)
+    {
+        setTabBar(new PaneTabBar(this));
+    }
+};
+
+} // namespace
 
 QString EditorTabs::saveLayout() const
 {
@@ -117,7 +261,12 @@ void EditorTabs::focusTab(quint64 tabId)
 
 QTabWidget *EditorTabs::makeGroup()
 {
-    auto *group = new QTabWidget(root_);
+    auto *group = new PaneTabWidget(root_);
+    auto *bar = static_cast<PaneTabBar *>(group->tabBar());
+    bar->tabIdAt_ = [this, group](int index) { return tabIdAt(group, index); };
+    bar->tabDropped_ = [this, group](quint64 tabId, int index) {
+        moveTabToGroup(tabId, group, index);
+    };
     group->setTabsClosable(true);
     group->setUsesScrollButtons(true);
     // G2: drag-reorder is safe with no adapter/app-core change because
@@ -264,8 +413,44 @@ void EditorTabs::splitTab(QTabWidget *group, int index, Qt::Orientation orientat
     target->setSizes(evenSizes(target));
     setActiveGroup(newGroup, newGroup->indexOf(page));
     page->setFocus();
+    // A split *moves* the tab, so it reports the move like any other: the
+    // marker is what tells a test where the tab now is on screen.
+    markTab("tab_moved", tabIdAt(newGroup, newGroup->indexOf(page)), newGroup,
+            newGroup->indexOf(page), title);
     e2eMark(QStringLiteral("{\"ev\":\"split_created\",\"orientation\":\"%1\"}")
               .arg(orientation == Qt::Horizontal ? QLatin1String("h") : QLatin1String("v")));
+    markPaneCount();
+}
+
+void EditorTabs::moveTabToGroup(quint64 tabId, QTabWidget *target, int index)
+{
+    const TabLoc loc = locate(tabId);
+    if (!loc.group || loc.group == target) {
+        return; // Within one strip, QTabBar's own reorder has already run.
+    }
+
+    QTabWidget *source = loc.group;
+    QWidget *page = source->widget(loc.index);
+    // As in splitTab: the page moves rather than reopening, and removeTab
+    // drops the decoration along with the tab.
+    const QIcon icon = source->tabIcon(loc.index);
+    const QString title = source->tabText(loc.index);
+    const QString toolTip = source->tabToolTip(loc.index);
+
+    suspendActivation_ = true;
+    source->removeTab(loc.index);
+    const int at = index < 0 ? target->count() : qMin(index, target->count());
+    const int moved = target->insertTab(at, page, icon, title);
+    target->setTabToolTip(moved, toolTip);
+    target->setCurrentIndex(moved);
+    suspendActivation_ = false;
+
+    if (source->count() == 0) {
+        collapseGroup(source);
+    }
+    setActiveGroup(target, moved);
+    page->setFocus();
+    markTab("tab_moved", tabId, target, moved, title);
     markPaneCount();
 }
 
