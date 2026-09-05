@@ -128,6 +128,21 @@ struct CodeLensSpan
     bool clickable;
 };
 
+// One line's inline debug values (D3-7), view-local like every other span
+// here. `line` is a 0-based block number, converted from `DebugService`'s
+// 1-based line by whoever owns the mapping (EditorTabs), exactly as
+// CodeLensSpan is.
+struct InlineValueSpan
+{
+    int line;
+    QString text;
+
+    bool operator==(const InlineValueSpan &other) const
+    {
+        return line == other.line && text == other.text;
+    }
+};
+
 // One classified space/tab character (show-whitespace-characters task),
 // view-local for the same reason FoldRange and DiagnosticSpan are:
 // converted from FfiWhitespaceSpan by whoever owns the mapping (EditorTabs),
@@ -288,6 +303,11 @@ public:
     // ("3 references", "Run Test"), not a guess the editor is inventing
     // inline with the code.
     void setCodeLenses(const QVector<CodeLensSpan> &lenses);
+
+    // D3-7: values from the stopped frame, painted after each line's text.
+    // Empty whenever nothing is suspended in this file, which is what makes
+    // "is the debugger stopped here" a question this widget never asks.
+    void setInlineValues(const QVector<InlineValueSpan> &values);
 
     // Show-whitespace-characters task: what to paint. `paintEvent` re-asks
     // `whitespaceClassifier_` for the visible blocks whenever the document
@@ -590,6 +610,7 @@ private:
     QVector<DiagnosticSpan> diagnosticSpans_;
     QVector<OccurrenceSpan> occurrenceSpans_;
     QVector<InlayHintSpan> inlayHints_;
+    QVector<InlineValueSpan> inlineValues_;
     bool inlayHintsEnabled_ = false;
     QVector<CodeLensSpan> codeLenses_;
     // Screen rects the last paintEvent drew each of codeLenses_'s clickable

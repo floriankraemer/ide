@@ -49,6 +49,11 @@ struct SessionState {
     /// with. Cleared on every stop: a value from the previous suspension is
     /// worse than no value, because it looks current.
     variables: HashMap<i64, Vec<dap_core::Variable>>,
+    /// The references of the current frame's own scopes, in the order the
+    /// adapter listed them. `variables` is keyed globally, so without this
+    /// there is no way to ask "what is in scope *here*" — which is exactly
+    /// what inline values need (D3-7).
+    scope_references: Vec<i64>,
 }
 
 /// Rust side of the `DebugService` QObject.
@@ -248,6 +253,7 @@ impl ffi::DebugService {
                 stopped_thread: 0,
                 current_frame: 0,
                 frames: Vec::new(),
+                scope_references: Vec::new(),
                 threads: Vec::new(),
                 variables: HashMap::new(),
             },
@@ -322,6 +328,7 @@ impl ffi::DebugService {
                 stopped_thread: 0,
                 current_frame: 0,
                 frames: Vec::new(),
+                scope_references: Vec::new(),
                 threads: Vec::new(),
                 variables: HashMap::new(),
             },
@@ -558,6 +565,49 @@ impl ffi::DebugService {
         .unwrap_or_default()
     }
 
+    /// The values to paint at the end of the lines of `path`, given the
+    /// buffer's current `text` (D3-7).
+    ///
+    /// The text comes from the view because the view owns it: a file being
+    /// debugged may have unsaved edits, and reading it from disk would
+    /// place values against lines the user is no longer looking at. Which
+    /// value belongs on which line is `dap_core::inline_values`' rule;
+    /// this only supplies the frame's variables and the stopped line.
+    pub fn inline_values(&self, path: &QString, text: &QString) -> Vec<ffi::FfiInlineValue> {
+        let path = path.to_string();
+        self.with_current(|state| {
+            let Some(frame) = state
+                .frames
+                .iter()
+                .find(|frame| frame.id == state.current_frame)
+            else {
+                return Vec::new();
+            };
+            // Values belong to the file execution is in, not to whichever
+            // file happens to be open.
+            if frame.path != path {
+                return Vec::new();
+            }
+
+            let variables: Vec<(String, String)> = state
+                .scope_references
+                .iter()
+                .filter_map(|reference| state.variables.get(reference))
+                .flatten()
+                .map(|variable| (variable.name.clone(), variable.value.clone()))
+                .collect();
+
+            dap_core::inline_values(&text.to_string(), &variables, frame.line)
+                .into_iter()
+                .map(|value| ffi::FfiInlineValue {
+                    line: value.line,
+                    text: QString::from(value.text.as_str()),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
     /// Fetch a frame's scopes, then the variables of each — one round trip
     /// per level, which is what makes a deep object cheap to show and
     /// expensive only where the user expands it.
@@ -602,6 +652,9 @@ impl ffi::DebugService {
                     .map(|scope| scope.variables_reference)
                     .collect();
                 let names: Vec<String> = scopes.iter().map(|scope| scope.name.clone()).collect();
+                if let Some(state) = service.sessions.borrow_mut().get_mut(&session_id) {
+                    state.scope_references = references.clone();
+                }
                 service
                     .as_mut()
                     .scopes_changed(session_id, QString::from(names.join("\n").as_str()));

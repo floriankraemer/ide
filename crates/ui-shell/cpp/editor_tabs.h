@@ -443,6 +443,9 @@ public:
     // D2-3: follow this editor's edits so its breakpoints move with them.
     void watchLineCountFor(CodeEditor *editor);
     // D3: show (or clear, with an empty path) the suspended line.
+    // D3-7: re-read the stopped frame's inline values into every editor
+    // showing the file they belong to, and clear them everywhere else.
+    void refreshInlineValues();
     void showExecutionPoint(const QString &path, int line);
 
     // R1-7: ask `RunService::canRunFile` whether an editor's file has a run

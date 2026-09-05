@@ -494,6 +494,36 @@ void CodeEditor::paintEvent(QPaintEvent *event)
         }
     }
 
+    // D3-7: the stopped frame's values, after the line's text and past
+    // whatever a code lens already put there. Which value belongs on which
+    // line is `dap_core::inline_values`' answer, arriving through
+    // `EditorTabs`; this paints where it was told to.
+    if (!inlineValues_.isEmpty()) {
+        QPainter painter(viewport());
+        QFont valueFont = font();
+        valueFont.setItalic(true);
+        valueFont.setPointSizeF(valueFont.pointSizeF() * 0.85);
+        painter.setFont(valueFont);
+        const QColor valueColor = tinted(palette().color(QPalette::Text), 100, 120);
+        const int maxBlock = document()->blockCount() - 1;
+        for (const InlineValueSpan &value : inlineValues_) {
+            if (value.line < 0 || value.line > maxBlock) {
+                continue;
+            }
+            const QTextBlock block = document()->findBlockByNumber(value.line);
+            if (!block.isValid() || !block.isVisible()) {
+                continue;
+            }
+            const QRect lineRect = blockBoundingGeometry(block).translated(contentOffset()).toRect();
+            const int textEnd = lineRect.left() + fontMetrics().horizontalAdvance(block.text());
+            const QRect textRect(textEnd + 24, lineRect.top(),
+                                 painter.fontMetrics().horizontalAdvance(value.text) + 8,
+                                 lineRect.height());
+            painter.setPen(valueColor);
+            painter.drawText(textRect, Qt::AlignVCenter | Qt::AlignLeft, value.text);
+        }
+    }
+
     // Show-whitespace-characters task: off by default, like inlay hints
     // above, and for the same reason — a glyph that isn't in the file
     // should cost nothing to a user who never turned it on.
@@ -624,6 +654,15 @@ void CodeEditor::setInlayHints(const QVector<InlayHintSpan> &hints)
 void CodeEditor::setInlayHintsEnabled(bool enabled)
 {
     inlayHintsEnabled_ = enabled;
+    viewport()->update();
+}
+
+void CodeEditor::setInlineValues(const QVector<InlineValueSpan> &values)
+{
+    if (inlineValues_ == values) {
+        return;
+    }
+    inlineValues_ = values;
     viewport()->update();
 }
 

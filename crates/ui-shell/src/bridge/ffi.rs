@@ -709,6 +709,14 @@ mod ffi {
     /// `dap_core::StackFrame`. `path` is empty for a frame the adapter knows
     /// only by address — a runtime-internal frame — which the view shows
     /// without offering to open it.
+    /// One line's inline debug values (D3-7): what to paint after the text
+    /// of line `line` (1-based) while the debuggee is stopped.
+    #[derive(Default)]
+    struct FfiInlineValue {
+        line: u32,
+        text: QString,
+    }
+
     struct FfiStackFrame {
         id: i64,
         name: QString,
@@ -5634,6 +5642,22 @@ mod ffi {
         /// fetched yet", which `expand` answers.
         #[qinvokable]
         fn variables(self: &DebugService, reference: i64) -> Vec<FfiVariable>;
+
+        /// What to paint at the end of the lines of `path`, given the
+        /// buffer's current `text` (D3-7). Empty unless a session is
+        /// stopped in that very file.
+        ///
+        /// The text is passed in because the view owns it: a file being
+        /// debugged may have unsaved edits, and a value placed against a
+        /// line read from disk would sit next to code the user is no longer
+        /// looking at.
+        #[qinvokable]
+        #[cxx_name = "inlineValues"]
+        fn inline_values(
+            self: &DebugService,
+            path: &QString,
+            text: &QString,
+        ) -> Vec<FfiInlineValue>;
 
         /// Fetch the children of `reference`; answers via
         /// `variablesChanged`.

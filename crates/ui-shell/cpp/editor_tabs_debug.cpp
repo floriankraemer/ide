@@ -46,11 +46,23 @@ void wireDebugService(DebugService *debugService, EditorTabs *editorTabs)
     QObject::connect(debugService, &DebugService::debugStopped, editorTabs,
                       [editorTabs](quint64, const QString &, const QString &path, quint32 line) {
                           editorTabs->showExecutionPoint(path, static_cast<int>(line));
+                          editorTabs->refreshInlineValues();
                       });
+    // The scopes arrive after the stop, one fetch per level, so the values
+    // are painted again as they land rather than once when nothing is
+    // known yet (D3-7).
+    QObject::connect(debugService, &DebugService::variablesChanged, editorTabs,
+                      [editorTabs](quint64, qint64) { editorTabs->refreshInlineValues(); });
     QObject::connect(debugService, &DebugService::debugResumed, editorTabs,
-                      [editorTabs](quint64) { editorTabs->showExecutionPoint(QString(), 0); });
+                      [editorTabs](quint64) {
+                          editorTabs->showExecutionPoint(QString(), 0);
+                          editorTabs->refreshInlineValues();
+                      });
     QObject::connect(debugService, &DebugService::debugTerminated, editorTabs,
-                      [editorTabs](quint64, int) { editorTabs->showExecutionPoint(QString(), 0); });
+                      [editorTabs](quint64, int) {
+                          editorTabs->showExecutionPoint(QString(), 0);
+                          editorTabs->refreshInlineValues();
+                      });
 }
 
 void EditorTabs::setDebugService(DebugService *debugService)
@@ -129,6 +141,33 @@ void EditorTabs::watchLineCountFor(CodeEditor *editor)
                 debugService_->shiftBreakpoints(path, static_cast<quint32>(block + 1), delta);
             });
     connect(editor, &QObject::destroyed, editor, [previous]() { delete previous; });
+}
+
+void EditorTabs::refreshInlineValues()
+{
+    if (!debugService_) {
+        return;
+    }
+    forEachEditor([this](QPlainTextEdit *editor) {
+        auto *codeEditor = qobject_cast<CodeEditor *>(editor);
+        if (!codeEditor) {
+            return;
+        }
+        const quint64 tabId = codeEditor->property("tabId").toULongLong();
+        const QString path = docManager_->tabPath(tabId);
+        QVector<InlineValueSpan> spans;
+        if (!path.isEmpty()) {
+            // Whether this file is the one execution stopped in is
+            // `DebugService`'s answer: it returns nothing for every other
+            // file, so this loop asks the same question of each editor and
+            // decides nothing itself.
+            for (const FfiInlineValue &value :
+                 debugService_->inlineValues(path, codeEditor->toPlainText())) {
+                spans.append(InlineValueSpan{static_cast<int>(value.line) - 1, value.text});
+            }
+        }
+        codeEditor->setInlineValues(spans);
+    });
 }
 
 void EditorTabs::showExecutionPoint(const QString &path, int line)
