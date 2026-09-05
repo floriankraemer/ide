@@ -82,7 +82,9 @@ baseline() {
 	# only that field reached .ide/settings.toml — the flow that found and
 	# proves the fix for the origin-badge bug #143 walked into. No split
 	# planned; this suite is already one flow per test.
-	crates/app/tests/e2e.rs) echo 1477 ;;
+	# Ratcheted down: the split-pane flows moved to their own binary,
+	# crates/app/tests/e2e_panes.rs, to make room for the tab-drag flow.
+	crates/app/tests/e2e.rs) echo 1362 ;;
 	esac
 }
 
