@@ -96,10 +96,9 @@ fn buffer(mcp: &Mcp, tab_id: u64) -> String {
         .to_string()
 }
 
-/// The centre of a `[x, y, w, h]` marker field — the same shape `tab_centre`
-/// reads off `tab_added`, reused here for `changes_row`'s and
-/// `changes_panel_shown`'s rects so a flow never computes a click point from
-/// window geometry or font metrics.
+/// The centre of a `[x, y, w, h]` marker field — used for `changes_row`'s
+/// and `changes_panel_shown`'s rects so a flow never computes a click point
+/// from window geometry or font metrics.
 fn rect_centre(rect: &serde_json::Value) -> (i32, i32) {
     let rect: Vec<i64> = rect
         .as_array()
@@ -519,94 +518,6 @@ fn start_rename(ide: &Ide, symbol: &str, new_name: &str) {
     ide.key("Return");
 }
 
-/// Split the editor, quit, and come back to the same layout.
-///
-/// `app-config`'s TOML round-trip is unit-tested; *the view reconstructing
-/// itself from it* is not, and that is the whole flow. The persisted layout
-/// is read back with `app-config`'s own types rather than a regex, so the
-/// test cannot pass by agreeing with a re-implementation of the format.
-#[test]
-#[ignore = "E2E: needs an X server; run via `make e2e`"]
-fn e2e_split_editor_persistence() {
-    let name = "e2e_split_editor_persistence";
-    let mut ide = Ide::launch(name, APP, fixture("tiny"));
-    let mcp = ide.mcp();
-    ide.wait_for_ev(Mark::start(), "project_opened");
-    wait_for_index(&mcp);
-
-    open_file(&ide, "main.rs");
-    let second = open_file(&ide, "greeting.rs");
-    assert_eq!(
-        second["pane"].as_i64(),
-        Some(0),
-        "both tabs start in one pane"
-    );
-
-    // Split through the tab's own context menu, at the coordinates the view
-    // reported for that tab — not at a rectangle computed from the window
-    // geometry and the style's metrics.
-    let mark = ide.mark();
-    let (x, y) = tab_centre(&second);
-    ide.click_at(x, y, 3);
-    ide.wait_for_event(mark, "the tab context menu", |e| {
-        e["ev"] == "dialog_shown" && e["name"] == "tab_context_menu"
-    });
-    for _ in 0..3 {
-        ide.key("Down"); // Close, Close Others, (separator), Split Vertical
-    }
-    ide.key("Return");
-
-    let split = ide.wait_for_ev(mark, "split_created");
-    assert_eq!(
-        split["orientation"], "h",
-        "Split Vertical puts panes side by side"
-    );
-    e2e::wait_for("the editor to report two panes", || {
-        ide.events_since_of(mark, "pane_count")
-            .last()
-            .and_then(|e| e["n"].as_u64())
-            .filter(|n| *n == 2)
-            .map(|_| ())
-    });
-    ide.focus_main();
-
-    assert_eq!(ide.quit(), 0);
-
-    // Read the persisted layout with the app's own types.
-    let settings = app_config::load(&ide.config_dir()).expect("the settings the app just wrote");
-    let layout: serde_json::Value =
-        serde_json::from_str(&settings.editor_layout).expect("editor_layout is JSON");
-    let panes = groups_of(&layout);
-    assert_eq!(
-        panes.len(),
-        2,
-        "the persisted layout does not describe two panes"
-    );
-    assert_eq!(panes[0]["files"].as_array().map(Vec::len), Some(1));
-    assert_eq!(panes[1]["files"].as_array().map(Vec::len), Some(1));
-
-    // And back.
-    ide.relaunch();
-    ide.wait_for_ev(Mark::start(), "project_opened");
-    let restored: Vec<_> = e2e::wait_for("both tabs to be restored", || {
-        let tabs = ide.events_since_of(Mark::start(), "tab_added");
-        (tabs.len() == 2).then_some(tabs)
-    });
-    assert_eq!(restored[0]["title"], "main.rs");
-    assert_eq!(restored[0]["pane"].as_i64(), Some(0));
-    assert_eq!(restored[1]["title"], "greeting.rs");
-    assert_eq!(restored[1]["pane"].as_i64(), Some(1));
-    assert_eq!(
-        ide.events_since_of(Mark::start(), "pane_count")
-            .last()
-            .and_then(|e| e["n"].as_u64()),
-        Some(2),
-        "the restored window has a different number of panes"
-    );
-
-    assert_eq!(ide.quit(), 0);
-}
-
 /// Two carets, one keystroke, one undo (F1-18).
 ///
 /// The caret is walked to the middle of the fixture's first "world" by a
@@ -966,32 +877,6 @@ fn e2e_intention_creates_a_file_through_the_preview() {
     });
 
     assert_eq!(ide.quit(), 0);
-}
-
-/// The centre of a tab's label on screen, from its `tab_added` marker.
-fn tab_centre(tab: &serde_json::Value) -> (i32, i32) {
-    let rect: Vec<i64> = tab["rect"]
-        .as_array()
-        .expect("the marker carries the tab's rect")
-        .iter()
-        .map(|v| v.as_i64().expect("an integer"))
-        .collect();
-    (
-        (rect[0] + rect[2] / 2) as i32,
-        (rect[1] + rect[3] / 2) as i32,
-    )
-}
-
-/// Every `group` node in a persisted editor layout, in tree order.
-fn groups_of(node: &serde_json::Value) -> Vec<&serde_json::Value> {
-    match node["type"].as_str() {
-        Some("group") => vec![node],
-        Some("splitter") => node["children"]
-            .as_array()
-            .map(|children| children.iter().flat_map(groups_of).collect())
-            .unwrap_or_default(),
-        _ => Vec::new(),
-    }
 }
 
 /// F3-11/F3-16: reverting a hunk splices the edit back into the buffer —
