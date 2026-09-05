@@ -13,6 +13,7 @@
 #include <QMainWindow>
 #include <QMenu>
 #include <QMenuBar>
+#include <QStringList>
 
 namespace ui_shell {
 
@@ -59,8 +60,18 @@ void buildRunMenu(QMainWindow *window, RunService *runService, RunConfigEditor *
     // `aboutToShow`/`aboutToHide` are the only signal an E2E flow has that
     // it is safe to send keystrokes into it — same reasoning as
     // `vcs_menu.cpp`'s "V&CS" markers.
-    QObject::connect(runMenu, &QMenu::aboutToShow, runMenu,
-                      []() { e2eMark("{\"ev\":\"dialog_shown\",\"name\":\"run_menu\"}"); });
+    QObject::connect(runMenu, &QMenu::aboutToShow, runMenu, [runMenu]() {
+        // The item labels ride along with the marker so an E2E flow can
+        // count Downs to a named item instead of to a hard-coded index —
+        // adding a menu entry used to silently break whichever flow walked
+        // past it (R2-5 added one and did exactly that).
+        QStringList items;
+        for (const QAction *action : runMenu->actions()) {
+            items.append(e2eJson(action->text()));
+        }
+        e2eMark(QStringLiteral("{\"ev\":\"dialog_shown\",\"name\":\"run_menu\",\"items\":[%1]}")
+                  .arg(items.join(QStringLiteral(","))));
+    });
     QObject::connect(runMenu, &QMenu::aboutToHide, runMenu,
                       []() { e2eMark("{\"ev\":\"dialog_closed\",\"name\":\"run_menu\"}"); });
 
@@ -96,6 +107,17 @@ void buildRunMenu(QMainWindow *window, RunService *runService, RunConfigEditor *
         docks->show(QStringLiteral("runConsole"));
         runConsolePanel->focusConfigSelector();
     });
+
+    // IntelliJ's Show Running List: which of this session's consoles are
+    // still alive, and a way back to each one's tab (R2-5).
+    QAction *runningListAction =
+      registerAction(runMenu, QStringLiteral("run.showRunningList"),
+                      QObject::tr("Show Running List"), appSettings, actions);
+    QObject::connect(runningListAction, &QAction::triggered, runConsolePanel,
+                      [docks, runConsolePanel]() {
+                          docks->show(QStringLiteral("runConsole"));
+                          runConsolePanel->showRunningList();
+                      });
 
     QAction *editConfigsAction =
       registerAction(runMenu, QStringLiteral("run.editConfigurations"),

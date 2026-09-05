@@ -76,6 +76,25 @@ fn open_file(ide: &Ide, name: &str) -> serde_json::Value {
 /// correctness is exactly what `run_core::detect`'s unit tests already
 /// cover and re-proving it here would only add a compiler's worth of
 /// runtime to this flow for nothing this suite doesn't already know.
+/// How many `Down` presses reach the item whose label starts with
+/// `prefix`, given the first item is already highlighted.
+///
+/// Panics with the menu's actual contents rather than timing out sixty
+/// seconds later on a focus change that never comes, which is what a wrong
+/// index looks like from the outside.
+fn menu_index(shown: &serde_json::Value, prefix: &str) -> usize {
+    let items = shown["items"]
+        .as_array()
+        .expect("the menu marker carries its item labels");
+    items
+        .iter()
+        .position(|item| {
+            item.as_str()
+                .is_some_and(|label| label.replace('&', "").starts_with(prefix))
+        })
+        .unwrap_or_else(|| panic!("no menu item starting with {prefix:?} in {items:?}"))
+}
+
 #[test]
 #[ignore = "E2E: needs an X server; run via `make e2e`"]
 fn e2e_run_and_stop_shows_console_output() {
@@ -162,16 +181,17 @@ fn e2e_run_config_dialog_persists_across_relaunch() {
 
     let mark = ide.mark();
     ide.key("alt+r"); // "&Run"
-    ide.wait_for_event(mark, "the Run menu to open", |e| {
+    let menu = ide.wait_for_event(mark, "the Run menu to open", |e| {
         e["ev"] == "dialog_shown" && e["name"] == "run_menu"
     });
-    // Run, Run File, Stop, Rerun, Select Run Configuration..., (this one):
-    // a
-    // menu-bar-triggered QMenu pre-highlights its first item the moment it
-    // opens (confirmed under Xvfb for "V&CS" in
-    // `e2e_hunk_revert_is_one_undo_never_touches_disk`), so reaching the
-    // 6th item takes 5 more Downs.
-    for _ in 0..5 {
+    // A menu-bar-triggered QMenu pre-highlights its first item the moment
+    // it opens (confirmed under Xvfb for "V&CS" in
+    // `e2e_hunk_revert_is_one_undo_never_touches_disk`), so reaching item
+    // N takes N-1 Downs. Which item that is comes from the menu itself:
+    // counting to a hard-coded index broke silently every time somebody
+    // added an entry above this one.
+    let steps = menu_index(&menu, "Edit Configurations");
+    for _ in 0..steps {
         ide.key("Down");
     }
     ide.key("Return");

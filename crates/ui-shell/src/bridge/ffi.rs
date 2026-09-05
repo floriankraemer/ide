@@ -721,6 +721,15 @@ mod ffi {
         variables_reference: i64,
     }
 
+    /// One row of the Show Running List popup (R2-5): a console this
+    /// session started, and whether its process is still alive.
+    #[derive(Clone, Default)]
+    struct FfiRunningConsole {
+        console_id: u64,
+        config_id: QString,
+        running: bool,
+    }
+
     /// One styled span of the text a `consoleOutput` signal just carried
     /// (R2-1). `start`/`length` are offsets **in UTF-16 code units** into
     /// that signal's `text`, because that is what `QTextCursor` counts;
@@ -5351,6 +5360,37 @@ mod ffi {
         #[cxx_name = "consoleStyleRuns"]
         fn console_style_runs(self: &RunService, console_id: u64) -> Vec<FfiStyledRun>;
 
+        /// Every match of `pattern` in a console's text, in UTF-16 units
+        /// (R2-3). Literal, never a regex: a console find bar is a "where
+        /// did that word go" affordance, and `editor_core::search` is the
+        /// matcher either way.
+        #[qinvokable]
+        #[cxx_name = "findInConsole"]
+        fn find_in_console(
+            self: &RunService,
+            console_id: u64,
+            pattern: &QString,
+            case_sensitive: bool,
+        ) -> Vec<FfiTextMatch>;
+
+        /// Forget a console's scrollback (R2-3). The view clears its
+        /// document in the same gesture; both must forget together, or the
+        /// offsets `resolveLink` answers with stop meaning anything.
+        #[qinvokable]
+        #[cxx_name = "clearConsole"]
+        fn clear_console(self: &RunService, console_id: u64);
+
+        /// Drop a finished console's scrollback when its tab closes
+        /// (R2-3). A running console is left alone — see the Rust side.
+        #[qinvokable]
+        #[cxx_name = "closeConsole"]
+        fn close_console(self: &RunService, console_id: u64);
+
+        /// The consoles this session has, running ones first (R2-5).
+        #[qinvokable]
+        #[cxx_name = "activeConsoles"]
+        fn active_consoles(self: &RunService) -> Vec<FfiRunningConsole>;
+
         /// `configurations()` has a fresh answer.
         #[qsignal]
         #[cxx_name = "configurationsChanged"]
@@ -5367,12 +5407,12 @@ mod ffi {
         #[cxx_name = "consoleOutput"]
         fn console_output(self: Pin<&mut RunService>, console_id: u64, text: QString);
 
-        /// The ring buffer backing `console_id` dropped its oldest content.
-        /// Emitted at most once per batch, right after the `consoleOutput`
-        /// that pushed it over the limit.
+        /// This console's cache dropped `utf16_units` code units off its
+        /// front, and the view must drop exactly as many so its document
+        /// stays the text the offsets are measured against (R2-3).
         #[qsignal]
-        #[cxx_name = "consoleTruncated"]
-        fn console_truncated(self: Pin<&mut RunService>, console_id: u64);
+        #[cxx_name = "consoleTrimmed"]
+        fn console_trimmed(self: Pin<&mut RunService>, console_id: u64, utf16_units: u32);
 
         /// `console_id` exited (on its own, or via `stop`/`rerun`).
         /// `exit_code` is `-1` when it could not be determined (an explicit
