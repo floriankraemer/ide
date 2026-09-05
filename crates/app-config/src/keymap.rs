@@ -663,6 +663,12 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "Alt+Shift+F10",
     },
     ActionDef {
+        id: "run.showRunningList",
+        label: "Show Running List",
+        category: "Run",
+        default_shortcut: "",
+    },
+    ActionDef {
         id: "run.editConfigurations",
         label: "Edit Configurations...",
         category: "Run",

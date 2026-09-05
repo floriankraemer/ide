@@ -225,16 +225,35 @@ fn to_ffi_run_config(config: &run_core::RunConfig) -> ffi::FfiRunConfig {
 /// Trim `output` down to `max_bytes` from the front, on a UTF-8 char
 /// boundary — never a raw byte cut, which could split a multi-byte
 /// character and produce invalid UTF-8 in a `String`.
-fn cap_cached_output(output: &mut String, max_bytes: usize) {
+/// Drop the oldest cached output once it passes `max_bytes`, returning how
+/// many **UTF-16 code units** went with it.
+///
+/// The count is the point. `resolveLink` and `findInConsole` answer in
+/// offsets into this string, and the view resolves those against its own
+/// document — so the two must trim the same text at the same moment. They
+/// used not to: this cache dropped bytes at 16 MiB while the widget dropped
+/// blocks at five thousand, and after either fired a Ctrl+Click landed on
+/// whatever text had moved into that offset. The view no longer trims on
+/// its own; it mirrors this, through `consoleTrimmed`.
+fn trim_cached_output(output: &mut String, max_bytes: usize) -> usize {
     if output.len() <= max_bytes {
-        return;
+        return 0;
     }
     let mut boundary = output.len() - max_bytes;
     while boundary < output.len() && !output.is_char_boundary(boundary) {
         boundary += 1;
     }
+    let dropped = output[..boundary].encode_utf16().count();
     output.drain(..boundary);
+    dropped
 }
+
+/// What a console shows where `run-core`'s ring dropped its oldest lines.
+///
+/// Lives here rather than in `run_console_panel.cpp` because it is part of
+/// the console's text: everything the view displays has to be in the cache
+/// the offsets are measured against (see [`trim_cached_output`]).
+const TRUNCATION_NOTICE: &str = "\n--- output truncated: earlier lines were dropped ---\n";
 
 /// One chunk's styled runs, in the units the view counts in.
 ///
@@ -286,7 +305,8 @@ fn to_ffi_runs(styled: &run_core::StyledText) -> Vec<ffi::FfiStyledRun> {
 
 /// Queue every event a batch produced onto the Qt thread: text as
 /// `consoleOutput` (appended to this console's cached output for
-/// `resolveLink`), a dropped-history notice as `consoleTruncated`.
+/// `resolveLink`), a dropped-history notice as one more line of that same
+/// output.
 fn emit_events(
     console_id: u64,
     events: Vec<run_core::BatchedOutput>,
@@ -296,7 +316,7 @@ fn emit_events(
         match event {
             run_core::BatchedOutput::Output(text) => {
                 let _ = qt_thread.queue(move |mut service: Pin<&mut ffi::RunService>| {
-                    let visible = {
+                    let (visible, trimmed) = {
                         let mut consoles = service.consoles.borrow_mut();
                         let Some(state) = consoles.get_mut(&console_id) else {
                             return;
@@ -304,17 +324,41 @@ fn emit_events(
                         let styled = state.ansi.feed(&text);
                         state.last_runs = to_ffi_runs(&styled);
                         state.output.push_str(&styled.text);
-                        cap_cached_output(&mut state.output, run_core::batching::MAX_RING_BYTES);
-                        styled.text
+                        let trimmed = trim_cached_output(
+                            &mut state.output,
+                            run_core::batching::MAX_RING_BYTES,
+                        );
+                        (styled.text, trimmed)
                     };
                     service
                         .as_mut()
                         .console_output(console_id, QString::from(visible.as_str()));
+                    // After the append, never before: the view has just
+                    // added this chunk, and trimming its front is what
+                    // keeps its document the same text this cache holds.
+                    if trimmed > 0 {
+                        service.as_mut().console_trimmed(console_id, trimmed as u32);
+                    }
                 });
             }
             run_core::BatchedOutput::Truncated => {
                 let _ = qt_thread.queue(move |mut service: Pin<&mut ffi::RunService>| {
-                    service.as_mut().console_truncated(console_id);
+                    // Cached as well as emitted. Text the view shows but
+                    // this cache does not hold shifts every later offset
+                    // `resolveLink` and `findInConsole` answer with, so the
+                    // notice is part of the console's text rather than
+                    // something C++ inserts alongside it.
+                    {
+                        let mut consoles = service.consoles.borrow_mut();
+                        let Some(state) = consoles.get_mut(&console_id) else {
+                            return;
+                        };
+                        state.last_runs.clear();
+                        state.output.push_str(TRUNCATION_NOTICE);
+                    }
+                    service
+                        .as_mut()
+                        .console_output(console_id, QString::from(TRUNCATION_NOTICE));
                 });
             }
         }
@@ -825,6 +869,86 @@ impl ffi::RunService {
         self.as_mut().run(&QString::from(config_id.as_str()))
     }
 
+    /// Every match of `pattern` in this console's text, in document order
+    /// and in UTF-16 units — the same offsets `QTextCursor` counts in.
+    ///
+    /// The matcher is `editor_core::search`, the one Find in Files and the
+    /// editor's own find bar already use (R2-3): a console is a buffer of
+    /// text, and a second matching implementation would be a second answer
+    /// to "does this pattern match here".
+    pub fn find_in_console(
+        &self,
+        console_id: u64,
+        pattern: &QString,
+        case_sensitive: bool,
+    ) -> Vec<ffi::FfiTextMatch> {
+        let consoles = self.consoles.borrow();
+        let Some(state) = consoles.get(&console_id) else {
+            return Vec::new();
+        };
+        let options = editor_core::search::SearchOptions {
+            regex: false,
+            case_sensitive,
+        };
+        editor_core::search::find_matches(&state.output, &pattern.to_string(), options)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|found| ffi::FfiTextMatch {
+                start: found.start as u32,
+                end: found.end as u32,
+            })
+            .collect()
+    }
+
+    /// Forget a console's scrollback, so the view's document and this cache
+    /// stay the same text (R2-3). The process, if any, keeps running: this
+    /// clears what was printed, not what is printing.
+    pub fn clear_console(&self, console_id: u64) {
+        if let Some(state) = self.consoles.borrow_mut().get_mut(&console_id) {
+            state.output.clear();
+            state.last_runs.clear();
+        }
+    }
+
+    /// Drop a finished console entirely — the tab is going away, so the
+    /// scrollback `resolveLink` was keeping for it has nothing left to
+    /// answer for.
+    ///
+    /// A console that is still running is left alone: the view stops it
+    /// first and closes the tab when `consoleFinished` arrives, so that
+    /// "close" never silently orphans a process is a view sequencing
+    /// question, not a rule this can enforce halfway.
+    pub fn close_console(&self, console_id: u64) {
+        let mut consoles = self.consoles.borrow_mut();
+        if consoles
+            .get(&console_id)
+            .is_some_and(|state| state.finished)
+        {
+            consoles.remove(&console_id);
+        }
+    }
+
+    /// Every console this session has, newest first, with the ones still
+    /// running first of all (R2-5).
+    ///
+    /// Read from the Qt thread's own map rather than round-tripping to
+    /// `Supervisor::active_ids`: the popup opens on a click and must fill
+    /// immediately, and `finished` here is set by the same code that makes
+    /// the supervisor forget a console, so the two cannot disagree.
+    pub fn active_consoles(&self) -> Vec<ffi::FfiRunningConsole> {
+        let consoles = self.consoles.borrow();
+        let mut rows: Vec<_> = consoles
+            .iter()
+            .map(|(id, state)| ffi::FfiRunningConsole {
+                console_id: *id,
+                config_id: QString::from(state.config_id.as_str()),
+                running: !state.finished,
+            })
+            .collect();
+        rows.sort_by_key(|row| (!row.running, std::cmp::Reverse(row.console_id)));
+        rows
+    }
+
     pub fn console_style_runs(&self, console_id: u64) -> Vec<ffi::FfiStyledRun> {
         self.consoles
             .borrow()
@@ -890,5 +1014,41 @@ mod styled_run_tests {
         let runs = runs_of("\x1b[1mbold");
         assert_eq!(runs.len(), 1);
         assert!(runs[0].bold && !runs[0].has_fg);
+    }
+}
+
+#[cfg(test)]
+mod trim_tests {
+    use super::trim_cached_output;
+
+    #[test]
+    fn output_under_the_cap_is_left_alone() {
+        let mut output = String::from("short");
+        assert_eq!(trim_cached_output(&mut output, 1024), 0);
+        assert_eq!(output, "short");
+    }
+
+    #[test]
+    fn the_dropped_prefix_is_reported_in_utf16_units() {
+        // Four bytes of emoji are two UTF-16 code units, and the view
+        // deletes what this number says — counting bytes here would leave
+        // its document one character longer than the cache and shift every
+        // offset `resolveLink` answers with.
+        let mut output = String::from("\u{1F600}tail");
+        let dropped = trim_cached_output(&mut output, "tail".len());
+        assert_eq!(dropped, 2);
+        assert_eq!(output, "tail");
+    }
+
+    #[test]
+    fn trimming_never_splits_a_character() {
+        let mut output = String::from("a\u{1F600}b");
+        let dropped = trim_cached_output(&mut output, 2);
+        assert!(output.starts_with('b'));
+        assert_eq!(dropped, output_dropped_units("a\u{1F600}"));
+    }
+
+    fn output_dropped_units(prefix: &str) -> usize {
+        prefix.encode_utf16().count()
     }
 }
