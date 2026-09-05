@@ -66,3 +66,86 @@ jobs:
 
       - name: Tests
         run: xvfb-run -a cargo test --workspace
+
+  # A separate job, not another step in `test`: coverage needs an
+  # instrumented rebuild with its own RUSTFLAGS, which shares nothing with the
+  # normal build's cache. Running it in parallel keeps the gate's wall clock
+  # unchanged.
+  coverage:
+    name: Coverage
+    needs: builder-image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    container:
+      image: ${{ needs.builder-image.outputs.image }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          # The patch-coverage diff is against the merge base, which a shallow
+          # clone does not contain.
+          fetch-depth: 0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: coverage
+
+      - name: Coverage run
+        run: make coverage-ci
+
+      - name: Report self-test
+        run: python3 scripts/coverage-report.py --self-test
+
+      # The report is produced and published before the threshold is enforced,
+      # so a red job still shows which lines made it red.
+      - name: Build report
+        id: report
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            base="$(git merge-base "origin/${{ github.base_ref }}" HEAD)"
+          else
+            base="HEAD~1"
+          fi
+          python3 scripts/coverage-report.py \
+            --lcov target/coverage/lcov.info \
+            --base "$base" \
+            --threshold 80 > coverage.md \
+            || echo "below_threshold=true" >> "$GITHUB_OUTPUT"
+          cat coverage.md >> "$GITHUB_STEP_SUMMARY"
+
+      # A fork's GITHUB_TOKEN is read-only, so the comment would fail there;
+      # the step summary above carries the same report in that case.
+      - name: Comment on the pull request
+        if: >-
+          github.event_name == 'pull_request' &&
+          github.event.pull_request.head.repo.fork != true
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const body = fs.readFileSync('coverage.md', 'utf8');
+            const marker = '<!-- coverage-report -->';
+            const { owner, repo } = context.repo;
+            const issue_number = context.issue.number;
+            const comments = await github.paginate(
+              github.rest.issues.listComments, { owner, repo, issue_number });
+            const existing = comments.find(
+              c => c.user.type === 'Bot' && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment(
+                { owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment(
+                { owner, repo, issue_number, body });
+            }
+
+      - name: Enforce the patch-coverage threshold
+        if: steps.report.outputs.below_threshold == 'true'
+        run: |
+          echo "::error::Patch coverage is below the 80% threshold — see the job summary"
+          exit 1

@@ -26,7 +26,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
         sh -s -- -y --no-modify-path --profile minimal \
         --default-toolchain "${RUST_VERSION}" \
-        --component clippy,rustfmt \
+        --component clippy,rustfmt,llvm-tools-preview \
     && rustc --version && cargo --version
 
 WORKDIR /workspace
@@ -91,6 +91,16 @@ RUN curl -fsSL -o /tmp/nextest.tar.gz \
     && tar -xzf /tmp/nextest.tar.gz -C /usr/local/cargo/bin cargo-nextest \
     && rm /tmp/nextest.tar.gz \
     && cargo nextest --version
+
+# cargo-llvm-cov drives the source-based coverage instrumentation rustc
+# already ships; `llvm-tools-preview` in the base stage supplies the
+# llvm-profdata/llvm-cov binaries it shells out to.
+ARG LLVM_COV_VERSION=0.9.0
+RUN curl -fsSL -o /tmp/llvm-cov.tar.gz \
+      "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${LLVM_COV_VERSION}/cargo-llvm-cov-x86_64-unknown-linux-gnu.tar.gz" \
+    && tar -xzf /tmp/llvm-cov.tar.gz -C /usr/local/cargo/bin cargo-llvm-cov \
+    && rm /tmp/llvm-cov.tar.gz \
+    && cargo llvm-cov --version
 
 ARG SCCACHE_VERSION=0.17.0
 RUN curl -fsSL -o /tmp/sccache.tar.gz \
