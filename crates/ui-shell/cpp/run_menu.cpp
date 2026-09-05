@@ -94,6 +94,12 @@ void buildRunMenu(QMainWindow *window, RunService *runService, RunConfigEditor *
     QObject::connect(stopAction, &QAction::triggered, runConsolePanel,
                       [runConsolePanel]() { runConsolePanel->stopSelected(); });
 
+    // Stop asks; Kill does not wait to be asked twice (R2-4).
+    QAction *killAction = registerAction(runMenu, QStringLiteral("run.kill"), QObject::tr("Kill"),
+                                         appSettings, actions);
+    QObject::connect(killAction, &QAction::triggered, runConsolePanel,
+                      [runConsolePanel]() { runConsolePanel->killSelected(); });
+
     QAction *rerunAction = registerAction(runMenu, QStringLiteral("run.rerun"),
                                           QObject::tr("Rerun"), appSettings, actions);
     QObject::connect(rerunAction, &QAction::triggered, runConsolePanel,

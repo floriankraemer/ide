@@ -285,11 +285,34 @@ impl PtySession {
             // state the caller was asking for.
             return Ok(KillOutcome::Complete);
         };
-        let outcome = platform::kill_tree(pid)?;
+        let outcome = platform::signal_tree(pid, platform::Signal::Kill)?;
         // Always signal the direct child too, so a failure to reach the
         // group still stops the thing we actually started.
         let _ = self.child.kill();
         Ok(outcome)
+    }
+
+    /// **Ask** the child's whole tree to exit, and leave it running if it
+    /// declines.
+    ///
+    /// This is IntelliJ's Exit next to [`PtySession::kill_tree`]'s Kill: a
+    /// TERM that a program with a signal handler can act on — flush its
+    /// output, close its sockets, remove its pid file — where a KILL gives
+    /// it no such chance. The caller escalates if the process is still
+    /// there after a grace period (`run_core::Supervisor` does, see
+    /// `TERMINATION_GRACE`), which is the half of the sentence
+    /// [`platform::signal_tree`]'s TERM branch has always described but
+    /// nothing implemented: `kill_tree` sent TERM and then immediately
+    /// killed the child anyway, so nothing was ever given time to react.
+    ///
+    /// On Windows there is no soft equivalent — a Job Object terminates —
+    /// so this is the same call as `kill_tree`, honestly, rather than a
+    /// promise the platform cannot keep.
+    pub fn terminate_tree(&mut self) -> Result<KillOutcome, PtyError> {
+        let Some(pid) = self.process_id() else {
+            return Ok(KillOutcome::Complete);
+        };
+        platform::signal_tree(pid, platform::Signal::Terminate)
     }
 
     /// Non-blocking check: `Some(exit_code)` if the child has already
@@ -329,15 +352,26 @@ pub enum KillOutcome {
 mod platform {
     use super::{KillOutcome, PtyError};
 
+    /// Which of the two things a caller can mean by "stop this".
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Signal {
+        /// TERM: a request the process may handle, delay, or ignore.
+        Terminate,
+        /// KILL: not a request.
+        Kill,
+    }
+
     /// Signal the child's whole process group.
     ///
-    /// TERM first, so anything with a handler can flush and exit cleanly;
-    /// the caller escalates to `kill` if it is still there after its grace
-    /// period. Errors other than "no such group" are real failures.
-    pub(super) fn kill_tree(pid: u32) -> Result<KillOutcome, PtyError> {
+    /// Errors other than "no such group" are real failures.
+    pub(super) fn signal_tree(pid: u32, signal: Signal) -> Result<KillOutcome, PtyError> {
+        let number = match signal {
+            Signal::Terminate => libc::SIGTERM,
+            Signal::Kill => libc::SIGKILL,
+        };
         // Safety: killpg with a valid pgid and a standard signal number has
         // no memory effects; the only failure modes are reported via errno.
-        let result = unsafe { libc::killpg(pid as libc::pid_t, libc::SIGTERM) };
+        let result = unsafe { libc::killpg(pid as libc::pid_t, number) };
         if result == 0 {
             return Ok(KillOutcome::Complete);
         }
@@ -357,6 +391,12 @@ mod platform {
 mod platform {
     use super::{KillOutcome, PtyError};
 
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum Signal {
+        Terminate,
+        Kill,
+    }
+
     /// Windows has no process groups in the Unix sense. The tree is killed
     /// by the Job Object the child was assigned at spawn, which closes with
     /// `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`.
@@ -364,7 +404,11 @@ mod platform {
     /// Not exercised by CI: the Windows binary is cross-built through MXE
     /// and there is no Windows runner, so this is covered by the manual
     /// release checklist instead of a test that cannot run.
-    pub(super) fn kill_tree(_pid: u32) -> Result<KillOutcome, PtyError> {
+    ///
+    /// `Signal` is accepted and ignored: Windows job termination has no
+    /// "ask politely" form, and pretending otherwise would make
+    /// `terminate_tree` claim a grace period the platform never gives.
+    pub(super) fn signal_tree(_pid: u32, _signal: Signal) -> Result<KillOutcome, PtyError> {
         // portable-pty's Windows child already terminates its job on kill,
         // so the caller's follow-up `child.kill()` does the work. Reported
         // as complete because the job takes the tree with it.

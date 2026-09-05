@@ -37,6 +37,8 @@ public:
     // whatever this toolbar has selected regardless of focus.
     void runSelected();
     void stopSelected();
+    // R2-4: stop without the grace period `stopSelected` allows.
+    void killSelected();
     void rerunSelected();
     // D3-8: start a debug session for whatever configuration is selected.
     void debugSelected();

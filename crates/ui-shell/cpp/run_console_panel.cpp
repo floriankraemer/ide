@@ -545,6 +545,11 @@ void RunConsolePanel::stopSelected()
     toolbar_->stopSelected();
 }
 
+void RunConsolePanel::killSelected()
+{
+    toolbar_->killSelected();
+}
+
 void RunConsolePanel::rerunSelected()
 {
     toolbar_->rerunSelected();

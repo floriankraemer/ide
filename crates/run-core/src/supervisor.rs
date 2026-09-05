@@ -100,6 +100,18 @@ impl Supervisor {
     /// a double-forked descendant that could not be reached — not an error,
     /// and still removes the console: the IDE cannot follow an escaped
     /// process, so nothing is served by continuing to track it.
+    /// Ask `id`'s process tree to exit, and keep tracking it.
+    ///
+    /// The console stays: a program given a TERM is expected to still be
+    /// there for a moment, printing whatever it flushes on the way out, and
+    /// forgetting it here would throw that output away. Whoever asked for
+    /// this escalates to [`Supervisor::stop`] if the process is still
+    /// running after [`TERMINATION_GRACE`].
+    pub fn terminate(&mut self, id: ConsoleId) -> Result<KillOutcome, RunError> {
+        let console = self.consoles.get_mut(&id).ok_or(RunError::UnknownConsole)?;
+        Ok(console.pty_session.terminate_tree()?)
+    }
+
     pub fn stop(&mut self, id: ConsoleId) -> Result<KillOutcome, RunError> {
         let console = self.consoles.get_mut(&id).ok_or(RunError::UnknownConsole)?;
         let outcome = console.pty_session.kill_tree()?;
@@ -263,6 +275,55 @@ mod tests {
 
         supervisor.stop(b).expect("stop b");
         assert!(!supervisor.is_running(b));
+    }
+
+    #[test]
+    fn terminate_asks_and_a_handler_gets_to_run_before_the_process_exits() {
+        // The point of a TERM: this shell traps it, prints, and only then
+        // leaves. A kill would lose the line — which is the whole reason
+        // Stop stopped sending one (R2-4).
+        let mut supervisor = Supervisor::new();
+        let id = supervisor
+            .launch(
+                "cfg",
+                &spec(
+                    "/bin/sh",
+                    vec!["-c", "trap 'echo caught-term; exit 0' TERM; sleep 5"],
+                ),
+            )
+            .expect("launch");
+
+        // The trap has to be installed before the signal arrives, or the
+        // shell's default disposition takes it and nothing is printed.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        supervisor.terminate(id).expect("terminate");
+        assert_eq!(wait_for_exit(&mut supervisor, id), 0);
+
+        let mut buf = [0u8; 4096];
+        let text = read_all_text(&mut supervisor, id, &mut buf, std::time::Instant::now());
+        assert!(text.contains("caught-term"), "got: {text:?}");
+    }
+
+    #[test]
+    fn a_process_that_ignores_terminate_survives_it_and_dies_to_stop() {
+        // The other half of the pair: `terminate` keeps tracking the
+        // console precisely because the process may still be there, and
+        // `stop` is what the caller escalates to.
+        let mut supervisor = Supervisor::new();
+        let id = supervisor
+            .launch("cfg", &spec("/bin/sh", vec!["-c", "trap '' TERM; sleep 5"]))
+            .expect("launch");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+
+        supervisor.terminate(id).expect("terminate");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            supervisor.is_running(id),
+            "a TERM the process ignores must not be reported as a stop"
+        );
+
+        supervisor.stop(id).expect("stop");
+        assert!(!supervisor.is_running(id));
     }
 
     #[test]

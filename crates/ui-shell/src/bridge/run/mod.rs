@@ -547,6 +547,26 @@ fn spawn_reader_thread(
     });
 }
 
+/// Kill `id`'s tree and report it finished, once — the second half of
+/// `stop`'s escalation and the whole of `kill`.
+fn hard_stop(
+    worker: &mut RunWorker,
+    id: run_core::ConsoleId,
+    qt_thread: &CxxQtThread<ffi::RunService>,
+) {
+    let Ok(outcome) = worker.supervisor.stop(id) else {
+        return;
+    };
+    let escaped = matches!(outcome, pty_core::KillOutcome::Escaped);
+    let console_id = id.0;
+    let qt_thread = qt_thread.clone();
+    let _ = qt_thread.queue(move |mut service: Pin<&mut ffi::RunService>| {
+        if mark_finished(&mut service.consoles.borrow_mut(), console_id) {
+            service.as_mut().console_finished(console_id, -1, escaped);
+        }
+    });
+}
+
 /// A console's process exited on its own (its reader thread hit EOF): flush
 /// whatever output was still pending, best-effort recover its exit code,
 /// reap it via `Supervisor::stop` (a no-op kill on an already-dead process
@@ -833,6 +853,19 @@ impl ffi::RunService {
         ffi::FfiResult::default()
     }
 
+    /// Stop a console the way IntelliJ's Stop does: ask first, insist
+    /// afterwards (R2-4).
+    ///
+    /// A TERM goes to the whole tree and the console keeps running for up
+    /// to `run_core::TERMINATION_GRACE`, so a program with a signal handler
+    /// gets to flush its output — which arrives through the console's own
+    /// reader thread, and is why the console is not forgotten immediately.
+    /// If it is still alive when the grace runs out, it is killed.
+    ///
+    /// The wait happens on a thread of its own rather than on the worker:
+    /// the worker is also what feeds every console's output through its
+    /// batcher, and blocking it for two seconds would freeze every other
+    /// console's output along with this one's.
     pub fn stop(mut self: Pin<&mut Self>, console_id: u64) {
         let Some(tx) = self.jobs.borrow().clone() else {
             return;
@@ -844,14 +877,38 @@ impl ffi::RunService {
             if let Ok(events) = worker.supervisor.flush_remaining(id, now) {
                 emit_events(console_id, events, &qt_thread);
             }
-            if let Ok(outcome) = worker.supervisor.stop(id) {
-                let escaped = matches!(outcome, pty_core::KillOutcome::Escaped);
-                let _ = qt_thread.queue(move |mut service: Pin<&mut ffi::RunService>| {
-                    if mark_finished(&mut service.consoles.borrow_mut(), console_id) {
-                        service.as_mut().console_finished(console_id, -1, escaped);
-                    }
-                });
+            if worker.supervisor.terminate(id).is_err() {
+                return;
             }
+
+            let jobs_tx = worker.jobs_tx.clone();
+            std::thread::spawn(move || {
+                std::thread::sleep(run_core::TERMINATION_GRACE);
+                let _ = jobs_tx.send(Box::new(move |worker: &mut RunWorker| {
+                    // Gone already: the TERM was enough, and the console's
+                    // own EOF path has reported it finished.
+                    if worker.supervisor.is_running(id) {
+                        hard_stop(worker, id, &qt_thread);
+                    }
+                }));
+            });
+        }));
+    }
+
+    /// Kill a console outright, with no grace period — the escape hatch for
+    /// a process that ignores TERM (R2-4).
+    pub fn kill(mut self: Pin<&mut Self>, console_id: u64) {
+        let Some(tx) = self.jobs.borrow().clone() else {
+            return;
+        };
+        let qt_thread = self.as_mut().qt_thread();
+        let _ = tx.send(Box::new(move |worker: &mut RunWorker| {
+            let id = run_core::ConsoleId(console_id);
+            let now = std::time::Instant::now();
+            if let Ok(events) = worker.supervisor.flush_remaining(id, now) {
+                emit_events(console_id, events, &qt_thread);
+            }
+            hard_stop(worker, id, &qt_thread);
         }));
     }
 

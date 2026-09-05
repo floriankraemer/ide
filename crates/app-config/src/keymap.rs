@@ -651,6 +651,12 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "Ctrl+F2",
     },
     ActionDef {
+        id: "run.kill",
+        label: "Kill",
+        category: "Run",
+        default_shortcut: "",
+    },
+    ActionDef {
         id: "run.rerun",
         label: "Rerun",
         category: "Run",

@@ -5333,6 +5333,12 @@ mod ffi {
         #[qinvokable]
         fn stop(self: Pin<&mut RunService>, console_id: u64);
 
+        /// Kill a console outright, skipping the grace period `stop` gives
+        /// it (R2-4) — IntelliJ's Kill next to its Stop.
+        #[qinvokable]
+        #[cxx_name = "kill"]
+        fn kill(self: Pin<&mut RunService>, console_id: u64);
+
         /// Stop `console_id` if still running, then launch its configuration
         /// again. `console_id` must be one `consoleStarted` reported.
         #[qinvokable]

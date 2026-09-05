@@ -57,6 +57,7 @@ public:
     // regardless of which widget has focus.
     void runSelected();
     void stopSelected();
+    void killSelected();
     void rerunSelected();
     // D3-8: Debug the selected configuration, forwarded like the others so
     // the shortcut works regardless of focus.
