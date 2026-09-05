@@ -101,7 +101,7 @@ Task ids are stable; titles may change.
 | D3-4 — Variables with lazy expansion, Set Value gated on the adapter's capability | done | this branch |
 | D3-5 — Watches, re-evaluated on every stop, and Evaluate in the console | done | this branch |
 | D3-6 — the debugger console, fed by DAP `output` events | done | this branch |
-| D3-7 — inline values from the current frame's scopes | open | the values are already fetched and cached; what is missing is painting them at the end of a line, which is an editor-paint change rather than a debugger one |
+| D3-7 — inline values from the current frame's scopes | done | this branch; which value belongs on which line turned out to be a rule, not a paint decision — no shipped adapter implements DAP's optional `inlineValues`, so `dap_core::inline_values` associates a variable with the last line at or above the stopped one that mentions it as a whole word. The buffer text comes from the view, because a file being debugged may have unsaved edits |
 | D3-8 — view: the Debug toolbar button, the "&Debug" menu, capability-gated enablement | done | this branch; the toolbar now has the whole cluster the mockup shows |
 | D3-9 — E2E: `e2e_debug_stops_at_a_breakpoint`, plus a real-adapter conformance test | done | this branch; found that debugpy holds the `launch` response until `configurationDone`, so a client that waits for it deadlocks |
 
