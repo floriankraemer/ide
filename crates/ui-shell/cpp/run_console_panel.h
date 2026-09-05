@@ -28,10 +28,10 @@ class RunToolbar;
 // Humble view: what output a console produced, and what `file:line` a
 // position in it resolves to, are `RunService`/`run-core` calls
 // (`consoleOutput`, `resolveLink`); this widget only appends the text it is
-// given to the right tab and turns a resolved link into `openAt`. See
-// `bridge/run/mod.rs`'s `ConsoleState::ansi` doc comment for why the text
-// arriving here is already ANSI-stripped rather than colored — a v1
-// decision, not an omission.
+// given to the right tab and turns a resolved link into `openAt`. The text
+// arriving here has had its escape sequences resolved already; the styling
+// they carried comes alongside it from `consoleStyleRuns`, in UTF-16 offsets
+// this widget hands straight to a `QTextCursor` (R2-1).
 class RunConsolePanel : public QWidget
 {
 public:

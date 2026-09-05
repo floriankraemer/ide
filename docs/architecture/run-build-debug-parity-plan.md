@@ -122,8 +122,8 @@ An independent second lane; it may run at any point after R1.
 
 | Task | Status | Commit |
 |---|---|---|
-| R2-1 — SGR colour as `FfiStyledRun` beside the unchanged plain text, per ADR-0032's named path | blocked on R1-6 |  |
-| R2-2 — `AnsiStripper` becomes `AnsiResolver` reusing `terminal-core`'s SGR state machine | blocked on R2-1 |  |
+| R2-1 — SGR colour as `FfiStyledRun` beside the unchanged plain text, per ADR-0032's named path | done | this branch; runs are offsets into the one cached string rather than a second copy of it, so `resolveLink` is untouched — and they cross the seam in UTF-16 units because that is what `QTextCursor` counts |
+| R2-2 — `AnsiStripper` becomes `AnsiResolver` reusing `terminal-core`'s SGR state machine | done | this branch; the machine is reused by adding a second sink to it (`terminal_core::SgrResolver`) rather than by moving it — `AnsiStripper` stays as the wrapper that discards styling, which is all `build-core` wants |
 | R2-3 — console find, pin tab, scroll lock, clear | blocked on R1-6 |  |
 | R2-4 — soft terminate before `kill_tree` | blocked on R1-6 |  |
 | R2-5 — Show Running List over `Supervisor::active_ids` | blocked on R1-6 |  |

@@ -16,6 +16,10 @@ use alacritty_terminal::term::cell::Flags as CellFlags;
 use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color as AnsiColor, NamedColor, Processor, Rgb};
 
+mod sgr;
+
+pub use sgr::{SgrResolver, StyledRun, StyledText, TextStyle};
+
 /// Terminal size in character cells, mirroring `pty_core::PtySize` without
 /// depending on `pty-core` — `terminal-core` stays a standalone emulation
 /// crate (see module docs).
@@ -50,7 +54,7 @@ impl Dimensions for GridSize {
 /// index or a named ANSI slot). The view (`ui-shell`) shouldn't need
 /// its own copy of the default 16-color ANSI palette just to paint cells, so
 /// resolution happens here.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CellColor {
     pub r: u8,
     pub g: u8,
@@ -63,34 +67,49 @@ impl CellColor {
     }
 
     fn from_ansi(color: AnsiColor, default: CellColor) -> Self {
+        Self::from_ansi_opt(color).unwrap_or(default)
+    }
+
+    /// The same resolution, but saying "use the caller's default" as `None`
+    /// rather than substituting a color.
+    ///
+    /// A grid cell must end up with a concrete color to paint, so
+    /// [`CellColor::from_ansi`] folds the default in immediately. Streamed
+    /// console text must not: SGR 39/49 mean "back to the view's default",
+    /// and a run console that baked a color in there would stop following
+    /// the editor theme. Both sinks resolve through this one function so
+    /// the palette stays in one place (`crate::sgr`).
+    pub(crate) fn from_ansi_opt(color: AnsiColor) -> Option<Self> {
         match color {
-            AnsiColor::Spec(Rgb { r, g, b }) => CellColor::rgb(r, g, b),
-            AnsiColor::Named(named) => named_color(named, default),
+            AnsiColor::Spec(Rgb { r, g, b }) => Some(CellColor::rgb(r, g, b)),
+            AnsiColor::Named(named) => named_color_opt(named),
             // Indexed colors beyond the named 16 are the 256-color cube /
             // grayscale ramp; approximating those faithfully needs a full
             // palette table, which is over-engineering for a first slice.
             // Falls back to the caller's default (usually foreground/
             // background) until a real theme/palette lands.
-            AnsiColor::Indexed(idx) => named_color_by_index(idx).unwrap_or(default),
+            AnsiColor::Indexed(idx) => named_color_by_index(idx),
         }
     }
 }
 
-/// Resolve a [`NamedColor`] against the caller's `default`.
+/// Resolve a [`NamedColor`] to a palette entry, or `None` where the name
+/// means "the caller's default".
 ///
 /// `NamedColor` is *not* a palette index: only its first 16 variants line up
 /// with the ANSI 0-15 table, while `Foreground`/`Background`/`Cursor` and the
 /// `Dim*` tail have discriminants past 255. Casting the whole enum to `u8`
 /// therefore wrapped a default-background cell onto palette slot 1 (red).
-fn named_color(named: NamedColor, default: CellColor) -> CellColor {
+fn named_color_opt(named: NamedColor) -> Option<CellColor> {
     let index = match named {
         // Not palette slots — these mean "whatever the caller's default is",
-        // which `from_ansi` already threads through per fg/bg call.
+        // which `from_ansi` threads through per fg/bg call and `from_ansi_opt`
+        // hands back to its caller as `None`.
         NamedColor::Foreground
         | NamedColor::Background
         | NamedColor::Cursor
         | NamedColor::BrightForeground
-        | NamedColor::DimForeground => return default,
+        | NamedColor::DimForeground => return None,
         // Dim variants share the ANSI 0-7 hues; using the normal slot is a
         // fair approximation until a real theme/palette lands.
         NamedColor::DimBlack => 0,
@@ -104,7 +123,7 @@ fn named_color(named: NamedColor, default: CellColor) -> CellColor {
         // `Black`..`BrightWhite` really do occupy discriminants 0-15.
         other => other as u8,
     };
-    named_color_by_index(index).unwrap_or(default)
+    named_color_by_index(index)
 }
 
 /// The standard 16-color ANSI palette (indices 0-15), used both for

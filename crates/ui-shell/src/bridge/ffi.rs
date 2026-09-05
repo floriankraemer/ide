@@ -721,6 +721,34 @@ mod ffi {
         variables_reference: i64,
     }
 
+    /// One styled span of the text a `consoleOutput` signal just carried
+    /// (R2-1). `start`/`length` are offsets **in UTF-16 code units** into
+    /// that signal's `text`, because that is what `QTextCursor` counts;
+    /// `run_core` measures the same runs in bytes and `RunService`
+    /// converts at this seam.
+    ///
+    /// `has_fg`/`has_bg` false means "the view's own default colour" — SGR
+    /// 39/49 and a reset say exactly that, and substituting a concrete
+    /// colour here would stop the console following the editor theme
+    /// (ADR-0003's typed-flag rule rather than a sentinel colour).
+    #[derive(Clone, Default)]
+    struct FfiStyledRun {
+        start: u32,
+        length: u32,
+        has_fg: bool,
+        fg_r: u8,
+        fg_g: u8,
+        fg_b: u8,
+        has_bg: bool,
+        bg_r: u8,
+        bg_g: u8,
+        bg_b: u8,
+        bold: bool,
+        italic: bool,
+        underline: bool,
+        inverse: bool,
+    }
+
     /// `RunService::resolveLink`'s result. `found == false` means "no link
     /// at that byte offset", the same typed-flag convention `FfiTerminalLink`
     /// and `FfiLocation` already use instead of an empty-`QString` sentinel
@@ -5309,6 +5337,19 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "resolveLink"]
         fn resolve_link(self: &RunService, console_id: u64, byte_offset: u32) -> FfiResolvedLink;
+
+        /// How the text of this console's most recent `consoleOutput`
+        /// signal is styled (R2-1).
+        ///
+        /// Pulled by the slot rather than pushed as a signal parameter: a
+        /// `Vec<T>` is not a Qt metatype, so it cannot ride on a signal —
+        /// the same reason `TerminalSupervisor::gridCells` is a getter
+        /// beside its `gridChanged` signal. Sequential and race-free for
+        /// the same reason that one is: both the signal and this call run
+        /// on the Qt thread, in the order the worker queued them.
+        #[qinvokable]
+        #[cxx_name = "consoleStyleRuns"]
+        fn console_style_runs(self: &RunService, console_id: u64) -> Vec<FfiStyledRun>;
 
         /// `configurations()` has a fresh answer.
         #[qsignal]
