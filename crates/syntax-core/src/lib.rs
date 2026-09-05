@@ -4,6 +4,7 @@
 //! wraps [`highlight`] behind a `QSyntaxHighlighter` adapter later. This
 //! crate only classifies bytes of already-loaded text into spans.
 
+mod catalog;
 mod folds;
 mod registry;
 pub mod runtime;
