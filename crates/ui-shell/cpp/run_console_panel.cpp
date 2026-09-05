@@ -8,10 +8,12 @@
 #include "DockManager.h"
 #include "DockWidget.h"
 
+#include <QColor>
 #include <QMouseEvent>
 #include <QPlainTextEdit>
 #include <QScrollBar>
 #include <QTabWidget>
+#include <QTextCharFormat>
 #include <QTextCursor>
 #include <QVBoxLayout>
 
@@ -71,17 +73,55 @@ private:
     ActivateCallback activate_;
 };
 
-void appendLine(QPlainTextEdit *edit, const QString &text)
+// Appends `text` at the end of the document, keeping the view pinned to the
+// bottom if it already was, and returns the position the appended text
+// starts at — what `applyStyledRuns` offsets into.
+int appendLine(QPlainTextEdit *edit, const QString &text)
 {
     QScrollBar *scrollBar = edit->verticalScrollBar();
     const bool wasAtBottom = scrollBar->value() >= scrollBar->maximum();
 
     QTextCursor cursor = edit->textCursor();
     cursor.movePosition(QTextCursor::End);
+    const int base = cursor.position();
     cursor.insertText(text);
 
     if (wasAtBottom) {
         scrollBar->setValue(scrollBar->maximum());
+    }
+    return base;
+}
+
+// Paints one chunk's SGR styling (R2-1). Which spans are styled, and how,
+// is `run-core`'s answer via `consoleStyleRuns`; this only turns each run
+// into a `QTextCharFormat`. A run with no colour of its own keeps the
+// palette's — `has_fg`/`has_bg` false means "the view's default", so the
+// format simply leaves that half unset.
+void applyStyledRuns(QPlainTextEdit *edit, int base, const rust::Vec<FfiStyledRun> &runs)
+{
+    for (const FfiStyledRun &run : runs) {
+        QTextCharFormat format;
+        if (run.has_fg) {
+            format.setForeground(QColor(run.fg_r, run.fg_g, run.fg_b));
+        }
+        if (run.has_bg) {
+            format.setBackground(QColor(run.bg_r, run.bg_g, run.bg_b));
+        }
+        if (run.bold) {
+            format.setFontWeight(QFont::Bold);
+        }
+        if (run.italic) {
+            format.setFontItalic(true);
+        }
+        if (run.underline) {
+            format.setFontUnderline(true);
+        }
+
+        QTextCursor cursor(edit->document());
+        cursor.setPosition(base + static_cast<int>(run.start));
+        cursor.setPosition(base + static_cast<int>(run.start) + static_cast<int>(run.length),
+                           QTextCursor::KeepAnchor);
+        cursor.mergeCharFormat(format);
     }
 }
 
@@ -132,7 +172,8 @@ void RunConsolePanel::onConsoleOutput(quint64 consoleId, const QString &text)
 {
     const auto it = consoles_.constFind(consoleId);
     if (it != consoles_.constEnd()) {
-        appendLine(it->edit, text);
+        const int base = appendLine(it->edit, text);
+        applyStyledRuns(it->edit, base, runService_->consoleStyleRuns(consoleId));
     }
     e2eMark(QStringLiteral("{\"ev\":\"run_console_output\",\"console_id\":%1,\"text\":%2}")
               .arg(consoleId)

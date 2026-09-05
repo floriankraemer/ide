@@ -31,6 +31,11 @@ Stripping keeps one string, byte-for-byte identical between what `resolveLink` r
 
 **Follow-up path, not designed further here**: a real `FfiStyledRun` vector alongside the plain text, with `resolveLink` walking the plain copy and the view applying styled runs as `QTextCharFormat` ranges over the same offsets — deferred because nothing in F4's own test-strategy or the plan's risk table requires it for v1, and it is additive over what exists.
 
+**Superseded by R2-1/R2-2** (`docs/architecture/run-build-debug-parity-plan.md`), along exactly that follow-up path.
+The console now resolves SGR rather than stripping it: `terminal_core::SgrResolver` is a second *sink* on the parser the terminal grid already drives, `run_core::AnsiResolver` hands its styled runs on, and `AnsiStripper` survives as a wrapper that discards them for `build-core`'s diagnostic parsing.
+The dilemma this section describes did not have to be resolved either way: the runs are offsets *into* the plain text rather than a second copy of it, so `resolveLink` still walks one string.
+The one thing that did have to be decided is which unit those offsets are in — `run-core` measures in UTF-8 bytes and `QTextCursor` counts UTF-16 code units, so `RunService` converts at the seam, which is where the two representations meet.
+
 ### 3. One `TerminalSupervisorRust` QObject owns N sessions — not N QObject instances
 
 The plan's F4-14a framing ("N `TerminalSession` QObjects instead of one") turned out not to be mechanically available in this codebase's cxx-qt integration, discovered during that task (commit 4036e21) rather than assumed up front: cxx-qt registers a `#[qobject]`-tagged type's `QMetaObject` once, at build time.

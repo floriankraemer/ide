@@ -23,7 +23,7 @@ pub mod macros;
 pub mod supervisor;
 pub mod toolchain;
 
-pub use ansi::AnsiStripper;
+pub use ansi::{AnsiResolver, AnsiStripper, StyledRun, StyledText, TextStyle};
 pub use batching::{BatchedOutput, OutputBatcher};
 pub use before_launch::{BeforeLaunchError, BeforeLaunchTask};
 pub use config::{ConsoleKind, LaunchSpec, RunConfig, RunConfigExt};

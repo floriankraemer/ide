@@ -38,7 +38,7 @@ use std::sync::mpsc::Sender;
 
 use cxx_qt::{CxxQtThread, Threading};
 use cxx_qt_lib::QString;
-use run_core::{AnsiStripper, RunConfigExt};
+use run_core::{AnsiResolver, RunConfigExt};
 
 use crate::bridge::errors;
 use crate::bridge::ffi;
@@ -72,18 +72,21 @@ struct ConsoleState {
     config_id: String,
     cwd: PathBuf,
     output: String,
-    /// F4-11 v1: console text is displayed and cached with ANSI/VT escapes
-    /// removed rather than rendered as color (a `QPlainTextEdit` has no SGR
-    /// support of its own, and the plan's `FfiStyledRun` design — SGR parsed
-    /// into styled runs in Rust, one `QTextCharFormat` per run in C++ — is
-    /// real work this branch's time budget didn't reach). Stripping here,
-    /// once, keeps `output` (what `resolveLink` byte-offsets index into) and
-    /// what `consoleOutput` sends the view in sync — both are the same
-    /// visible text — so link resolution stays correct even though the
-    /// stream it is computed from is not the raw one `run-core` batched.
-    /// Follow-up: replace this field and `strip_ansi_stateful` with real SGR
-    /// parsing and an `FfiStyledRun` signal.
-    ansi: AnsiStripper,
+    /// Escape sequences are resolved here, once: `output` (what
+    /// `resolveLink` byte-offsets index into) and what `consoleOutput`
+    /// sends the view are then the same visible text, so link resolution
+    /// stays correct even though the stream it is computed from is not the
+    /// raw one `run-core` batched.
+    ///
+    /// The styling that resolution recovers rides beside the text in
+    /// `last_runs` rather than being thrown away (R2-1).
+    ansi: AnsiResolver,
+    /// The styled runs covering the text of the most recent
+    /// `consoleOutput` signal, in UTF-16 units, waiting for the view's
+    /// `consoleStyleRuns` call. One chunk deep on purpose: a run is only
+    /// ever needed by the slot handling the signal that produced it, and
+    /// the document the view appends to keeps the formatting afterwards.
+    last_runs: Vec<ffi::FfiStyledRun>,
     /// Set once, by whichever of `finish_console`/`stop` first observes this
     /// console has exited, so the other does not also emit `consoleFinished`
     /// (see both call sites). The entry itself is kept around afterwards,
@@ -233,6 +236,54 @@ fn cap_cached_output(output: &mut String, max_bytes: usize) {
     output.drain(..boundary);
 }
 
+/// One chunk's styled runs, in the units the view counts in.
+///
+/// `run_core` measures a run in bytes of UTF-8; `QTextCursor` moves in
+/// UTF-16 code units, so the offsets are converted here — at the seam that
+/// owns the difference — rather than in either the domain crate or the
+/// view. A default-styled run is dropped: the console's own palette is
+/// already what an unformatted range paints with, so sending it would only
+/// ask C++ to apply an empty format.
+fn to_ffi_runs(styled: &run_core::StyledText) -> Vec<ffi::FfiStyledRun> {
+    let mut runs = Vec::new();
+    let mut utf16_start = 0usize;
+    let mut byte_cursor = 0usize;
+
+    for run in &styled.runs {
+        // Runs arrive in order and cover the text end to end, so the gap
+        // between the last run's end and this one's start (if any) is
+        // plain text whose UTF-16 length still has to be counted.
+        utf16_start += styled.text[byte_cursor..run.start].encode_utf16().count();
+        let length = styled.text[run.start..run.start + run.len]
+            .encode_utf16()
+            .count();
+        byte_cursor = run.start + run.len;
+
+        if !run.style.is_default() {
+            let fg = run.style.fg.unwrap_or_default();
+            let bg = run.style.bg.unwrap_or_default();
+            runs.push(ffi::FfiStyledRun {
+                start: utf16_start as u32,
+                length: length as u32,
+                has_fg: run.style.fg.is_some(),
+                fg_r: fg.r,
+                fg_g: fg.g,
+                fg_b: fg.b,
+                has_bg: run.style.bg.is_some(),
+                bg_r: bg.r,
+                bg_g: bg.g,
+                bg_b: bg.b,
+                bold: run.style.attrs.bold,
+                italic: run.style.attrs.italic,
+                underline: run.style.attrs.underline,
+                inverse: run.style.attrs.inverse,
+            });
+        }
+        utf16_start += length;
+    }
+    runs
+}
+
 /// Queue every event a batch produced onto the Qt thread: text as
 /// `consoleOutput` (appended to this console's cached output for
 /// `resolveLink`), a dropped-history notice as `consoleTruncated`.
@@ -250,10 +301,11 @@ fn emit_events(
                         let Some(state) = consoles.get_mut(&console_id) else {
                             return;
                         };
-                        let visible = state.ansi.feed(&text);
-                        state.output.push_str(&visible);
+                        let styled = state.ansi.feed(&text);
+                        state.last_runs = to_ffi_runs(&styled);
+                        state.output.push_str(&styled.text);
                         cap_cached_output(&mut state.output, run_core::batching::MAX_RING_BYTES);
-                        visible
+                        styled.text
                     };
                     service
                         .as_mut()
@@ -706,7 +758,8 @@ impl ffi::RunService {
                                 config_id: started_config_id.clone(),
                                 cwd,
                                 output: String::new(),
-                                ansi: AnsiStripper::default(),
+                                ansi: AnsiResolver::default(),
+                                last_runs: Vec::new(),
                                 finished: false,
                             },
                         );
@@ -772,6 +825,14 @@ impl ffi::RunService {
         self.as_mut().run(&QString::from(config_id.as_str()))
     }
 
+    pub fn console_style_runs(&self, console_id: u64) -> Vec<ffi::FfiStyledRun> {
+        self.consoles
+            .borrow()
+            .get(&console_id)
+            .map(|state| state.last_runs.clone())
+            .unwrap_or_default()
+    }
+
     pub fn resolve_link(&self, console_id: u64, byte_offset: u32) -> ffi::FfiResolvedLink {
         let consoles = self.consoles.borrow();
         let Some(state) = consoles.get(&console_id) else {
@@ -787,5 +848,47 @@ impl ffi::RunService {
             },
             None => ffi::FfiResolvedLink::default(),
         }
+    }
+}
+
+#[cfg(test)]
+mod styled_run_tests {
+    use super::to_ffi_runs;
+
+    fn runs_of(text: &str) -> Vec<crate::bridge::ffi::FfiStyledRun> {
+        to_ffi_runs(&run_core::AnsiResolver::default().feed(text))
+    }
+
+    #[test]
+    fn a_colored_span_becomes_one_run_at_its_offset() {
+        let runs = runs_of("plain \x1b[31mred\x1b[0m tail");
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].start, "plain ".len() as u32);
+        assert_eq!(runs[0].length, "red".len() as u32);
+        assert!(runs[0].has_fg && !runs[0].has_bg);
+        assert_eq!((runs[0].fg_r, runs[0].fg_g, runs[0].fg_b), (205, 0, 0));
+    }
+
+    #[test]
+    fn offsets_are_counted_in_utf16_units_not_bytes() {
+        // The emoji is 4 bytes of UTF-8 but 2 UTF-16 code units, which is
+        // what `QTextCursor::setPosition` counts. Getting this wrong paints
+        // the format over the wrong characters, and only for non-ASCII
+        // output — exactly the bug a byte offset would hide in ASCII tests.
+        let runs = runs_of("\u{1F600}\x1b[32mok");
+        assert_eq!(runs[0].start, 2);
+        assert_eq!(runs[0].length, 2);
+    }
+
+    #[test]
+    fn plain_text_produces_no_runs_at_all() {
+        assert!(runs_of("nothing to style").is_empty());
+    }
+
+    #[test]
+    fn attributes_survive_without_a_color() {
+        let runs = runs_of("\x1b[1mbold");
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].bold && !runs[0].has_fg);
     }
 }
