@@ -32,5 +32,16 @@ pub use detect::{detect, merge_detected};
 pub use error::RunError;
 pub use links::{resolve_link, ResolvedLink};
 pub use macros::{expand as expand_macros, MacroContext};
+/// How long a stopped process is given to exit on its own before it is
+/// killed (R2-4).
+///
+/// Long enough that a program with a signal handler can flush its output
+/// and remove its pid file, short enough that "Stop" still feels like it
+/// stopped something. IntelliJ's own Exit/Kill pair works the same way,
+/// and the escalation is what makes the soft signal safe to send first:
+/// nothing survives a Stop by ignoring it, it only survives for two
+/// seconds.
+pub const TERMINATION_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
 pub use supervisor::{ConsoleId, Supervisor};
 pub use toolchain::{detect_toolchains, ToolCommand, ToolchainId};

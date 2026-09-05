@@ -271,6 +271,15 @@ void RunToolbar::stopSelected()
     }
 }
 
+void RunToolbar::killSelected()
+{
+    const QString configId = selectedConfigId();
+    const auto it = runningConsoleIdByConfig_.constFind(configId);
+    if (it != runningConsoleIdByConfig_.constEnd()) {
+        runService_->kill(it.value());
+    }
+}
+
 void RunToolbar::debugSelected()
 {
     const QString configId = selectedConfigId();
