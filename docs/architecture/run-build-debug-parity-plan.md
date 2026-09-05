@@ -110,11 +110,11 @@ Task ids are stable; titles may change.
 | Task | Status | Commit |
 |---|---|---|
 | D4-1 — attach to a local process | done | this branch; the user gives the pid — enumerating processes portably is three implementations and a permissions story for a number they already have |
-| D4-2 — remote `attach` configurations | open | needs a persisted attach configuration (host, port, path mappings) that no adapter agrees on the shape of; deferred until a second toolchain needs it, so the schema is designed against two cases rather than one |
+| D4-2 — remote `attach` configurations | done | this branch; there is still no common schema, so `dap_core::launch::remote_attach_arguments` is a table of what each of the three adapters documents — debugpy connects to a socket and maps paths, codelldb drives an LLDB `gdb-remote` command and maps sources the other way round, java-debug names a host and a port. The persisted half is one `[remote_attach]` block per project, path mappings included, because they are the same for everyone working on it |
 | D4-3 — exception breakpoints, from the adapter's own filters | done | this branch; per adapter rather than per language — which exceptions can be broken on is something only the adapter knows, and it says so in `initialize` |
-| D4-4 — reload changed classes where the adapter exposes it | open | JVM-only in practice: none of the three shipped adapters declares a reload capability except java-debug, which needs the JVM toolchain matrix (D4-6) to be verifiable at all |
+| D4-4 — reload changed classes where the adapter exposes it | done, unverified against a JVM | this branch; DAP has no capability flag for it, so `dap_core::catalog::supports_class_reload` is where the asymmetry is written down and the action is greyed out everywhere else. The request itself is java-debug's custom `redefineClasses`. **Not exercised**: java-debug is not in the builder image (see D4-6), so this ships tested only for the branch that disables it — it belongs on the manual matrix below |
 | D4-5 — multiple simultaneous sessions, with a session picker | done | this branch; a picker rather than tabs — the dock already has four panes, and a second row of tabs above them buys nothing |
-| D4-6 — the four-toolchain debug matrix | open | Python is covered automatically (`dap-core/tests/debugpy.rs` + `e2e_debug_stops_at_a_breakpoint`). Cargo, CMake and the JVM need codelldb and java-debug installed in the builder image; that is an image change per adapter and a licence question for each, so it is a decision rather than a task |
+| D4-6 — the four-toolchain debug matrix | done as a documented manual matrix | decided: no adapters are added to the builder image. Python stays covered automatically (`dap-core/tests/debugpy.rs` + `e2e_debug_stops_at_a_breakpoint`); Cargo, CMake and the JVM are walked by hand against the script in §6 below and recorded there. The alternative — codelldb plus a JDK, Maven and Gradle in `linux-builder` — is several hundred megabytes on every image pull to automate a walk that takes minutes and changes rarely |
 
 ### R2 — console and run-widget ergonomics
 
@@ -229,4 +229,24 @@ End to end, per phase, in the headless harness under Xvfb:
 - B1 — introduce a deliberate compile error, press Build, confirm the Problems dock lists it at the right file and line and that double-clicking navigates there.
 - B2 — attach a Build before-launch task to a run configuration, break the build, confirm the run never starts and the failure is visible.
 - D3 — set a breakpoint in a Rust binary, press Debug, confirm the session suspends on that line, that Variables shows locals, that step over advances one line, and that resume runs to exit.
-- D4 — repeat the D3 walk once per toolchain and record the result in this document.
+- D4 — repeat the D3 walk once per toolchain, by hand, against §6.
+
+## 6. The manual debug matrix (D4-6)
+
+Only Python is verified automatically. The other three toolchains need a debug adapter that is not in `linux-builder` and, for the JVM, a whole JDK and build tool with it — several hundred megabytes on every image pull to automate a walk that takes a few minutes and changes rarely.
+So they are walked by hand, and the result is written down here rather than assumed.
+
+Run this before a release, and after any change to `dap-core`'s session, launch or catalog modules.
+
+**The walk, identical for every toolchain**: open the project, set a breakpoint on a line inside the entry point, press Debug, confirm the session suspends on that line and the gutter marks it; confirm Variables lists the locals with plausible values and that the inline values appear at the end of their lines (D3-7); step over once and confirm the execution point advances exactly one line; resume and confirm the program runs to exit and the session ends.
+
+| Toolchain | Adapter | How to get it | Last walked | Result |
+|---|---|---|---|---|
+| Python (`debugpy`) | debugpy | `python3-debugpy`, already in `linux-builder` | automated | `cargo test -p dap-core --test debugpy` and `e2e_debug_stops_at_a_breakpoint` on every CI run |
+| Cargo | codelldb | [vadimcn/codelldb releases](https://github.com/vadimcn/codelldb/releases), then a `[[debug_adapter]]` override pointing at it | not yet | — |
+| CMake / C++ | codelldb | the same install; the toolchain table already maps both to it | not yet | — |
+| Maven / Gradle | java-debug | a JDK plus [microsoft/java-debug](https://github.com/microsoft/java-debug), launched as a `[[debug_adapter]]` command | not yet | — |
+
+The JVM row carries one extra step, because it is the only toolchain where anything depends on it: with the session suspended, edit a method body, rebuild, and use Debug > Reload Changed Classes (D4-4). That action is disabled for every other adapter, so this row is the only place it can be exercised at all.
+
+Rows read "not yet" rather than being left blank on purpose: an empty cell looks like an oversight, and this one is a decision.

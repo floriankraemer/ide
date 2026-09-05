@@ -14,6 +14,7 @@
 #include <QMenuBar>
 #include <QPlainTextEdit>
 #include <QInputDialog>
+#include <QLineEdit>
 #include <QTextCursor>
 
 namespace ui_shell {
@@ -83,6 +84,31 @@ void buildDebugMenu(QMainWindow *window, DebugService *debugService, DebugPanel 
         }
     });
 
+    QAction *attachRemoteAction =
+      registerAction(debugMenu, QStringLiteral("debug.attachRemote"),
+                      QObject::tr("Attach to Remote..."), appSettings, actions);
+    QObject::connect(attachRemoteAction, &QAction::triggered, window,
+                      [window, debugService, showDock]() {
+                          bool accepted = false;
+                          // Prefilled with wherever this project attached
+                          // last: a debug server's address rarely changes,
+                          // and `DebugService` is the one that remembers.
+                          const QString target = QInputDialog::getText(
+                            window, QObject::tr("Attach to Remote"),
+                            QObject::tr("Debug server (host:port):"), QLineEdit::Normal,
+                            debugService->lastRemoteTarget(), &accepted);
+                          if (!accepted) {
+                              return;
+                          }
+                          const qsizetype colon = target.lastIndexOf(QLatin1Char(':'));
+                          if (colon <= 0) {
+                              return;
+                          }
+                          showDock();
+                          debugService->attachRemote(target.left(colon),
+                                                      target.mid(colon + 1).toUInt());
+                      });
+
     debugMenu->addSeparator();
 
     QAction *toggleBreakpoint = registerAction(debugMenu, QStringLiteral("debug.toggleBreakpoint"),
@@ -103,6 +129,22 @@ void buildDebugMenu(QMainWindow *window, DebugService *debugService, DebugPanel 
     muteBreakpoints->setChecked(debugService->muted());
     QObject::connect(muteBreakpoints, &QAction::toggled, debugService,
                       [debugService](bool muted) { debugService->setMuted(muted); });
+
+    // Enabled only where the adapter can actually do it (D4-4) — the
+    // answer is `canReloadClasses`', re-asked each time the menu opens
+    // because it depends on which session is current.
+    QAction *reloadClasses = registerAction(debugMenu, QStringLiteral("debug.reloadClasses"),
+                                             QObject::tr("Reload Changed Classes"), appSettings,
+                                             actions);
+    QObject::connect(debugMenu, &QMenu::aboutToShow, reloadClasses,
+                      [reloadClasses, debugService, debugPanel]() {
+                          reloadClasses->setEnabled(
+                            debugService->canReloadClasses(debugPanel->currentSession()));
+                      });
+    QObject::connect(reloadClasses, &QAction::triggered, debugService,
+                      [debugService, debugPanel]() {
+                          debugService->reloadClasses(debugPanel->currentSession());
+                      });
 
     // The adapter decides which exception classes exist, so the submenu is
     // rebuilt from `exceptionFilters` each time it opens rather than being

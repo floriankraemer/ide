@@ -56,6 +56,16 @@ The adapter itself is started with piped stdio, not a PTY: it speaks a protocol,
 
 ADR-0003 §4's headroom, the block after `build-core`'s.
 
+### 8. Where an adapter disagrees with the others, the table says so — the view never guesses
+
+Three later tasks each hit the same shape: something an adapter can do that the specification has no flag for.
+
+- **Remote attach** (D4-2). Every adapter spells it differently, and not cosmetically: debugpy connects to a socket and maps `localRoot`/`remoteRoot`, codelldb has no remote-attach request at all and needs an LLDB `gdb-remote` command with a source map keyed the other way round, java-debug names a host and a port. `dap_core::launch::remote_attach_arguments` is a table of what each documents, and an unknown adapter gets the plainest reading of the specification rather than one of the three dialects. Inventing a common schema would have meant translating into something no adapter accepts — §3's rule, applied to attaching.
+- **Reload changed classes** (D4-4). The JVM can redefine a running class through JDWP; nothing else here can. `dap_core::catalog::supports_class_reload` is the one place that is written down, so the action greys out because the debugger cannot do it, not because C++ recognised a language — §4's rule, for a capability the protocol forgot to define.
+- **Inline values** (D3-7). DAP has an optional `inlineValues` request and none of the three shipped adapters implements it, so `dap_core::inline_values` associates a variable with the last line at or above the stopped one that mentions it. That is a rule about source text, which is why it is in this crate and not in the editor's paint routine.
+
+The through-line: an adapter's dialect belongs in `dap-core`, stated once, with the reason. The view asks a question and is told yes or no.
+
 ## Consequences
 
 - A debug session cannot start without an installed adapter. That is a support burden and is the price of not writing three debugger backends; the install hint is what makes it survivable.

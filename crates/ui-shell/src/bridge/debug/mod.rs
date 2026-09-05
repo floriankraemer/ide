@@ -56,6 +56,44 @@ struct SessionState {
     scope_references: Vec<i64>,
 }
 
+/// What a session is attaching to (D4-1, D4-2).
+enum AttachTo {
+    /// A process on this machine, by id.
+    Pid(u32),
+    /// A debug server reachable over the network.
+    Remote(dap_core::launch::RemoteTarget),
+}
+
+impl AttachTo {
+    fn label(&self) -> String {
+        match self {
+            AttachTo::Pid(pid) => format!("attach {pid}"),
+            AttachTo::Remote(target) => format!("attach {}:{}", target.host, target.port),
+        }
+    }
+
+    /// The `attach` body, as a closure the session thread applies once it
+    /// knows which adapter answered — every adapter spells attaching
+    /// differently, and neither this type nor the caller should have to
+    /// know which (`dap_core::launch` does).
+    fn arguments(&self) -> Box<dyn FnOnce(&str) -> serde_json::Value + Send> {
+        match self {
+            AttachTo::Pid(pid) => {
+                let pid = *pid;
+                Box::new(move |adapter_id: &str| {
+                    dap_core::launch::attach_arguments(adapter_id, pid)
+                })
+            }
+            AttachTo::Remote(target) => {
+                let target = target.clone();
+                Box::new(move |adapter_id: &str| {
+                    dap_core::launch::remote_attach_arguments(adapter_id, &target)
+                })
+            }
+        }
+    }
+}
+
 /// Rust side of the `DebugService` QObject.
 #[derive(Default)]
 pub struct DebugServiceRust {
@@ -291,7 +329,75 @@ impl ffi::DebugService {
     /// because doing it portably means three implementations and a
     /// permissions story, and every debugger's attach dialog is a list the
     /// user searches for a number they already know.
-    pub fn attach(mut self: Pin<&mut Self>, pid: u32) -> ffi::FfiResult {
+    pub fn attach(self: Pin<&mut Self>, pid: u32) -> ffi::FfiResult {
+        self.attach_to(&AttachTo::Pid(pid))
+    }
+
+    /// Attach to a debuggee already running elsewhere — a debug server on a
+    /// host and port (D4-2).
+    ///
+    /// The target is remembered in the project's settings, path mappings
+    /// included: which server a project attaches to, and how a container's
+    /// paths line up with the checkout, is the same for everyone working on
+    /// it. The mappings are only editable in `.ide/settings.toml`, because
+    /// a dialog for them would be a schema editor for something most
+    /// projects leave empty.
+    pub fn attach_remote(mut self: Pin<&mut Self>, host: &QString, port: u32) -> ffi::FfiResult {
+        let Some(root) = current_project_root() else {
+            return no_project();
+        };
+        let host = host.to_string();
+        if host.is_empty() || port == 0 || port > u32::from(u16::MAX) {
+            return ffi::FfiResult {
+                code: errors::CODE_INVALID_ARGUMENT,
+                message: QString::from("a remote target needs a host and a port"),
+            };
+        }
+
+        let mut settings = app_config::project_settings::load(&root).unwrap_or_default();
+        let mappings = settings
+            .remote_attach
+            .as_ref()
+            .map(|previous| previous.path_mappings.clone())
+            .unwrap_or_default();
+        settings.remote_attach = Some(app_config::project_settings::RemoteAttachSetting {
+            host: host.clone(),
+            port: port as u16,
+            path_mappings: mappings.clone(),
+        });
+        let _ = app_config::project_settings::save(&root, &settings);
+
+        self.as_mut()
+            .attach_to(&AttachTo::Remote(dap_core::launch::RemoteTarget {
+                host,
+                port: port as u16,
+                mappings: mappings
+                    .iter()
+                    .filter_map(|mapping| mapping.split_once('='))
+                    .map(|(local, remote)| (local.trim().to_string(), remote.trim().to_string()))
+                    .collect(),
+            }))
+    }
+
+    /// The remote target this project last attached to, as `host:port`, or
+    /// empty if it never has — what the Attach to Remote dialog offers.
+    pub fn last_remote_target(&self) -> QString {
+        let Some(root) = current_project_root() else {
+            return QString::default();
+        };
+        let settings = app_config::project_settings::load(&root).unwrap_or_default();
+        match settings.remote_attach {
+            Some(target) => QString::from(format!("{}:{}", target.host, target.port).as_str()),
+            None => QString::default(),
+        }
+    }
+
+    /// Start a session against something already running — a local pid or a
+    /// remote server. The two differ only in what the `attach` body says
+    /// and what the session is called; everything else — which adapter,
+    /// which breakpoints, the initialize/attach/configurationDone order —
+    /// is one path deliberately (D4-1, D4-2).
+    fn attach_to(mut self: Pin<&mut Self>, to: &AttachTo) -> ffi::FfiResult {
         let Some(root) = current_project_root() else {
             return no_project();
         };
@@ -334,14 +440,15 @@ impl ffi::DebugService {
             },
         );
         self.as_mut()
-            .debug_started(session_id, QString::from(format!("attach {pid}").as_str()));
+            .debug_started(session_id, QString::from(to.label().as_str()));
 
         let adapter_id = adapter.id.clone();
         let breakpoints = self.breakpoints.borrow().clone();
+        let arguments = to.arguments();
         std::thread::spawn(move || {
             let result = (|| -> Result<(), DapError> {
                 session.initialize()?;
-                session.attach(dap_core::launch::attach_arguments(&adapter_id, pid))?;
+                session.attach(arguments(&adapter_id))?;
                 session.wait_for_initialized(std::time::Duration::from_secs(10))?;
                 send_configuration(&session, &breakpoints);
                 session.configuration_done()
@@ -361,6 +468,48 @@ impl ffi::DebugService {
             }
         });
         ffi::FfiResult::default()
+    }
+
+    /// Whether this session's adapter can reload changed classes (D4-4).
+    ///
+    /// The answer is the adapter's, through `dap_core::catalog` — the view
+    /// greys the action out because the debugger said it cannot do this,
+    /// never because C++ recognised a language.
+    pub fn can_reload_classes(&self, session_id: u64) -> bool {
+        self.sessions
+            .borrow()
+            .get(&session_id)
+            .is_some_and(|state| {
+                dap_core::catalog::supports_class_reload(state.session.adapter_id())
+            })
+    }
+
+    /// Redefine the running program's classes from what is now on disk
+    /// (D4-4). A rebuild has to have happened first — this reloads what the
+    /// build produced, it does not produce it.
+    pub fn reload_classes(mut self: Pin<&mut Self>, session_id: u64) {
+        if !self.can_reload_classes(session_id) {
+            return;
+        }
+        let Some(session) = self.as_mut().session_handle(session_id) else {
+            return;
+        };
+        let qt_thread = self.qt_thread();
+        std::thread::spawn(move || {
+            let result = session.request(dap_core::catalog::CLASS_RELOAD_REQUEST, json!({}));
+            if let Err(err) = result {
+                let failure = (err.code(), err.to_string());
+                let _ = qt_thread.queue(move |mut service: Pin<&mut ffi::DebugService>| {
+                    service.as_mut().debug_failed(
+                        session_id,
+                        ffi::FfiResult {
+                            code: failure.0,
+                            message: QString::from(failure.1.as_str()),
+                        },
+                    );
+                });
+            }
+        });
     }
 
     /// The exception filters this session's adapter offers, as

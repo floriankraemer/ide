@@ -5583,6 +5583,20 @@ mod ffi {
         #[qinvokable]
         fn attach(self: Pin<&mut DebugService>, pid: u32) -> FfiResult;
 
+        /// Attach to a debuggee already running elsewhere (D4-2). The
+        /// target is remembered in the project's settings, path mappings
+        /// included — see the Rust side for why those live only there.
+        #[qinvokable]
+        #[cxx_name = "attachRemote"]
+        fn attach_remote(self: Pin<&mut DebugService>, host: &QString, port: u32) -> FfiResult;
+
+        /// `host:port` of the last remote target this project attached to,
+        /// empty if it never has — what the dialog offers instead of an
+        /// empty field.
+        #[qinvokable]
+        #[cxx_name = "lastRemoteTarget"]
+        fn last_remote_target(self: &DebugService) -> QString;
+
         /// The exception filters this session's adapter offers, as
         /// `id\tlabel\tenabled` lines. Per adapter, because which
         /// exceptions can be broken on is something only the adapter knows.
@@ -5693,6 +5707,20 @@ mod ffi {
         #[qinvokable]
         #[cxx_name = "canSetVariable"]
         fn can_set_variable(self: &DebugService, session_id: u64) -> bool;
+
+        /// Whether this session's adapter can reload changed classes
+        /// (D4-4) — the JVM's hot code replace. The view disables the
+        /// action when it cannot; see the Rust side for why the answer is
+        /// per adapter rather than a capability flag.
+        #[qinvokable]
+        #[cxx_name = "canReloadClasses"]
+        fn can_reload_classes(self: &DebugService, session_id: u64) -> bool;
+
+        /// Redefine the running program's classes from what the last build
+        /// produced (D4-4). A no-op where the adapter cannot.
+        #[qinvokable]
+        #[cxx_name = "reloadClasses"]
+        fn reload_classes(self: Pin<&mut DebugService>, session_id: u64);
 
         /// The watch expressions, newline-separated, and their last values
         /// in the same order.

@@ -58,6 +58,20 @@ pub const CURRENT_VERSION: u32 = 1;
 
 /// Per-project overrides. Every field is `Option`: `None` means the project
 /// does not override it, and the global layer's value stands.
+/// `[remote_attach]`: where a remote debuggee listens, and how its paths
+/// line up with this checkout (D4-2).
+///
+/// `path_mappings` are `"local=remote"` strings — one line each, the same
+/// shape the environment and before-launch fields already use, because
+/// TOML tables of two keys read worse than the pair they encode.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RemoteAttachSetting {
+    pub host: String,
+    pub port: u16,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub path_mappings: Vec<String>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ProjectSettings {
     /// Schema version of the file on disk. Absent means "written before
@@ -112,6 +126,18 @@ pub struct ProjectSettings {
     )]
     pub debug_adapters: Option<Vec<DebugAdapterSetting>>,
 
+    /// The remote debuggee this project was last attached to (D4-2), so
+    /// the next Attach to Remote offers it instead of asking for a host and
+    /// port that have not changed since yesterday.
+    ///
+    /// Written by the IDE, but a normal committed setting rather than a
+    /// machine-local one: which debug server a project attaches to — and
+    /// especially how a container's paths map onto the checkout — is the
+    /// same for everyone working on it, and `path_mappings` is only ever
+    /// editable here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_attach: Option<RemoteAttachSetting>,
+
     /// Gitignore-syntax patterns the project index skips, on top of the
     /// `.gitignore` rules the walker already honours (ADR-0022's fourth
     /// project-scoped area).
@@ -147,6 +173,7 @@ impl ProjectSettings {
             && self.editing.is_none()
             && self.run_configs.is_none()
             && self.debug_adapters.is_none()
+            && self.remote_attach.is_none()
             && self.index_excludes.is_none()
             && self.unknown.is_empty()
     }
