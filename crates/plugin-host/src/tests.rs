@@ -412,15 +412,21 @@ fn the_markdown_preview_builtin_loads_through_the_real_path() {
         .expect("the built-in loaded");
     assert_eq!(plugin.source(), PluginSource::Builtin);
 
+    // Two contributions from the one built-in: Markdown documents, and
+    // standalone Mermaid files, which are a different renderer behind the
+    // same plugin (ADR-0043).
     let previews: Vec<_> = registry.previews().collect();
-    assert_eq!(previews.len(), 1);
-    let (owner, contribution) = previews[0];
-    assert_eq!(owner.id(), "markdown-preview");
-    assert_eq!(contribution.id, "markdown");
+    assert_eq!(previews.len(), 2);
+    for (owner, _) in &previews {
+        assert_eq!(owner.id(), "markdown-preview");
+    }
+    assert_eq!(previews[0].1.id, "markdown");
     assert_eq!(
-        contribution.extensions,
+        previews[0].1.extensions,
         vec!["md", "markdown", "mdown", "mkd"]
     );
+    assert_eq!(previews[1].1.id, "mermaid");
+    assert_eq!(previews[1].1.extensions, vec!["mermaid", "mmd"]);
 }
 
 #[test]
