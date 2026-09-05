@@ -120,6 +120,20 @@ impl Drop for TerminalSupervisorRust {
     }
 }
 
+/// A grid column is a cell — one character — while `run_core::links`
+/// measures in bytes. These two convert between them; a row of ASCII makes
+/// them the identity, which is exactly why the conversion has to be
+/// written down rather than assumed.
+fn byte_offset_of_column(text: &str, column: usize) -> usize {
+    text.char_indices()
+        .nth(column)
+        .map_or(text.len(), |(offset, _)| offset)
+}
+
+fn column_of_byte_offset(text: &str, offset: usize) -> usize {
+    text[..offset.min(text.len())].chars().count()
+}
+
 impl ffi::TerminalSupervisor {
     /// Allocate a fresh session id and its (not-yet-started) backing state.
     /// The shell is not spawned here — `start()` is, same as the old
@@ -372,27 +386,57 @@ impl ffi::TerminalSupervisor {
         }
     }
 
+    /// What, if anything, the cell at `row`/`col` links to.
+    ///
+    /// A `http(s)` URL is the grid's own answer (`terminal_core`'s
+    /// `link_at`). Anything else a row might contain is a question about
+    /// *text*, and the one place this codebase recognises a `file:line` in
+    /// text is `run_core::links` — the same function the run console's
+    /// Ctrl+Click goes through, so a compiler error is the same link
+    /// wherever it is printed (R2-6). Relative paths resolve against the
+    /// project root, which is where a terminal opened in this IDE starts.
     pub fn link_at(&self, session_id: u64, row: u32, col: u32) -> ffi::FfiTerminalLink {
-        let link = self
+        if let Some(link) = self
             .with_emulator(session_id, |emulator| {
                 emulator.link_at(row as usize, col as usize)
             })
-            .flatten();
-        match link {
-            Some(link) => ffi::FfiTerminalLink {
+            .flatten()
+        {
+            return ffi::FfiTerminalLink {
                 found: true,
                 url: QString::from(link.url.as_str()),
                 row: link.row as u32,
                 start_col: link.start_col as u32,
                 end_col: link.end_col as u32,
-            },
-            None => ffi::FfiTerminalLink {
-                found: false,
-                url: QString::default(),
-                row: 0,
-                start_col: 0,
-                end_col: 0,
-            },
+                ..Default::default()
+            };
+        }
+
+        let Some(root) = crate::bridge::convert::current_project_root() else {
+            return ffi::FfiTerminalLink::default();
+        };
+        let Some(text) = self
+            .with_emulator(session_id, |emulator| emulator.row_text(row as usize))
+            .flatten()
+        else {
+            return ffi::FfiTerminalLink::default();
+        };
+
+        let offset = byte_offset_of_column(&text, col as usize);
+        let Some(link) = run_core::resolve_link(&text, offset, &root) else {
+            return ffi::FfiTerminalLink::default();
+        };
+        ffi::FfiTerminalLink {
+            found: true,
+            url: QString::default(),
+            row,
+            start_col: column_of_byte_offset(&text, link.start) as u32,
+            end_col: column_of_byte_offset(&text, link.end) as u32,
+            is_file: true,
+            path: QString::from(link.path.display().to_string().as_str()),
+            line: link.line,
+            has_column: link.col.is_some(),
+            column: link.col.unwrap_or(0),
         }
     }
 }
@@ -486,5 +530,34 @@ mod shutdown_order_tests {
 
         wait_until("session 1's grandchild to die", || !alive(grandchild_a));
         wait_until("session 2's grandchild to die", || !alive(grandchild_b));
+    }
+}
+
+#[cfg(test)]
+mod terminal_link_offset_tests {
+    use super::{byte_offset_of_column, column_of_byte_offset};
+
+    #[test]
+    fn ascii_columns_and_byte_offsets_agree() {
+        let row = "src/main.rs:42:5";
+        assert_eq!(byte_offset_of_column(row, 4), 4);
+        assert_eq!(column_of_byte_offset(row, 4), 4);
+    }
+
+    #[test]
+    fn a_wide_character_earlier_in_the_row_shifts_the_offset() {
+        // The grid counts cells; `run_core::links` counts bytes. Assuming
+        // they are the same underlines the wrong cells the moment anything
+        // non-ASCII is printed above the link — which build output does,
+        // routinely, with arrows and check marks.
+        let row = "\u{2192} src/main.rs:1";
+        assert_eq!(byte_offset_of_column(row, 2), "\u{2192} ".len());
+        assert_eq!(column_of_byte_offset(row, "\u{2192} ".len()), 2);
+    }
+
+    #[test]
+    fn a_column_past_the_end_lands_at_the_end() {
+        assert_eq!(byte_offset_of_column("abc", 99), 3);
+        assert_eq!(column_of_byte_offset("abc", 99), 3);
     }
 }

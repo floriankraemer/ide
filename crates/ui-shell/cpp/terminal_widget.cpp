@@ -28,9 +28,10 @@
 namespace ui_shell {
 
 TerminalWidget::TerminalWidget(TerminalSupervisor *supervisor, quint64 sessionId,
-                                AppSettings *appSettings, QWidget *parent)
+                                AppSettings *appSettings, OpenAt openAt, QWidget *parent)
   : QWidget(parent)
   , supervisor_(supervisor)
+  , openAt_(std::move(openAt))
   , sessionId_(sessionId)
   , appSettings_(appSettings)
 {
@@ -195,9 +196,19 @@ void TerminalWidget::pasteClipboard()
 
 void TerminalWidget::openLink(const FfiTerminalLink &link)
 {
-    if (link.found) {
-        QDesktopServices::openUrl(QUrl(link.url));
+    if (!link.found) {
+        return;
     }
+    // Which kind of link this is was decided in `TerminalSupervisor::linkAt`
+    // (R2-6); this only routes it.
+    if (link.is_file) {
+        if (openAt_) {
+            openAt_(link.path, static_cast<int>(link.line),
+                    link.has_column ? static_cast<int>(link.column) : 0);
+        }
+        return;
+    }
+    QDesktopServices::openUrl(QUrl(link.url));
 }
 
 void TerminalWidget::updateHoverLink(const QPoint &pos, bool ctrlHeld)
@@ -323,7 +334,7 @@ void TerminalWidget::contextMenuEvent(QContextMenuEvent *event)
     menu.addAction(pasteAction_);
     if (link.found) {
         menu.addSeparator();
-        QAction *open = menu.addAction(tr("Open Link"));
+        QAction *open = menu.addAction(link.is_file ? tr("Open File") : tr("Open Link"));
         connect(open, &QAction::triggered, this, [this, link]() { openLink(link); });
     }
     menu.exec(event->globalPos());

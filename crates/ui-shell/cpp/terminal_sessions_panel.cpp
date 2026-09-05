@@ -11,10 +11,12 @@
 namespace ui_shell {
 
 TerminalSessionsPanel::TerminalSessionsPanel(TerminalSupervisor *supervisor,
-                                              AppSettings *appSettings, QWidget *parent)
+                                              AppSettings *appSettings, OpenAt openAt,
+                                              QWidget *parent)
   : QWidget(parent)
   , supervisor_(supervisor)
   , appSettings_(appSettings)
+  , openAt_(std::move(openAt))
 {
     tabs_ = new QTabWidget(this);
     tabs_->setTabsClosable(true);
@@ -49,7 +51,7 @@ TerminalSessionsPanel::TerminalSessionsPanel(TerminalSupervisor *supervisor,
 void TerminalSessionsPanel::addSession()
 {
     const quint64 sessionId = supervisor_->newSession();
-    auto *widget = new TerminalWidget(supervisor_, sessionId, appSettings_, tabs_);
+    auto *widget = new TerminalWidget(supervisor_, sessionId, appSettings_, openAt_, tabs_);
     ++sessionCounter_;
     const int index = tabs_->addTab(widget, tr("Terminal %1").arg(sessionCounter_));
     tabs_->setCurrentIndex(index);

@@ -411,12 +411,25 @@ mod ffi {
     /// `TerminalSession::linkAt`'s result. `found == false` means "no link
     /// at that cell", at which point the other fields are meaningless — a
     /// typed flag rather than an empty-`QString` sentinel (ADR-0003).
+    ///
+    /// Two kinds of link live here, told apart by `is_file` (R2-6): a
+    /// `http(s)` URL the grid recognised, which opens in a browser, and a
+    /// `file:line[:col]` location `run_core::links` recognised, which opens
+    /// in the editor. `url` is set for the first, `path`/`line`/`column`
+    /// for the second; both carry the cell span so the view can underline
+    /// what it is offering to open.
+    #[derive(Default)]
     struct FfiTerminalLink {
         found: bool,
         url: QString,
         row: u32,
         start_col: u32,
         end_col: u32,
+        is_file: bool,
+        path: QString,
+        line: u32,
+        has_column: bool,
+        column: u32,
     }
 
     /// Severity of one diagnostic, 1:1 with `lsp_core::Severity` — the

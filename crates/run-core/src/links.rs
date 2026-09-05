@@ -72,6 +72,13 @@ pub struct ResolvedLink {
     pub path: PathBuf,
     pub line: u32,
     pub col: Option<u32>,
+    /// The half-open byte range of `text` the link was recognised in.
+    ///
+    /// A console indexes its own document by offset and needs none of
+    /// this; a terminal underlines the cells it hovers, and cannot ask
+    /// where the link starts without being told (R2-6).
+    pub start: usize,
+    pub end: usize,
 }
 
 fn find_candidates(text: &str) -> Vec<Candidate> {
@@ -168,6 +175,8 @@ pub fn resolve_link(text: &str, byte_offset: usize, cwd: &Path) -> Option<Resolv
         path: resolved_path,
         line: candidate.line,
         col: candidate.col,
+        start: candidate.start,
+        end: candidate.end,
     })
 }
 
@@ -185,6 +194,19 @@ mod tests {
         text: &'static str,
         create: Option<&'static str>,
         expected: Option<(&'static str, u32, Option<u32>)>,
+    }
+
+    #[test]
+    fn a_resolved_link_reports_the_span_it_matched() {
+        // The terminal underlines the cells it is offering to open, and
+        // cannot work out which ones without being told (R2-6).
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join("main.rs"), "fn main() {}").expect("write");
+        let text = "error at main.rs:42:5 there";
+        let offset = text.find("main.rs").expect("the path is in the text");
+
+        let link = resolve_link(text, offset, dir.path()).expect("a link");
+        assert_eq!(&text[link.start..link.end], "main.rs:42:5");
     }
 
     #[test]
@@ -308,15 +330,10 @@ mod tests {
 
         let text = r"src\main.rs:12:5";
         let offset = text.len() / 2;
-        let resolved = resolve_link(text, offset, dir.path());
-        assert_eq!(
-            resolved,
-            Some(ResolvedLink {
-                path: dir.path().join("src/main.rs"),
-                line: 12,
-                col: Some(5),
-            })
-        );
+        let resolved = resolve_link(text, offset, dir.path()).expect("a link");
+        assert_eq!(resolved.path, dir.path().join("src/main.rs"));
+        assert_eq!(resolved.line, 12);
+        assert_eq!(resolved.col, Some(5));
     }
 
     #[test]
