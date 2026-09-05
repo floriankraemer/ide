@@ -379,6 +379,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
                           classViewPanel->refresh(editorTabs->currentTabId());
                       });
     DockRegistry *previewDocks = docks;
+    editorTabs->setPreviewProvider(previewProvider);
     previewPanel->setOpenFileHandler([editorTabs](const QString &path, int line) {
         if (line >= 0) {
             editorTabs->openFileAtLine(path, line, 0);
@@ -415,7 +416,19 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
           // auto-open already uses.
           const quint64 tabId = editorTabs->currentTabId();
           const QString path = editorTabs->currentPath();
-          previewPanel->setCurrentTab(tabId, path, editorTabs->currentContent());
+          // While a tab renders itself in place (view mode,
+          // editor_tabs_preview.cpp), the dock stands down: `PreviewProvider`
+          // keys one render per tab id, so two panels asking for the same tab
+          // would rasterise its diagrams at whichever panel's width won the
+          // race, pay for two Mermaid layouts per keystroke, and emit two
+          // `preview_ready` markers for one revision. Tab id 0 is the "no tab"
+          // sentinel the panel's own filter already rejects everything for.
+          const bool renderedInTab = editorTabs->previewModeActive(tabId);
+          if (renderedInTab) {
+              previewPanel->setCurrentTab(0, QString(), QString());
+          } else {
+              previewPanel->setCurrentTab(tabId, path, editorTabs->currentContent());
+          }
           // Auto-opens once per session, the first time a previewable file
           // becomes the active tab — `toggleView(true)`, not `show()`, so
           // it never raises the dock over whatever the user is already
@@ -424,7 +437,7 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
           // (`setFirstDiagnosticCallback` above), applied to "the first
           // previewable file" instead.
           static bool everShown = false;
-          if (!everShown && !path.isEmpty() && previewProvider->hasPreview(path)) {
+          if (!everShown && !renderedInTab && !path.isEmpty() && previewProvider->hasPreview(path)) {
               everShown = true;
               previewDocks->dock(QStringLiteral("preview"))->toggleView(true);
           }
@@ -433,6 +446,11 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     // ADR-0033's own debounce (editor_tabs_lsp.cpp's `previewTimer`, 300ms,
     // separate from the LSP one): the *current* tab's content changed.
     editorTabs->setPreviewChangedCallback([editorTabs, previewPanel](quint64 tabId) {
+        // One cadence for both surfaces: whichever of the two is showing this
+        // tab gets the settled content, and the other was already stood down.
+        if (editorTabs->previewModeActive(tabId)) {
+            return;
+        }
         previewPanel->setCurrentTab(tabId, editorTabs->currentPath(), editorTabs->currentContent());
     });
     QObject::connect(docManager, &DocumentManager::tabModifiedChanged, classViewPanel,
@@ -968,6 +986,7 @@ void buildMainWindow(AppSettings *appSettings,
                                                 QObject::tr("Preview"), appSettings, *actions);
     QObject::connect(previewViewAction, &QAction::triggered, window,
                       [central]() { central.docks->show(QStringLiteral("preview")); });
+    wirePreviewModeAction(viewMenu, central.editorTabs, appSettings, *actions);
     QAction *problemsAction = registerAction(viewMenu, QStringLiteral("view.problems"),
                                              QObject::tr("Problems"), appSettings, *actions);
     QObject::connect(problemsAction, &QAction::triggered, window, [central]() {

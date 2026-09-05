@@ -335,6 +335,31 @@ public:
     // centring behave identically.
     void goToLine();
 
+    // `view.togglePreviewMode`: flip the current tab between its source and
+    // a rendered preview of it, for whichever file types a plugin previews
+    // (`PreviewProvider::hasPreview`). Nothing happens for a tab whose file
+    // has no preview provider.
+    //
+    // The tab's page widget stays the CodeEditor either way — view mode is a
+    // preview panel parented *to* the editor and shown over it, the same
+    // shape FindBar already uses. Reparenting the editor out of the tab, the
+    // way the editable diff window does, would hide it from `forEachEditor`,
+    // `saveAllModified` and `hasUnsavedChanges`, all of which skip a page
+    // that is not a QPlainTextEdit — a tab in view mode would then be
+    // invisible to Save All and to the quit-time unsaved-changes prompt.
+    void togglePreviewMode();
+
+    // Whether `tabId` is currently showing its preview rather than its
+    // source. Read by the window to decide whether the Preview *dock* should
+    // stand down for this tab (two panels rendering one tab would rasterise
+    // its diagrams at whichever panel's width won the race).
+    bool previewModeActive(quint64 tabId) const;
+
+    // Re-feed the preview shown over `editor`, if it is in view mode. Called
+    // from the same 300ms content debounce the dock uses, so both cadences
+    // are one cadence.
+    void refreshPreviewMode(CodeEditor *editor);
+
     // Ctrl+S / File > Save.
     void saveCurrentTab();
 
@@ -432,6 +457,10 @@ public:
     // Git — every gutter/popup path below is a no-op without it, the same
     // "no server for this language" shape LanguageService's absence has.
     void setVcsService(VcsService *vcsService);
+    // ADR-0033: the provider the in-tab preview asks for a render. Null in
+    // a window built without one, in which case view mode is a no-op —
+    // the same "no service, no feature" shape as the three below.
+    void setPreviewProvider(PreviewProvider *previewProvider);
     void setRunService(RunService *runService);
     void setDebugService(DebugService *debugService);
 
@@ -753,6 +782,7 @@ private:
     // F3-16: null for a project with no Git — set once, after construction,
     // the same retrofit shape setContextMenuCallback uses.
     VcsService *vcsService_ = nullptr;
+    PreviewProvider *previewProvider_ = nullptr;
     RunService *runService_ = nullptr;
     DebugService *debugService_ = nullptr;
     // A monotonic counter bumped on every requestHunks call: `HunkCache`'s
