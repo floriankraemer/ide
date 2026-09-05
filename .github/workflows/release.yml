@@ -1,18 +1,63 @@
 name: Release
 
-# Cutting a release is tag-driven: push a v* tag and this builds the
-# distributable bundle, attaches it to a GitHub Release and publishes.
+# Two triggers, one pipeline:
+#   * a `v*` tag cuts a normal, permanent release;
+#   * a push to `main` republishes the rolling `latest` pre-release, so there
+#     is always a downloadable build of the current tip.
+# Everything that differs between the two is computed once in `meta`; the
+# build and publish jobs never branch on the ref themselves.
 on:
   push:
+    branches: [main]
     tags:
       - 'v*'
+  workflow_dispatch:
+
+# Two merges in quick succession must not race to rewrite the same `latest`
+# release — but a tag build is permanent and must never be cancelled.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
 
 jobs:
+  meta:
+    name: Release identity
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.id.outputs.tag }}
+      title: ${{ steps.id.outputs.title }}
+      stem: ${{ steps.id.outputs.stem }}
+      prerelease: ${{ steps.id.outputs.prerelease }}
+    steps:
+      # Asset names are derived from `stem`, so the rolling release always
+      # publishes the same file names and its download URLs never change:
+      # /releases/download/latest/ide-latest-linux-x86_64.tar.gz. (The
+      # /releases/latest/ shorthand is deliberately unused — GitHub resolves
+      # it to the newest non-prerelease.)
+      - name: Compute release identity
+        id: id
+        run: |
+          set -eu
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            {
+              echo "tag=$GITHUB_REF_NAME"
+              echo "title=$GITHUB_REF_NAME"
+              echo "stem=ide-$GITHUB_REF_NAME"
+              echo "prerelease=false"
+            } >> "$GITHUB_OUTPUT"
+          else
+            {
+              echo "tag=latest"
+              echo "title=Latest build (main) — ${GITHUB_SHA:0:7}"
+              echo "stem=ide-latest"
+              echo "prerelease=true"
+            } >> "$GITHUB_OUTPUT"
+          fi
+
   linux:
     name: Linux bundle
+    needs: meta
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       # ui-shell's build script compiles the Qt Advanced Docking System
       # sources, so the submodule has to be there.
@@ -36,23 +81,136 @@ jobs:
             .
 
       - name: Package tarball
-        id: package
+        env:
+          STEM: ${{ needs.meta.outputs.stem }}
         run: |
           set -eux
-          version="${GITHUB_REF_NAME}"
-          name="ide-${version}-linux-x86_64"
+          name="$STEM-linux-x86_64"
           mv dist/ide-linux-x86_64 "$name"
           tar czf "$name.tar.gz" "$name"
           sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
-          echo "name=$name" >> "$GITHUB_OUTPUT"
 
-      - name: Publish release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: |
+            *.tar.gz
+            *.tar.gz.sha256
+
+  # Non-blocking by decision: the MXE mingw-w64 + Qt6 cross toolchain builds
+  # from source on a cold cache (hours), so a slow or failed Windows leg must
+  # not hold back the Linux artifact — `publish` ships whatever exists.
+  windows:
+    name: Windows bundle
+    needs: meta
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # The MXE toolchain does not fit in the ~14 GB a stock runner leaves
+      # free; these preinstalled SDKs are worth ~25 GB and are unused here.
+      - name: Free runner disk
+        run: sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute cache reference
+        id: cache
+        run: |
+          owner=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "ref=ghcr.io/$owner/ide-buildcache:windows" >> "$GITHUB_OUTPUT"
+
+      # Registry cache, not type=gha: GitHub's Actions cache is capped at
+      # 10 GB per repository and would evict the MXE layers between runs,
+      # meaning a multi-hour rebuild of the cross toolchain on every merge.
+      - name: Build Windows bundle
+        run: |
+          docker buildx build \
+            --target windows-artifact \
+            -f docker/Dockerfile \
+            --output type=local,dest=dist/ \
+            --cache-from type=registry,ref=${{ steps.cache.outputs.ref }} \
+            --cache-to type=registry,ref=${{ steps.cache.outputs.ref }},mode=max \
+            .
+
+      - name: Package zip
         env:
-          GH_TOKEN: ${{ github.token }}
+          STEM: ${{ needs.meta.outputs.stem }}
         run: |
           set -eux
-          name="${{ steps.package.outputs.name }}"
-          gh release create "$GITHUB_REF_NAME" \
-            --title "$GITHUB_REF_NAME" \
-            --generate-notes \
-            "$name.tar.gz" "$name.tar.gz.sha256"
+          name="$STEM-windows-x86_64"
+          mv dist/windows "$name"
+          zip -r "$name.zip" "$name"
+          sha256sum "$name.zip" > "$name.zip.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            *.zip
+            *.zip.sha256
+
+  publish:
+    name: Publish release
+    needs: [meta, linux, windows]
+    # `always()` so a red Windows leg still publishes the Linux artifact;
+    # a failed Linux build publishes nothing.
+    if: always() && needs.linux.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      # The rolling release is deleted and recreated rather than having its
+      # assets clobbered: one code path, and it re-points the `latest` tag at
+      # the new commit instead of leaving it on the previous one.
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.meta.outputs.tag }}
+          TITLE: ${{ needs.meta.outputs.title }}
+          PRERELEASE: ${{ needs.meta.outputs.prerelease }}
+        run: |
+          set -eux
+          subject=$(git log -1 --pretty=%s)
+          built=$(date -u '+%Y-%m-%d %H:%M UTC')
+          cd artifacts
+          if [ "$PRERELEASE" = true ]; then
+            gh release delete "$TAG" --cleanup-tag --yes || true
+            notes=$(printf '%s\n' \
+              "Rolling build of \`main\`. Replaced on every merge — the tag moves with it." \
+              "" \
+              "- commit: \`$GITHUB_SHA\`" \
+              "- subject: $subject" \
+              "- built: $built")
+            gh release create "$TAG" \
+              --target "$GITHUB_SHA" \
+              --title "$TITLE" \
+              --prerelease \
+              --notes "$notes" \
+              ./*
+          else
+            gh release create "$TAG" \
+              --title "$TITLE" \
+              --generate-notes \
+              ./*
+          fi
