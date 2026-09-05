@@ -294,6 +294,26 @@ impl Ide {
         self.click(button);
     }
 
+    /// Press at `from`, travel to `to`, release — a real drag.
+    ///
+    /// The travel is stepped rather than a single jump: a drag is recognised
+    /// from pointer *motion*, and one teleporting move gives the widget
+    /// under the cursor nothing to recognise. The steps also carry the
+    /// pointer over the intermediate widgets, which is what makes the
+    /// drag-enter/drag-move handshake happen at all.
+    pub fn drag(&self, from: (i32, i32), to: (i32, i32)) {
+        const STEPS: i32 = 12;
+        self.mouse_move(from.0, from.1);
+        xdotool::run(&["mousedown", "--clearmodifiers", "1"]);
+        for step in 1..=STEPS {
+            self.mouse_move(
+                from.0 + (to.0 - from.0) * step / STEPS,
+                from.1 + (to.1 - from.1) * step / STEPS,
+            );
+        }
+        xdotool::run(&["mouseup", "--clearmodifiers", "1"]);
+    }
+
     /// Wait until some window is active and return its id. A dialog is its
     /// own toplevel, so this is how a flow knows a modal actually took focus
     /// before typing into it.
