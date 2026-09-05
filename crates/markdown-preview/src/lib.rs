@@ -130,6 +130,43 @@ impl Renderer {
             anchors: raw.anchors,
         }
     }
+
+    /// Render a file that *is* one Mermaid diagram (`.mermaid`, `.mmd`)
+    /// rather than a Markdown document that contains fences.
+    ///
+    /// Deliberately not "wrap the source in a synthetic ```mermaid fence
+    /// and call [`Self::render`]": a diagram file is not Markdown, such a
+    /// fence would have to out-run whatever run of backticks the source
+    /// itself contains, and comrak has nothing to contribute to a document
+    /// with no prose in it. Every piece below is the one the fence path
+    /// already uses — the same key, the same cache, the same fallback — so
+    /// one diagram renders identically whichever kind of file it lives in.
+    ///
+    /// No anchors: there are no headings to scroll-sync against, which is
+    /// why this returns an empty `anchors` rather than pretending to one.
+    pub fn render_diagram(&mut self, source: &str, width_px: u32) -> Rendered {
+        let key = html::diagram_key(source);
+        match self.diagrams.rasterise(&key, source, width_px) {
+            Ok(rasterised) => {
+                let image = PreviewImage {
+                    key: key.clone(),
+                    width: rasterised.width,
+                    height: rasterised.height,
+                    pixels: rasterised.pixels.clone(),
+                };
+                Rendered {
+                    html: format!(r#"<img src="ide-preview:{key}">"#),
+                    images: vec![image],
+                    anchors: Vec::new(),
+                }
+            }
+            Err(err) => Rendered {
+                html: fallback_block(source, &err),
+                images: Vec::new(),
+                anchors: Vec::new(),
+            },
+        }
+    }
 }
 
 /// What a diagram that failed to rasterise shows instead of an image: its
@@ -185,6 +222,51 @@ mod tests {
             rendered.html
         );
         assert!(!rendered.html.contains("ide-preview:"), "{}", rendered.html);
+    }
+
+    #[test]
+    fn a_whole_file_diagram_rasterises_without_going_through_the_parser() {
+        let mut renderer = Renderer::new();
+        let rendered = renderer.render_diagram("graph TD\nA-->B\n", 400);
+        assert_eq!(rendered.images.len(), 1);
+        assert_eq!(rendered.images[0].width, 400);
+        assert!(rendered.html.contains("ide-preview:"));
+        assert!(rendered.anchors.is_empty());
+    }
+
+    #[test]
+    fn a_broken_whole_file_diagram_falls_back_to_its_source() {
+        let mut renderer = Renderer::new();
+        let rendered = renderer.render_diagram("this is not a real diagram type {{{\n", 400);
+        assert!(rendered.images.is_empty());
+        assert!(
+            rendered.html.contains("this is not a real diagram type"),
+            "{}",
+            rendered.html
+        );
+        assert!(!rendered.html.contains("ide-preview:"), "{}", rendered.html);
+    }
+
+    #[test]
+    fn a_whole_file_diagram_shares_the_fence_path_s_cache() {
+        let mut renderer = Renderer::new();
+        let source = "graph TD\nA-->B\n";
+        let first = renderer.render_diagram(source, 400);
+        let second = renderer.render_diagram(source, 400);
+        assert_eq!(first.images, second.images);
+    }
+
+    #[test]
+    fn a_diagram_source_containing_backticks_is_not_mistaken_for_a_fence() {
+        // The reason `render_diagram` does not wrap its source in a fence:
+        // this source would close a three-backtick one early.
+        let mut renderer = Renderer::new();
+        let rendered = renderer.render_diagram("graph TD\nA[\"```\"]-->B\n", 400);
+        assert!(
+            rendered.html.contains("ide-preview:") || rendered.html.contains("<pre>"),
+            "{}",
+            rendered.html
+        );
     }
 
     #[test]

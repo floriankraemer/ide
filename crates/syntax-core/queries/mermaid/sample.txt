@@ -1,0 +1,3 @@
+%% Harness fixture (X1): a comment, a keyword and a string in one diagram.
+flowchart TD
+    start["hello world"] --> finish

@@ -44,6 +44,11 @@ tree-sitter-md = "0.5.3"
 tree-sitter-html = "0.23.2"
 tree-sitter-css = "0.25"
 tree-sitter-xml = "0.7"
+# Mermaid (the diagram-preview tranche). Same upstream project as the
+# `merman` renderer `markdown-preview` uses, so the grammar and the
+# renderer agree on what Mermaid is. It declares `rust-version = 1.95`,
+# which is what forced this repository's toolchain up to 1.98.1.
+tree-sitter-mermaid = "0.1.0"
 streaming-iterator = "0.1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

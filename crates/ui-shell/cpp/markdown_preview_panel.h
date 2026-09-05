@@ -2,13 +2,18 @@
 
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
+#include <QHash>
+#include <QString>
 #include <QWidget>
 
 #include <functional>
 
+class QAction;
 class QLabel;
+class QMenu;
 class QTextBrowser;
 class QUrl;
+class AppSettings;
 class PreviewProvider;
 
 namespace ui_shell {
@@ -88,5 +93,17 @@ private:
     OpenFileHandler openFileHandler_;
     StatusHandler statusHandler_;
 };
+
+class EditorTabs;
+
+// Adds the `view.togglePreviewMode` action to `viewMenu`: the in-tab
+// edit/view toggle, as opposed to `view.preview`, which opens the dock
+// beside the editor. A free function here rather than inline in
+// main_window.cpp for that file's line ceiling, the same split
+// `wireProjectTreeViewAction` uses.
+void wirePreviewModeAction(QMenu *viewMenu,
+                           EditorTabs *editorTabs,
+                           AppSettings *appSettings,
+                           QHash<QString, QAction *> &actions);
 
 } // namespace ui_shell

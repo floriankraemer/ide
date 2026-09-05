@@ -303,6 +303,9 @@ fn main() {
         .cpp_file("cpp/editor_tabs_vcs.cpp")
         .cpp_file("cpp/editor_tabs_run.cpp")
         .cpp_file("cpp/editor_tabs_debug.cpp")
+        // The in-tab preview mode (view mode), a sixth leg for the same
+        // reason as the five above.
+        .cpp_file("cpp/editor_tabs_preview.cpp")
         .cpp_file("cpp/build_panel.h")
         .cpp_file("cpp/build_panel.cpp")
         .cpp_file("cpp/build_menu.cpp")

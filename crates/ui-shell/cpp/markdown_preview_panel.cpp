@@ -2,8 +2,10 @@
 
 #include "e2e_mark.h"
 
+#include <QAction>
 #include <QImage>
 #include <QLabel>
+#include <QMenu>
 #include <QScrollBar>
 #include <QStackedLayout>
 #include <QTextBlock>
@@ -11,6 +13,9 @@
 #include <QTextCursor>
 #include <QUrl>
 #include <QVBoxLayout>
+
+#include "editor_tabs.h"
+#include "keymap_page.h"
 
 namespace ui_shell {
 
@@ -71,6 +76,12 @@ MarkdownPreviewPanel::MarkdownPreviewPanel(PreviewProvider *provider, QWidget *p
     browser_->setOpenLinks(false);
     browser_->setOpenExternalLinks(false);
     browser_->setReadOnly(true);
+    // So `setFocus()` on the panel lands in the browser rather than
+    // nowhere: the in-tab view mode (editor_tabs_preview.cpp) takes focus
+    // away from the editor by focusing this panel, and focus is the only
+    // thing keeping keystrokes out of the buffer there. Inert for the dock
+    // instance, which nothing focuses programmatically.
+    setFocusProxy(browser_);
     stack->addWidget(browser_);
 
     emptyState_ = new QLabel(tr("Nothing to preview."), this);
@@ -217,6 +228,17 @@ int MarkdownPreviewPanel::nearestSourceLine() const
         }
     }
     return nearest;
+}
+
+void wirePreviewModeAction(QMenu *viewMenu,
+                           EditorTabs *editorTabs,
+                           AppSettings *appSettings,
+                           QHash<QString, QAction *> &actions)
+{
+    QAction *action = registerAction(viewMenu, QStringLiteral("view.togglePreviewMode"),
+                                     QObject::tr("Preview Mode"), appSettings, actions);
+    QObject::connect(action, &QAction::triggered, viewMenu,
+                     [editorTabs]() { editorTabs->togglePreviewMode(); });
 }
 
 } // namespace ui_shell
