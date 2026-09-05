@@ -443,7 +443,7 @@ mod tests {
 
         assert_eq!(pixels.len() as u32, px * px * 4);
         assert!(
-            pixels.chunks_exact(4).any(|p| p[3] != 0),
+            pixels.as_chunks::<4>().0.iter().any(|p| p[3] != 0),
             "a rasterised icon must have opaque pixels somewhere"
         );
     }
