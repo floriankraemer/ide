@@ -49,6 +49,11 @@ pub const CODE_REFUSED: i32 = 1007;
 /// non-zero (B2-2).
 pub const CODE_BEFORE_LAUNCH: i32 = 1008;
 
+/// A value the view passed across the seam is not usable — an empty host,
+/// a port outside a port's range (D4-2). Distinct from a domain error:
+/// nothing was attempted, because the request could not be formed.
+pub const CODE_INVALID_ARGUMENT: i32 = 1009;
+
 /// A failure with an adapter code and a finished sentence.
 pub fn failure(code: i32, message: impl AsRef<str>) -> FfiResult {
     debug_assert!(

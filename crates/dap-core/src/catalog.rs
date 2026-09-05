@@ -85,6 +85,23 @@ pub fn for_toolchain(toolchain: ToolchainId, overrides: &[DebugAdapterSetting]) 
     resolve(toolchain.debug_adapter()?, overrides)
 }
 
+/// Whether this adapter can redefine a running program's classes — "reload
+/// changed classes" (D4-4).
+///
+/// Keyed by adapter rather than read from `Capabilities`, because the
+/// specification has no flag for it: the JVM can do this through JDWP and
+/// java-debug exposes it as a custom `redefineClasses` request, while
+/// neither codelldb nor debugpy has an equivalent to advertise. This is the
+/// one place that asymmetry is written down, so the view can disable an
+/// action it must not offer without knowing why.
+pub fn supports_class_reload(adapter_id: &str) -> bool {
+    adapter_id == "java-debug"
+}
+
+/// The request that performs it. Custom, not DAP: see
+/// [`supports_class_reload`].
+pub const CLASS_RELOAD_REQUEST: &str = "redefineClasses";
+
 #[cfg(test)]
 mod tests {
     use super::*;

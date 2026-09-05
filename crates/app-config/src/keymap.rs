@@ -591,6 +591,18 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "",
     },
     ActionDef {
+        id: "debug.reloadClasses",
+        label: "Reload Changed Classes",
+        category: "Debug",
+        default_shortcut: "",
+    },
+    ActionDef {
+        id: "debug.attachRemote",
+        label: "Attach to Remote...",
+        category: "Debug",
+        default_shortcut: "",
+    },
+    ActionDef {
         id: "debug.toggleBreakpoint",
         label: "Toggle Breakpoint",
         category: "Debug",
