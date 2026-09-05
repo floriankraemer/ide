@@ -376,6 +376,20 @@ impl TerminalEmulator {
         self.parser.advance(&mut self.term, bytes);
     }
 
+    /// The text of one visible row, trailing blanks trimmed.
+    ///
+    /// The grid is the terminal's answer to "what is on screen"; this is
+    /// the same answer as a line of text, for a caller that recognises
+    /// spans in text rather than cells — `run_core::links` does, and
+    /// `ui-shell` feeds this to it so a `file:line` in a terminal is the
+    /// same link it is in a run console (R2-6).
+    pub fn row_text(&self, row: usize) -> Option<String> {
+        let grid = self.grid();
+        let cells = grid.rows.get(row)?;
+        let text: String = cells.iter().map(|cell| cell.character).collect();
+        Some(text.trim_end().to_string())
+    }
+
     /// Resize the grid to new dimensions, preserving content as
     /// `alacritty_terminal` reflows it (matches real terminal resize
     /// behavior: content shifts, it never panics).
@@ -621,6 +635,18 @@ mod tests {
         assert_eq!(grid.cursor.row, 1);
         assert_eq!(grid.rows[0][0].character, 'a');
         assert_eq!(grid.rows[1][0].character, 'b');
+    }
+
+    #[test]
+    fn row_text_is_the_row_without_its_trailing_blanks() {
+        let mut emulator = TerminalEmulator::new(GridSize::new(3, 40));
+        emulator.feed(b"src/main.rs:42:5: error\r\n");
+        assert_eq!(
+            emulator.row_text(0).as_deref(),
+            Some("src/main.rs:42:5: error")
+        );
+        assert_eq!(emulator.row_text(1).as_deref(), Some(""));
+        assert_eq!(emulator.row_text(99), None);
     }
 
     #[test]

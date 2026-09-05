@@ -127,7 +127,7 @@ An independent second lane; it may run at any point after R1.
 | R2-3 — console find, pin tab, scroll lock, clear | done | this branch; the find bar asks `editor_core::search`, the matcher the editor and Find in Files already use. Doing it exposed an older bug: the cache and the widget trimmed their copies of the same text at different limits, so after either fired a Ctrl+Click opened whatever had moved into that offset — the view now trims only when `consoleTrimmed` says the cache did, and the truncation notice moved into the cached text so nothing on screen is unknown to the offsets |
 | R2-4 — soft terminate before `kill_tree` | done | this branch; `kill_tree` had always *sent* TERM and then killed the child in the next line, so nothing was ever given the moment its own doc comment promised. Stop now sends TERM and escalates after `TERMINATION_GRACE`, on a thread of its own so a two-second wait does not freeze every other console's output, and Kill is the action that skips it |
 | R2-5 — Show Running List over `Supervisor::active_ids` | done | this branch; over the adapter's own console map rather than the supervisor's ids — a popup must fill on the click, and the two cannot disagree because the same code sets both |
-| R2-6 — the terminal's `linkAt()` unified with `run_core::links` | blocked on R1-6 |  |
+| R2-6 — the terminal's `linkAt()` unified with `run_core::links` | done | this branch; unified at the adapter rather than in either crate — `terminal-core` may not depend on `run-core`, so `TerminalSupervisor::linkAt` asks the grid for a URL and `run_core::links` for a `file:line`, and `ResolvedLink` gained the span the terminal needs to underline what it offers |
 
 ## 1. Decisions resolved before work starts
 

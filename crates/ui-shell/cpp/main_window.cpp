@@ -356,7 +356,8 @@ CentralWidgets buildCentralWidget(QMainWindow *window, ProjectTreeModel *treeMod
     QObject::connect(languageService, &LanguageService::diagnosticsChanged, editorTabs,
                       [editorTabs]() { editorTabs->applyDiagnostics(); });
 
-    auto *terminalPanel = new TerminalSessionsPanel(terminalSupervisor, appSettings, dockManager);
+    auto *terminalPanel =
+      new TerminalSessionsPanel(terminalSupervisor, appSettings, openAt, dockManager);
     auto *terminalDock = new ads::CDockWidget(dockManager, QObject::tr("Terminal"));
     terminalDock->setWidget(terminalPanel);
     docks->registerDock(QStringLiteral("terminal"), terminalDock, ads::CenterDockWidgetArea,

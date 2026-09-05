@@ -4,6 +4,8 @@
 
 #include <QWidget>
 
+#include <functional>
+
 class QAction;
 class QTabWidget;
 
@@ -33,7 +35,12 @@ class TerminalSessionsPanel : public QWidget
     Q_OBJECT
 
 public:
-    TerminalSessionsPanel(TerminalSupervisor *supervisor, AppSettings *appSettings,
+    // `openAt` is passed on to every tab: a `file:line` printed in a
+    // terminal opens in the editor, exactly as one printed in a run console
+    // does (R2-6).
+    using OpenAt = std::function<void(const QString &, int, int)>;
+
+    TerminalSessionsPanel(TerminalSupervisor *supervisor, AppSettings *appSettings, OpenAt openAt,
                            QWidget *parent = nullptr);
 
     // Open a new tab and give it focus — the target of both the "+" button
@@ -58,6 +65,7 @@ private:
 
     TerminalSupervisor *supervisor_;
     AppSettings *appSettings_;
+    OpenAt openAt_;
     QTabWidget *tabs_ = nullptr;
     QAction *newSessionAction_ = nullptr;
     int sessionCounter_ = 0;

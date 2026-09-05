@@ -5,6 +5,8 @@
 #include <QPoint>
 #include <QWidget>
 
+#include <functional>
+
 #include "ui-shell/src/bridge/ffi.cxxqt.h"
 
 class QAction;
@@ -39,8 +41,13 @@ class TerminalWidget : public QWidget
     Q_OBJECT
 
 public:
+    // `openAt` is how a `file:line` link in the output reaches the editor
+    // (R2-6) — the same callback `RunConsolePanel` takes, threaded through
+    // the sessions panel from `main_window`.
+    using OpenAt = std::function<void(const QString &, int, int)>;
+
     TerminalWidget(TerminalSupervisor *supervisor, quint64 sessionId, AppSettings *appSettings,
-                   QWidget *parent = nullptr);
+                   OpenAt openAt, QWidget *parent = nullptr);
 
     quint64 sessionId() const { return sessionId_; }
 
@@ -98,6 +105,7 @@ private:
     void updateHoverLink(const QPoint &pos, bool ctrlHeld);
 
     TerminalSupervisor *supervisor_;
+    OpenAt openAt_;
     quint64 sessionId_;
     AppSettings *appSettings_;
     QAction *copyAction_ = nullptr;
