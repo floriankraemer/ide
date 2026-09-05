@@ -95,6 +95,12 @@ jobs:
         with:
           key: coverage
 
+      # The job runs as root inside the container while the checkout belongs to
+      # the runner's user, so git refuses to read it. actions/checkout marks it
+      # safe only for its own steps, under a temporary HOME.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
       - name: Coverage run
         run: make coverage-ci
 
