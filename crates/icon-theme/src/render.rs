@@ -207,7 +207,7 @@ xyz = "never-shipped"
         assert_eq!((icon.width, icon.height), (24, 24));
         assert_eq!(icon.pixels.len(), 24 * 24 * 4);
         assert!(
-            icon.pixels.chunks_exact(4).any(|px| px[3] != 0),
+            icon.pixels.as_chunks::<4>().0.iter().any(|px| px[3] != 0),
             "a filled square must produce opaque pixels"
         );
     }

@@ -836,8 +836,14 @@ void EditorTabs::onTabOpened(quint64 tabId, const QString &title)
     previewTimer->setSingleShot(true);
     previewTimer->setInterval(300);
     connect(previewTimer, &QTimer::timeout, this, [this, editor, tabId]() {
-        if (previewChanged_ && activeGroup_ && activeGroup_->currentWidget() == editor) {
-            previewChanged_(tabId);
+        if (activeGroup_ && activeGroup_->currentWidget() == editor) {
+            // Both preview surfaces ride this one timer: the dock through
+            // the callback, the in-tab view mode directly. Whichever is not
+            // showing this tab ignores what it is handed.
+            refreshPreviewMode(editor);
+            if (previewChanged_) {
+                previewChanged_(tabId);
+            }
         }
     });
     connect(editor->document(), &QTextDocument::contentsChanged, previewTimer,

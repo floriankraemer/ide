@@ -118,7 +118,7 @@ impl DiagnosticStore {
             .get(uri)
             .map(|diags| diags.iter().map(|d| row(uri, d)).collect())
             .unwrap_or_default();
-        rows.sort_by(|a, b| (a.line, a.column, a.severity).cmp(&(b.line, b.column, b.severity)));
+        rows.sort_by_key(|row| (row.line, row.column, row.severity));
         rows
     }
 

@@ -10,7 +10,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:$PATH \
-    RUST_VERSION=1.90.0
+    RUST_VERSION=1.98.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -333,7 +333,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
     RUSTUP_HOME=/usr/local/rustup \
     CARGO_HOME=/usr/local/cargo \
     PATH=/usr/local/cargo/bin:/opt/mxe/usr/bin:$PATH \
-    RUST_VERSION=1.90.0
+    RUST_VERSION=1.98.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \

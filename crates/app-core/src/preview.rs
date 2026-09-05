@@ -161,6 +161,19 @@ impl PreviewService {
                 anchors: rendered.anchors,
             });
         }
+        // A standalone `.mermaid`/`.mmd` file: the whole document is one
+        // diagram, so it skips comrak entirely rather than being wrapped in
+        // a synthetic fence — see `Renderer::render_diagram`. One extra arm
+        // here rather than a second provider table: which renderer serves a
+        // contribution is exactly the decision this function already makes.
+        if provider.contribution_id == "mermaid" {
+            let rendered = self.renderer.render_diagram(source, width_px);
+            return Ok(Rendered {
+                html: rendered.html,
+                images: rendered.images,
+                anchors: rendered.anchors,
+            });
+        }
         // A `previews` id this build does not recognise and that names no
         // component: well-formed, inert. See the module doc, point 3.
         Err(PreviewError::NoProvider)
@@ -258,6 +271,29 @@ mod tests {
             .render(Path::new("a.md"), "# Title\n", 800)
             .expect("markdown is served natively");
         assert!(rendered.html.contains("Title"));
+    }
+
+    #[test]
+    fn the_builtin_also_serves_standalone_mermaid_files() {
+        let service = PreviewService::from_registry(builtin_registry(&[]), empty_tier());
+        for ext in ["mermaid", "mmd"] {
+            assert!(
+                service.has_preview(Path::new(&format!("erd.{ext}"))),
+                "{ext}"
+            );
+        }
+    }
+
+    #[test]
+    fn rendering_a_mermaid_file_reaches_the_whole_file_diagram_renderer() {
+        let mut service = PreviewService::from_registry(builtin_registry(&[]), empty_tier());
+        let rendered = service
+            .render(Path::new("erd.mermaid"), "graph TD\nA-->B\n", 400)
+            .expect("mermaid is served natively");
+        // The diagram path, not the Markdown one: comrak would have wrapped
+        // this in a `<p>` of prose rather than rasterising it.
+        assert_eq!(rendered.images.len(), 1);
+        assert!(rendered.html.contains("ide-preview:"), "{}", rendered.html);
     }
 
     #[test]

@@ -5711,6 +5711,7 @@ dependencies = [
  "tree-sitter-lua",
  "tree-sitter-make",
  "tree-sitter-md",
+ "tree-sitter-mermaid",
  "tree-sitter-php",
  "tree-sitter-python",
  "tree-sitter-ruby",
@@ -6493,6 +6494,16 @@ name = "tree-sitter-md"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2efd398be546456c814598ee56c0f51769a77241511b4a58077815d120afa882"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-mermaid"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "34921c596d2732a74eb6489f1148df732163f0c4fd20737547396f40a588b559"
 dependencies = [
  "cc",
  "tree-sitter-language",

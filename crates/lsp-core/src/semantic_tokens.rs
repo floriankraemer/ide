@@ -169,7 +169,7 @@ pub fn decode(data: &[u64]) -> Vec<SemanticToken> {
     let mut tokens = Vec::with_capacity(data.len() / 5);
     let mut line = 0u32;
     let mut start_char = 0u32;
-    for chunk in data.chunks_exact(5) {
+    for chunk in data.as_chunks::<5>().0 {
         let delta_line = chunk[0] as u32;
         let delta_start_char = chunk[1] as u32;
         if delta_line > 0 {

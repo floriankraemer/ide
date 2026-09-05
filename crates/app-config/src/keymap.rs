@@ -336,6 +336,16 @@ pub const ACTIONS: &[ActionDef] = &[
         default_shortcut: "Ctrl+Alt+V",
     },
     ActionDef {
+        id: "view.togglePreviewMode",
+        label: "Preview Mode",
+        category: "View",
+        // Flips the *current tab* between its source and its rendered form,
+        // where `view.preview` above opens the dock beside it. Ctrl+Shift+M
+        // is free; Ctrl+Shift+V, the shortcut the same gesture carries in
+        // some other editors, is already Terminal's Paste.
+        default_shortcut: "Ctrl+Shift+M",
+    },
+    ActionDef {
         id: "view.findAction",
         label: "Find Action...",
         category: "View",

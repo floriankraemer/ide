@@ -233,6 +233,11 @@ EditorTabs::EditorTabs(DocumentManager *docManager, LanguageService *languageSer
     root_->addWidget(activeGroup_);
 }
 
+void EditorTabs::setPreviewProvider(PreviewProvider *previewProvider)
+{
+    previewProvider_ = previewProvider;
+}
+
 void EditorTabs::setActiveTabChangedCallback(std::function<void()> callback)
 {
     activeTabChanged_ = std::move(callback);

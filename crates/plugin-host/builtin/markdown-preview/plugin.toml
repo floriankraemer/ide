@@ -15,3 +15,13 @@ description = "Renders Markdown and Mermaid diagrams in the Preview dock."
 id = "markdown"
 label = "Markdown"
 extensions = ["md", "markdown", "mdown", "mkd"]
+
+# A standalone diagram file is not Markdown: the whole file is one diagram,
+# so `app_core::preview` dispatches this contribution to
+# `markdown_preview::Renderer::render_diagram` rather than the comrak path.
+# Same extension-mirroring caveat as the row above — syntax-core registers
+# these two in its own catalog and nothing enforces that they agree.
+[[contributes.previews]]
+id = "mermaid"
+label = "Mermaid"
+extensions = ["mermaid", "mmd"]
