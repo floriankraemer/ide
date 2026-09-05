@@ -552,6 +552,12 @@ private:
     // call, no TabId change, so a file still has exactly one editor widget.
     void splitTab(QTabWidget *group, int index, Qt::Orientation orientation);
 
+    // Drag-and-drop of a tab onto another group's tab strip: the same pure
+    // widget surgery splitTab does, only into a group that already exists.
+    // A negative `index` appends. Dropping a tab back on its own strip is a
+    // no-op — QTabBar's built-in reorder already owns that gesture.
+    void moveTabToGroup(quint64 tabId, QTabWidget *target, int index);
+
     static QList<int> evenSizes(QSplitter *splitter);
 
     // A group that just lost its last tab disappears, unless it's the only
