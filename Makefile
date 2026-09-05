@@ -12,7 +12,7 @@ DOCKER_MOUNTS = -v "$(CURDIR)":/workspace -w /workspace \
 	-v ide-sccache:/sccache
 RUN_LINUX = $(DOCKER) run --rm $(DOCKER_MOUNTS) $(LINUX_IMAGE)
 
-.PHONY: help all test lint e2e e2e-ci e2e-repeat build build-linux build-windows linux-image shell clean \
+.PHONY: help all test lint coverage coverage-ci e2e e2e-ci e2e-repeat build build-linux build-windows linux-image shell clean \
 	lsp-image lsp-conformance lsp-conformance-ci
 
 .DEFAULT_GOAL := help
@@ -53,6 +53,24 @@ lint: linux-image ## Run clippy + rustfmt + file-size checks in Docker
 	$(RUN_LINUX) cargo clippy --workspace --all-targets -- -D warnings
 	$(RUN_LINUX) cargo fmt --all -- --check
 	$(RUN_LINUX) scripts/check-file-size.sh
+
+# Coverage measures the Qt-free crates only. `ui-shell` is a humble view and
+# `app` is a main(); both are untested by design (CLAUDE.md), and folding
+# them in would produce a total nobody can act on. `e2e` drives the built
+# binary from the outside, so it has no source of its own worth measuring.
+COVERAGE_EXCLUDES = --exclude ui-shell --exclude app --exclude e2e
+
+coverage: linux-image ## Coverage for the Qt-free crates; writes target/coverage/lcov.info
+	$(RUN_LINUX) $(MAKE) coverage-ci
+
+# Inner target: the command line itself, with no Docker wrapper, so CI (which
+# is already inside the linux-builder image) and `make coverage` run exactly
+# the same thing.
+coverage-ci: ## Inner half of `coverage` — run inside the builder image
+	mkdir -p target/coverage
+	cargo llvm-cov --workspace $(COVERAGE_EXCLUDES) \
+		--lcov --output-path target/coverage/lcov.info
+	python3 scripts/coverage-report.py --lcov target/coverage/lcov.info
 
 # One X server with N app instances makes xdotool's window targeting
 # ambiguous, and ambiguous input is the first source of E2E flake — hence

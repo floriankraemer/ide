@@ -90,6 +90,9 @@ The authoritative per-crate import table lives in `docs/architecture/layering.md
 - Every new rule or behavior gets unit tests in the Qt-free crate it lives in.
 - C++ stays thin and is untested by design — if you feel you need a C++ test, the logic is in the wrong layer.
 - Gate: `cargo test --workspace` must pass before commit.
+- Coverage: `make coverage` measures the Qt-free crates (`ui-shell`, `app` and `e2e` are excluded — see `COVERAGE_EXCLUDES`).
+  CI posts the report on every PR and fails when *patch coverage* — the share of the lines the branch adds that a test executes — is below 80%.
+  Total coverage is reported for context and never gates.
 
 ## Docs
 
